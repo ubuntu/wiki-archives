@@ -1,0 +1,152 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+This page describes how to test UEC images without signing and uploading to eeither EC2 or UEC.
+
+== Basic requirements ==
+
+=== Grabbing an image to test ===
+
+You need a UEC image to test. You can for instance rsync the current karmic image like so:
+<pre>
+rsync -aP uec-images.ubuntu.com::uec-images/karmic/current/karmic-uec-amd64.tar.gz .
+</pre>
+
+The first time you do it, it will probably take a while, as the images are around 180 MB. Subsequent rsyncs should be quite a bit faster.
+
+Next, you uncompress the image. It's a 2 GB filesystem, so if you just ungzip it, it'll take up 2 GB of space on your disk. The image is very sparse, so we save a lot of space by uncompressing it like so (note '-S' to tar):
+<pre>
+tar -xSvzf karmic-uec-amd64.tar.gz
+</pre>
+
+This also takes a while.
+
+=== Setting up a fake meta-data service ===
+
+ec2-init in the images expects to be able to reach the EC2 meta-data service at 169.254.169.254. The simplest way to make this happen is to assign this IP to your host machine.  You then have 2 options, either a.) disable ec2init on boot, or b.) setup a meta-data service on your system.
+
+==== Disable ec2-init ====
+ec2-init can be disabled with a kernel command line argument of <code>ec2init=0</code>
+
+==== Setup Metadata service ====
+Add something like the following to your '/etc/network/interfaces':
+<pre>
+iface eth0:0 inet static
+     address 169.254.169.254
+	 netmask 255.255.255.255
+</pre>
+
+and run
+<pre>
+sudo ifup eth0:0
+</pre>
+
+You should also have apache installed.
+<pre>
+sudo apt-get install apache2
+</pre>
+Now, the trick to the metadata service is that it's a simple HTTP interface, so we're just going to emulate it with a bunch of files in our webroot. You can grab http://people.canonical.com/~soren/mock-meta-data.tar.gz and unpack it in your webroot, and you should be ready to roll.
+
+=== Starting the instance ===
+
+==== kvm command line ====
+Start the instance with:
+<pre>
+kvm \
+   -m 512 \
+   -drive file=karmic-uec-amd64.img,if=scsi,bus=0,unit=6,boot=on \
+   -kernel karmic-uec-amd64-vmlinuz-virtual \
+   -initrd karmic-uec-amd64-initrd-virtual \
+   -append "root=/dev/sda ro"
+</pre>
+
+Note, above, you could add 'ec2init=0' to '-append'
+
+==== libvirt ====
+Next, we add the instance to libvirt. Create a file like this:
+<pre>
+<domain type='kvm'>
+  <name>uec-amd64-karmic-test</name>
+  <memory>524288</memory>
+  <currentMemory>524288</currentMemory>
+  <vcpu>1</vcpu>
+  <os>
+    <type arch='x86_64' machine='pc'>hvm</type>
+    <kernel>/home/soren/uec/karmic-uec-amd64-vmlinuz-virtual</kernel>
+    <initrd>/home/soren/uec/karmic-uec-amd64-initrd-virtual</initrd>
+    <cmdline>root=/dev/sda ro</cmdline>
+  </os>
+  <features>
+    <acpi/>
+  </features>
+  <clock offset='utc'/>
+  <on_poweroff>destroy</on_poweroff>
+  <on_reboot>restart</on_reboot>
+  <on_crash>destroy</on_crash>
+  <devices>
+    <disk type='file' device='disk'>
+      <source file='/home/soren/uec/karmic-uec-amd64.img'/>
+      <target dev='hda' bus='ide'/>
+    </disk>
+    <interface type='network'>
+      <source network='default'/>
+      <model type='e1000'/>
+    </interface>
+    <input type='mouse' bus='ps2'/>
+    <graphics type='vnc' port='-1' autoport='yes' listen='127.0.0.1'/>
+  </devices>
+</domain>
+</pre>
+..obviously adjusting the paths according to you local setup. Save it as temp.xml, and run
+<pre>
+virsh define temp.xml
+</pre>
+And remove the file again. It'll just be confusing to have it lying around.
+
+That should do it, really!
+
+<pre>
+virsh start uec-amd64-karmic-test
+</pre>
+
+should start up an instance and it should boot completely. Yay.
+
+=== kvm and lucid uec ===
+
+==== modify uec image for easier test ====
+* The following sets up a getty on serial console and sets the 'ubuntu' users password to 'mypass" so you can log in on it
+<pre>
+sudo sh -c 'i=$1; p=$2; mp=${3:-/mnt}; pa=PasswordAuthentication;
+  mount -o loop "$i" "${mp}" && trap "umount ${mp}" EXIT &&
+  sudo chroot "${mp}" sh -c "
+    cp /etc/init/tty2.conf /etc/init/ttyS0.conf &&
+      sed -i s,tty2,ttyS0,g /etc/init/ttyS0.conf 2>/dev/null &&
+      sed -i \"s,${pa} no,${pa} yes,\" /etc/ssh/sshd_config 2>/dev/null &&
+      echo "ubuntu:${p}" | chpasswd
+    "
+  ' fiximg "lucid-server-amd64.img" "ubuntu"
+</pre>
+
+==== boot in kvm ====
+The following kvm command line allows you to login at console:
+<pre>
+kvm -drive file=lucid-server-amd64.img.dist,if=scsi \
+  -kernel lucid-server-amd64-vmlinuz-virtual \
+  -initrd lucid-server-amd64-initrd-virtual \
+  -m 256 \
+  -nographic \
+  -serial stdio \
+  -append "root=/dev/sda console=ttyS0"
+</pre>
+
+Other helpful options are:
+* Disable ec2init timeout by adding 'ec2init=0' to the '-append' arguments
+* Increase upstart debug output by adding '--verbose' or '--debug' to '-append arguements'
+* enable guest ssh in usermode networking with by adding arguments: '-redir tcp:2222::22'

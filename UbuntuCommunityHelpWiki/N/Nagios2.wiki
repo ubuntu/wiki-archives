@@ -1,0 +1,286 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+
+This page describes how to install and configure Nagios2 on Gutsy Gibbon. It is intended for those who have never used Nagios before and gives a basic functional configuration. Readers are encouraged to experiment on their own for a more advanced configuration.
+
+Note that this information is no longer accurate for nagios3 (the latest version distributed with Karmic, etc.).  See <nowiki>[[Nagios3]]</nowiki>.
+
+== Introduction ==
+
+Nagios is an open source host, service and network monitoring program. It is composed by the main service and a set of plugins which makes it very flexible as they can be developed by anyone.
+Nagios provides a web interface for the user to monitor but it also is capable of sending emails or even messages to a pager in case of problems. There is also a very useful extension for Firefox which highlights problems. Nagios' official homepage is http://nagios.org/
+
+== Installation ==
+
+This installation assume that there is a web server configured and running. For this tutorial Apache will be used.
+
+** Activate the Universe repository and install nagios from it (or download the source from the official website and follow the instructions attached with it).
+<pre>
+  sudo apt-get update
+  sudo apt-get install nagios2 nagios-plugins nagios-images
+</pre>
+
+== Initial Configuration ==
+
+This is the basic configuration to get Nagios2 running before you add your site specific tests.
+
+** Setup htpasswd file for web access
+The configuration for authentication is in /etc/nagios2/apache2.conf.  The default htpasswd file is /etc/nagios2/htpasswd.users, which does '''not''' exist upon installation.
+<pre>
+  cd /etc/nagios2/
+  sudo htpasswd -c htpasswd.users nagiosadmin
+</pre>
+** If you want to use something other then nagiosadmin as your user, that is fine, just make the necessary adjustments to /etc/nagios2/cgi.cfg. Wherever it says nagiosadmin change it.
+
+That's all you to get it running!  Navigate to http://nagios_server/nagios2 and log in to see your systems monitor.  By default it monitors the machine it runs on and its gateway to the Internet.
+
+== Further Configuration ==
+
+** Add a custom directory for your *.cfg files
+<pre>
+  sudo mkdir /etc/nagios2/mysite
+</pre>
+** By default, nagios creates an /etc/nagios2/conf.d directory where it puts some configuration files for the services it has detected. But now, you will need to tell Nagios that your configuration files are located in other path. Do that by editing the following line in /etc/nagios2/nagios.cfg:
+<pre>
+  cfg_dir=/etc/nagios2/mysite
+</pre>
+** Now is time that you create your own configurations files inside the defined directory. It is possible to use the files in the conf.d directory as templates. You will need:
+*** contacts.cfg: defines the people who will receive the alerts in case of a problem.
+*** hosts.cfg: defines the hosts that will be monitored.
+*** hostgroups.cfg: arrange the hosts defined in the hosts.cfg file into groups (e.g. servers, wireless, switches).
+*** services.cfg: defines the services that will be monitored for each host.
+*** templates.cfg: defines some templates like the generic host, generic service and a lot of others custom templates.
+*** timeperiods.cfg: defines timeperiods which are valid for checks, notifications, etc.
+
+Note that everything could be put into a single file, but is better to split things to have them organized.
+
+The following example assume a small net with:
+** Three Unix machines (all with SSH):
+*** 192.168.1.1: NAT and monitoring server.
+*** 192.168.1.2: web and ftp server.
+*** 192.168.1.3: mail server.
+
+=== contacts.cfg ===
+<pre>
+define contact{
+  contact_name                    administrator
+  alias                           Administrator Name
+  service_notification_period     24x7
+  host_notification_period        24x7
+  service_notification_options    w,u,c,r
+  host_notification_options       d,r
+  service_notification_commands   notify-by-email
+  host_notification_commands      host-notify-by-email
+  email                           administrator@domain.com
+}
+
+define contactgroup{
+  contactgroup_name       admins
+  alias                   Nagios Administrators
+  members                 administrator
+}
+</pre>
+=== hosts.cfg ===
+
+Each host has the following basic properties:
+** host_name: an unique name to identify the host.
+** alias: a very short description.
+** address: the IP address or domain name of the host.
+** parents: a comma separated list where the parents of the host are enumerated. This is useful to see the distribution of the hosts on the map drawn by Nagios.
+** use: the name of the template to use.
+
+<pre>
+define host{
+  host_name  google
+  alias      Internet Connection
+  address    www.google.com
+  use        generic-host
+}
+
+define host{
+  host_name  mywangateway
+  alias      ISP Gateway
+  address    190.2.53.193
+  parents    google
+  use        generic-host
+}
+
+define host{
+  host_name  mylangateway
+  alias      My LAN Internet Gateway
+  address    192.168.1.1
+  parents    mywangateway
+  use        generic-host
+}
+
+define host{
+  host_name  webserver
+  alias      Web Server
+  address    192.168.1.2
+  parents    mylangateway
+  use        generic-host
+}
+
+define host{
+  host_name  mailserver
+  alias      Mail Server
+  address    192.168.1.3
+  parents    mylangateway
+  use        generic-host
+}
+</pre>
+
+=== hostgroups.cfg ===
+
+<pre>
+define hostgroup {
+  hostgroup_name  all
+    alias           All Servers
+    members         *
+}
+
+define hostgroup {
+  hostgroup_name    servers
+    alias           Servers
+    members         mylangateway, webserver, mailserver
+}
+
+define hostgroup {
+  hostgroup_name    http-servers
+    alias           HTTP servers
+    members         mylangateway, webserver
+}
+
+define hostgroup {
+  hostgroup_name    ssh-servers
+    alias           SSH servers
+    members         mylangateway, webserver, mailserver
+}
+
+define hostgroup {
+  hostgroup_name    ping-servers
+    alias           Pingable servers
+    members         google, mywangateway, mylangateway, webserver, mailserver
+}
+</pre>
+
+=== services.cfg ===
+
+Each service has the following basic properties:
+** host_name: the host that runs the service.
+** hostgroup_name: instead of host_name this could be used with the name of a group. In this case, all the hosts within that group will be checked.
+** service_description: a very short description.
+** check_command: the command to execute in order to check the service. Each command will need an available plugin (they're located in /usr/lib/nagios/plugins).
+** use: the name of the template to use.
+** notification_interval: a period of time to resend a change on the hosts state. If set to 0 Nagios will notify just once.
+
+To add new services you can explore the /usr/lib/nagios/plugins (or whichever directory the plugins are installed in) and look for the plugin wich checks the service you need. If none is available you could always search on the net. An excellent place to start your search is the official website of the project at http://nagiosplugins.org.
+Once you have the plugin you need execute it with --help as parameter to see what parameters it expect. The example gives you some basic services. Note that each parameter pass to the command is separated from the others with an exclamation mark (!).
+
+<pre>
+
+define service {
+  hostgroup_name                  http-servers
+  service_description             HTTP
+  check_command                   check_http
+  use                             generic-service
+  notification_interval           0
+}
+
+define service {
+  hostgroup_name                  ssh-servers
+  service_description             SSH
+  check_command                   check_ssh
+  use                             generic-service
+  notification_interval           0
+}
+
+define service {
+  hostgroup_name                  ping-servers
+  service_description             PING
+  check_command                   check_ping!100.0,20%!500.0,60%
+  use                             generic-service
+  notification_interval           0
+}
+
+define service {
+  hostgroup_name                  webserver ; remember that this host is also an ftp server.
+  service_description             FTP
+  check_command                   check_ftp
+  use                             generic-service
+  notification_interval           0
+}
+
+define service {
+  hostgroup_name                  mailserver
+  service_description             POP
+  check_command                   check_pop
+  use                             generic-service
+  notification_interval           0
+}
+
+define service {
+  hostgroup_name                  mailserver
+  service_description             IMAP
+  check_command                   check_imap
+  use                             generic-service
+  notification_interval           0
+}
+
+define service {
+  hostgroup_name                  mailserver
+  service_description             Secure POP
+  check_command                   check_spop
+  use                             generic-service
+  notification_interval           0
+}
+
+define service {
+  hostgroup_name                  mailserver
+  service_description             Secure IMAP
+  check_command                   check_simap
+  use                             generic-service
+  notification_interval           0
+}
+
+define service {
+  hostgroup_name                  mailserver
+  service_description             SMTP
+  check_command                   check_smtp
+  use                             generic-service
+  notification_interval           0
+}
+</pre>
+
+For more information, refer to http://nagios.sourceforge.net/docs/2_0/xodtemplate.html
+
+=== templates.cfg ===
+
+In the default installation you will find files named generic-host_nagios2.cfg, generic-service_nagios2.cfg and there might be others. Just with copy and paste them into /etc/nagios2/mysite directory it will work OK. Anyway, I prefer to put the definitions on each of them into a single file called templates.cfg, but that's a personal preference.
+
+=== timeperiods.cfg ===
+
+The default configuration file is OK, so just copy and paste it from /etc/nagios2/conf.d/timeperiods_nagios2.cfg to /etc/nagios2/mysite/timeperiods.cfg.
+
+== Testing the new configuration ==
+
+* Restart the Nagios service: /etc/init.d/nagios2 restart
+* On your browser: http://nagios_server/nagios2
+
+If there is any configuration error Nagios will tell you where it is when you attemp to restart the service. 
+
+== See also ==
+* <nowiki>[[Nagios]]</nowiki>
+* <nowiki>[[Zenoss]]</nowiki>
+
+----
+CategoryInternet CategoryNetworking

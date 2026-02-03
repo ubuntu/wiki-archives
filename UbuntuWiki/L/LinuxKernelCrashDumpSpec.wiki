@@ -1,0 +1,97 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+* '''Launchpad Entry''': https://launchpad.net/distros/ubuntu/+spec/foundations-karmic-linux-kernel-crash-dump/
+* '''Created''': 2006-05-09 by SimonLaw
+* '''Contributors''': BenCollins, SimonLaw
+* '''Packages affected''': linux-source-2.6.xx
+
+=== Summary ===
+
+This specification outlines a plan to dump kernel crashes to disk, whenever possible.
+
+=== Rationale ===
+
+When a normal user uses Dapper and experiences a kernel panic, it isn't possible to capture the crash dump.  The user is locked into a frozen X session and can only reboot.  We then lose the crash dump, making debugging the kernel for this bug virtually impossible.
+
+If we were able to dump most crash dumps to disk, we would be able to ask for the log file to be attached to a bug report in Malone.  This debugging information can be used to track down the bug, either by Ubuntu or upstream kernel developers.
+
+=== User stories ===
+
+* Alice is a kernel developer who is using her desktop when it suddenly freezes solid.  She reboots and looks for the crash dump that's been deposited on disk.
+
+* Barry is an Ubuntu user whose personal desktop suddenly freezes.  He reboots, goes online, and is instructed on how to file a bug report with the appropriate crash dump attached.
+
+* Cynthia is a malicioius user who wants to extract passwords on a multi-user machine.  She inserts a bad piece of hardware which causes the kernel to panic.  She looks for the crash dump when the system is rebooted, but cannot access it because she is not authorized to do so.
+
+* Daryl is a power user who wants to see a Brown Screen Of Death whenever his Ubuntu box panics.  He turns on an option and whenever the kernel panics, it drops to a TTY and spits out its crash message.
+
+=== Scope ===
+
+This specification only covers the mechanism for dumping kernel crashes to disk.  It does not cover any integration with other systems, like BugReportingToolSpec or [Malone].
+
+=== Design ===
+
+The crash dump infrastructure should trigger whenever the kernel panics.  Kernel oopses can be ignored, as either they are benign and will be logged to /var/log/kern.log, or they will cause a kernel panic.
+
+All captured dumps must eventually end up in /var/crash/ in a format consistent with that defined by AutomatedProblemReports.  This way, BugReportingTool can automatically pick up this file.  Only administrators with sudo access are allowed to read captured crash dumps.  Regular users must be unable to read these dumps, or even identify their existance.
+
+When a kernel panic occurs, the system must reset into a known good state without clearing the RAM.  Then, it must verify that it can safely write to a blank region on disk, say the swap partition.  If it cannot safely identify the disk and an empty region, it must abort.  Once it is safe to write a crash dump, it must write out the kernel panic messages, as output to the console.  It may write out a full kernel dump, with optional compression.
+
+If a configuration option is set, the kernel may drop to a normal TTY on a kernel panic, clear the display, and dump out its crash message.  This screen may be white text on a brown background.  This should be able to grab control from X.
+
+The emergency boot system may provide a busybox shell, if an appropriate option is passed.
+
+=== Implementation ===
+
+We should base our implementation around kdump.  kdump supports i386, x86_64 and ppc64 architectures and is actively maintained upstream.
+
+We will create a separate crash dump kernel for each supported architecture that contains an initramfs that only knows about storage drivers.  This minimizes the risk that a faulty driver in another subsystem would cause the emergency kernel to crash.  As well, since it is modularized, the chance of driver conflicts is greatly reduced.
+
+=== Test/Demo plan ===
+
+Follow the instructions at https://wiki.ubuntu.com/KernelTeam/CrashdumpRecipe
+
+=== Outstanding issues ===
+
+We have no kdump implementation for Sparc.
+
+We need to audit kdump to make sure it won't eat people's data.
+
+We also need to consider the security implications of attaching crash dumps to bug reports.  If they contain kernel cores, would this compromise someone's confidential data?  Passwords?  System settings?
+
+If there are any problems developing the feature, we can easily rip out this feature.
+
+=== See also ===
+* http://lse.sourceforge.net/kdump/
+* http://mkdump.sourceforge.net/
+* http://lkcd.sourceforge.net/
+* http://kerneltrap.org/node/5758
+
+=== BoF agenda and discussion ===
+
+ScottJamesRemnant: if there's no obvious and easy way, one hacky way occurs -- write it to the top of the swap disk with a simple to detect header and then pick it up on reboot and put it on the real filesystem -- I suspect there's far simpler ways though
+
+SorenHansen: That's not quite safe, though. There's no way to know if the particular crash has messed up the kernel's perception of where the swap space starts. If it has, the dump could potentially overwrite actual data.  If this could be done via a SysRq magic combo, the user could make an informed decision as to whether this is likely (based on stack dumps and whatnot) and based on that decide if he/she wants to write the dump.
+
+SimonLaw: kdump has solved these problems, if you go and read the paper they presented at OLS 2005.
+
+LucaFalavigna: kdump, mkdump and any kexec-based feature suffer a drawback: it is mandatory to pass crashkernel parameter to the bootloader to reserve a given amount of memory in order to successfully load a kernel image. You won't be able to reclaim that portion of memory anymore, unless you reboot without crashkernel parameter.
+Even if the required memory is quite low (mkdump guys speaks about 4mb, while 16mb are enough to run a kexec relocated kernel in single mode without bothering oom_killer too much), you have to sacrifice that portion of RAM everytime you power on the machine. That's the price you have to pay for an excellent crash dump report: you will have a fresh, safe system to work with and complete access to crashed kernel memory (through /dev/vmcore or /dev/oldmem). Obtaining a stack trace or the kernel log ring buffer is quite easy at that point.
+
+SimonLaw: Luca, that's a very good point.  16 MB isn't very much these days in terms of total system memory.  GNOME needs at least 256 MB of RAM, and that's still pretty painful to run.  (I know, I do it.)  The only exception I can see is under embedded systems, where we'd want to abstain from passing that kernel parameter.
+
+LucaFalavigna: In order to get a complete crash dump report, we have to load the kdump-enabled kernel ASAP in the boot process. An init script should work well because kexec uses a system call to load the image. It can fail without bothering the user too much, so if someone needs to disable kexec, there is no need to prevent that script from being loaded. Some times ago, I created a <nowiki>[[http://www.linuxdc.it/download/software/klogdump/|trivial script]]</nowiki> which dumps the content of kernel log ring buffer on the screen given a phisical memory device (such as /dev/mem or /dev/oldmem). It should help the dump process by providing an oops message or some useful info about the crashed kernel.
+
+LucaFalavigna: There's another big challenge to solve. kexec is unable to reload VESA framebuffer and no GUI or virtual console will be showed when the relocated kernel starts! I noticed this when I first tried kexec some months ago and I was able to fix it by applying <nowiki>[[http://dev.gentoo.org/~spock/projects/vesafb-tng/|VESA-tng patch]]</nowiki>. A lot of time elapsed since then and I didn't try again with newer releases, but I don't think any solution has been studied to fix this, so we should release a kernel package with that patch merged in order to enable the whole thing.
+
+LucaFalavigna: Recently, Eric Biederman committed a patch named <nowiki>[[http://www.kernel.org/git/?p=linux/kernel/git/torvalds/linux-2.6.git;a=commitdiff;h=968de4f02621db35b8ae5239c8cfc6664fb872d8|relocatable kernel support]]</nowiki> in the 2.6.20 development cycle. Do you think it could be useful?
+----
+CategorySpec

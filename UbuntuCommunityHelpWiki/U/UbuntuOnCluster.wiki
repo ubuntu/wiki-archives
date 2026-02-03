@@ -1,0 +1,188 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+Per the above, please see and update <nowiki>[[https://bugs.launchpad.net/bugs/238383]]</nowiki> if changed.
+
+''This article is very outdated.  Either needs to be updated or deleted.''
+
+This page documents the process of automatically installing Ubuntu on a cluster of machines. This means one machine will be manually set up as the install server, and all others will be install Ubuntu when booting. The version used here is hoary, and the installer used is debian-installer (The default Ubuntu installer). No tricks like FAI or kickstart are needed.
+
+Prerequisites on the server:
+* Ubuntu-base install
+* An Ubuntu <nowiki>[[http://www.ubuntu.com/getubuntu/download|.iso]]</nowiki>
+* nat active on the server ''or'' all machines must receive a public dhcp IP address
+* Several packages need to be installed
+
+=== Stage 1: Preparing DHCP & PXE booting ===
+
+1. First, you will need the MAC addresses for all machines, so they will get unique and constant IP addresses and hostnames.
+
+2. Now install the packages <code>dhcp3-server</code> and <code>tftpd-hpa</code> (see <nowiki>[[https://help.ubuntu.com/8.04/add-applications/C/index.html|Add Applications]]</nowiki>).
+
+3. Once you have this list, you can edit your /etc/dhcp3/dhcpd.conf.
+
+NOTE: PXE booting requires that the .iso file is mounted locally, I mounted it under /var/lib/tftpboot/ubuntu/
+
+<pre>
+mkdir /var/lib/tftpboot/ubuntu
+echo '/data/ubuntu-5.04-install-i386.iso /var/lib/tftpboot/ubuntu/ auto defaults,loop 0 0' >> /etc/fstab
+mount -a}}}
+
+The next step is setting up the PXE configuration. You will need to create two files: one for installing and one for booting from the local disk (ie: booting the installed system). Create /var/lib/tftpboot/pxelinux.cfg and put these files there.
+
+As you can see, the default action is to run the installer. You can also set a few options in here (the kernel command line). As space can be limited, you may save some space on the kernel command line by creating symlinks to relevant files:
+
+{{{
+cd /var/lib/tftpboot
+ln -s ubuntu/install/netboot/ubuntu-installer/i386/initrd.gz
+ubuntu/install/netboot/ubuntu-installer/i386/linux
+ubuntu/install/netboot/pxelinux.0
+ubuntu/install/netboot/ubuntu-installer/
+</pre>
+
+You can see that in the example config files, these symlinks are used.
+
+=== Stage 2: Setting up nis and nfs ===
+
+For cluster machines, nis and nfs are usually used to share login information and parts of the filesystem, so it is necessary to install both on the server. You will need the packages <code>nis nfs-kernel-server</code>.
+
+Note: the nis package (not nis itself) is quite buggy, and it will automatically try to start ypbind. It also completely ignores preseed, so in a following step we will create a new version of this package. You just have to wait a bit for ypbind to time out.
+
+When the nis setup asks for a domain, pick one you like. As soon as ypbind times out, stop nis again with
+
+<pre>
+invoke-rc.d nis stop}}}
+
+Now you need to edit /etc/default/nis and enable the nis server. You also need to initialize the nis database with 
+
+{{{
+/usr/lib/yp/ypinit -m}}}
+
+You can now start the nis services again
+
+{{{
+invoke-rc.d nis start}}}
+
+For NFS, you need to edit /etc/exports in order to export required parts of the filesystem. Exporting /home and /data, should look like:
+
+{{{
+/home   192.168.0.0/255.255.0.0(rw,async)
+/data   192.168.0.0/255.255.0.0(rw,async)}}}
+
+Now restart the nfs server.
+
+{{{
+invoke-rc.d nfs restart}}}
+
+=== Stage 3: Setting up a local mirror and proxy ===
+
+Installing from a local mirror and using an http proxy for the rest greatly improves the speed of subsequent installs. Since apt-proxy is quite broken, you should use squid as a generic http proxy. To recover the reboot, install php or use a CGI script.
+
+You will need the packages: <code>apache2 libapache2-mod-php4 squid</code>
+
+This example has only one external IP address, so only the master server is connected to the internet. The other machines are only connected to the master (and via NAT they can reach the net). If you do not want a public proxy, make sure squid installer only uses eth1, the internal interface. You can tell apache to do so to by editing /etc/apache2/ports.conf.
+
+{{{
+invoke-rc.d apache2 stop
+echo 'Listen 192.168.0.1:80' > /etc/apache2/ports.conf
+echo 'Listen 127.0.0.1:80' >> /etc/apache2/ports.conf
+invoke-rc.d apache start}}}
+
+You should also edit the squid config.
+
+Now make the apache server an Ubuntu archive by symlinking into the .iso
+{{{
+ln -s /var/lib/tftpboot/ubuntu/ubuntu /var/www/ubuntu}}}
+
+=== Stage 4: preseed ===
+
+Having everything in place on the server, you can now take care of the client configuration. The tftpboot will launch the Ubuntu installer. This installer usually asks questions, but the answers can be preseeded in a so called preseed file. 
+
+Points for possible changes: language, package selection (which is an aptitude pattern), first-created user account, and partition manager setup. Go over these settings and adapt them to your needs.
+
+=== Stage 5: Surviving the reboot ===
+
+The installer reboots after the basic install, which means that the installer will be launched again. Of course you don't want this, which is why it is necessary to create a registration system. As you can see in the preseed file, the preseed/late-command has been set to <code>wget http://192.168.0.1/register.php</code>. This does nothing on the client side, but the php script creates a PXE boot file for this machine which instructs it to boot from the local drive. If you want to reinstall a certain machine all you have to do is remove the associated PXE boot file and it will use the default again.
+
+In order for this to work, the <code>www-data</code> user must have write access to /var/lib/tftpboot/pxelinux.cfg.
+
+{{{
+chown :www-data /var/lib/tftpboot/pxelinux.cfg
+chmod g+w $_}}}
+
+This is the register.php script:
+{{{
+<?php
+  function _dechex($x) { return sprintf("%02s",dechex($x)); }
+  $host = strtoupper(implode('',array_map(_dechex,explode('.',$_SERVER['REMOTE_ADDR']))));
+  copy("/var/lib/tftpboot/pxelinux.cfg/localboot", "/var/lib/tftpboot/pxelinux.cfg/$host");
+?>}}}
+
+=== Stage 6: postinstall ===
+
+The postinstall script can be used to do anything you like. I used it to install a correct nis package on the clients, create a correct NIS config and more bootstrapping things.
+
+Creating a correct NIS package is done as follows (for Breezy this won't be necessary: the package has been fixed).
+
+{{{
+mkdir nispackage
+cd nispackage
+apt-get source nis
+cd nis-3.12/debian}}}
+* Open the file <code>postinst</code>
+* comment out line 61 (the one with <code>db_input</code>
+* just before line 64 (the one with <code> if [ "$RET</code> add a line containing RET=domain where domain is the NIS domain you chose
+* comment out line 106 (The one with <code>db_text</code>) 
+
+Now enter the following sequence of commands:
+{{{
+cd ..
+apt-get build-dep nis
+dpkg-buildpackage}}}
+
+Copy the newly generated .deb (to be found in the nispackage folder) file to a location where the clients can retrieve them (either with wget or an nfs mount)
+
+The postinstallscript itself should be placed in /var/www
+Mine looks like this:
+
+{{{
+
+mkdir /data
+mount -t nfs 192.168.0.1:/data /data -o rw,soft,bg,rsize=32768,wsize=32768,tcp,timeo=600,intr
+
+aptitude -y install portmap libslp1
+dpkg -i /data/nis_3.12-3_i386.deb
+cp /data/nsswitch.conf /etc/nsswitch.conf
+echo '+::::::' >> /etc/passwd
+echo '+::::::::' >> /etc/shadow
+echo '+:::' >> /etc/group
+
+DIR=`pwd`
+cd /etc/rc2.d
+ln -s ../init.d/mountnfs.sh S20mountnfs.sh
+cd $DIR
+
+umount /data
+echo 'enterprise:/home  /home   nfs     rw,soft,bg,rsize=32768,wsize=32768,tcp,timeo=600,intr' >> /etc/fstab
+echo 'enterprise:/data  /data   nfs     rw,soft,bg,rsize=32768,wsize=32768,tcp,timeo=600,intr' >> /etc/fstab
+mount -a
+
+cp /data/sources.list /etc/apt/sources.list
+aptitude update
+aptitude -y upgrade
+
+aptitude -y install linux-686-smp manpages-dev
+rm /var/log/installer/debconf-seed
+rm /var/log/installer/cdebconf/questions.dat
+
+echo '0 *    * * *  root   test -x /data/upgrade && /data/upgrade' >> /etc/crontab
+
+reboot
+</pre>

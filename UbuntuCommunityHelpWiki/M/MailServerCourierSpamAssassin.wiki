@@ -1,0 +1,264 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== Introduction ==
+
+A very simple guide to build a free mail server using Ubuntu, Courier MTA and SpamAssassin. After following the instructions below you will have a functional mail server in about as much time as it will take you to read this guide to the end.
+
+* Installing and configuring the server OS
+* Adding Courier MTA and SpamAssassin packages
+* Setting up Maildir folders for all users
+* Configuring SpamAssassin and maildrop
+* Setting up Courier, Sqwebmail and Apache
+* Backup to tape
+* Administration of the mail server
+* Using graphical desktop Xfce
+
+First things first. You will need a static (public) IP address, a DNS registered name (aka mail.example.org) with an MX record for @example.org domain pointing to it, and a valid SSL certificate (self-signed certificate by your own authority or from an outside authority). For hardware, a relatively inexpensive server with hardware RAID, and a tape drive for backups, would work well. The storage size is mainly determined by the number of users and mail quotas you plan to setup.
+
+== Installation ==
+
+You should use server version of Ubuntu with LTS (Long Term Support), as it comes with free security updates for 5 years. You can get appropriate CD from the download section of Ubuntu website. The only options that require thinking during install are hostname (mail in our case) and the first user name (who will become the administrator of this system). It is a good idea to keep it simple and name your users by firstlastinitialnumber, e.g. my user name would be aa1. Later you can assign an alias to a user name to get an email address you want (firstname.lastname@example.org). On the software selection screen we only need the OpenSSH server for remote administration.
+
+After reboot following the initial setup, we will install the Courier mail server components and the SpamAssassin package. You can use ssh at this point to login to the server from another computer (your workstation for example). If you plan to create any other users, you should limit who is allowed to do that by editing the /etc/ssh/sshd_config configuration file and adding "AllowGroups admin" at the end (restart the ssh server to apply changes). Now only server administrators can login using ssh.
+
+After you get the server shell prompt one way or another, run following commands on the shell to install Courier and SpamAssassin:
+
+<pre>
+sudo apt-get install courier-mta courier-mta-ssl courier-imap courier-imap-ssl courier-doc sqwebmail
+sudo apt-get install spamassassin spamc
+</pre>
+
+== Configuration ==
+
+With the software packages in place, we need to configure everything to work together as a mail server. First, we will set up the Maildir skeleton folder (with a sub folder for Spam) for all users. To do that, run following commands in the home directory of your admin account:
+
+<pre>
+maildirmake Maildir
+maildirmake -f Spam Maildir
+maildirmake -q 10000000S ./Maildir
+touch .courier
+sudo cp -r Maildir /etc/skel
+sudo cp .courier /etc/skel
+</pre>
+
+This will set the default email user quota to 10000000 Bytes (you can adjust it later per user). This also creates a Spam folder for every user, so that courier server can place email messages identified by SpamAssassin as Spam into separate folder instead of your Inbox.
+
+Next we will make changes to SpamAssassin and maildrop configuration files to filter incoming email messages. First, enable the SpamAssassin daemon in /etc/default/spamassassin. Also you should enable nightly rule updates by setting "cron=1" at the bottom of that file. If you wish, adjust settings in /etc/spamassassin/local.cf so that Spam email messages get delivered into Spam folder unchanged ("report_safe 0"), and set the trusted networks to "trusted_networks 10/8 192.168/16" (or to whatever your internal network is). (Re)start the SpamAssassin daemon and configure maildrop to use SpamAssassin for filtering:
+
+<pre>
+sudo vi /etc/courier/maildroprc 
+</pre>
+
+Paste in the following lines:
+
+<pre>
+import HOME
+import USER
+DEFAULT="$HOME/Maildir/"
+
+if ($SIZE < 256000)
+{
+   xfilter "/usr/bin/spamc -u $USER"
+}
+if ( /^X-Spam-Status: Yes/ )
+{
+  to "$DEFAULT/.Spam/"
+}
+</pre>
+
+Maildrop will call spamc for every message smaller than 256000 Bytes (most Spam messages are smaller than that) and deliver Spam messages into the folder called Spam. Also, we need to configure Courier to use maildrop for local delivery. In the /etc/courier/courierd configuration file, uncomment the line:
+
+<pre>
+DEFAULTDELIVERY="| /usr/bin/maildrop"
+
+</pre>
+
+We need to specify our email domain by adding "example.org" line to /etc/courier/locals so that Courier MTA knows what emails to treat as local.
+
+Because we would like our users to relay outgoing emails through this server as well, we need to enable authenticated SMTP relaying by setting the ESMTPAUTH parameter in /etc/courier/esmtpd to ESMTPAUTH="LOGIN PLAIN". Also edit /etc/courier/esmtpd-ssl and set AUTH_REQUIRED to 1 to force all clients to authenticate when they are using STMP over SSL. To use SSL encryption, you can either purchase an SSL certificate from an outside certification authority or use a self-signed certificate. The only downside of using a self-signed certificate is that no email client will trust it by default without first installing your root CA certificate (that you used to sign your SSL certificate). That would work if you plan to use this mail server for a small number of users and you can force them to install your root CA certificate.
+
+To use your SSL certificate (and SSL key!) in Courier MTA run these commands:
+
+<pre>
+sudo cat mail.example.org.key mail.example.org.crt > /etc/courier/imapd.pem
+sudo cat mail.example.org.key mail.example.org.crt > /etc/courier/esmtpd.pem
+</pre>
+
+Restart both courier-imapd-ssl and courier-mta-ssl daemons. At this point you can use any standard mail client to read and send email over IMAP and SMTP protocols (also using SSL/TLS encryption). To provide a web-based interface to this mail server (and a way for your users to change passwords, set up auto-reply and forwarding settings), we will use Sqwebmail. You can customize this interface with your logo:
+
+<pre>
+sudo cp yourlogo.png /var/www/sqwebmail
+sudo vi /usr/lib/courier/sqwebmail/html/en-us/loginform.inc.html
+
+</pre>
+
+Also you need to tell Sqwebmail your default domain name "example.org" in /etc/courier/defaultdomain for outgoing messages.
+
+To enable auto-reply and forwarding capabilities for mail users you need to create a file maildirfilterconfig:
+
+<pre>
+sudo vi /etc/courier/maildirfilterconfig
+
+MAILDIRFILTER=../.mailfilter
+MAILDIR=./Maildir
+</pre>
+
+This tells Sqwebmail to save each user's maildrop filters in a file called .mailfilter in his/hers home directory. Now you can setup email forwarding and auto-replies using Sqwebmail. You first create an auto-reply message, and then enable this auto-reply message in the filter rules page.
+
+To access Sqwebmail securely, we need to tell apache2 daemon to listen on the SSL port and to use our valid SSL certificate:
+
+<pre>
+cp /etc/apache2/sites-available/default /etc/apache2/sites-available/ssl
+ln -s /etc/apache2/sites-available/ssl /etc/apache2/sites-enabled/000-ssl
+ln -s /etc/apache2/mods-available/ssl.load /etc/apache2/mods-enabled/
+ln -s /etc/apache2/mods-available/ssl.conf /etc/apache2/mods-enabled/
+sudo cp /etc/courier/imapd.pem /etc/apache2/apache.pem
+
+NameVirtualHost *:443
+<VirtualHost *:443>
+  SSLEngine On
+  SSLCertificateFile /etc/apache2/apache.pem
+...
+</VirtualHost>
+
+sudo /etc/init.d/apache2 restart
+</pre>
+
+If everything worked well, you should get the Sqwebmail interface at http(s)://mail.example.org/cgi-bin/sqwebmail using a web browser.
+
+== Administration ==
+
+We need to schedule two cron jobs to delete old Spam messages (older than 30 days) in user mail folders and to clear webmail login cache files. The most straightforward way to do that, is to add the following lines to the end of the /etc/crontab file:
+
+<pre>
+0 7     * * *   root    find /home/*/Maildir/.Spam/cur -type f -mtime +30 -print0 | xargs -0 rm
+20 *	* * *	root	perl /usr/lib/courier/sqwebmail/cleancache.pl
+</pre>
+
+Before you start creating users and giving out email addresses, you should make sure you can backup your server to a tape. You can simply label one tape for each day of the week and use this simple script to backup you server manually:
+
+<pre>
+# !/bin/bash
+ mt -f /dev/st0 rewind
+ sudo tar -cvf /dev/st0 --one-file-system --exclude=/cdrom --exclude=/media --exclude=/mnt --exclude=/proc /
+ mt -f /dev/st0 offline
+</pre>
+
+Once the backup tape is ready, you should store it in a remote location (separate from the building your mail server is in) and rotate your backup tapes daily. Other useful tape drive commands are:
+
+<pre>
+mt -f /dev/st0 rewind
+tar -tf /dev/st0
+tar -xvf /dev/st0
+tar -xvf /dev/st0 /bin
+mt -f /dev/st0 offline
+</pre>
+
+You should also set up a maintenance schedule and inform your users when to expect service interruptions. If you are ready to install updates and restart your system, run this commands:
+<pre>
+sudo apt-get update && sudo apt-get upgrade
+</pre>
+
+Last but not least comes email user administration. You can add/remove users with these commands:
+
+<pre>
+sudo adduser username --home /home/username --gecos "Full Name"
+sudo passwd username
+sudo deluser --remove-home username
+</pre>
+
+If you would like to give a user admin privileges (to help you with system maintenance), add this user to the admin group:
+
+<pre>
+sudo useradd USERNAME admin
+</pre>
+
+When needed, you can adjust a user's email quota by running this command:
+
+<pre>
+sudo maildirmake -q 100000000S /home/$USER/Maildir
+</pre>
+
+This sets quota to 100MB for user $USER. To remove this user's quota entirely, delete the /home/$USER/Maildir/maildirsize file.
+
+Courier MTA server wide message size limit defaults to 10MB. You can change it to 20MB by simply creating a file /etc/courier/sizelimit with number 20000000 in it.
+
+You should define the recipient(s) for postmaster/root emails under aliases directory:
+
+<pre>
+sudo vi /etc/courier/aliases/system
+postmaster: yourusername
+
+sudo makealiases
+</pre>
+
+Similarly you can assign aliases to all users. Create a new file called users and make your alias assignments there:
+
+<pre>
+sudo vi /etc/courier/aliases/users
+alex.andr: aa1
+
+sudo makealiases
+</pre>
+
+You could even create very basic email distribution lists this way. Simply create a file mlists and define your lists there:
+
+<pre>
+sudo vi /etc/courier/aliases/mlists
+testlist: aa1, postmaster
+
+sudo makealiases
+</pre>
+
+For any serious mailing list setup, you should look into using couriermlm - Courier mailing list manager, or even better, into separate package called Mailman.
+
+If you ever need to forward all emails for someone to a different address you can use .courier file in this user's home directory. Add a comma-separated list of email addresses in $HOME/.courier file to forward the messages. Also you can disable/bypass all maildrop (Sqwebmail and SpamAssassin!) filtering by putting single "./Maildir/" line into user's .courier file.
+
+== Using graphical desktop Xfce ==
+
+For some admins (especially beginners) it might be easier to use graphical tools for system administration instead of the Linux shell. In this case you can install the lightweight Xfce desktop environment on your ubuntu mail server.
+
+<pre>
+sudo apt-get install xubuntu-desktop
+</pre>
+
+Xfce graphical environment provides multiple tools for system administration, such as "Users and Groups" for user administration, "Update Manager" for software updates, and a number of other programs. You can create desktop launcher shortcuts to run following bash scripts so you can easily update aliases with makealiases command, or set email quota for users, or start Thunar file manager as root (make sure it displays the hidden files as well!) without ever using Linux shell. If you edit alias files using graphical text editors, remember to delete the backup files with "~" at the end (graphical text editors often create them) - otherwise you will end up with duplicate email deliveries!
+
+Here are some example scripts. To start Thunar as root, create a launcher for the following script:
+
+<pre>
+# !/bin/bash
+ sudo thunar
+</pre>
+
+A simple script to set email quota for a user:
+
+<pre>
+# !/bin/bash
+ echo "User name?"
+ read username
+ echo "Quota size?"
+ read size
+ sudo maildirmake -q "$size"S /home/"$username"/Maildir
+</pre>
+
+A script to delete backup files created by graphical text editors and to update the mail aliases:
+
+<pre>
+# !/bin/bash
+ sudo find /etc/courier/aliases -name '*~' -exec rm -rf "{}" \;
+ sudo makealiases
+</pre>
+
+Thank you for reading this far! These instructions provide a starting point for setting up and running a mail server. It is a fact that to keep this guide short a lot of useful information was omitted, but it could serve you as an example of a functional mail server setup in under an hour.
+
+----
+CategoryEmail

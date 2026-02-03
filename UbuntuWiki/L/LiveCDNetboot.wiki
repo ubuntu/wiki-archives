@@ -1,0 +1,102 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== Netbooting Ubuntu Live CDs ==
+
+=== Introduction ===
+
+It is possible to boot an Ubuntu live CD from the network, although the process is quite experimental.  There are two parts to this: booting vmlinuz+initrd.gz from a PXE boot server, and accessing the root filesystem (containing filesystem.squashfs) over NFS.  These are independent, and you can do either one without the other.  e.g. for testing you could boot vmlinuz and initrd.gz from a disk or USB drive with GRUB or syslinux, as long as you pass the right kernel command line.  NFS root is the tricky part, since it depends on scripts in the initramfs's `/init` to do the right thing; current status:
+
+* Gutsy and earlier: working.  Previous versions of this page only documented this case, so if it's wrong now, try looking back at previous versions.
+
+* Hardy: working
+
+* Intrepid : working
+
+* Jaunty : working
+
+* Karmic : working (And, if you are installing Karmic you can use the super-simple process described in the "Automation script" section below.)
+
+ However, this only works when eth0 is your boot interface, unless you <nowiki>[[https://bugs.launchpad.net/ubuntu/+source/initramfs-tools/+bug/182940|modify the initramfs image]]</nowiki>.  This bug dates back to at least Gutsy, and affects Hardy.  Probably Intrepid, but untested.
+
+=== Preparation ===
+
+* You will need a PXE boot server, which means DHCP and TFTP servers.  dnsmasq makes a good boot server, as it has a DNS cache, DHCP server, and TFTP server all in one, but most examples you'll see are for ISC DHCPD config files, not dnsmasq.  Otherwise, go with `dhcp3-server` and `tftpd-hpa` (`atftpd` works too).  Search the web for more info if you haven't done this before.
+
+* Put `/casper/vmlinuz` and `/casper/initrd.gz` (from the live CD) where your TFTP server can serve them up. (The former is just the same as the stock Ubuntu kernel; the latter is a special initial RAM disk that contains `casper`, Ubuntu's set of live CD boot scripts.)
+
+* Mount the live CD and copy its contents to a path exported by your NFS server (you can also loop-mount it directly on such a path, although you will have to arrange to mount it on boot, and NFS export the loopback mount): <pre>
+sudo mount -o loop ubuntu-7.10-desktop-i386.iso /mnt
+sudo cp -a /mnt/. /srv/nfs/ubuntu-7.10-desktop
+sudo umount /mnt
+</pre>
+
+* Ensure that this path is listed in `/etc/exports`, if necessary. You will need to use the `no_root_squash` option. Run `/etc/init.d/nfs-kernel-server reload` to export it.
+
+* Arrange for vmlinuz to be booted (by pxelinux.0) with the livecd initramfs (initrd.gz), and with the following kernel arguments:<pre>
+ (Gutsy and earlier): root=/dev/nfs boot=casper NETBOOT=nfs NFSROOT=server:/path quiet splash
+ (Hardy, Intrepid,Karmic): boot=casper netboot=nfs nfsroot=server:/path}}}
+ where ''server'' and ''/path'' are set appropriately for your NFS server.  
+All var=value arguments set environment vars for /init, but /init parses /proc/cmdline only for lower-case options.  Sometimes it does more than just setting the uppercase equivalent.  quiet and splash are optional.  text would stop GDM from running.  (This isn't specific to netbooting, though)
+
+* (NetworkManager bug workaround):  append break=init, and when the initramfs drops you to a shell, `touch /cow/etc/init.d/NetworkManager` to replace N-M's init script with an empty file under the union FS of the main system.  (or do anything else to prevent N-M from even temporarily taking down the interface needed to access filesystem.squashfs.)
+
+=== Example ===
+My syslinux livecd label looks like this with the following details:
+** '''Server:''' `vansen` or `192.168.1.100`
+** '''Path:''' `/data/images/diskless/ubuntu-7.10-desktop`.  This is where i put the livecd files.
+** '''/etc/exports:'''{{{
+/data/images/diskless/ubuntu-7.10-desktop	192.168.1.0/255.255.255.0(async,no_root_squash,no_subtree_check,ro)
+</pre>
+
+<pre>
+default menu.c32
+SAY press return for menu
+
+LABEL live-gutsy
+	kernel ubuntu-7.10-desktop/casper/vmlinuz
+	append root=/dev/nfs boot=casper netboot=nfs nfsroot=192.168.1.100:/data/images/diskless/ubuntu-7.10-desktop initrd=ubuntu-7.10-desktop/casper/initrd.gz quiet splash --
+
+LABEL live-hardy-i386
+        kernel hardy-i386/vmlinuz
+        append boot=casper netboot=nfs nfsroot=192.168.2.200:/srv/tftpboot/hardy-i386/mnt initrd=hardy-i386/initrd.gz --
+
+LABEL live-intrepid-i386
+        kernel intrepid-i386/vmlinuz
+        append boot=casper netboot=nfs nfsroot=192.168.2.200:/srv/tftpboot/intrepid-i386/mnt initrd=intrepid-i386/initrd.gz --
+</pre>
+
+==== Notes ====
+* You can save space (only about 9MB, but space all the same) by using the livecd copies of the kernel (vmlinuz) and the initramfs image (initrd.gz) instead of copying them someplace else on your tftp server.  This is shown in the example above.
+* You can export a loopback iso9660 mount, if you want to keep the iso image without wasting disk space.  It is a separate mount, so does need to be specifically exported (/etc/exports, or run e.g. `sudo exportfs -v 192.168.0.0/16:/srv/tftpboot/intrepid-alpha5-i386/mnt`).  If your tftp server doesn't chroot, and or if you mounted the CD under your tftproot, you may be able to just symlink to vmlinuz and initrd.gz, or put the path to them (...mnt/casper/vmlinuz) into the pxelinux config file.
+* If you run into problems, you can delete the `quiet` and `splash` options to see kernel boot messages on screen vs the splash screen.  Removing only the `splash` option will give you less verbose messages via the splash screen, which is cool too.
+* If your image fails to boot and drops you to a busybox initramfs command prompt, the file casper.log may shed some light on why it died.  You will likely be here because the livecd couldn't find a root filesystem to mount (filesystem.squashfs).  Try `cat casper.log` at the prompt.
+* If your image hangs during the boot sequence just after the message about "squashfs: version 3.3", after a minute try the key combination Alt+Enter. It will then continue booting. 
+
+==== Automation script ====
+<nowiki>[[http://alkisg.mysch.gr/steki/index.php?action=dlattach;topic=2525.0;attach=1421|This script]]</nowiki> completely automates the aforementioned method, with a few modifications (you don't need to download it from this link, the 'wget' described below does this all automatically). Steps to use it:
+* Boot a PC with the desktop (ed)ubuntu CD (either i386 or amd64). Karmic or Lucid are required because this script uses dnsmasq >= 2.49 instead of dhcp3-server. Also, an external DHCP server (e.g. a router) on the local network is not only allowed, but '''required''', because dnsmasq is used in <nowiki>[[https://help.ubuntu.com/community/UbuntuLTSP/ProxyDHCP|proxyDHCP]]</nowiki> mode so that it doesn't interfere with the existing network setup.
+* From the live session, run this command:
+<pre>
+wget 'http://alkisg.mysch.gr/steki/index.php?action=dlattach;topic=2525.0;attach=1421' -O /tmp/livecd-netboot && sudo sh /tmp/livecd-netboot
+</pre>
+   Internet connectivity is needed because the script temporarily installs nfs-kernel-server.
+* That's all, now you should be able to netboot your clients. Press Ctrl+C to stop the script when you're done.
+It's also possible to use that script in a normal session, but novice users are advised to use it only in live sessions.
+
+==== Discussion ====
+* links about PXE booting in general: http://syslinux.zytor.com/pxe.php
+* Basically, a DHCP server includes a "filename", like `pxelinux.0`, in its DHCP reply, and the PXE client loads it from the TFTP server (also pointed to by the DHCP reply).  TFTP paths are usually relative to a directory the tftp server chroots to, or at least acts like an http server with a DocumentRoot.  e.g. /srv/tftpboot is a good choice.  (the pxe client just uses paths like /pxelinux.0 and /pxelinux.cfg/default)
+
+* If the question "Please provide a name for this Disc, such as ‘Debian 2.1r1 Disk 1′:" appears during boot, it's because the hidden folder named ".disk" is missing. (Chances are your "cp -a ..." command included a "*", which didn't match that dot-directory.)
+ Copy this folder over from the source to keep the boot sequence going on without the need of user interaction. 
+ This question are only visible if the splash are disabled, else it'll just stand there doing nothing.
+
+* FIXME: put the PXE howto somewhere else.  Every page about something to do with PXE should _not_ become its own howto on setting up a PXE server.  It would be good to link to a good page about it, though.

@@ -1,0 +1,78 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== Client side ==
+
+=== Introduction ===
+The <nowiki>[[http://packages.ubuntu.com/search?keywords=system-image&searchon=names&suite=all&section=all|system-image client tool]]</nowiki> is used to calculate the update, download the files, validate them, and then perform the device- and distro-specific operation to apply the update.  On ubuntu-touch, this means rebooting into recovery.  On snappy, this means applying the update to the "B" partition.
+
+Also, on ubuntu-touch '''all''' downloads are performed by the `ubuntu-download-manager` service.  On snappy, (and optionally on touch) downloads are performed by a built-in cURL based downloader.
+
+=== Overview ===
+
+* Secure download of the indexes (HTTPS + GPG)
+* Support for everything described in the <nowiki>[[..-GPG|GPG]]</nowiki> spec
+* Resolution of the best upgrade path based on different policies (total download size, least number of reboots, ...)
+* Download and validation of the files
+* Hooks to provide customized "apply-the-upgrade" operations.
+* Support for suspend/resume of downloads
+
+=== Implementation ===
+
+There source package is divided into three (+1 for a "development" package not normally deployed) binary packages: `system-image-common` for the base system and Python libraries; `system-image-cli` for the command line tool; `system-image-dbus` for the D-Bus service.  Note that on snappy, only `system-image-cli` is used since there are no D-Bus clients (e.g. `system-settings` on touch).  The cli tool also provides a much more robust functionality, allowing you to do things on the cli that you can't do over D-Bus.
+
+There is a default image server available at http://system-image.ubuntu.com but it is relatively easy to deploy your own servers.
+
+=== Step-by-step example for an update ===
+
+The client does the following:
+
+# Grab `https://server/channels.json` and lookup the index for the current channel. If present, also grab the device GPG keyring.
+# Grab `https://server/<channel>/<model>/index.json`
+# Read the current version number of the device
+# Look for the most recent version available for the specified channel on the current device
+# Calculate the candidate upgrade paths, minimizing download size, number of reboots, and other factors (including Phased Updates)
+# Score the candidate paths (lowest score wins), yielding the images to effect the upgrade
+# Download any file needed up until the next reboot
+# Validate all the files
+# Write them to the cache partition
+# Write the commands for upgrading the device to a file
+# Apply the update (in-place "B" partition unpacking for snappy, reboot into recovery for touch)
+
+Those steps don't include all of the specific GPG validation bits required to ensure the authenticity of all files. Those are detailed in the separate <nowiki>[[..-GPG|GPG]]</nowiki> wiki page.
+
+Security (e.g. what to download over https/http) is outlined in the <nowiki>[[..-Server#security|server security section]]</nowiki>.
+
+=== DBus API ===
+
+The `system-image-dbus` process exposes a D-Bus API on the System Bus which will is used by touch processes such as the <nowiki>[[SoftwareUpdates#Phone|u-i in the System Settings]]</nowiki> to query, begin, cancel, and apply a system update.  This service starts via D-Bus activation and exits automatically after a configurable amount of time (i.e. it does not run forever).  It maintains state such that the client can exit and get restarted to continue the update, even across reboots.  The client uses the <nowiki>[[..-Downloader|download service]]</nowiki> to manage all file downloads.  See the <nowiki>[[http://manpages.ubuntu.com/manpages/xenial/man8/system-image-dbus.8.html|manpage]]</nowiki> for the up-to-date description of the D-Bus interface.
+
+=== Code ===
+
+The code is now managed under Git on Launchpad: https://code.launchpad.net/ubuntu-system-image
+
+The old Bazaar repository is preserved for read-only access.
+
+=== Phased Updates ===
+
+It is possible on the server to ''phase'' an update, such that only a percentage of devices will receive the update.  This can be used to smoke test an update in the field, even after extensive pre-publishing testing.  The way this works is:
+
+* Every terminal upgrade image (i.e. highest available on a device/channel) has a percentage assigned to it, as an integer in the set [0..100]
+* 0% means an image has been pulled, and no device should upgrade to it
+* 100% means the image is available to all devices.  This is the default if the image has no explicit phase percentage assigned to it
+* Each device calculates its own "phase", also as an integer in the set [0..100).  Inputs into this random number include the channel, target image number, the device's unique ''machine id'', and a random number
+* If the device's phase percentage is less than or equal to the target image's percentage, then the device is "phased in" and selects the upgrade leading to this image number
+* If the device's phase percentage is greater than the target image's percentage, then the device is "phased out" and will not upgrade to the target image number
+
+When a device is phased out, the candidate upgrade path scoring algorithm simply discards the winning upgrade candidate and falls back to the next lowest scoring candidate path, until a phased-in upgrade is found.  If no phased-in upgrade path is found, the device will not upgrade.
+
+'''Note:''' the algorithm described above is for `system-image` 3.0 or better.  The `system-image` 2.5 phase algorithm is slightly different: a few different inputs are used to calculate the device's phase, and if a winning upgrade path is phased-out, no fallback is performed; the device simply won't upgrade.
+
+Also note that in all cases, `system-image-cli` allows the user to override the device's phase percentage, thus forcing the winning path to be explicitly phased in or out.  Dry-run operation of `system-image-cli` can be used to see what the scores and phase percentages are without effecting an upgrade.

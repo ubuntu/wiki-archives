@@ -1,0 +1,129 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+==== The Problem Domain ====
+
+We have multiple, often hardware dependent, implementations of the Khronos EGL, GL|ES, and OpenVG APIs.  We want software in the Ubuntu archive to be able to build against these APIs.  Software in the Ubuntu archive must build against the Mesa implementation.
+
+With the introduction of <nowiki>[[https://wiki.ubuntu.com/MultiarchSpec|MultiArch]]</nowiki> support in dpkg we should also support the parallel install of EGL packages from different sources for different architectures - for example, to allow a developer on an x86-64 system to use the x86-64 EGL implementation from the proprietary ATI drivers while having an armel EGL implementation from mesa installed to cross-compile for ARM.
+
+The goal is to have multiple EGL implementations available in the Ubuntu archive
+
+===== Assumptions =====
+* The selection of EGL implementation determines which GL|ES and OpenVG implementation is usable.  For example, it would never be useful to use a vendor's GLESv2 library with Mesa's EGL.
+* The libraries (with SONAME) are <code>libEGL.so.1, libGLESv1_CM.so.1, libGLESv2.so.2</code> and <code>libOpenVG.so.1</code>
+
+== Packaging ==
+
+==== Multiarch ====
+
+This is a brief summary as it applies to EGL libraries.  See the MultiarchSpec for full details.
+
+Throughout this guide DEB_HOST_MULTIARCH is used as a variable.  The appropriate value for this variable on an Ubuntu system can be found by running <code>dpkg-architecture -qDEB_HOST_MULTIARCH</code>.  The most common values for DEB_HOST_MULTIARCH are <code>arm-linux-gnueabi</code> for armel, <code>i386-linux-gnu</code> for i386, and <code>x86_64-linux-gnu</code> for amd64.
+
+If vendor drivers are only available for a single architecture then the rest of this section may be skipped.  The traditional <code>/usr/lib</code> library paths still function as normal on a multiarch system, and there is no technical impediment to switching to multiarch packaging later.
+
+To allow for the same package built for different architectures to be installed at the same time the library paths must be unique for each architecture (dpkg has special handling for data in /usr/share).  Libraries for a multi-arch ready EGL package must live in a subdirectory of /usr/lib/$DEB_HOST_MULTIARCH/.  The value of DEB_HOST_MULTIARCH can be retrieved with from <code>dpkg-architecture -qDEB_HOST_MULTIARCH</code>.  For example, libraries for the amd64 architecture live in <code>/usr/lib/x86_64-linux-gnu/</code>.
+
+There is (at the moment) no equivalent policy for -dev packages.
+
+==== Alternatives ====
+
+To support FIXME the previous Conflicts/Provides/Replaces solution is no longer appropriate as it precludes having the Mesa EGL libraries for one architecture and a vendor's EGL libraries for the native architecture simultaneously installed.  We instead use the Debian alternatives system to provide a per-architecture switch.
+
+Packages which use this alternatives system '''should not''' provide the <code>libegl1-x11, libgles1, libgles2</code> or <code>libopenvg1</code> virtual packages.
+
+Each EGL implementation should install their libraries into a subdirectory of libdir, which should be of the form $VENDOR-egl.    The implementation should also install a <code>ld.so.conf</code> file, containing the fully qualified directory name.  For example, on x86-64, Mesa's implementation is installed into <code>/usr/lib/x86_64-linux-gnu/mesa-egl</code>, and has a <code>/usr/lib/x86_64-linux-gnu/mesa-egl/ld.so.conf</code> file containing the line
+<pre>
+/usr/lib/x86_64-linux-gnu/mesa-egl
+</pre>
+
+The current EGL implementation is selected by setting the $DEB_HOST_MULTIARCH_egl_conf alternative.  This alternative will set <code>/etc/ld.so.conf.d/$DEB_HOST_MULTIARCH_EGL.conf</code> to point to the current implementation's <code>ld.so.conf</code>.  The dynamic loader will then search the implementation's private libdir when attempting to resolve libraries.
+
+The package which provides <code>libEGL.so.1</code> is responsible for setting the alternative.  If the GL|ES or OpenVG libraries are in separate packages, they should be installed alongside <code>libEGL.so.1</code> and should not touch the alternatives configuration.
+
+===== debian/rules example snippet =====
+<pre>
+##### Create an ld.so.conf which says where to find libEGL, libGLES{1,2} 
+##### and libOpenVG from Mesa.
+
+        echo "/usr/lib/$(DEB_HOST_MULTIARCH)/mesa-egl" \
+        > $(CURDIR)/debian/libegl1-mesa/usr/lib/$(DEB_HOST_MULTIARCH)/mesa-egl/ld.so.conf
+</pre>
+
+===== postinst example =====
+<pre>
+
+set -e
+
+THIS_PACKAGE=libegl1-mesa
+THIS_SCRIPT=postinst
+
+case "$1" in
+  configure)
+## Use alternatives to make it easier to switch between Mesa and 3rd party modules
+  update-alternatives --force \
+    --install /etc/ld.so.conf.d/${DEB_HOST_MULTIARCH}_EGL.conf ${DEB_HOST_MULTIARCH}_egl_conf /usr/lib/${DEB_HOST_MULTIARCH}/mesa-egl/ld.so.conf 500 \
+
+## ldconfig needs to be run immediately as we're changing /etc/ld.so.conf.d/ with
+## alternatives.
+  LDCONFIG_NOTRIGGER=y ldconfig
+
+esac
+
+exit 0
+</pre>
+
+===== prerm example =====
+
+<pre>
+
+set -e
+
+THIS_PACKAGE=libegl1-mesa
+THIS_SCRIPT=prerm
+
+case "$1" in
+  remove)
+## Use alternatives to make it easier to switch between Mesa and 3rd party modules
+  update-alternatives --remove ${DEB_HOST_MULTIARCH}_egl_conf /usr/lib/${DEB_HOST_MULTIARCH}/mesa-egl/ld.so.conf
+
+## explicit ldconfig due to alternatives
+  ldconfig
+
+esac
+
+exit 0
+</pre>
+
+== Summary ==
+
+* A vendor's libraries '''must be''' installed into a private library path.  This will typically be of the form <code>/usr/lib/$VENDOR-egl</code> or <code>/usr/lib/$DEB_HOST_MULTIARCH/$VENDOR-egl</code>.
+* The vendor packages '''must''' include an <code>ld.so.conf</code> file in their private library path.  This file should consist of a single line of text, containing the private library path as an absolute path.  This means the <code>ld.so.conf</code> file will typically contain a path of the form
+<pre>
+/usr/lib/$VENDOR-egl
+</pre>
+or
+<pre>
+/usr/lib/$DEB_HOST_MULTIARCH/$VENDOR-egl
+</pre>
+* The vendor packages '''must''' add an <code>${DEB_HOST_MULTIARCH}_EGL_conf</code> alternative to their <code>ld.so.conf</code> snippet in their <code>postinst</code> maintainer script and remove this alternative in their <code>prerm</code> maintainer script.  The alternative '''should''' be added at a higher priority than the Mesa alternative (which has a priority of 500).
+* A package using this alternatives scheme '''must not''' Provide: any of the <code>libegl1-x11, libgles1, libgles2</code> or <code>libopenvg1</code> virtual packages.
+* A vendor's EGL/GL|ES/OpenVG implementation '''should be''' contained in a single package.  There is no facility for resolving application dependencies to specific packages in a vendor's implementation.  If the vendor also ships an Xorg DDX and/or OpenGL implementation, these may all be shipped as a single package.  Note however that OpenGL implementations require additional integration work not covered in this document.
+
+Mesa provides the following EGL binary packages:
+* libegl1-mesa (containing <code>/usr/lib/$DEB_HOST_MULTIARCH/mesa-egl/libEGL.so.1</code>)
+* libegl1-mesa-dev (containing <code>/usr/include/EGL</code>, <code>/usr/include/KHR</code>, and the <code>libEGL.so→libEGL.so.1</code> symlink.)
+* libopenvg1-mesa (containing <code>/usr/lib/$DEB_HOST_MULTIARCH/mesa-egl/libOpenVG.so.1</code>)
+* libopenvg1-mesa-dev (containing <code>/usr/include/VG</code> and the <code>libOpenVG.so→libOpenVG.so.1</code> symlink.)
+* libgles1-mesa (containing <code>/usr/lib/$DEB_HOST_MULTIARCH/mesa-egl/libGLESv1_CM.so.1</code>)
+* libgles1-mesa-dev (containing <code>/usr/include/GLES</code> and the <code>libGLESv1_CM.so→libGLESv2_CM.so.1</code> symlink.)
+* libgles2-mesa (containing <code>/usr/lib/$DEB_HOST_MULTIARCH/mesa-egl/libGLESv2.so.2</code>)
+* libgles2-mesa-dev (containing <code>/usr/include/GLES2</code> and the <code>libGLESv2.so→libGLESv2.so.2</code> symlink.)

@@ -1,0 +1,143 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== Introduction ==
+This page just gives a few highlevel details on file locations, etc for Ubuntu Core 16.04+ (later sections will describe 15.04). Important concepts:
+* Like on Ubuntu Touch, snappy uses templated policy for its security policy. This is comprised of the default policy and any additional '''interfaces''' (in terms of security policy, interfaces can be thought of as roughly equivalent to policy groups on Touch)
+* When no interfaces are specified via 'plugs' or 'slots', the default policy is used with no additions
+* In general, the Ubuntu Core policy is written such that apps within a snap are allowed to share files and communicate with each other (signals, ipc)
+* snappy policy is shipped inside the snapd source as Go files in `interfaces/`
+* Security policy consists of apparmor policy, seccomp filter and udev tags used for device cgroups
+* On install, the apparmor profile is generated and loaded into the kernel (note, the default policy has certain apparmor variables definied as part of install)
+* apps that want to use an interface specify 'plugs' in their security yaml
+* apps that want to provide an interface specify 'slots' in their security yaml
+* interfaces policy may be specified in snapd as:
+** !PermanentSlotPolicy - if 'slots' in yaml, add this upon install
+** !ConnectedSlotPolicy - if 'slots' in yaml, add this when the providing snap is connected to another snap
+** !PermanentPlugPolicy - if 'plugs' in yaml, add this upon install
+** !ConnectedPlugPolicy - 'if 'plugs' in yaml, add this when this snap connects to a providing snap
+* Interfaces may be auto-connected by snapd on install, auto-connected by snapd via the gadget snap or manually connected by the user after install (`snap connect <plugging-snap>:interface <slotting-snap>:interface)
+* Snaps specified slots in the store (currently) flag for human review
+* Some plugs in the store flag for human review
+* All core interfaces exist on classic, but only some interfaces exist on classic
+* Some interfaces that are provided by the OS (eg, network-manager on classic) have different policy than the same interface on Core
+* Custom policy and overrides is not suported
+* Unconfined is not specified in the yaml, but an install option (install with --devmode)
+* The 'confinement' property in the yaml indicates whether the snap operates correcty in strict mode or only in devmode and the 'confinement' property cannot be used to influence snapd's install behavior (ie, `confinement: devmode` in the snap yaml does *not* mean 'snap install ...' will install in devmode
+* The profile name/security label is composed of the snap name and the app name from snap.yaml prefixed with 'snap.' Eg, '''snap.<snap>.<app>'''
+* snapd ensures that there is only one profile loaded per app and that it is the one for the correct version
+* only one version of a snap on a system may be active at a time (inactive versions are there to support rollbacks0
+* snaps may ship services (launched via systemd) or binaries (cli programs). In either case, the executable is launched via '''snap-run/snap-confine'''
+* `snap-confine` (called by the launcher) reads the seccomp policy and creates a filter prior to exec. `snap-confine` uses `aa_change_onexec()` to exec the application under the profile name associated with this app
+* On snappy, snaps are not allowed access to devices (excepting /dev/null, etc). Hardware is assigned via interfaces, interface connections and the gadget snap (TBD)
+* When an app is assigned hardware, the hardware is tagged via udev such that `snap-confine` can detect which devices are assigned to the snap. The launcher adds devices that correspond to the app to the app's devices cgroup (this will be changed when apparmor supports profile composition)
+* Each app gets its own /tmp in a private mount namespace
+* Each app gets its own devpts newinstance
+* apparmor denials and seccomp denials are found in /var/log/syslog
+* syscall denials are logged as an integer and that integer can be resolved to the syscall name using '''scmp_sys_resolver'''. This command must be run on the same architecture as the denial
+* Snappy doesn't currently support the concept of per-app UID/GIDs but the launcher supports seccomp argument filtering and will allow certainchown syscalls that match the given argument
+* '''snappy install snappy-debug''' can install a debugging snap that has a simple tool ('''snappy-debug.security''') that can be used to list installed policy and scan logs for policy denials
+* !AppArmor policy loads (will be updated soon to something similar to this)
+** system cache in /etc/apparmor.d/cache, system policy in /etc/apparmor.d, app cache in /var/cache/apparmor, app policy in /var/lib/snapd/apparmor/profiles
+** snappy flavors ship /usr/share/snappy/security-policy-version that has versions of apparmor, ubuntu-core-security-apparmor and ubuntu-core-security-seccomp
+** apparmor init script (debian/apparmor.init) compares apparmor version in /usr/share/snappy/security-policy-version to /var/lib/snapd/security-policy-version and if different, invalidates the system cache (leaving the app cache alone)
+** snappy systemd unit (runs after apparmor init) compares /usr/share/snappy/security-policy-version to /var/lib/snapd/security-policy-version and if different, uses 'snappy policygen --regenerate-all' to detect which app policy needs to be regenerated (it will consider parser, abstraction, template and cap changes), then updates /var/lib/snappy/security-policy-version
+** Notes:
+** less complicated, but still contains md5sums checks for Touch systems since Touch and snappy flavors are still both supported (we can remove the click stuff once Touch moves to Ubuntu Personal)
+** system policy and app policy (for both apparmor and seccomp) is now covered
+* Snappy does not use click under the hood and 16.04 and instead '''snap install''' will generate apparmor and seccomp policy itself. The paths for files are:
+** '''/var/cache/apparmor''': apparmor cache files for snaps
+** '''/var/lib/snapd/apparmor/profiles''': generated apparmor profiles. The file name corresponds to snap.<snapname>.<appname>
+** '''/var/lib/snapd/apparmor/additional''': additional rules from hardware assignment. The file name is `snap.<snapname>.<appname>`
+** '''/var/lib/snapd/seccomp/profiles''': generated seccomp profiles. The file name is `snap.<snapname>.<appname>`
+Snappy yaml policy example (yaml not related to policy omitted. This example uses 16.04 security-override): <pre>
+name: foo
+version: 1.0
+apps:
+  bar                        # uses default policy
+    command: bin/bar
+  baz                        # uses default policy with specified interfaces
+    command: bin/baz
+    interfaces:
+    - network                # auto-connected
+    - firewall-control       # manual connected (not added during install)
+</pre>
+
+== 15.04, 15.10 ==
+* Custom security policy can be used instead of templated policy with the '''security-policy''' yaml option. This triggers a manual review in the public store.
+* Snappy supports the concept of '''security-override''' which allows using templated policy with easy to declare additional rules (the process is different between 15.04 and 16.04, see below)
+* In 15.04, the profile name and policy files incorporate the APP_ID, which consists of '''<pkgname>_<service/binary>_<version>'''
+* 'policy groups' are known as 'caps'
+* On 15.04, apps are launched by ubuntu-core-launcher, not snap-run/snap-confine
+* On snappy, snaps are not allowed access to devices (excepting /dev/null, etc). Hardware is assigned in one of two ways: '''snappy hw-assign''' cli tool and so called '''oem assign''' (preassignement via oem snap). This will be revamped in a future release
+* When an app is assigned hardware, the hardware is tagged via udev such that `ubuntu-core-launcher` can detect which devices are assigned to the snap. The launcher adds devices that correspond to the app to the app's devices cgroup.
+* On 15.04, a devpts newinstance is not used
+* On 15.04, security policy is defined in '''ubuntu-core-security''' for Ubuntu Core
+* Snappy doesn't currently support the concept of per-app UID/GIDs, so '''setuid and chown family of syscalls are denied on 15.04'''. When ubuntu-core-launcher supports syscall argument filtering, snappy can be adjusted to allow opting in to per-app UID/GIDs and then the policy updated to allow these syscalls with the user
+* frameworks are a special kind of snap that extend the system with services and security policy that app snaps may use. App snaps depend on a framework and may specify framework security policy (aka, 'framework-policy') via `security-template` and/or `caps`. framework-policy may ship templates and/or caps and is namespaced on the filesystem (ie, if framework `foo` ships the `client` cap, then it is referenced as `foo_client`
+* !AppArmor policy loads for image-based flavors (ie, Touch and Snappy-- traditional apt systems continue to function as always)
+** 15.04 - essentially same as on touch images (but with bugs):
+** system cache in /etc/apparmor.d/cache, system policy in /etc/apparmor.d, app cache in /var/cache/apparmor, app policy in /var/lib/apparmor/profiles.
+** apparmor init script (debian/apparmor.init) looks at /var/lib/dpkg/info/apparmor.md5sums and compares to /var/lib/apparmor/profiles/.apparmor.md5sums. If different, clear the cache and copy /var/lib/dpkg/info/apparmor.md5sums to /var/lib/apparmor/profiles/.apparmor.md5sums. It does the same for click-apparmor.md5sums, apparmor-easyprof-ubuntu.md5sums (unused on snappy), apparmor-easyprof-ubuntu-snappy.md5sums (deprecated by ubuntu-core-security-apparmor).
+** Problems
+*** complicated and incomplete
+*** app apparmor policy is not regenerated on ubuntu-core-security-apparmor upgrades (this may be fixed in a future update. This deficiency is also true for seccomp policy)
+
+Snappy yaml policy example (yaml not related to policy omitted. This example uses 16.04 security-override): <pre>
+
+name: foo
+version: 1.0
+frameworks:
+ - norf-framework
+services:
+  - name: bar                       # uses 'default' template with 'network-client' cap
+  - name: baz                       # uses 'default' template with specified caps
+    caps:
+      - network-client
+      - norf-framework_client
+  - name: qux                       # uses 'nondefault' template with no caps
+    security-template: nondefault
+  - name: quux
+    security-policy:                # uses custom security policy as defined by relative paths
+      apparmor: meta/quux.aa
+      seccomp: meta/quux.sc
+  - name: corge                     # uses 'default' template and 'network-client' cap with overrides
+    security-override:
+      syscalls: [ some, thing ]
+      read-paths: [ /path1, ... ]
+      write-paths: [ /path1, ... ]
+binaries:
+  - name: cli-exe                   # uses 'default' template with no caps
+    caps: []
+</pre>
+
+15.04 and 15.10 policy generation is functional but for historical reasons is messy and complex (16.04 cleans these things up). It uses '''click-apparmor''' for apparmor policy generation and '''sc-filtergen''' for seccomp filter generation
+* '''/var/cache/apparmor''': apparmor cache files for snaps
+* '''/var/lib/apparmor/clicks''': apparmor click hooks ('''aa-clickhook''') for templated policy and `security-override`.
+** Files in this directory with a '''.json''' prefix symlink to the file in the snap that defines the policy
+** Files in this directory with a '''.additional''' prefix are used as part of hardware assignement
+* '''/var/lib/apparmor/snappy''': apparmor click hooks ('''aa-policy-hook''') for custom policy. Files in this directory symlink to the file in the snap that defines the custom policy
+* '''/var/lib/apparmor/profiles''': generated apparmor profiles from the click hooks. Files starting with '''click_''' are generated by aa-clickhook and files starting with '''profile_''' are generated by aa-profile-hook
+* '''/var/lib/snappy/seccomp/profiles''': generated seccomp profiles from sc-filtergen. The file name corresponds to the APP_ID
+* '''/var/lib/snappy/{apparmor,seccomp}/templates''': framework-policy templates
+* '''/var/lib/snappy/{apparmor,seccomp}/policygroups''': framework-policy caps
+* '''security-override''' specifies the click security json file for apparmor read-paths, write-paths, etc and security yaml file for seccomp (syscalls)
+
+== References ==
+* https://developer.ubuntu.com/en/snappy/guides/security-whitepaper/
+* https://wiki.ubuntu.com/SecurityTeam/Specifications/SnappyConfinement
+* https://wiki.ubuntu.com/SecurityTeam/Specifications/SnappyConfinement15.04
+* https://developer.ubuntu.com/en/snappy/
+* https://developer.ubuntu.com/en/snappy/guides/filesystem-layout/
+* https://developer.ubuntu.com/en/snappy/guides/security-policy/
+* https://developer.ubuntu.com/en/snappy/guides/frameworks/
+* https://developer.ubuntu.com/en/snappy/guides/package-metadata/
+* Snappy Developer Guide for 15.04 (TODO: link when available)
+* Snappy Security Whitepaper for 15.04 (TODO: link when available)

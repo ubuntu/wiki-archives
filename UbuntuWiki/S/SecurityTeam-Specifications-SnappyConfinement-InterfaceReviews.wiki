@@ -1,0 +1,47 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== DRAFT ==
+This page lists various things that might be interesting to consider when performing snappy interface security policy reviews. It is not an exhaustive list and the reviewer will have to consider the system holistically, snaps access to the system, snaps access to each other, unconfined access to snaps, etc, etc. Any reviewer should be familiar with how slots and plugs work wrt interfaces. zyga has a blog series that describes all of this (mandatory reading):
+* http://www.zygoon.pl/2016/04/snappy-snapcraft-and-interfaces.html
+* http://www.zygoon.pl/2016/04/snappy-interfaces-plugs-slots-connections.html
+* http://www.zygoon.pl/2016/04/anatomy-of-snappy-interface.html
+* http://www.zygoon.pl/2016/08/snap-execution-environment.html
+* http://www.zygoon.pl/2016/08/creating-your-first-snappy-interface.html
+
+Also see:
+* http://www.zygoon.pl/2016/04/snap-install-devmode.html
+* http://www.zygoon.pl/2016/06/making-your-first-contribution-to-snapd.html
+
+Here are some things to be mindful of when performing interface reviews:
+* check that rules aren't part of the default template or other interfaces. For example, `@{PROC}/@{pid}/mounts r,` is often added to interfaces but it is included in the `mount-observe` interface which the snap can simply `plugs: [ mount-observe ]`. Since there are overlaps within the interfaces (especially with syscalls) make sure that plugging the interface makes sense (ie, don't recommend 'network-bind' unless it actually listens on the network)
+* extraordinary permissions should have a comment indicating why it is needed and how it affects the system. Eg "# Udisks2 needs to read the raw device for partition information. These rules give raw read access to the system disks and therefore the entire system."
+* allowing unconfined to talk to a dbus service is fine, but make sure it has a comment of the form: "# Allow unconfined to talk to us. The API for unconfined will be limited with DBus policy, below."
+* When using the interfaces.SecurityDBus backend, make sure that the DBus policy makes sense for this interface. In general, interfaces.SecurityDBus should only be used for 'all snaps' slot implementations since classic systems ship these as debs. All snaps systems do not have policykit at this time so it is important that privileged dbus APIs have appropriate default dbus bus policy (typically deny by default and allow root, but dbus bus policy is flexible) so that unconfined, unprivileged processes aren't given unprotected privileged access to the system (note, removing the `unconfined` dbus rule doesn't help since unconfined processes are allowed to `change_profile`-- we really need the dbus bus policy uid/group/etc checks for slot implementations provide a dbus API).
+* attempts to load kernel modules is common and rules/syscalls allowing it should be discouraged. The kernel-modules-control interface exists for this, but its use should also be discouraged. Instead, interfaces should use the interfaces.!SecurityKernelModules backend to have snapd load modules on the snap's behalf (most modules auto-load so only tell interfaces.!SecurityKernelModules to load the ones that don't)
+* `/run/udev/* r,` is often requested. You can actually fine-tune a bit by looking at https://github.com/torvalds/linux/blob/master/Documentation/admin-guide/devices.txt (formerly <nowiki>[[https://www.kernel.org/doc/Documentation/devices.txt|here]]</nowiki>. Eg: `/run/udev/data/b[0-9]*:[0-9]* r,` for block devices. `/sys/devices` entries are similar, use something like this `/sys/devices/**/block/** r,` (or finer) instead of `/sys/devices/** r,`
+* interfaces that have !AppArmor rules to allow access to devices in /dev/* should also have interfaces.SecurityUDev tagging to ensure that the devices are added to the snap's device cgroup when the snap plugs other interfaces that use the udev backend. If this isn't done, snaps that plug the !AppArmor-only interface with another interface that uses udev will not be able to access the devices in the !AppArmor-only interface. See http://www.reactivated.net/writing_udev_rules.html for more information.
+* mount and umount rules should be carefully scrutinized for options, srcname and target name to not allow interfering with the system or other snaps. remount can typically be avoided. Use of overlayfs mounts should be avoided due to <nowiki>[[https://bugs.launchpad.net/apparmor?field.searchtext=overlayfs&search=Search&field.status%3Alist=NEW&field.status%3Alist=INCOMPLETE_WITH_RESPONSE&field.status%3Alist=INCOMPLETE_WITHOUT_RESPONSE&field.status%3Alist=CONFIRMED&field.status%3Alist=TRIAGED&field.status%3Alist=INPROGRESS&field.status%3Alist=FIXCOMMITTED&field.assignee=&field.bug_reporter=&field.omit_dupes=on&field.has_patch=&field.has_no_package=|mediation issues]]</nowiki>
+* pivot_root rules should be carefully scrutinized to ensure that unintended access is not granted to parts of the fs that are intended to be mediated
+* don't forget to document the interface in `docs/interfaces.md`, indicating both what access it provides and why it is privileged (if it is)
+* interfaces providing privileged access to the system should use `deny-auto-connection: true` in its entry in  `interfaces/builtin/basedeclaration.go` (transitional interfaces notwithstanding, but there shouldn't be any more transitional interfaces). There should be a test that verifies this
+* extraordinary permissions should have a correspondingly restrictive base declaration entry to require a snap declaration (eg, `deny-auto-connection: true` and `deny-connection: true`). See the top of `interfaces/builtin/basedeclaration.go` for details and common use cases. There should be a test that verifies this
+* snaps may run on 'classic' systems (eg, traditional distributions like Ubuntu) or on 'all snaps' systems. Sometimes security policy should be different depending on the system. In such cases, consider using release.!OnClassic to conditionally use classic policy or not
+* policy variables should be `const` strings, not `var []byte`
+* consider accesses to /proc and whether they leak sensitive information about the system or other snaps
+* 'm' (mmap) should not be specified with 'w' (write). Applications seemingly needing this should be adjusted to not use 'PROT_WRITE | PROT_EXEC'. Kernels without the full !AppArmor patchset may show both as needed (eg, this came up once with pulseaudio clients even though pulse uses 'PROT_READ | PROT_WRITE'), in which case the kernel should be updated appropriately. To verify no existing policy is doing this, verify nothing is found with `egrep -r ' [rklx]*(w|m)[rklx]*(w|m)[rklx]*,' ./snapd.git/interfaces/*`
+** use of the `personality` syscall may also add PROT_EXEC and thus cause a denial on 'm'. Per jjohansen, "we can detect requested vs. actual PROT, so we could audit the difference, and have some kind of flag to allow it without having to modify all the profile" (https://bugs.launchpad.net/apparmor/+bug/1707067)
+** Binaries or libraries with <nowiki>[[https://wiki.ubuntu.com/SecurityTeam/Roadmap/ExecutableStacks|executable stacks]]</nowiki> may add PROT_EXEC and thus cause a denial on 'm'. https://forum.snapcraft.io/t/file-mmap-of-dev-zero-is-currently-blocked/1426/22 discusses this in detail
+* carefully inspect udev rules to make sure they use '==' instead of '=' (when appropriate)
+* carefully inspect udev tagging rules to use 'SUBSYSTEM' instead of 'SUBSYSTEMS'
+* interfaces that need DBus should use `#include <abstractions/dbus-session-strict>` or `#include <abstractions/dbus-strict>` and not the more open `dbus-session` or `dbus`
+* interfaces with DBus rules should typically allow DBus introspection for the service so clients can use pydbus. Because of the nature of DBus introspection rules, the 'path' must be service-specific when using 'peer=(label=unconfined)'. See <nowiki>[[https://github.com/snapcore/snapd/pull/3266|snapd PR#3266]]</nowiki> for details
+* `owner` match is often helpful for files owned by a specific user and `fsuid` and `ouid` must match. `fsuid` is the uid that the kernel uses for DAC filesystem checks (see `man setfsuid`)  which is usually the effective uid (euid) of the running process (unless someone uses the `setfsuid()` system call). The `ouid` is the "object owner's id" (ie, what is being checked). As such, with a rule that is '`owner /path/foo r,`' the kernel will check that the owner of the file `/tmp/foo` matches the `fsuid` of the running process. Therefore, if `/path/foo` is owned by `root`, and the process is running as uid `1000` (ie, the `euid` is `1000` and `setfsuid` wasn't called so `fsuid` is `1000`) and the aformentioned rule, you'll see denials with `fsuid=1000 ouid=0`
+* in addition to mount rules, note that policy that allows manipulating namespaces is highly privileged due to lack of mediation of `setns()`. We can mediate access to `/proc/*/ns/*` and `setns()` via seccomp arg filtering CLONE_* (eg, network-control allows CLONE_NEWNET). Use of CLONE_NEWNS and access to `/proc/*/ns/mnt` can be used to escape confinement.

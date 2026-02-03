@@ -1,0 +1,132 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== Integrating Bzr with 3.0 (Quilt) packages ==
+* '''Launchpad Entry''': UbuntuSpec:none
+* '''Created''': 26 March 2009
+* '''Contributors''':  DmitrijsLedkovs
+* '''Packages affected''': bzr-pipeline, bzr-bd, bzrtools
+
+=== Summary ===
+
+This spec makes bzr & bzr-bd awesome for managing 1.0 or DpkgSrc3.0 (quilt) packages.
+Because currently it's not easy to manage packages using bzr with 3.0 (quilt) all patches applied state. And looking at debdiff of the previous revisions it's mostly diff-of-diff in the debian/patches/ (I can't read that ;-))
+
+=== Assumptions ===
+
+Spec does not include multiple tarballs format.
+
+=== Design ===
+
+Imagine bzr:$distro/$package branch implemented as a pipeline. You would have.
+
+** upstream
+** patch-1
+** ubuntu-patch-1 (changes to patch-1 made for ubuntu)
+** patch-2
+** patch-3
+** debian-packaging
+** ubuntu-packaging (e.g. Maintainer-name, soname bump)
+
+With package tags on packaging pipes. Such that when you switch to that tag, previous pipes are merged (pumped) resulting in your current commit and debian/patches/series is replica of pipeline looking downward to upstream, and patches are as if you did "bzr pump-patches" to make this commit.
+
+Execpt that our lp:$distro/$package branches are actually 3 merged dsc import branches (upstream, debian commits, ubuntu commits) which you can access by using tags or point revisions (e.g. 1.1.1):
+
+** upstream
+** debian-packaging (with patches applied or not)
+** ubuntu-packaging (with patches applied or not)
+
+My proposal is to locally "reveal" this branch to create a pipeline view of it. To work on it and allow to fold back as uncommitted state.
+
+=== Implementation ===
+
+So we should add '''bzr reveal-patches''' command which will inteligently create a pipeline view of the packag branch like this:
+
+# Shelve current packaging branch somewhere safe similar to ~/.bzr/pipes or if using lightweight checkout we are safe.
+# Branch off first upstream revision of the to be revealed packaging range
+# Make it base of the pipeline.  
+# Looking at the shelved packaging branch start importing each patch as a pipe for equivalent debian revision.
+# Make at debian pipe for  "debian/" packaging excluding debian/patches
+# For each Ubuntu revision on top of debian
+### where possible modify existing patch pipe
+### add/remove patch pipes
+### and add ubuntu packaging changes on separate pipe above debian
+# Do this for all requested package version range
+
+Each commit should be tagged along the way: Eg. 01_patch-debian-3.2-1 for a patch pipe, debian-3.2-1 on debian branch and ubuntu-3.2-1ubuntu1 for ubuntu branch.
+
+Note this doesn't re-write history because the real packaging branch is shelved safely away and used for reference.
+
+So far so good, so we have our very nice pipeline view of the package. So how would you build a package while on the debian pipe tagged 3.2-1?
+
+To achive this we will use a read/write content filter to show debian/patches directory. The content filter will export each patch-pipe as quilt series into debian/patches. So that you can invoke bzr-bd using current state & generating original tarballs from the shelved packaging branch. 
+
+So for example you are MOTU (Master Of The Unseeded) and need to do a complex merge with 10 patches. You would grab  lp:ubuntu/$package. Reveal it from the base revision. Import new debian revisions from lp:debian/$package in revealed state. Do a bzr pump resolving conflicts. Do a build, do testing. Fold the revealed state into lp:ubuntu/$package which will become a single commit/tag, mark uploaded and push to launchad for building. 
+
+=== Implementation ===
+
+Modify bzrtools patch command to use quilt for importing patches.
+
+Provide new command import-quilt in bzr-pipeline plugin, which takes quilt series file as argument and creates one pipe per patch. Pipes should be named after quilt patch file names. Pipe should store quilt header (e.g. DEP-3 headers) in branch config for example.
+
+Provide new command export-quilt in bzr-pipeline plugin, which takes output directory as argument and creates quilt series there. This should be similar to the current pipe-patches command exept that series file must be created and  patches should have headers restored from the pipe store.
+
+If there is no header on export-quilt it should analyse commits in each pipe and guess summary, author, and bug urls from commits.
+
+Stage 1
+
+Provide a "hidden" command / hook, which exports pipes and replaces debian/patches/ quilt series and add result to the tree. This "hidden" command will then be added to run as part of bzr-bd pre-build hook.
+
+Stage 2
+
+Add a new read & write content filter for '''debian/patches'''. Such that when you switch to debian pipe and all patches magically are refreshed. Removing a patch should remove pipe & vice-versa.
+
+==== UI Changes ====
+
+bzr patch '''--quilt''' - new option to use quilt logic for importing a single / multiple patches
+bzr '''import-quilt series''' - new command to import quilt '''series''' file as patches
+bzr '''export-quilt [destdir]''' - new command to export pipes as quilt series to destdir (default debian/patches)
+bzr '''export-quilt-hook''' - new '''hidden''' command / API for consumption by bzr-bd as pre-build hook
+bzr '''reveal''' - expose packaging branch as pipeline
+bzr '''hide''' - go back to packaging branch
+bzr '''fold''' - fold current committed state of top-level pipe as a commit on packaging branch
+
+==== Code Changes ====
+
+Not ready yet. Draft....
+
+==== Migration ====
+
+Stage 1 will not have reveal/hide/fold. It will be able to import quilt series as pipes & export them. Which will already be improvement and will be usable for packaging.
+
+Stage 2 will add content filter to eliminate exporting patches.
+
+Stage 3 will have reveal/hide/fold for total Ayatana development.
+
+=== Test/Demo Plan ===
+
+Nearing completion of each stage, packaging recepies will we written for developers. 
+
+=== Unresolved issues ===
+
+This also can be implemented using threads instead of pipeline. Which might be easier to do. But the design goal is to not push threaded/pipeline view to launchpad and not to rewrite public branch history. Our packaging branches have enough information already for this.
+
+=== GSoC Questions ===
+
+* '''Why did you like this idea?'''
+
+I've been doing a few merges & syncs. MoM helps a lot, but it's not perfect. With this project implemented it would be easier to start working on Ubuntu because the required steps will be shown by example. And it will make Ubuntu development more fun "Spot what went wrong?" type of game =)
+
+* '''Why will your proposal benefit Ubuntu?''
+
+It will provide archive wide QA check of potential future package versions allowing to spot problems earlier in the development cycle.
+
+----
+CategorySpec

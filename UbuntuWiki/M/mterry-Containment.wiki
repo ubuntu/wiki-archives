@@ -1,0 +1,78 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== Intro ==
+
+This is a page to discuss the mechanisms needed to allow a contained app to request access to a file on the user's system in a safe way.
+
+There are three pieces need:
+ 1. In-container library that the app links to and uses.
+ 2. Out-of-container daemon that apparmor allows the contained app to talk to.  This daemon only validates the request and passes it on to a more trusting daemon.
+ 3. Out-of-container trusting daemon that actually presents the dialog and passes back the data.
+
+Consider an image editing program like Photoshop.  It might want to do things like:
+ 1. Allow the user to open an image in their $HOME. (prompt, read data)
+ 2. Allow the user to export that image as a separate format in $HOME. (prompt, write data, creating/replacing any existing file at the chosen location)
+ 3. Allow the user to save back changes to that image. (prompt, read data, later and periodically write data back)
+
+== In-Container Library API ==
+
+API in Vala:
+
+<pre>
+PrompterFile
+{
+  enum Mode {FILE, FOLDER};
+  string title {get; set;}
+  string action {get; set;}
+  Mode mode {get; set;}
+  bool allow_new {get; set;}
+  void add_filter_pattern(string pattern);
+
+  PromptFile(string? title, string? action);
+  async GFile prompt(Cancellable? cancel) throws Error;
+  async GList<GFile> prompt_multiple(Cancellable? cancel) throws Error;
+}
+</pre>
+
+* will take returned fd & name and make a GFile out of it
+* (fds are local only right?, thus preventing this from working via networked app)
+* No way to do fancier filtering.  Mime type filtering will be better done with future APIs that are mime-specific (like PromptPhoto)
+* No way to do some of the things that GtkFileChooser lets you (like controlling whether preview is shown).  Do we want such picky settings?
+
+== Out-Of-Container DBus API ==
+
+<pre>
+DBus Name: com.canonical.Prompter
+Path: /Files
+Interface: com.canonical.Prompter.File
+ Prompt({key: value})
+ Read(uri)
+ Replace(uri)
+</pre>
+
+* Prompt:
+** title's default is either "Choose File" or "Choose Folder" depending on other values
+** actions's default is either "Save" or "Open" depending on other values
+** will return multiple or one depending on key "allow-multiple"
+** Returns a uri. (fake uri like x-prompter://.../NiceFileName.txt)
+** Or a list of uris in the multiple case.
+** In error or cancel case, a serialization of a GError {error_string=X, error_code=Y}? dict is returned.  Or a dbus error
+* Read:
+** Take a uri, return an fd with read permissions
+* Replace
+** Take a uri, return an fd with write permissions, will atomically replace file when done (to research: is the atomic bit semantically possible?)
+* permissions to consider:
+** Can access remote locations, external drives, etc
+** Can have write/read permission
+* validate all input
+* all input is optional, with default values if not provided
+* any unknown or non-string keys are ignored
+* any values that don't match expected variable types are ignored

@@ -1,0 +1,112 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+A common class of kernel or video driver bug is a blank or black screen on boot.
+
+'''Symptoms:'''  The screen becomes 100% blank (no backlight or indication that the LEDs or CRT phosphors are lit up), or black (the monitor is on and displaying video, it's just 100% pure black), at some point between the BIOS screen and the login page (GDM) being displayed.  The black/blank screen never goes away.  Aside from video, the system might still be working (e.g. playing the login sounds, responding to pings, etc.) or it could be completely locked up requiring a reboot.  The issue can occur every time you boot, only irregularly, or only under certain circumstances (such as with a particular device plugged in).
+
+'''Symptom Variation:'''
+The bug shows up the same way, yet can be worked around by attaching an external monitor or letting the system go into standby and resume the system. Another workaround that worked (for me) is to install a version of ubuntu parallel to the bugged version. Somehow, the installationprocess corrects the bootparameters and initializes the graphicsadapter correctly.  
+
+'''Non-Symptoms:'''
+* If you never see your BIOS screen, then that points to perhaps some hardware issue.
+* The screen displays but is far too time and/or the backlight can't be adjusted.  See <nowiki>[[Kernel-Debugging-Backlight]]</nowiki>
+* If you see "Out of Scan Range" or similar, you don't have this bug.  See <nowiki>[[X-Troubleshooting-Resolution]]</nowiki> instead.
+* If the blank/black screen occurs after resuming from suspend, you have a different class of bug.  See DebuggingKernelSuspend or UnderstandingSuspend
+* If it occurs when closing your laptop lid, see the <nowiki>[[X-Quirks|PipeA Quirk]]</nowiki> as a better possibility.
+* If the blank/black screen comes after your screen saver has been running, you may either have a screensaver-induced crash (see <nowiki>[[X-Backtracing]]</nowiki>) or a power management failure (See PowerManagement)
+* If you see a screen of a different color (brown, white, multi-colored corruption, etc.) you are seeing a different class of graphics bug.  Obtaining register dumps (see below) may still be of value however.
+* If it occurs *after* entering your password on the login page, you have some different class of issue, such as an issue with 3D / DRM.  Try disabling compiz (<code>sudo chmod a-x /usr/bin/compiz</code>), logging in as a different user, or turning off DRI.
+
+=== How It Works ===
+
+Blank or black screens generally indicate a failure feeding data to the Graphics Processing Unit (GPU) in your video card.  This can happen for a bunch of different reasons as different processes run as your system boots up.  You may notice flickers during boot - these are indications that different processes are starting up and interacting with the GPU.
+
+Here is a typical sequence of phases your system goes through as it boots:
+
+ 1.  bios screen
+ 2.  Black with blinking cursor (short).  Disk activity LEDs blink and flicker.
+ 3.  Purple without cursor (long)
+ 4.  Boot splash graphic (via plymouth)
+ 5.  Black screen (short).  Backlight may go off at this point.
+ 6.  Maybe more plymouth
+ 7.  Login screen.  Sound (e.g. drums) plays
+
+Here's what's going on under the hood during each of these steps:
+
+ 1.  BIOS detects hard drive with a bootloader (grub) present and starts it
+ 2.  grub selects a kernel and loads it
+ 3.  If the kernel supports Mode Setting (KMS), it puts the video card into its preferred resolution using a frame buffer (vesafb).  The framebuffer is initialized with a purple background.
+ 4.  plymouth displays a bootsplash image.
+ 5.  gdm is started, which instantiates a new X session for the login screen to replace the framebuffer's graphics
+ 6.  X attempts to put the card into one of its higher resolutions, such as the preferred resolution
+ 7.  The login screen is drawn on the screen
+
+==== Workaround A:  Non-graphical Boot ====
+You can disable the graphical bootscreen via:
+
+ set gfxpayload=text
+
+See <nowiki>[[X-NonGraphicalBoot]]</nowiki> for additional ideas.
+
+==== Workaround B:  Disable Plymouth ====
+
+If Plymouth crashes during boot, X *should* still boot up, just that you'll be left looking at a black screen a lot longer than you'd like.  However, if plymouth dies at just the right time it can leave the system stuck on a blank vt, and can't recover.  This is because with plymouth in initrd, it's a bit racy.
+
+To check this, in the grub menu edit the kernel line and remove 'splash' from the end of the line, and boot.  If that solves the issue, you can remove it from your /boot/grub/menu.lst as a workaround.
+
+==== Workaround C:  Disable the VESA framebuffer from grub ====
+
+The linux kernel uses the framebuffer for doing graphics prior to X starting up.  For systems that support Kernel Mode Setting (KMS), this includes using the higher resolutions of the video card.  The kernel uses a framebuffer driver for this, such as -vesafb.  However this can misbehave sometimes (e.g. hardware-specific bugs).
+
+You can disable vesafb in grub by passing it a nonsensical parameter.  E.g.:
+
+ vesafb.nonsense=1
+
+=== Analysis Techniques ===
+
+Before you start, think back to when you first started noticing the behavior.  Did it start right after a fresh install?  Or only after an upgrade?  Or only after you installed something?  If you can recall a rough timeframe for when it started, you may be able to correlate that with your upgrade logs (see /var/log/dpkg.log).
+
+Start by studying your boot, writing down exactly what you see.  If you can record a video using a camera or phone, do it.  Count how many screen blanking flickers you see.  Do you see a blinking underscore cursor?  Do you see the boot splash graphic?  Does it look correct?  Does it show weird colors or scrambling or appear stretched or squished?  Does it resize during the boot?  Do you see any text on the screen at any point during the boot (these can be useful in isolating how far into the boot process the error occurred.)
+
+Run through your boot cycle several times, taking notes for each run.  Does it always behave the same way?  If it fails only intermittently, determine the % frequency of failure.  Does the blank screen failure always occur the same way, or does it sometimes occur earlier or later?  Or does it sometimes fail in other ways (such as with scrambled colors, a kernel panic message, or sudden hardware reboot)?  Does the boot splash graphic always display the same way or does it appear corrupted (or text) on some boots?
+
+To enable debugging, add this to the kernel command line:
+
+ drm.debug=0x4
+
+Also, remove "splash" and "quiet", so you can see more info.
+
+Plymouth debug output can be enabled by adding this to the kernel command line:
+
+ plymouth:debug
+
+This will cause a log to be written to /var/log/plymouth-debug.log (which you should definitely include in bug reports).
+
+If you have any other kernel parameters set in your grub configuration (such as gfxpayload), one by one remove them to see if their presence affects the issue.
+
+=== Problem:  System is Completely Unresponsive, with Blank/Black Screen ===
+
+The screen blanks after BIOS, flickers a few times, and then plymouth dies, leaving the system in an inconsistent state.  You may or may not see the Plymouth boot splash graphics.
+
+See <nowiki>[[X-Troubleshooting-Freeze]]</nowiki> for troubleshooting a completely locked up system.  Register dumps are usually needed.
+
+=== Problem:  Black screen after resume ===
+
+Typical scenario is "use a laptop docked with lid closed, only the external screen is active, suspend, take the laptop, open it somewhere"... which leads to "no screen active".
+
+To debug this problem, check if <code>gnome-settings-daemons</code> is getting a signal that the display configuration has changed, by running '''xtrace''' against it, and look for a <code>RRScreenChangeNotify</code> event when resuming the machine.  If that signal is being sent, then it indicates a possible bug in g-s-d.  Otherwise, it suggests a bug in either X or (more likely) the kernel which is not causing the signal to be emitted to begin with.
+
+=== Problem:  Lockup When Closing Lid with Intel Graphics ===
+
+There is a long known issue with the -intel driver where pipe A/B mixups can cause hangs at the point where the lid is closed.  The good news is that it is easily quirkable.  In general this is most often seen with newer hardware, because older hardware either has already gotten a quirk or doesn't need one.
+
+See <nowiki>[[https://wiki.ubuntu.com/X/Quirks#Force Pipe A Quirk|Force Pipe A Quirk]]</nowiki> for this issue.

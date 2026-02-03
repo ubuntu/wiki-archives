@@ -1,0 +1,88 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+=== runC (CVE-2019-5736) ===
+
+Adam Iwaniuk and Borys Popławski discovered that an attacker can compromise the runC host binary from inside a ''privileged'' runC container. As a result, this could be exploited to gain root access on the host. runC is used as the default runtime for containers with Docker, containerd, Podman, and CRI-O. As such the following Ubuntu packages are affected:
+
+* `runc`
+* `docker.io`
+
+'''CVE-2019-5736''' has been assigned for this issue.
+
+Ubuntu users who are using either `docker.io`, `containerd` or `opengcs` are recommended to update to the latest `docker.io` and `runc` packages respectively (whilst not directly affected, `containerd` and `opengcs` both depend on `runc` which itself is affected by this issue).
+
+'''runc'''
+{| class="wikitable"
+|-
+| '''Ubuntu Release '''
+| '''Fixed Version'''
+|-
+| Xenial 16.04
+| <nowiki>[[https://launchpad.net/ubuntu/+source/runc/1.0.0~rc2+docker1.13.1-0ubuntu1~16.04.2|1.0.0~rc2+docker1.13.1-0ubuntu1~16.04.1]]</nowiki>
+|-
+| Bionic 18.04
+| <nowiki>[[https://launchpad.net/ubuntu/+source/runc/1.0.0~rc4+dfsg1-6ubuntu0.18.04.1|1.0.0~rc4+dfsg1-6ubuntu0.18.04.1]]</nowiki>
+|-
+| Cosmic 18.10
+| <nowiki>[[https://launchpad.net/ubuntu/+source/runc/1.0.0~rc4+dfsg1-6ubuntu0.18.10.1|1.0.0~rc4+dfsg1-6ubuntu0.18.10.1]]</nowiki>
+|}
+
+'''docker.io'''
+{| class="wikitable"
+|-
+| '''Ubuntu Release '''
+| '''Fixed Version'''
+|-
+| Xenial 16.04
+| <nowiki>[[https://launchpad.net/ubuntu/+source/docker.io/18.06.1-0ubuntu1.2~16.04.1|18.06.1-0ubuntu1.2~16.04.1]]</nowiki>
+|-
+| Bionic 18.04
+| <nowiki>[[https://launchpad.net/ubuntu/+source/docker.io/18.06.1-0ubuntu1.2~18.04.1|18.06.1-0ubuntu1.2~18.04.1]]</nowiki>
+|-
+| Cosmic 18.10
+| <nowiki>[[https://launchpad.net/ubuntu/+source/docker.io/18.06.1-0ubuntu1.2|18.06.1-0ubuntu1.2]]</nowiki>
+|}
+
+==== Description of the attack ====
+
+The attack can be made when attaching to a running container or when starting a container running a specially crafted image.  For example, when runC attaches to a container the attacker can trick it into executing itself. This could be done by replacing the target binary inside the container with a custom binary pointing back at the runC binary itself. As an example, if the target binary was `/bin/bash`, this could be replaced with an executable script specifying the interpreter path `#!/proc/self/exe` (`/proc/self/exec` is a symbolic link created by the kernel for every process which points to the binary that was executed for that process). As such when `/bin/bash` is executed inside the container, instead the target of `/proc/self/exe` will be executed - which will point to the `runc` binary on the host. The attacker can then proceed to write to the target of `/proc/self/exe` to try and overwrite the runC binary on the host. However in general, this will not succeed as the kernel will not permit it to be overwritten whilst runC is executing. To overcome this, the attacker can instead open a file descriptor to `/proc/self/exe`  using the `O_PATH` flag and then proceed to reopen the binary as `O_WRONLY` through `/proc/self/fd/<nr>` and try to write to it in a busy loop from a separate process. Ultimately it will succeed when the runC binary exits. After this the runC binary is compromised and can be used to attack other containers or the host itself.
+
+==== Mitigations ====
+
+This attack is only possible with privileged containers since it requires root privilege on the host to overwrite the runC binary. Unprivileged containers with a non-identity ID mapping do not have the permission to write to the host binary and therefore are unaffected by this attack.
+
+==== LXC ====
+
+LXC is also impacted in a similar manner by this vulnerability, however as the LXC project considers privileged containers to be unsafe no CVE has been assigned for this issue for LXC. Quoting from the <nowiki>[[https://linuxcontainers.org/lxc/security/|LXC project's Security information page]]</nowiki>:
+
+<pre>
+As privileged containers are considered unsafe, we typically will
+not consider new container escape exploits to be security issues worthy
+of a CVE and quick fix. We will however try to mitigate those issues so
+that accidental damage to the host is prevented.
+</pre>
+
+==== LXD ====
+
+LXD uses LXC for the container runtime, which is impacted in a similar manner when running privileged containers as noted above. However by default, LXD uses ''unprivileged'' containers and so is not affected. In the case where privileged containers are used with LXD, this is also likely mitigated against as the LXD runtime binary never exits during the lifetime of a container so it should not be possible to overwrite it from within a privileged container.
+
+Further, LXD is only shipped as a snap since Ubuntu 18.10, and on earlier Ubuntu releases the snap is the preferred method of delivery for LXD (compared to the deb package in the Ubuntu archive for those releases). Due to the immutable nature of snap applications, the LXD snap adds another layer of protection against this attack as it is not possible to overwrite any part of the snap application and hence the LXD runtime binary.
+
+==== Description of the fix ====
+
+To prevent this attack, runC has been patched to create a temporary copy of the runC binary itself when it starts or attaches to containers. To do this runC creates an anonymous, in-memory file using the `memfd_create()` system call and copies itself into the temporary in-memory file, which is then sealed to prevent further modifications. runC then executes this sealed, in-memory file instead of the original on-disk binary. Any compromising write operations from a privileged container to the host runC binary will then write to the temporary in-memory binary and not to the host binary on-disk, preserving the integrity of the host runC binary. Also as the temporary, in-memory runC binary is sealed, writes to this will also fail.
+
+Note: `memfd_create()` was added to the Linux kernel in the 3.17 release. Therefore if using `runc` / `docker.io` on an earlier kernel which does not have the `memfd_create()` system call backported to it will still be vulnerable.
+
+==== Timeline ====
+
+* 2019 Feb 11 at 15:00 CET: the issue is made public

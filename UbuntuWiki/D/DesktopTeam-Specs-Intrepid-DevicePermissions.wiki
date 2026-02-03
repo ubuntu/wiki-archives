@@ -1,0 +1,184 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+* '''Launchpad Entry''': UbuntuSpec:intrepid-device-permissions
+* '''Packages affected''': hal, pam, debian-installer, fuse, gnome-system-tools (users-admin)
+
+=== Summary ===
+
+We will replace the remaining system groups which control device
+access and which desktop users are put into by default by more
+dynamic, flexible, and better designed Console``Kit/Policy``Kit
+privilege rules.
+
+=== Release Note ===
+
+TODO when spec is "beta available".
+
+=== Rationale ===
+
+NSS Groups should solely be for grouping people. They should not be
+used extensively to assign privileges to local device permissions,
+since this leads to proliferation of more and more groups,
+difficulties with maintaining those groups, and even more difficulties
+with maintaining them centrally in e. g. NIS or LDAP.
+
+=== Design ===
+
+* We will not generally abolish groups for device access (or, more
+ generally, privileges), since these will/might still be required by
+ system daemons. The main concern here are groups which users are
+ put into.
+
+* Similarly to the already deprecated `plugdev` and `scanner` groups,
+ the majority of the current user specific device access groups can
+ be replaced by a simple Console``Kit/automatic ACL solution. This
+ applies to devices which cannot sensibly be used from a remote
+ login, e. g. `audio` and `video`, and where it does not make a lot
+ of sense to not give those privileges to locally active users.
+
+* Privileges which should not be granted to all local users by
+ default, and/or are generally applicable to remote sessions as well
+ are described and maintained in Policy``Kit. That way, the more
+ fine-grained PK privileges can be assigned to users, groups, people
+ on consoles, or other dynamic sets. 
+
+=== Implementation ===
+
+==== Replacements of current default groups ====
+
+* `floppy`: Replaced by dynamic ACLs from Hal in Ubuntu 8.04, so this
+ can be dropped.
+
+* `audio`:
+
+ Hal already assigns dynamic ACLs to sound devices in Ubuntu 8.04 (see
+ `/usr/share/PolicyKit/policy/org.freedesktop.hal.device-access.policy`),
+ so this can be dropped without any problem.
+
+* `video`:
+
+ This group is currently used for the following devices:
+ 
+** `/dev/agpgart`: At the moment there is no obvious reason why users
+  should have access to this in the first place. X.org runs as root
+  and on the client side access to this is not needed.
+
+** `/dev/dv1394*`, `/dev/video1934*`, Video4Linux devices, DVB
+    devices: already covered by Hal/CK in Ubuntu 8.04
+    (`org.freedesktop.hal.device-access.policy`)
+
+* `dialout`:
+
+ This controls access to modem devices (`/dev/ttyS*`, etc.). Since
+ unconfined modem access can have serious monetary consequences
+ (dialer programs, etc.), users should not have this privilege by
+ default.
+
+ For the standard desktop case, Network``Manager access modems, so it
+ should not even be required there. For more fine-grained access
+ control, provide a Hal rule and a Policy``Kit privilege for Modem
+ access, so that Hal assigns ACLs to the user with the privilege. The
+ `polkit-gnome-authorization` or similar UIs can then be used to
+ manage the privilege for command line users (minicom, and other
+ programs which deal with the device directly).
+ 
+* `dip`: Unused in Ubuntu, should just go away completely
+
+* `fuse`:
+
+ This group is currently a bad workaround for a poor security
+ design/excuse. `fusermount` can be abused for some easy local DoS. 
+
+ We change `/bin/fusermount` to be world-executable again and control access to it ''only'' through the permissions of `/dev/fuse`. In fact, `fusermount` already does the right thing and bails out if the user cannot access `/dev/fuse`, so changing the permissions of the binary does not change the security situation at all.
+
+ We then use the standard HAL "local foreground console" magic to allow access to `/dev/fuse` with a dynamic ACL.
+
+==== Groups that need to stay for now ====
+
+* `adm`:
+
+ This needs to stay around, since this group controls readability of
+ system log files, without a program being in between. It is an LSB
+ standard group, too.
+
+* `cdrom`:
+
+ The only reason why we still put users into this is that `apt-cdrom`
+ still relies on it (see <nowiki>[[http://bugs.debian.org/464899|Debian #464899]]</nowiki>, 
+ <nowiki>[[http://bugs.debian.org/282344|Debian #282344]]</nowiki>. So we need to retain
+ it for now.
+
+* `plugdev`:
+ 
+ The installer creates static mounts of FAT/NTFS partitions with
+ options `umask=007,gid=46`, thus dropping the group would render
+ those mounts inaccessible. This can only be dropped with deprecating
+ the static mounts feature from the installer.
+
+==== Other devices ====
+
+* fingerprint readers: Current hardy allows access to those over a
+ custom PK rule in hal. However, this was merely a workaround to get
+ gnome-screensaver working with fingerprint readers without intrusive
+ changes, but architecturally it is wrong. Accessing the fingerprint
+ reader should be limited to a privileged and trusted
+ `unix_chkpwd`-like helper binary. The corresponding checker for
+ fingerprints should be shipped by `fprint`.
+
+ Thus the hal patch should be dropped again, and replaced by a proper
+ solution in `fprint`. The latter is outside of the scope of this
+ specification.
+
+==== Console logins ====
+
+In order for text console logins to succeed and get similar privileges
+as X11 logins, the `libpam-ck-connector` package should be installed
+by default and set up so that VT logins get a Console``Kit session.
+
+In addition to installing the package, the PAM module must be
+activated in `/etc/pam.d/common-session`:
+
+<pre>
+ session optional    pam_ck_connector.so
+</pre>
+
+This does not interfere with gdm's and kdm's built-in support for
+Console``Kit. To the contrary, this unbreaks local device access for
+people who use a nonstandard login manager.
+
+==== Migration ====
+
+We will not automatically remove system groups, or any user
+membership, since we cannot make assumptions about how they are
+currently being used and customized.
+
+=== Test/Demo Plan ===
+
+Verify that your user is not in any of above groups any more. Test
+that you can playback audio and video files, get 3D acceleration, can
+mount CD-ROMs and USB-Sticks, and get `~/.gvfs/` FUSE mounts for
+network server connections done in GNOME (ssh, samba, etc.).
+
+=== Outstanding Issues ===
+
+* PCMCIA smartcard readers have been inaccessible in all Ubuntu
+ releases so far. Implementing this spec is not a regresion for those,
+ but making those work properly requires someone with the hardware.
+
+* `lpadmin` will not be changed for Intrepid, since it would require
+ an extensive change of the cups architecture to provide its services
+ over D-BUS.
+
+ TODO
+
+----
+CategorySpec

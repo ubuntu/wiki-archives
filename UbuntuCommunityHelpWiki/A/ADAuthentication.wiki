@@ -1,0 +1,221 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+=== Goal ===
+To configure a Linux box (in this case Ubuntu 8.04) to authenticate user logins and samba users via a separate Active Directory server (in this case tested with Win2K3). This is the process as was used to get a Ubuntu Samba box playing nice-nice with "adserver".
+
+=== Assumptions ===
+Observe that there's the assumption here that the DNS hostname of your Active Directory box is '''adserver.example.local''' and has an ip '''192.168.1.2'''. So naturally, this means you should swap out what I'm calling it here for whatever you've got.
+
+Also note that the caps names such as '''EXAMPLE.LOCAL''' are required. I forget why, but I'm pretty sure it's explained in one of the reference docs.
+
+=== Packages ===
+<pre>
+sudo apt-get install krb5-user winbind samba ntp
+</pre>
+
+=== Edit Config Files ===
+
+==== /etc/krb5.conf ====
+For some reason the logging does not work.
+<pre>
+[logging]
+	default = FILE:/var/log/krb5.log
+
+[libdefaults]
+	default_realm = EXAMPLE.LOCAL
+	kdc_timesync = 1
+	ccache_type = 4
+	forwardable = true
+	proxiable = true
+
+[realms]
+	EXAMPLE.LOCAL = {
+		kdc = adserver.example.local
+		admin_server = adserver.example.local
+		default_domain = EXAMPLE.LOCAL
+	}
+
+[domain_realm]
+	.adserver.example.local = EXAMPLE.LOCAL
+	adserver.example.local = EXAMPLE.LOCAL
+	.kerberos.server = EXAMPLE.LOCAL
+[login]
+        krb4_convert = true
+        krb4_get_tickets = false
+
+</pre>
+
+==== /etc/samba/smb.conf ====
+Note the work group is the left most part of the realm.
+<pre>
+[global]
+	log file = /var/log/samba/log.%m
+	max log size = 1000
+	security = ADS
+	realm = EXAMPLE.LOCAL
+	password server = 192.168.1.2
+	workgroup = EXAMPLE
+	use kerberos keytab = true
+	idmap uid = 10000-20000
+	idmap gid = 10000-20000
+	winbind enum users = yes
+	winbind enum groups = yes
+	template homedir = /home/%D/%U
+	template shell = /bin/bash
+	client use spnego = yes
+	client ntlmv2 auth = yes
+	encrypt passwords = true
+	winbind use default domain = yes
+	restrict anonymous = 2
+
+;Communal Files
+[files]
+   comment = Shared Files Stuff
+   path = /Storage/
+   writable = yes
+
+;Individual Files - sym link /home/%D to /Storage/ 
+</pre>
+
+A samba share of files\Storage is created. The directory should be created and permissions assigned
+
+<pre>
+mkdir /Storage
+chmod a+rwx /Storage
+</pre>
+
+==== /etc/nsswitch.conf ====
+<pre>
+passwd:         compat	winbind
+group:          compat	winbind
+shadow:         compat
+
+hosts:          files mdns4_minimal dns mdns4 wins [NOTFOUND=return]
+networks:       files
+
+protocols:      db files
+services:       db files
+ethers:         db files
+rpc:            db files
+
+netgroup:       nis
+</pre>
+
+==== /etc/ntp.conf ====
+Set time server to the active directory server - sufficiently large clock skews can mess with authentication. Best off to install ntpd
+<pre>
+...
+   server    adserver
+...
+</pre>
+
+==== /etc/pam.d/common-account ====
+<pre>
+account sufficient	pam_winbind.so
+account	required	pam_unix.so
+</pre>
+
+==== /etc/pam.d/common-auth ====
+<pre>
+auth	sufficient	pam_winbind.so
+auth	required	pam_unix.so nullok_secure use_first_pass
+</pre>
+
+==== /etc/pam.d/common-password ====
+<pre>
+password	required	pam_unix.so nullok obscure min=4 max=50 md5
+password	optional	pam_smbpass.so nullok use_authtok use_first_pass missingok
+</pre>
+
+==== /etc/pam.d/common-session ====
+<pre>
+session	required	pam_mkhomedir.so umask=0022 skel=/etc/skel
+</pre>
+
+==== /etc/pam.d/sshd ====
+You may need to add the following line in order to get user home directory auto-creation working:
+<pre>
+session    required     pam_mkhomedir.so        skel=/etc/skel/ umask=0022
+</pre>
+I added this towards the bottom of /etc/pam.d/sshd, right before the last line, an "@include" statement.
+
+=== Make User Home Dir ===
+Directory name is the same as the workgroup. 
+<pre>
+mkdir /home/EXAMPLE
+</pre>
+
+=== Work around potential DNS pitfalls ===
+Edit /etc/hosts to contain:
+<pre>
+192.168.1.2	adserver.example.local example.local adserver
+127.0.0.1 	<hostname>.example.local localhost <hostname>
+<local ip> 	<hostname>.example.local <hostname>
+</pre>
+
+=== Restart key services ===
+<pre>
+/etc/init.d/samba stop
+/etc/init.d/winbind stop
+/etc/init.d/samba start
+/etc/init.d/winbind start
+</pre>
+
+=== Testing ===
+To test Kerberos:
+<pre>
+kinit '''<your username>'''@EXAMPLE.LOCAL
+</pre>
+
+Check that a ticket was issued:
+<code>klist</code>
+
+Query LDAP server:
+<code>ldapsearch </code>
+
+List all users to test LDAP configuration:
+<code>getent passwd</code>
+
+Make sure you time is correct:
+<code>net time</code>
+
+=== Join the Active Directory Domain ===
+<pre>
+net ads join -U administrator@EXAMPLE.LOCAL
+</pre>
+Note that any domain administrator user could be used instead of administrator
+If it does not work remover @EXAMPLE.LOCAL. If problems persist add -d5 for extra debugging information.
+
+=== Restart ssh and test login ===
+<pre>
+/etc/init.d/ssh restart
+
+ssh '''<your username>'''@'''<smb server>'''
+</pre>
+
+=== Allowing sudo for some users ===
+One approach is to add the Active Directory group name of sudoer users to the /etc/sudoers file (of course, you may have to create said group)
+
+''Example '''/etc/sudoers''':''
+<pre>
+%BUILTIN\administrators ALL=(ALL) ALL
+%"domain admins" ALL=(ALL) ALL
+</pre>
+
+=== References ===
+Largely derived from: <nowiki>[[http://ubuntuforums.org/showthread.php?t=91510 | this page]]</nowiki>
+
+More reading :<nowiki>[[https://help.ubuntu.com/community/ActiveDirectoryWinbindHowto | Winbind Howto]]</nowiki>
+
+=== What's next ===
+Once this is working Apache2 user authentication via Active Directory can quite easily be added on. Check out the <nowiki>[[LinuxApache2ActiveDirectoryAuthentication | page]]</nowiki> here.
+----
+CategoryNetworking

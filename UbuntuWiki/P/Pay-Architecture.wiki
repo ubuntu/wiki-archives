@@ -1,0 +1,127 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+=== Introduction ===
+
+To allow users to purchase applications and in-app features on their Ubuntu system we need a small client side service that works with the Ubuntu Software Store servers to purchase an item. This requires creating a transaction with the server and giving it information about the application, user and item wishing to be purchased. The client side isn't taking payment or credit card information directly, more facilitating the use of the server in a quick and secure manner. Complex interactions with services requiring secondary means of authentication or other interactions will be handled by webpages returned by the server, perhaps including links to third party providers. The client side of the pay system is designed to provide a quick default purchase experience and not to handle all the possibilities available with exchanging currency today.
+
+=== Architecture ===
+
+Due to the volatility of the environment we want to ensure that we can update the interface with changing requirements as quickly as possible. Changes may occur by adding payment services, having payment UI that is specific to a particular OEM/Carrier or perhaps based on regional differences. To handle this uncertainty we are separating the base service and the user interface, and allowing the user interface to update as a click package. The result of this is a UI that can be updated more frequently and without full integration testing. The result is a small service that sets up the environment and a UI that is run separately. The goal is to create a consistent base for application developer that they feel they can trust while creating a user experience that can adjust to the changing requirements.
+
+<nowiki>[[File:pay-ui-flow.svg]]</nowiki>
+
+To start a transaction the application talks with the pay service and that in turn sets up a trusted session for the pay UI helper to be executed in. This trusted session is displayed to the user as an overlay, and the pay UI and application are managed by the window management together. The UI will confined by its own AppArmor profile that will have very limited access to the system, only what is needed to display graphics, connect to the server and return status to the pay service.
+
+One complexity that is caused by splitting the service and the UI is that the service must trust the UI less. It needs to verify the transaction with the pay server when ever that transaction is made. While not ideal, the trade off of being able to quickly update the UI for changing requirements overrides the inefficiency.
+
+<nowiki>[[File:pay-ui-interactions.svg]]</nowiki>
+
+For the typical purchase with default payment type we want to streamline the interaction as much as possible, from both the user's perspective and also in the contact to the server. The minimum case, where we have a credit card on file, a U1 account registered to the device and the user wishes to use that default payment method.
+
+<nowiki>[[File:pay-client-typical.svg]]</nowiki>
+
+When breaking down the interaction using a message sequence chart we can see that this architecture provides for a base case of two user prompts and four server requests to be able to do the default payment.
+
+=== Server Endpoints ===
+
+We'll need to connect to the pay server for various pieces of information and interactions. Here is a potential list of end points that we'll need. Also included is what component of the client side pay service needs to change if the end point changes. The update schedule is important as we expect to need to support new pay systems in the future and need to know which pieces of the client side will need updating with those changes. This doesn't mean to imply API names, the names are more for functionality, additional documents will specify the full API.
+
+{| class="wikitable"
+|-
+| '''Endpoint'''
+| '''Update'''
+| '''Description'''
+|-
+| verify
+| image
+| Used to verify a purchase. Based on the application ID, item ID and device ID. Returns a signed manifest with those values in it that can be verified with a known key.
+|-
+| methods
+| click
+| Returns the payment methods that the user can select from for this purchase. This may take into account both the user's account (type of credit card) and the account of the application (location of payment) and provide different options. Allows for hints about whether the payment option will require further interaction.
+|-
+| manage
+| click
+| Returns HTML to manage the payment options for the account. The HTML is expected to be shown to the user in a browser window and may result in multiple pages. This is also used to add or remove payment methods.
+|-
+| buy
+| click
+| Used to purchase an item. This can return either a status of the purchase or HTML if further interaction is required to complete the purchase (two factor, etc.)
+|-
+| register devices
+| image
+| Register the device to recieve push messages to update the cache
+|}
+
+=== Application functionality ===
+
+Applications need to be able to use the pay service to, well, pay for things. A special case of application is the click scope which is used to purchase applications on Ubuntu. For applications they need to be able to initiate purchases but also find out the state of previous purchases. Also, for many purchases, purchasing on a separate device will mean that this device is authorized to use that item as well.
+
+{| class="wikitable"
+|-
+| '''Feature'''
+| '''Description'''
+|-
+| Initiate Transaction
+| A way to tell the pay service to start a transaction and get money from the user. Should return appropriate errors and success depending if the item is able to be purchased.
+|-
+| Item Status
+| Get the current status of an item, whether it is purchased or not or whether the purchase was in-flight when the application was last suspended.
+|-
+| Get Manifest
+| Access to the manifest and server signatures so that applications can build more sophisticated DRM schemes for high value content.
+|-
+| Describe Errors
+| If for some reason the purchase errors the application should be able to describe that to the user. <nowiki>[[https://bugs.launchpad.net/ubuntu/+source/pay-service/+bug/1333403|1333403]]</nowiki>
+|-
+| Initiate Refund
+| Start the process to refund the purchase of an item. This may or may not cause a UI to be displayed considering which payment provider is being used
+|}
+
+We will provide access to the application to both the manifest, and the signature of that manifest. This way the application can verify that if it wishes using customized DRM and obfuscation schemes. Our description of the interface will include a notice about how our guarantee is to ensure the server isn’t replaced, but malicious users may be able to attack the system internally. Applications with high value content will need to build on the schemes provided.
+
+=== Pay UI functionality ===
+
+The Pay UI helper needs to be able to find out information on the item purchased in the application from a trusted source. It can't take the information from the application as it's possible that the application would be out-of-date or maliciously incorrect. We also don't want Pay UI have to have to talk with the Canonical Software Store, there is no reason for it to have knowledge of those interfaces. This makes the Pay Service itself the proper place for this information to be stored and accessed.
+
+{| class="wikitable"
+|-
+| '''Info'''
+| '''Description'''
+|-
+| Title
+| Header description of the item being sold. Usually bold and larger text
+|-
+| Cost
+| How many shells we need to pay for the item
+|-
+| Currency
+| ISO Currency designation for the ''cost'' attribute
+|-
+| ''Note: Cost/Currency need to come as a list of pairs, as there could be more than one currency an item is offered in, with slightly different pricing.''
+|-
+| Icon
+| URL to an icon representing the item (it is expected that Pay UI helpers can cache these)
+|}
+
+Information for the item exists on the same D-Bus path that the application uses, allowing the application to use the information if it would like as well.
+
+=== Trusted Prompt Sessions ===
+
+To start the Pay UI helper and allow for associating the UI with an application the Pay Service uses the <nowiki>[[https://wiki.ubuntu.com/Security/TrustStoreAndSessions|Trusted Prompt Sessions]]</nowiki> feature of Mir. When an application requests a purchase to be started the session is created over that application. The service then creates a randomized D-Bus path and starts the Pay UI helper using UAL untrusted helpers with the path as an environment variable. The exec-tool for the untrusted helper creates an exec line that prepends a small pay-service utility to the exec line requested by the Pay UI helper and allows UAL to exec that utility. The utility reads the environment variable and transfers a file descriptor over the socket and configures the <code>MIR_SOCKET</code> environment variable to point to that file descriptor. It closes the socket and then execs the Pay UI helper to use the specified Mir connection.
+
+<nowiki>[[File:pay-trusted-prompt.svg]]</nowiki>
+
+=== Cache Considerations ===
+
+In order for an application to be able to quickly check to see if an item is purchased and get information on it, the pay service must maintain a cache of the items that are available and their states. As with most network cache's this won't always be complete, and in some cases it might require that they're updated from the network so applications should be built to handle a possible delay.
+
+For updates that happen off of the device (another Ubuntu device or through the web) a push message should be sent with the updated information. Push messaging requires that it know the device ID, so pay-service needs to register the device ID whenever a new account is added on the device. At that point the software store should start sending push updates to pay-service about status changes. The cache should be updated and notifications of the changes sent to running applications.

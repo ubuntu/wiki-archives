@@ -1,0 +1,207 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+* '''Launchpad Entry''': UbuntuSpec:mid-application-switcher
+* '''Created''': 2008-11-21
+* '''Contributors''': Emmet Hikory, Neil J. Patel
+* '''Packages affected''':
+
+=== Summary ===
+
+In the MID environment, there is no easy way to switch between running applications. While this helps reduce resource requirements, it can be annoying for a user who wishes to be able to e.g. take notes while reading an eBook. While Alt-Tab works, it is not necessarily available for some hardware configurations.
+
+There should be an interface widget that permits the user to easily switch between running applications.
+
+=== Release Note ===
+
+Users of Ubuntu MID with sufficiently powerful hardware to run multiple simultaneous applications are no longer restricted to Alt-Tab to change the primary application: instead they can use the application-switcher widget to select any currently running application.
+
+=== Rationale ===
+
+The vast majority of applications do not respect a single instance launch policy, and it's easer to repurpose one of the existing application switchers than to adjust each application to prefer a single instance launch policy under hildon or modify kourou to do both launching and launched-instance-management.
+
+=== Use Cases ===
+
+* Alice is listening to music while reading a book, and wishes to select a different album without losing her place in the book.
+* Bob is supposed to be reading a very dry technical manual, and rewards himself with a quick round of neverputt after completing each chapter
+* Chris is doing research, and wants to quickly switch between a text editor and source documents
+
+=== Assumptions ===
+
+* There isn't some global environment flag available to force a single instance policy
+* Most available MID hardware doesn't have easy access to Alt+Tab or a dedicated application-switch button
+
+=== Design ===
+
+The Hildon Home plugin shall be replaced with a wnck-enabled application switcher.  Pressing and holding the Home icon shall present a menu of currently running applications to allow the user to select the desired application.  Press and release without selection will switch to kourou.  Press, hold, scroll, and release without selection shall perform no action.
+
+=== Implementation ===
+
+==== UI Changes ====
+
+* New press-and-hold functionality displays a drop-down menu with currently running applications, as seen by libwnck.
+
+==== Code Changes ====
+
+TBD
+
+==== Migration ====
+
+No migration required: there is no stored data in the Home plugin.
+
+==== Home Button Implementation ====
+
+(this is written in terms of libwnck, and is in C for the most part. Apologies to Pythonic friends!)
+
+'''The first thing''' to do when using libwnck for window-management purposes is to call 
+
+<pre>
+wnck_set_client_type (WNCK_CLIENT_TYPE_PAGER);
+</pre>
+
+which tells wnck that you are implementing a "pager", and therefore gives you a higher priority than say, a desktop application, when you request actions on windows (such as activate, minimise etc.). '''Do this before''' calling any other wnck functions.
+
+The new Home button will work as follows:
+
+* Single Tap = Show/Hide Desktop (which actually minimises/unminimises all windows)
+* Tap-and-Hold (and Double-Tap?) = Show a drop-down list of windows that the user can switch to.
+
+===== Show Home Implementation =====
+
+Very simple:
+
+<pre>
+wnck_screen_toggle_showing_desktop (screen, !wnck_screen_get_showing_desktop (screen));
+</pre>
+
+===== List Windows Implementation =====
+
+Although wnck lets you grab a list of windows which you can iterate over, it has a much more interesting list which contains ''WnckClassGroup''s. 
+
+A WnckClassGroup is the representation of a "class" of windows, which normally translates to a group of windows which are from one application. Don't get confused by WnckApplication, it's not what it sounds like.
+
+The best way to implement the switcher menu is to construct it from the list of WnckClassGroup's. Unfortunately there is not a simple function to retrieve the current list of groups, so we need to connect to the ''class-group-opened'' and ''class-group-closed'' signals on the ''WnckScreen'' object to maintain our own list.
+
+We can construct the menu by iterating over the list and using 
+
+<pre>
+wnck_class_group_get_icon (group);
+&
+wnck_class_group_get_name (group);
+</pre>
+
+functions to get the metadata for the menu item.
+
+In addition to displaying the class group, it's possible to determine whether the menu item should have a child by getting the list of windows in the class group:
+
+<pre>
+wnck_class_group_get_windows (group);
+</pre>
+
+this list should be tested for length. If the length is 1, you can update the main menu item with the name of the window (''wnck_window_get_name''). If the length is greater than 1, you can construct another menu with items for each window.
+
+This method of constructing the menu gives automatic "window grouping" for the applications that have more than one window open.
+
+''Notes''
+
+* Always use ''wnck_window_activate_transient'' to activate a window. This makes sure any transients of the window (like dialogs) are shown above the main window.
+* Check the list of windows returned from the class group for "wnck_window_is_skip_task_list()", and ignore those windows.
+* ''Always'' check that the WnckWindow is valid (normally WNCK_IS_WINDOW (window) in C), as wnck has an habit of returning windows that don't exist.
+
+==== Kourou Single Instance Implementation ====
+
+We want to have Kourou act as a window switcher of it's own i.e. Once an application is launched from Kourou, tapping the application icon again will bring up the same window, instead of launching a second instance of the application. Tap-and-hold will allow launching of multiple instances of the application.
+
+We need to do this as most applications do not have single-instancing built-in, and this is a lighter way of achieving the same effect without having to patch all those applications.
+
+To achieve this, we need to match the launchers (.desktop files) to the currently active windows (from wnck). We use the ''window-opened'' and ''window-closed'' signals of ''WnckScreen'' to be notified of windows being opened/closed on the desktop.
+
+When a window is opened, we need to try and match it to a launcher so, when tapped, the launcher shows the window instead of launching a new instance. There are two main angles for matching windows:
+
+ 1. Matching windows of applications that *we* launched
+ 2. Matching windows of applications that *we didn't* launch. (They could be launched by the user or another application i.e. Nautilus opening GEdit to view a txt file).
+
+===== Matching Windows Of Applications We Launched =====
+
+This is the (usually) easier one. When we launch an application, we'd get the pid of the new process. We can use this pid for the matching:
+
+<pre>
+ if (launch_pid == wnck_window_get_pid ())
+   blah;
+</pre>
+
+This works in most cases, however it will fail for those applications that use scripts to launch (a surprising amount of them).
+
+===== Matching Windows of Applications We Didn't Launch Or Were Launched Via Script =====
+
+If the pid test fails, we are in the same position as if we hadn't launched the application: We have a WnckWindow and we have a launcher.
+
+In this case, we can use some of the additional details available from the WnckWindow and our launcher to see if we can get a match. This involves getting the class_name and res_name for the window and trying to match it to the launchers "Exec=" line.
+
+I've recently written the code to do this for the Awn rewrite, so I'm just going to point to the code:
+
+<nowiki>[[http://bazaar.launchpad.net/~awn-core/awn/trunk-rewrite-and-random-breakage/annotate/head%3A/applets/taskmanager/task-manager.c | try_to_match_window_to_launcher]]</nowiki> function is called when a new WnckWindow is opened. It retrieves the pid, class and res name from the window and passes it to the launchers until it get's a match. I've found wnck to be unreliable in getting the correct class_name and res_name values, and therefore get them directly from X using the <nowiki>[[http://bazaar.launchpad.net/~awn-core/awn/trunk-rewrite-and-random-breakage/annotate/head%3A/applets/taskmanager/xutils.c |_wnck_get_wmclass]]</nowiki> function.
+
+Once we have these three details, we want to use them to match to the launcher attributes. <nowiki>[[http://bazaar.launchpad.net/~awn-core/awn/trunk-rewrite-and-random-breakage/annotate/head%3A/applets/taskmanager/task-launcher.c | task_launcher_try_match]]</nowiki> handles the matching for an individual launcher. 
+
+This method is tried-and-tested in Awn, and works for 99% of the cases. Ideas to cover the remaining 1% are welcomed! Note: OpenOffice.org is a single-instancing applications enemy. 
+
+=== Test/Demo Plan ===
+
+It's important that we are able to test new features, and demonstrate them to users.  Use this section to describe a short plan that anybody can follow that demonstrates the feature is working.  This can then be used during testing, and to show off after release.
+
+This need not be added or completed until the specification is nearing beta.
+
+=== Unresolved issues ===
+
+How should multiple instances of the same application be differentiated?  Does this require kourou to develop single-instance control?
+
+=== BoF agenda and discussion ===
+
+Kourou launches our apps.
+
+Current limitations of app switcher:
+* After apps launch you can't see a list of running apps.  
+* You have to go to home screen to get to apps.  You can't start multiple
+   versions
+
+We want an elegant way to show running apps and switch to them.
+
+* Brainstorming
+** Top-left icon with drop-down menu showing running apps.
+** Menu contains:  "Go Home", <list of running apps>
+** Would be nice to have 1-button Go-Home (not hit icon, then click "Go-Home")
+** Other topic: Shouldn't worry about closing app on PDA
+
+* Singleton behavior for app launching
+** Bill Filler implemented the "singleton" behavior for arbitrary apps in Mobile Basic Flash
+** Kourou needs it added
+** Limits ability to launch multiple instances (nice for terminal)
+** could be solved through an app whitelist in gconf
+
+* Some people complained they want to launch multiple instances of apps (e.g.
+   terminal or gimp)
+** gnome-terminal and gimp are multi "documents" (multi tabs / windows) so
+     we can still have singletons (PIDs)
+** we can tap-n-hold to launch a new instance
+
+* Selecting an instance in the list:
+## tap-n-hold
+## OR group applications by type (easily doable with libwnck) and click on
+      type, then on instance
+
+* Conclusions
+** Need new Hildon home icon plugin
+** Need new Kourou (for singleton behavior)
+** Look at bfiller's work on mobile-basic-flash
+
+----
+CategorySpec

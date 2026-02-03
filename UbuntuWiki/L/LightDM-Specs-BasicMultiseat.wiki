@@ -1,0 +1,192 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+
+== Spec: Basic Multiseat Support for LightDM ==
+
+Add basic multiseat support to LightDM.  "Basic" includes everything listed in the <nowiki>[[http://www.freedesktop.org/wiki/Software/systemd/writing-display-managers/|freedesktop.org "Writing Display Managers" page]]</nowiki> except steps 1 and 2 under "complete porting".
+
+Note that this spec is not about adding automatic multiseat support (steps 1 and 2 under "complete porting").
+
+'''Contact:''' <nowiki>[[https://launchpad.net/~ubuntu-multiseat|ubuntu-multiseat team]]</nowiki><<BR>>
+'''On Launchpad:''' <nowiki>[[https://blueprints.launchpad.net/lightdm/+spec/multiseat|blueprint]]</nowiki>
+
+=== Rationale ===
+
+<nowiki>[[http://www.freedesktop.org/wiki/Software/ConsoleKit/|ConsoleKit]]</nowiki> was intended to help manage multiseat setups, but full support for multiseat was never integrated into any of the popular display managers.
+
+!ConsoleKit is no longer maintained and is being replaced with <nowiki>[[http://www.freedesktop.org/wiki/Software/systemd/|systemd]]</nowiki>'s <nowiki>[[http://www.freedesktop.org/wiki/Software/systemd/logind/|logind]]</nowiki>.  Ubuntu started the process of migrating to logind in Ubuntu 13.04 raring (see the <nowiki>[[https://blueprints.launchpad.net/ubuntu/+spec/foundations-1303-consolekit-logind-migration|blueprint]]</nowiki> and associated <nowiki>[[https://bugs.launchpad.net/ubuntu/+source/systemd/+bug/1153224|bug report]]</nowiki>), and it will be completed in 13.10 saucy.
+
+logind has much more robust support for multiseat, including the ability to dynamically add and remove seats as devices are added and removed.  Full logind multiseat support has been added to gdm, but not yet to LightDM.
+
+Adding multiseat support to LightDM confers several benefits:
+* It is usually less expensive to deploy a single multiseat system than to deploy multiple uniseat systems.  This makes them particularly appealing to libraries and schools.
+* It is easier to share files and devices among multiple users that might want to be using a computer at the same time.  This makes multiseat attractive for family computers.
+* It brings Ubuntu closer to feature parity with other distributions (e.g., Fedora) that already have robust multiseat support.
+
+=== Stakeholders ===
+
+{| class="wikitable"
+|-
+| '''Name'''
+| '''Interest'''
+| '''Last consulted'''
+|-
+| <nowiki>[[https://launchpad.net/~robert-ancell|Robert Ancell]]</nowiki>
+| LightDM project maintainer
+| 2013-08-13
+|}
+
+=== User stories ===
+
+==== Smooth upgrade ====
+
+In `lightdm.conf` on my Ubuntu 12.04 "precise" system, I called the seat configuration section `[Seat:MySeat]` instead of the default `[Seat:0]`.  I don't want anything to break when I upgrade to the latest LightDM.
+
+'''Implications:''' The default name of the seat (in the `XDG_SEAT` sense) can't be derived from the `[Seat:*]` section title in `lightdm.conf` or else `XDG_SEAT` will get the wrong value and the display server might be invoked with an incorrect configuration.
+
+==== Smooth upgrade #2 ====
+
+I share a uniseat Ubuntu 12.04 "precise" system with another family member.  We each have our own system account and use fast-user-switching to switch between our login sessions.  To avoid the hassle of logging in, we edited `lightdm.conf` so that when the computer boots, two X sessions are automatically started and our two accounts are automatically logged in.  I don't want this to break when I upgrade to the latest LightDM.
+
+'''Implications:'''  It must be possible to have multiple `[Seat:*]` sections that are associated with the one XDG seat that is capable of VT switching (`seat0`).
+
+==== todo: more stories ====
+
+need more user stories
+
+=== Constraints and Requirements ===
+
+==== Must ====
+
+* follow steps 1-4 of "minimal porting" and steps 3-4 of "complete porting" in the <nowiki>[[http://www.freedesktop.org/wiki/Software/systemd/writing-display-managers/|writing display managers page]]</nowiki>
+* work with X, Mir, Wayland compositors, etc.
+* support fast user switching on at least one seat
+* be backward compatible: no configuration changes required to support existing setups
+
+==== Nice to have ====
+
+* Allow the user to control VT assignments on each seat (rather than let LightDM automatically determine how to associate a display server with a VT) (see the proposed `use-vt` setting below)
+* Add support for `[seatFoo]` sections in `lightdm.conf` (see below)
+
+==== Must not ====
+
+==== Out of scope ====
+
+* Automatic multiseat support (see <nowiki>[[https://blueprints.launchpad.net/bugs/1190581|bug #1190581]]</nowiki>)
+* New tools (or improvements to existing tools) to aid users in assigning devices to seats
+* Multiseat Linux console support (see <nowiki>[[http://www.freedesktop.org/wiki/Software/kmscon/|kmscon]]</nowiki>)
+* Fix X so that command-line arguments can be used to get it to completely disassociate itself from the kernel VT system (do not allow input events to go to the active VT, do not allow VT switching, etc.).  For now, the <nowiki>[[http://cgit.freedesktop.org/systemd/systemd/tree/src/login/multi-seat-x.c?id=v206|logind multiseat wrapper]]</nowiki> can be used instead (see <nowiki>[[https://blueprints.launchpad.net/bugs/1214146|bug #1214146]]</nowiki>), or we can imitate the logind wrapper in LightDM.
+
+=== Design ===
+
+A new `xdg-seat` setting identifies the logind seat name and determines how to start the display server.  For a seat associated with the Linux VT system (only `seat0` for now, but kmscon will change this), LightDM will launch the display server with command-line arguments that cause it to be associated with an automatically chosen VT.  For a seat not associated with the VT system (non-`seat0` seats), LightDM will launch the display server with command-line arguments that cause it to run independent of the VT system (e.g., use X's `-sharevts` argument).
+
+See the <nowiki>[[Multiseat]]</nowiki> wiki page for more details.
+
+=== Implementation ===
+
+==== UI Changes ====
+
+'''New `xdg-seat=<name>` setting'''<<BR>>
+(Default: `seat0`) This tells LightDM the name of the seat, which is used:
+* in the `XDG_SEAT` variable (for the logind PAM module)
+* in the `-seat` argument to X (if the seat is an X seat and not Mir or something else)
+* to determine whether the display server is going to be associated with a VT or not
+
+'''New `use-vt=auto|true|false|<integer>` setting''' (nice-to-have)<<BR>>
+(Default: `auto`) This tells LightDM which VT to associate with the display server (if any).
+
+'''New `[seatFoo]` section support''' (nice-to-have)<<BR>>
+A section `[seatFoo]` would be equivalent to:
+<pre>
+[Seat:Foo]
+xdg-seat=seatFoo
+</pre>
+The purpose of adding this would be to make configuration less confusing to users (the config section name would match the XDG seat name).  The `[Seat:Foo]` syntax would still be supported, but deprecated.
+
+A section `[seatFoo:Bar]` would be equivalent to:
+<pre>
+[Seat:Foo:Bar]
+xdg-seat=seatFoo
+</pre>
+Note that the colon and everything after it is ignored for the purposes of the XDG seat name.  This makes it possible to declare multiple sessions for the same seat.
+
+The full syntax is: `[seatName]` or `[seatName:sessionName]` where `seatName` must begin with `seat` and must not contain a colon.
+
+==== Code Changes ====
+
+If `xdg-seat` is unset or seat to the empty string, behave as if it was set to `seat0`.
+
+If logind says that the seat named by `xdg-seat` doesn't exist, then an error is logged and no graphical display server is started for the seat.  (Risk:  What if logind is just slow to detect the seat?  Mitigation:  Until automatic multiseat is implemented, always assume the seat exists, even if logind says otherwise.)
+
+Otherwise, if logind says that the seat named by `xdg-seat` is not suitable for graphical sessions, then an error is logged and no graphical display server is started for the seat.  (Risk:  What if LightDM starts before the video card is detected?  Mitigation:  Until automatic multiseat is implemented, assume that the seat is suitable for graphical sessions.)
+
+Otherwise, if `xdg-seat` is set to `seat0`, then:
+* LightDM switches to an automatically chosen VT
+* the `XDG_VTNR` PAM variable is set to the VT number
+* if the seat is an X seat:
+** `vtXX` is passed to X where `XX` is the number of the chosen VT
+** `-seat seat0` is passed to X
+
+Otherwise, if `xdg-seat` is set to something other than `seat0`, then:
+* LightDM does NOT do any VT switching
+* the `XDG_VTNR` PAM variable is NOT set
+* if the seat is an X seat:
+** `vtXX` is NOT passed to X
+** `-seat <name>` is passed to X
+** LightDM (or the logind multiseat wrapper) creates a temporary X.Org config file with the following contents:
+    {{{
+Section "ServerFlags"
+    Option "DontVTSwitch" "True"
+EndSection
+Section "InputClass"
+    Identifier "prevent input events from going to the console"
+    Option "GrabDevice" "True"
+EndSection
+    }}}
+** LightDM (or the logind multiseat wrapper) passes `-config /path/to/above/config/file -sharevts` to X
+
+If `lightdm.conf` defines two or more seats with the same `xdg-name`, and multiple sessions are not supported on the named seat (as determined by querying logind), an error message is logged and the second and subsequent seats with that name are ignored.
+
+The `use-vt` setting behaves as follows:
+* `use-vt=true`: behave as in the `seat0` case described above even if the name of the seat is not `seat0`
+* `use-vt=false`: behave as in the non-`seat0` case described above even if the name of the seat is `seat0`
+* `use-vt=auto` (default): If the name of the seat is `seat0`, this is the same as `use-vt=true`.  Otherwise (not `seat0`), this is the same as `use-vt=false`.
+* `use-vt=<integer>`: Same as `use-vt=true`, but use the specified VT.
+
+Also:  Call `set_seat_can_switch()` with the value of the `org.freedesktop.login1.Seat.CanMultiSession` dbus property for the seat.
+
+Note:  Seat startup order shouldn't matter because the seats should be completely independent of each other.  The non-VT seats shouldn't interfere with the VT seat.  If there are multiple sessions declared that are associated with the same seat, then session startup order for that seat does matter (the last one started will be the active session on that seat).
+
+==== Migration ====
+
+No migration required (config file is backward compatible).
+
+=== Test/Demo Plan ===
+
+todo
+
+=== Unresolved issues ===
+
+==== Determining a seat's multisession support from logind ====
+
+The logind dbus `Seat` objects have a `CanMultiSession` property to indicate whether the seat is capable of VT switching or not.  Is the value of this property valid before the display server is started?  Or does logind determine this from the `XDG_VTNR` PAM variable set by the display manager when it starts the display server?
+
+If the property is valid before the display server is started, then instead of checking whether the seat is named `seat0` or not in order to determine how to invoke the display server, the test can be whether `CanMultiSession` is true or not.  This would allow LightDM to support fast-user-switching on all seats without any changes once kmscon is installed.
+
+'''Update:'''  David Herrmann is working on a <nowiki>[[http://dvdhrm.wordpress.com/2013/08/25/sane-session-switching/|way to support non-VT session switching]]</nowiki>.  This would enable fast user switching on seats besides `seat0`.  If/when this is incorporated into systemd, the `CanMultiSession` property will be true even though the display server should not run associated with a VT.  Thus, comparing the seat name to `seat0` is currently the best option for determining whether to invoke the display server associated with a VT or not.  Perhaps the logind API will be expanded in the future to indicate which seat (if any) is associated with the VT system.
+
+==== No greeter respawn if seat's `can_switch` is false ====
+
+For seats where fast-user-switching is not supported (because VT switching isn't available), the seat's `can_switch` property must be set to false.  Unfortunately, when this is false, LightDM won't respawn a greeter on that seat after logging out.  A fix for this will have to be figured out.
+----
+CategorySpec

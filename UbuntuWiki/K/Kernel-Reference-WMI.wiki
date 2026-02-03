@@ -1,0 +1,156 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+{| class="wikitable"
+|-
+| <tablebgcolor="#f1f1ed" tablewidth="40%" tablestyle="margin: 0pt 0pt 1em 1em; float: right; font-size: 0.9em;"style="padding: 0.25em;"><<BR>>
+|}
+
+=== WMI in the ACPI DSDT ===
+
+Windows Management Instrumentation (WMI) is a complex set of proprietary extensions to the Windows Driver Model that provides an OS interface to allow instrumented components to provide information and notifications.  Typically we are interested in WMI if a laptop or netbook has implemented hotkey events using WMI.  In this case, we need to write a driver or extend an existing driver to capture the appropriate WMI events and map these onto key events.
+
+One can find WMI encoded data blocks inside the _WDG buffer in the DSDT. To extract this from a machine use: <pre>
+sudo acpidump > acpidump.hex
+acpixtract -a acpidump.hex
+iasl -d DSDT.dat
+</pre>
+..and then look in the DSDT.dsl file for a _WDG buffer declaration, for example:
+
+<pre>
+           Name (_WDG, Buffer (0x78)
+            {
+                /* 0000 */    0x6B, 0x0E, 0x4A, 0x28, 0x0E, 0x38, 0x2A, 0x47,
+                /* 0008 */    0x92, 0x1F, 0xE5, 0x27, 0x86, 0x25, 0x7F, 0xB4,
+                /* 0010 */    0xC0, 0x00, 0x01, 0x08, 0x6B, 0x0E, 0x4A, 0x28,
+		...
+            })
+</pre>
+
+As you can see this is a proprietary binary blob. However, it can be extracted using FirmwareTestSuite as follows:
+
+* On the machine:
+
+<pre>
+	sudo fwts wmi -
+</pre>
+
+* Or from previously dumped ACPI data (using acpidump or fwts --dump)
+
+<pre>
+	fwts wmi - --dumpfile=acpidump.log
+</pre>
+
+..and you get the following:
+
+<pre>
+Found WMI Event, Notifier ID: 0xc0, GUID: 284A0E6B-380E-472A-921F-E52786257FB4
+, Instance 0x01
+Found WMI Event, Notifier ID: 0xc1, GUID: 284A0E6B-380E-472A-921F-E52786257FB4
+, Instance 0x01
+Found WMI Event, Notifier ID: 0xc2, GUID: 284A0E6B-380E-472A-921F-E52786257FB4
+, Instance 0x01
+Found WMI Event, Notifier ID: 0xc3, GUID: 284A0E6B-380E-472A-921F-E52786257FB4
+, Instance 0x01
+Found WMI Object, Object ID AA, GUID: C230AA7C-902E-4CDE-85F7-5DCD6A43639B,
+Instance 0x01, Flags: 00
+Found WMI Object, Object ID MO, GUID: 05901221-D566-11D1-b2F0-00A0C9062910,
+Instance 0x01, Flags: 00
+</pre>
+
+So for this example, we have 4 WMI events, with GUID 284A0E6B-380E-472A-921F-E52786257FB4, with
+notifier IDs 0xc0..0xc3, and 2 WMI objects that map to WMI Methods with IDs AA and MO.
+
+The WMI driver drivers/platform/x86/wmi.c handles the _WDG block by fetching the
+_WDG data (using acpi_evaluate_object()) and then scanning this for each WMI item (known as
+a data block) and it gets appended to the wmi_block list.
+
+Each WMI data block has an 8 bit flag field specifying what kind of WMI data block it is, the flags are:
+
+<pre>
+        WMI_EXPENSIVE      0x01
+        WMI_METHOD         0x02
+        WMI_STRING         0x04
+        WMI_EVENT          0x08
+</pre>
+
+==== Expensive Items ====
+These have an Object ID xx which has an associated control method called WCxx (where xx are
+ASCII chars, e.g Object ID AD has control method WCAD()).
+
+The expensive flag is set if the associated WCxx control method should be run to whenever the first 
+data consumer is interested in collecting the data block and also whenever the last data 
+consumer is no longer interested. I suspect this is called expensive as it can comsume a lot of CPU cycles.
+
+==== Method Items ====
+
+These have an Object ID xx which has an associated method called WMxx. See the WMxx ACPI Methods description later on.
+
+==== String Items ====
+
+This is a data block that returns a null terminated ASCII string.
+
+==== Event Items ====
+
+These are GUID items that send events; for example, some (perverse) systems implement hotkeys as WMI events.
+
+WMI also defines a set of ACPI Methods, described as follows:
+
+==== WSxx ACPI Methods ====
+
+These are data block set methods. They take two argumenents, the first is the index of the instance and the second argument is
+a buffer that contains the new values for the data block. This is not required for data blocks that are read only.
+
+==== WMxx Methods ====
+
+These WMI Methods are associated with data blocks that have the WMI_METHOD flag bit set. The data block object ID xx maps to a WMxx named method.    These methods take 3 arguments, the first is a ULONG specifying the instance index being executed, this can be ignored if there are data blocks registered with just a single instance.  The second contains the method ID of the method being executed. The third argument contains the input data for that method call.  If the WMI_STRING bit is set in the data block flag, then the buffer being passed is assuming to be a null terminalted ASCII string.  WMxx methods are assumed to return buffers.
+
+==== WExx Methods ====
+
+These are Event Enable and Disable Methods and are optional. They are designed in case that collecting WMI data is CPU expensive in cycles, and hence one has the ability to enable or disable data collection.
+
+For a data block that has the WMI_EXPENSIVE flag set, there should be a corresponding WExx control method.  The naming convention is WExx, where xx is the hexidecimal value of the notification id of the corresponding data block. For example, a WMI event with notifier ID 0xc0:
+
+WMI Event, Notifier ID: 0xc0, GUID: 284A0E6B-380E-472A-921F-E52786257FB4
+
+..has a WEC0 method.
+
+The methods have one argument, an 8 bit unsigned int of value 0 to disable and 1 to enable. 
+
+==== WCxx Methods ====
+
+Like WExx methods, WCxx methods are used to enable/disable collecting of data via method calls if collecting that data is expensive in CPU cycles. For a data block that has the WMI_EXPENSIVE flag set, there should be a corresponding WCxx control method.  The naming convention is WCxx, where xx is the hexidecimal value of the notification id of the corresponding data block.
+
+==== _WED Method ====
+
+This method is evaluated by ACPI when a notification is received from a control method and the result is passed as part of the WMI event information. The method takes one argument, this being the notification code that caused the notification in the first place.
+
+==== WQxx buffers ====
+
+A lot of WMI implementations contain a WQxx declaration in the DSDT.
+
+The WQxx buffers are declared as follows:
+<pre>
+           Name (WQMO, Buffer (0x047A)
+            {
+                /* 0000 */    0x46, 0x4F, 0x4D, 0x42, 0x01, 0x00, 0x00, 0x00,
+                /* 0008 */    0x6A, 0x04, 0x00, 0x00, 0xD8, 0x11, 0x00, 0x00,
+...
+	    }
+</pre>
+
+These are generally large blobs of Managed Object Format (MOF) binary data embedded in the AML. Windows will evaluate the WQxx() buffer which returns to Windows the MOF binary which describes all data blocks, WMI methods, and events for the device in a compressed binary format.  As yet, there don't seem to be any MOF decompilers that can reverse engineer these blobs back into the MOF language, so we are at the mercy of getting descriptions of the MOF from the BIOS vendor to figure out how this maps to the WMI AML methods described inside the MOF.
+
+=== References ===
+
+* http://www.microsoft.com/whdc/system/pnppwr/wmi/wmi-acpi.mspx (Windows Instrumentation: WMI and ACPI)
+* http://en.wikipedia.org/wiki/Windows_Management_Instrumentation
+* http://lwn.net/Articles/391230/ (Writing a WMI driver - an introduction)
+* http://nukz.net/reference/wmi/hh/wmisdk/mof_8opx.htm (Managed Object Format (MOF) Language)

@@ -1,0 +1,158 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+=== Introduction ===
+This is a simple tutorial that will teach you to configure your system to  automatically install security updates. There are always some security risks involved in running software upgrades without supervision, but there are also benefits.  If you believe it's important to stay up to date with the latest security patches, then you should follow this simple tutorial.
+
+There are several options for enabling automatic updates:
+
+* Use the GNOME Update Manager
+* Use the <code>unattended-upgrades</code> package
+* Write your own cron script that calls aptitude
+* Use cron-apt
+
+See also: <nowiki>[[AutoWeeklyUpdateHowTo]]</nowiki>
+
+=== Using GNOME Update Manager ===
+
+If you are using GNOME, go to the "Software & Updates", open up the "Updates" tab.
+
+For "When there are security updates" select "Download and install automatically".
+
+=== Using the "unattended-upgrades" package ===
+
+Install the <code>unattended-upgrades</code> package if it isn't already installed (<code>sudo apt-get install unattended-upgrades</code>). 
+
+To enable it, do:
+
+<pre>
+sudo dpkg-reconfigure --priority=low unattended-upgrades
+</pre>
+
+(it's an interactive dialog) which will create <code>/etc/apt/apt.conf.d/20auto-upgrades</code> with the following contents:
+
+<pre>
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+</pre>
+
+Details about what these values mean may be found in the header of the '''/etc/cron.daily/apt''' file. Note:
+
+* When the apt job starts, it will sleep for a random period between 0 and  <code>APT::Periodic::RandomSleep</code> seconds. The default value is "1800" so that the script will stall for up to 30 minutes (1800 seconds) so that the mirror servers are not crushed by everyone running their updates all at the same time. Only set this to 0 if you use a local mirror and don't mind the load spikes. Note that while the apt job is sleeping it will cause the execution of the rest of your cron.daily jobs to be delayed.
+
+* If you want the script to generate more verbose output set <code>APT::Periodic::Verbose "1";</code>
+
+* If you want the script to automatically reboot when needed, you not only need to set  <code>Unattended-Upgrade::Automatic-Reboot "true"</code>, but you also need to have the "update-notifier-common" package installed. On minimal installations this is not installed by default and without it the automatic updater will never reboot and will not even tell you that you need to reboot manually if you have email notifications configured!
+
+And <code>/etc/apt/apt.conf.d/50unattended-upgrades</code>:
+
+<pre>
+// Automatically upgrade packages from these (origin, archive) pairs
+Unattended-Upgrade::Allowed-Origins {    
+    // ${distro_id} and ${distro_codename} will be automatically expanded
+    "${distro_id} stable";
+    "${distro_id} ${distro_codename}-security";
+    "${distro_id} ${distro_codename}-updates";
+//  "${distro_id} ${distro_codename}-proposed-updates";
+};
+
+// List of packages to not update
+Unattended-Upgrade::Package-Blacklist {
+//  "vim";
+//  "libc6";
+//  "libc6-dev";
+//  "libc6-i686";
+};
+
+// Send email to this address for problems or packages upgrades
+// If empty or unset then no email is sent, make sure that you 
+// have a working mail setup on your system. The package 'mailx'
+// must be installed or anything that provides /usr/bin/mail.
+//Unattended-Upgrade::Mail "root@localhost";
+
+// Do automatic removal of new unused dependencies after the upgrade
+// (equivalent to apt-get autoremove)
+//Unattended-Upgrade::Remove-Unused-Dependencies "false";
+
+// Automatically reboot *WITHOUT CONFIRMATION* if a 
+// the file /var/run/reboot-required is found after the upgrade 
+//Unattended-Upgrade::Automatic-Reboot "false";
+</pre>
+
+==== Determining the current configuration ====
+
+The current configuration can be queried by running:
+<pre>
+apt-config dump APT::Periodic::Unattended-Upgrade
+</pre>
+
+Which will produce output like:
+<pre>
+APT::Periodic::Unattended-Upgrade "1";
+</pre>
+
+In this example, Unattended Upgrade will run every <code>1</code> day.  If the number is <code>"0"</code> then unattended upgrades are disabled.
+  
+The files in /etc/apt/apt.conf.d/ are evaluated in lexicographical order with each file capable of overriding values set in earlier files.  This makes it insufficient to view the setting in <code>/etc/apt/apt.conf.d/20auto-upgrades</code> and why it is recommended to use <code>apt-config</code>.
+
+=== Using cron and aptitude ===
+
+To begin, press Alt+F2 and create a new file:
+<pre>
+gksudo gedit /etc/cron.weekly/apt-security-updates
+</pre>
+If you're using KDE, use this command instead:
+<pre>
+kdesudo kate /etc/cron.weekly/apt-security-updates
+</pre>
+Copy the following text into this new file, save, and exit:
+<pre>
+echo "**************" >> /var/log/apt-security-updates
+date >> /var/log/apt-security-updates
+aptitude update >> /var/log/apt-security-updates
+aptitude safe-upgrade -o Aptitude::Delete-Unused=false --assume-yes --target-release `lsb_release -cs`-security >> /var/log/apt-security-updates
+echo "Security updates (if any) installed"
+</pre>
+
+Recently (since Ubuntu 7.10), the aptitude action 'upgrade' is deprecated. There are now two ways to upgrade, a safe one (conservative, if an update needs to add or remove dependencies, it won't update) and a full one (it will always upgrade even though it impacts other packages by adding them or removing them, previously called 'dist-upgrade'). The actions are now 'safe-upgrade' or 'full-upgrade'. See the manual page of aptitude (<code>man aptitude</code>) for more details.
+
+Once you are complete, you want to make the file executable. So, via the terminal, type the following line:
+<pre>
+sudo chmod +x /etc/cron.weekly/apt-security-updates
+</pre>
+
+This script will run once weekly and it installs all available packages from the security repository. It also generates a log in ~-/var/log/apt-security-updates-~ for later inspection in case something goes wrong.
+
+This script will output information to a log file, so to prevent this log file from getting too large we need to make sure it gets rotated out.  To do this, we'll use the ~-logrotate-~ utility, which comes with Ubuntu.  Press Alt+F2 and type this command:
+<pre>
+gksudo gedit /etc/logrotate.d/apt-security-updates
+</pre>
+For KDE, use this command instead:
+<pre>
+kdesudo kate /etc/logrotate.d/apt-security-updates
+</pre>
+Paste this into the editor, save, and exit:
+<pre>
+/var/log/apt-security-updates {
+        rotate 2
+        weekly
+        size 250k
+        compress
+        notifempty
+}
+</pre>
+This will rotate the log file every week (`weekly`), or if it's over 250kB in size (`size 250k`), compressing old versions (`compress`).  The previous two log files will be kept (`rotate 2`), and no rotation will occur if the file is empty (`notifempty`).
+
+=== Using cron-apt to handle automatic updating ===
+Updating can be also done automatically by using package called <nowiki>[[http://packages.ubuntu.com/cron-apt|cron-apt]]</nowiki>. Please read man page before doing anything.
+
+----
+CategorySecurity

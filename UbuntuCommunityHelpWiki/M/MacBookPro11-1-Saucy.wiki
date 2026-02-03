@@ -1,0 +1,244 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+This page was originally written with a MacBook Pro 11,1 in mind, and describes the installation of Ubuntu 13.10 (Saucy Salamander). 
+
+The instructions on this page have proved useful in more cases, in particular for Ubuntu 14.04 LTS (Trusty Tahr) and on different hardware: according to the feedback, these instructions also work for other MacBook Pro laptops: 9,1, 10,1, 11,1, 11,2 and 11,3.
+
+You can find out the model identifier in MacOS by following http://support.apple.com/kb/ht4132 or in Linux by typing at the terminal:<pre>
+sudo dmidecode -s system-product-name
+</pre>
+
+The MacBookPro 11,1 is a 13-inch Mac laptop released in late 2013, which has a retina display, solid-state drive, and is based on Haswell Intel CPU.  The initial reports of successful installation and hardware fixes are in this thread: http://ubuntuforums.org/showthread.php?t=2184760, which also contains users' feedback on 15-inch versions (!MacBookPro 11,2 and 11,3).  
+
+==== A few notes ====
+ 1. This instruction does not need rEFIt or rEFInd or boot-repair after installation.
+
+ 2. The 2013 !MacBook Pro can recognize multi-boot CD image (e.g., Ubuntu's official iso).  So there is no need to use the "mac" iso image for installation.  In fact, I recommend you avoid the "mac" iso image because it is a BIOS-boot only image and will force the Mac to enter BIOS emulation mode to install Ubuntu, which will need to be fixed to boot in its native EFI mode.
+
+ 3. Although you only see one partition inside MacOS, your !MacBookPro actually comes with three partitions: a 200MB efi partition /dev/sda1, a hfs+ partition /dev/sda2, and a 650MB hfs+ partition /dev/sda3.
+
+ 4. Go to the end of this page to see what do not work.
+
+== Installation ==
+
+ 0.#0 If you want to keep the MacOS, boot into MacOS and use its Disk Utility to resize the MacOS partition to open up space for Ubuntu.  (I would open up at least 25GB, with ~20GB for / and about 4-8 GB for swap.)  Resizing MacOS partition during Ubuntu installation may damage your MacOS.
+
+ 1. Download Ubuntu 13.10 (or 14.04) NON-MAC 64-bit iso and put it onto a flash drive via Startup Disk Creator (or unetbootin).  See Note 2 above for why not a "mac" iso.
+
+ 2. Boot up your Mac with an OPTION key held, and select the EFI icon to boot the flash drive.
+
+ 3. Enter live mode (i.e. "Try Ubuntu").  You need to perform post-installation checks and fixes.
+
+ 4. Click "Install Ubuntu" to start installation.  Follow the instructions.  When it asks you for how to install onto the disk, you could choose to install "Alongside with MacOS" or choose the last option to set up the partitions yourself.  Make sure /dev/sda1 is mounted as /boot/efi (an EFI boot partition).
+
+ 5. After installation, do NOT restart.  We need to fix the EFI boot order information.  Open a terminal, and type the following <pre>
+sudo apt-get install efibootmgr
+sudo efibootmgr
+</pre> You should see "ubuntu" is listed as Boot0000*.  If you had booted into MacOS before installation, you should see two other boot entries, Boot0080* and BootFFFF* (these were created by MacOS), but the EFI !BootOrder is 0080, which would make the laptop boot into MacOS only.  To fix this, type <pre>
+sudo efibootmgr -o 0,80
+</pre> (If you had wiped out MacOS, then you only need to specify "0" instead of "0,80" in the command above.)
+
+ 6. Reboot (a command for reboot is "sudo reboot").
+
+ 7. The solid-state drive will freeze periodically under the default kernel boot parameters.  To prevent this, edit grub configuration file /etc/default/grub <pre>
+sudo nano /etc/default/grub
+</pre> to change the GRUB_CMDLINE_LINUX line to: <pre>
+GRUB_CMDLINE_LINUX="libata.force=noncq"
+</pre> Then save and update grub <pre>
+sudo update-grub
+</pre>
+
+ 8. Dual boot with grub.  The grub entries for MacOS (created by Ubuntu) cannot boot to MacOS, unfortunately.  If you want to use grub to dual-boot into MacOS, you can take advantage of the EFI boot order feature.  Make sure the EFI boot order is 0,80, as explained above.  If the boot order has 80 as its first value, the laptop boots to MacOS.  If the boot order has 0 as its first value, the laptop boots to Grub, and when you exit grub, the laptop boots to the second in line, the MacOS.  So the trick is to create a grub entry for MacOS that exits grub.  Edit /etc/grub.d/40_custom<pre>
+sudo nano /etc/grub.d/40_custom
+</pre> add to the end of file: <pre>
+menuentry "MacOS" {
+  exit
+}
+</pre> Then update grub <pre>
+sudo update-grub
+</pre> That is it!  If you also want grub to boot to MacOS by default, edit /etc/default/grub <pre>
+sudo nano /etc/default/grub
+</pre> and change GRUB_DEFAULT=4.  This sets the default to the 5th entry, the one we just added.  It is 4 because the first one is 0.  Then update grub as above.  (Note that EFI boot order and Grub boot order are different things.)
+
+== Other issues ==
+
+=== Wireless ===
+
+The laptop has a Broadcom BCM4360 wireless chipset.  Install Broadcom's driver to enable it<pre>
+sudo apt-get install bcmwl-kernel-source
+</pre> 
+
+==== Wireless stops working after suspend ====
+
+I fixed this by creating a power management script: <pre>
+sudo nano /etc/pm/sleep.d/99_myfix 
+</pre> to put the following into the file {{{#!plain
+case "$1" in
+	resume|thaw)
+		service network-manager stop
+		rm /var/lib/NetworkManager/NetworkManager.state
+		service network-manager start
+		;;
+esac
+}}} and set its permission to 755 <pre>
+sudo chmod 755 /etc/pm/sleep.d/99_myfix 
+</pre>
+
+==== Unstable wireless connection ====
+
+If you are experiencing WiFi connection lag every 2 minutes it might be caused by NetworkManager performing background scans. It's possible to disable those background scans once connection is established by forcing it to use specific BSSID in wireless connection properties.
+
+=== Speakers (13.10 only) ===
+
+Skip this section for 14.04.
+
+For 13.10, the speakers have no sound at boot and after resume from suspend.  I fixed these by setting GPIO flags at boot and after resume.  First, we need the alsa-tools package <pre>
+sudo apt-get install alsa-tools
+</pre> To make the speakers work after boot: <pre>
+sudo nano /etc/rc.local
+</pre> to add the following command before "exit 0" <pre>
+hda-verb /dev/snd/hwC1D0 0x1 set_gpio_data 1
+</pre> To make the speakers work after resume, I edited /etc/pm/sleep.d/99_myfix that I created above <pre>
+sudo nano /etc/pm/sleep.d/99_myfix
+</pre> to add the following before ";;" <pre>
+hda-verb /dev/snd/hwC1D0 0x1 set_gpio_mask 1
+sleep 1
+hda-verb /dev/snd/hwC1D0 0x1 set_gpio_direction 1
+sleep 1
+hda-verb /dev/snd/hwC1D0 0x1 set_gpio_data 1
+</pre>  The sleep commands are here because without them the flags are not all set sometimes.
+
+=== Touchpad ===
+
+Skip this section if you are okay with the touchpad default settings.  If you customize some settings via the synclient command or an xorg .conf file, the settings can be reset occasionally.  This is due to two reasons.  1) GNOME's mouse plugin can reset the settings.  This can be turned off at the command line <pre>
+gsettings set org.gnome.settings-daemon.plugins.mouse active false
+</pre> 2) Even if this is turned off, the settings set by synclient can be occasionally reset after resume.  This is because during resume, the system occasionally fails to detect the touchpad and unloads its module, and then after a second or so, detects the touchpad and loads its module and system settings.  So I put my customization into a system file: <pre>
+sudo mkdir -m 755 /etc/X11/xorg.conf.d
+sudo cp /usr/share/X11/xorg.conf.d/50-synaptics.conf /etc/X11/xorg.conf.d/
+sudo chmod 644 /etc/X11/xorg.conf.d/50-synaptics.conf
+sudo nano /etc/X11/xorg.conf.d/50-synaptics.conf
+</pre> and add to the "touchpad catchall" section after !MatchDevicePath "/dev/input/event*" <pre>
+	Option "PalmDetect" "1"
+	Option "TapButton3" "2"
+	Option "VertScrollDelta" "-100"
+	Option "HorizScrollDelta" "-100"
+	Option "HorizTwoFingerScroll" "1"
+</pre>  The last three options are to use two-finger natural scrolling (like on a iPad).  To disable touchpad during typing, you could add the following to an autostart script <pre>
+syndaemon -d -i 1
+</pre>
+
+=== Keyboard map ===
+
+Skip this section if you are okay with the default keyboard map.  If you customize some settings via the setxkbmap or xmodmap command, the settings can be reset occasionally.  This can be seen in /var/log/Xorg.0.log and it seems to affect settings set via setxkbmap more frequently than those set via xmodmap.  This is due to GNOME's keyboard plugin, which can be turned off at the command line <pre>
+gsettings set org.gnome.settings-daemon.plugins.keyboard active false
+</pre>
+This solution seems to also prevent customized keyboarding bindings from being reset occasionally.
+
+=== Keyboard and touchpad not recognised on boot ===
+
+Intermittently, the keyboard and touchpad aren't recognised on boot. The only thing you can do from the login screen is hold down the power button to power off. This can happen even though the keyboard is working perfectly at the grub screen.
+
+Edit the grub configuration file (/etc/default/grub) and add '''i8042.reset i8042.nomux''' to GRUB_CMDLINE_LINUX. For example: <pre>
+GRUB_CMDLINE_LINUX="quiet splash i8042.reset i8042.nomux"
+</pre>
+Then save and update grub:<pre>
+sudo update-grub
+</pre>
+For more info on i8042 see <nowiki>[[https://askubuntu.com/questions/279679|here]]</nowiki> and <nowiki>[[https://unix.stackexchange.com/questions/28736|here]]</nowiki>.
+
+=== Won't stay suspended ===
+
+If your laptop wakes up on its own a minute or two after suspending (just long enough for you to put it in your bag where it can wake up and start overheating!) then disable "wake from USB" -- presumably the keyboard, trackpad, or some other internal component is waking up.
+
+To disable "wake from USB": <pre>
+echo XHC1 | sudo tee /proc/acpi/wakeup
+</pre>
+You need to do this after every boot, so add it to an init script or similar.
+
+To confirm that it is disabled: <pre>
+cat /proc/acpi/wakeup
+</pre>
+
+(You can tell that XHC1 is the USB controller by comparing the PCI slot IDs from <code>cat /proc/acpi/wakeup</code> with the output of <code>lspci</code>).
+
+=== Issues due to tiny pixels on the retina display ===
+
+==== Window borders ====
+
+Window borders are 1 pixel wide by default (at least for the default theme Ambiance).  I increased it by editing Ambiance's control file <pre>
+sudo nano /usr/share/themes/Ambiance/metacity-1/metacity-theme-1.xml
+</pre> Under the section <frame_geometry name="frame_geometry_normal" ...>, I changed the left, right, bottom values to 4 <pre>
+  <distance name="left_width" value="4"/>
+  <distance name="right_width" value="4"/>
+  <distance name="bottom_height" value="4"/>
+</pre>
+
+==== Text scaling factor ====
+
+To increase font size system wide, you can play with the numbers in these settings until you find your best match:
+<pre>
+gsettings set com.ubuntu.user-interface scale-factor "{'eDP1': 12}"
+gsettings set com.canonical.Unity.Interface text-scale-factor '1.0'
+gsettings set org.gnome.desktop.interface text-scaling-factor '1.0'
+</pre>
+
+There's a bug that at some point the scaling goes crazy and you see everything huge or tiny, and it's being tracked here: <nowiki>[[https://bugs.launchpad.net/ubuntu/+source/unity/+bug/1310316]]</nowiki> In the meantime you can create a script that runs after you log in, and add it to your start applications (I suggest adding a sleep 5 before running the settings in case it runs before whatever breaks it).
+
+==== Text scaling within Firefox ====
+
+GNOME's text scaling factor has no effect on Firefox pages.  I set the Firefox scaling factor by setting "layout.css.devPixelsPerPx" to 2.5.  To do this, type "about:config" inside the address box to pull up all Firefox configurations, and search for "!PerPx" (no quotes).
+
+==== Console font size ====
+
+If you ever switch to a console screen, you will find out the font size is very small for the retina screen.  I changed the console default font by <pre>
+sudo dpkg-reconfigure console-setup
+</pre> and chose the "Terminus" font family and "32x16" font size in the menu.  At the end, the initrd file of the current kernel will be updated.  Future kernel initrd files will be built according to the new settings.
+
+=== Keyboard Fn mode ===
+
+By default, the F keys serve their traditional function by pressing the "fn" key.  For example, by default the "F1" key lowers display brightness and "fn+F1" is the traditional F1.  I switched this behavior on all the F keys by adding a modprobe config file <pre>
+sudo nano /etc/modprobe.d/hid-apple.conf
+</pre> and add <pre>
+options hid-apple fnmode=2
+</pre>
+
+=== Retina display ICC profile ===
+
+The retina display ICC profile Ubuntu generated through the display's EDID is a little dull in color.  If you have not wiped out MacOS, you can obtain the MacOS ICC profile at
+/Library/ColorSync/Profiles/Displays/Color LCD-xxxxxx.icc
+, where xxxxxx is a long EDID string.  Copy this file to a location that can be seen from inside Ubuntu (and rename it if you want to).  In Ubuntu, go to System Settings -> Color and click "Add profile" to select this new file as the ICC profile.
+
+For those who have wiped out MacOS:  MacOS probably generates the same ICC profile for display panels with the same EDID.  If you have access to another !MacBookPro with the same size panel and manufactured in the same period as yours, check its EDID (32 bytes, embeded in the ICC file name /Library/ColorSync/Profiles/Displays/Color LCD-xxxx.icc) and your panel's EDID (embeded in the ICC file name ~/.local/share/icc/edid-xxxx.icc).  If they are the same, you probably can use it without any problem.
+
+=== Washed out colors on external display ===
+
+If you have issues with an external monitor having washed out colors, you can try (adjusting the output parameter as necessary depending on your setup):
+
+<pre>
+xrandr --output HDMI2 --set "Broadcast RGB" "Full"
+</pre>
+
+More info: https://www.kubuntuforums.net/showthread.php?63895-Black-level-too-high-after-upgrade-to-13-10
+
+=== If you do not use Unity ===
+Some of the issues above may not apply if you use Ubuntu with a different desktop environment or window manager.  A user has reported experiences of installing Kubuntu on MBP 11,1: http://ubuntuforums.org/showthread.php?t=2184760&p=12930114#post12930114
+
+=== Things that do not work (or fully work) yet ===
+
+ 1. Camera does not work.
+ 2. External display: Apple's Thunderbolt Display does not work.  But Apple's Cinema Display, DVI monitors (through a minidisplay-to-DVI adapter), and HDMI monitors all work as plug-and-play devices.  HDMI sound works fine (tested by @glarrain).
+ 3. Ethernet: It works with a USB ethernet adapter.  A thunderbolt-to-ethernet adapter works only if it is plugged in before boot.  But it stops working after suspend.  It also does not work if it is plugged in after boot.  The adapter is a PCIe card to the system and the current Linux kernel does not support plug-and-play for this adapter (or at least no support through the thunderbolt interface).
+ 4. The !MacBookPro 11,3 has a nVidia GPU and an Intel GPU.  The nVidia GPU is used by Ubuntu by default, which is supposed to consume more power than the Intel GPU.  However, according to http://ubuntuforums.org/showthread.php?t=2098304 , this issue has been solved for 10,1, an earlier version of 15" MPB that has a similar dual GPU configuration.
+ 5. On the !MacBookPro 11,2, with Ubuntu 14.04, the screen does not appear to automatically dim/brighten when switching to and from battery. A workaround for this can be found here: http://ubuntuforums.org/showthread.php?t=2165826&p=12780831#post12780831
+ 6. Battery life on a !MacBookPro 11,2 (and possibly others) was quite poor out of the box on Ubuntu 14.04. This may be due to an old kernel issue (see https://bugs.launchpad.net/ubuntu/+source/linux/+bug/887793 and https://bugzilla.redhat.com/show_bug.cgi?id=1192856). The fix reported on the following link may resolve this issue: http://carlocapocasa.com/crushing-the-kworker-uprising-or-how-to-fix-your-linux-lenovo-ideapad-y560p/ A side effect of this workaround is very poor QEMU qcow2 performance, however.
+----
+CategoryInstallation

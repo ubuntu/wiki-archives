@@ -1,0 +1,275 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+== Why the effort ==
+
+The .deb packages from Citrix miss some features that are required in the corporate environment. Although you can point your users at Citrix webpage and tell them to download and install it, it will not always work. At the same time it is cheaper to provide a working client than to spend an hour or two per machine to explain and fix a broken installation.
+
+== State as of this writing ==
+
+It is November 2012 and although Citrix committed to fixing their client, their effort has not brought much fruit yet.
+
+Update: It's late February 2013, no change on that part.
+
+== Citrix original packages ==
+
+Citrix provides binary-only 32-bit only .deb packages for Ubuntu. The amd64.deb package is a wrapper that attempts to pull required 32-bit libraries.
+
+Citrix has a policy of not releasing patched versions of their packages until the next point release. However, if you have a Citrix contract, you can request a so-called "private release" which contains bugfixes by reporting one of the known bugs. The latest private release I was able to obtain is 12.1.4.217911.
+
+== Making custom packages ==
+
+This may sound a lot of work, but it is really worth the effort. As you read on, I will explain which change fixes which deficiency.
+
+I would gladly publish the fixed packages, but I have not sorted the license issues yet. So for the time being, you have to do the changes yourself.
+
+=== Unpacking the .deb files ===
+
+I am assuming you have downloaded the icaclient original package to the ~/Downloads directory (and you have no other version there, otherwise you need to specify it):
+
+{{{#!highlight bash
+mkdir icaclient-i386
+cd icaclient-i386
+dpkg -x ~/Downloads/icaclient-12.1*i386.deb .
+dpkg -e ~/Downloads/icaclient-12.1*i386.deb
+cd ..
+
+mkdir ctxusb-i386
+cd ctxusb-i386
+dpkg -x ~/Downloads/ctxusb-2.2*i386.deb .
+dpkg -e ~/Downloads/ctxusb-2.2*i386.deb
+
+}}}
+
+=== Package version ===
+
+Citrix package 12.1 can mean a lot of things. In the past we were provided with 3 different binaries marked as 12.0. Since we reported the problem, it was slightly better, but still you will be safer to provide the whole build-numbered version of the package.
+
+Change icaclient-i386/DEBIAN/control field "Version: " from 12.1 to the actual build version you get when you start the Receiver -> Help -> About. You should add the package version and some random string that would indicate your customization:
+<pre>
+Version: 12.1.4.217911-1custom1
+</pre>
+
+=== SSL Certificates ===
+
+The Citrix packages come with just a handful of trusted certificates in opt/Citrix/ICAClient/keystore/cacerts. Your choices are:
+
+ 1. Put your Xen server certificate there.
+
+ 1. Put the certificate of the CA that signed your certificate.
+
+ 1. Modify the package to use system CA certificates and manage them instead.
+
+The first two you can get with just copying your certificate to icaclient-i386/opt/Citrix/ICAClient/keystore/cacerts
+
+What I recommend, though, is to pick the last option and override the handful of certs with system certificates.
+
+For that you need to:
+
+ 1. modify icaclient-i386/DEBIAN/control field "Depends:" to include "ca-certificates" (this is the system package containing the certificates)
+
+ 1. remove the directory opt/Citrix/ICAClient/keystore/cacerts and replace it with a link to /etc/ssl/certs.
+
+ 1. add a shell excerpt to handle upgrades from upstream Citrix packages. In DEBIAN/preinst under:
+{{{#!highlight bash
+ case "$1" in
+     install|upgrade)
+}}}
+add
+{{{#!highlight bash
+### # Tieto modification to remove custom certs from /opt/Citrix/ICAClient/keystore/cacerts/
+    if [ -e /opt/Citrix/ICAClient/keystore/cacerts -a ! -h /opt/Citrix/ICAClient/keystore/cacerts ]
+    then
+        mkdir -p /opt/Citrix/ICAClient/keystore/cacerts.old
+        mv /opt/Citrix/ICAClient/keystore/cacerts/* /opt/Citrix/ICAClient/keystore/cacerts.old/ || true
+        rmdir /opt/Citrix/ICAClient/keystore/cacerts
+        ln -sf /etc/ssl/certs /opt/Citrix/ICAClient/keystore/cacerts
+    fi
+}}}
+
+=== libstdc++6 ===
+
+I found that VDFLASH2.DLL and VORBIS.DLL files are linked against libstdc++. You should thus add "libstdc++6" to "Recommends:" section in DEBIAN/control. Why Recommends, not Depends? Well, flash and vorbis support are not obligatory, either.
+
+Although most systems have libstdc++6 library installed, it may not be the case for multi-arch (see below).
+
+=== Microphone input ===
+
+By default, microphone input is disabled and the user does not get any indication that it can be turned on. This, I was told, was caused by privacy concerns.
+
+What I do, is I enable the microphone pass-through by default. Edit etc/icaclient/nls/*/wfclient.ini and add:
+<pre>
+AllowAudioInput=True
+</pre>
+into the [WFClient] section.
+
+=== License question ===
+
+Although you should be able to seed the answer to the license question now with:
+<pre>
+echo icaclient icaclient/accepteula select true | sudo debconf-set-selections
+echo ctxusb ctxusb/accepteula select true | sudo debconf-set-selections
+</pre>
+I bumped to a number of problems in the past that the question popped up anyway due to weak implementation. As it is the company that accepts the license anyway, not the user himself, I do not find it as a breach of license to remove the question.
+
+To remove it:
+
+ 1. Delete icaclient-i386/DEBIAN/control
+
+ 1. Edit DEBIAN/preinst under:
+{{{#!highlight bash
+ case "$1" in
+     install|upgrade)
+}}}
+modify 
+<pre>
+    if [ "yes" = "yes" ]
+</pre>
+to
+<pre>
+    if [ "yes" = "no" ]
+</pre>
+and add this *before* the condition:
+
+{{{#!highlight bash
+### # Tieto hack to get rid of the license question
+    db_set icaclient/accepteula true
+    db_fset icaclient/accepteula seen true
+}}}
+
+=== Multi-arch support ===
+
+Why care about multi-arch? Well, there is a number of reasons:
+
+ 1. The amd64 package from Citrix is actually 1:1 i386 with just slightly modified control file to include ia32-libs.
+
+ 1. The Citrix ia32-libs dependency pulls a lot of libraries you will never use and not even the ones that offer multimedia support.
+
+ 1. Multi-arch has been enabled from Ubuntu Oneiric (11.10) and in all releases to date (12.10).
+
+==== How to handle i386 packages on amd64 ====
+
+Since multi-arch is enabled by default, you can just install a 32-bit package on amd64 and apt should satisfy its dependencies.
+
+If you you want to install the Receiver by clicking it out (ok, I know, you want it automated, just read on), the package manager should handle the apt dependencies when you double-click a fixed icaclient package.
+
+You can try installing it with dpkg -i, but afterwards you will need to satisfy its dependencies with apt-get install -f.
+
+The best approach, though, is to provide a package repository so that people can check it out from the Software Centre or your software configuration manager can install it for you.
+
+At that point you can just run:
+<pre>
+sudo apt-get install ctxusb:i386 icaclient:i386"
+</pre>
+or make the CM do it for you.
+
+==== Fixes for multi-arch ====
+
+Although the upstream i386 packages can be installed on amd64 without modifications, the dependencies will be at flaw. To fix it, add:
+<pre>
+Multi-Arch: foreign
+</pre>
+below Conflicts: in icaclient-i386/DEBIAN/control.
+
+==== Fixed in 12.1.4: platforms ====
+
+Change any instance of:
+<pre>
+       echo $Arch|grep "i[0-9]86" >/dev/null
+</pre>
+in icaclient-i386/DEBIAN/postinst to
+<pre>
+       echo $Arch|grep "i[3-6]86\|x86_64" >/dev/null
+</pre>
+
+==== Fixed in 12.1.4: nspluginwrapper ====
+
+As we only have 1 package of icaclient for both platforms, we cannot depend or recommend nspluginwrapper on just one of them (dpkg deficiency, I guess - you cannot use Depends: nspluginwrapper [amd64], as this is only valid in the source package).
+
+So you have to make sure nspluginwrapper is installed before icaclient is (on amd64 of course).
+
+=== Fixes for ctxusb ===
+
+==== Fix the version ====
+
+ctxusb will not tell you which build it is. I use the same build version number as the one accompanying the icaclient package, like this (in ctxusb-i386/DEBIAN/control):
+<pre>
+Version: 2.2.0.217911-1custom1
+</pre>
+
+==== Multi-arch ====
+
+The same "Multi-Arch: foreign" line in ctxusb-i386/DEBIAN/control is required as in icaclient (see above).
+
+==== License question ====
+
+The same changes as in icaclient need to be performed in ctxusb to get rid of the license question.
+
+=== Packing it back together ===
+
+{{{#!highlight bash
+sudo chown root.root icaclient-i386
+version=`cat icaclient-i386/DEBIAN/control |grep Version |cut -d ' ' -f 2`
+sudo dpkg -b icaclient-i386 icaclient_${version}_i386.deb
+
+sudo chown root.root ctxusb-i386
+version=`cat ctxusb-i386/DEBIAN/control |grep Version |cut -d ' ' -f 2`
+sudo dpkg -b ctxusb-i386 icaclient_${version}_i386.deb
+
+}}}
+
+== Other deployment topics to note ==
+
+The packages that are made according to the instructions above are drop-in replacements to the upstream one and unless broken by something outside of this scope, they should be over-writeable by a new upstream version of the packages.
+
+Unfortunately, some deployment topics are not possible to be fixed with just the packaging.
+
+=== multiverse/openmotif ===
+
+The wfcmgr binary requires openmotif to be installed. The library links with libXm, so you can either hack it by using lesstif or provide libmotif4. This library is in the multiverse repository, so you want to have it enabled on the client machines. 
+
+=== amd64 handling ===
+
+On amd64 you want to remove the upstream amd64 packages before installing the multi-arch enabled i386 packages. You also want to install nspluginwrapper before (required before 12.1.4) or at least during the installation of icaclient.
+
+=== nss-caused crash on amd64 ===
+
+If you are using any authentication mechanism other than local files (/etc/passwd, /etc/shadow), you need to install the 32-bit nss libraries needed for it. Depending on how multiarch-enabled those libraries are you can either just list them in Depends: section in icaclient-i386/DEBIAN/control or make your configuration manager install them on the client machines instead. It might turn up that you need to copy or have the single library files copied for you.
+
+Consider your /etc/nsswitch.conf file to see what are your entries in "passwd:" line
+
+==== ldap ====
+
+Pretty common in most scenarios. You need to install libnss-ldap:i386 package.
+
+==== db ====
+
+This is the NSS caching backend from <nowiki>[[http://www.padl.com/OSS/nss_updatedb.html|PADL]]</nowiki>. You need to have libnss-db:i386 package. I briefly remember that you may need to take the package apart and copy libnss_db.so* to /usr/lib32. As it depends on one of the libdb-4.? packages, you need to provide the libdb-4.? 32-bit as well.
+
+==== nis ====
+
+Wow. Are you sure you are not running Solaris on this machine? I'd guess you need libnss-nis:i386. I don't know if it supports multiarch.
+
+==== sss ====
+
+libnss-sss Recommends: sss, which pulls a 32-bit sss package. This does not make sense, you are good enough with 64-bit daemon running on the machine. So you want to install it with --no-install-recommends to skip installation of that.
+
+==== other ====
+
+If you have anything else, you are left to the company behind the auth mechanism you use. What you need is a 32-bit libnss of the mechanism and the 32-bit libraries it depends on.
+
+=== Automated deployment with CFEngine 3 ===
+
+In the attachment you can find the CFEngine 3 bundle used to deploy Citrix in our environment.
+
+While you read <nowiki>[[attachment:icaclient.cf]]</nowiki> you will find that it contains references back from Ubuntu Lucid, but since you are doing a fresh deployment, I guess you can skip it or remove the entries as no longer needed.
+----
+<nowiki>[[CategoryEnterprise]]</nowiki>

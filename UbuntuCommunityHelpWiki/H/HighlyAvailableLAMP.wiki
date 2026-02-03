@@ -1,0 +1,594 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+This page was written between 2009 and 2011 and is not tested for modern ubuntu versions. '''For a new tutorial on creating a Highly Available LAMP, please follow this link: https://help.ubuntu.com/community/HALAMP'''
+
+In this tutorial we will set up a highly available server providing Linux, Apache, MySQL, and PHP (LAMP) services to clients.  Should a server become unavailable, services provided by our cluster will continue to be available to client systems.
+
+Our highly available system will resemble the following:
+
+<nowiki>[[File:lampfix.jpg]]</nowiki>
+<pre>
+LAMP server1: node1.home.local IP address: 10.10.1.51
+LAMP server2: node2.home.local IP address: 10.10.1.52
+LAMP Server Virtual IP address: 10.10.1.50
+
+A Distributed Replicated Block Device (DRBD) will mirror /srv/data between node1 and node2
+</pre>
+
+To begin, set up two Ubuntu 9.04 (Jaunty Jackalope) systems. In this guide, the servers will be set up in a virtual environment using KVM-84. Using a virtual environment will allow us to add additional disk devices and NICs as needed.
+
+The following partition scheme will be used for the operating system installation:
+<pre>
+/dev/vda1 -- 10 GB / (primary' jfs, Bootable flag: on)
+/dev/vda5 -- 1 GB swap (logical)
+</pre>
+
+After the installation of a minimal Ubuntu install on both servers, we will install packages required to configure a bonded network interface, and in-turn assign static IP addresses to bond0 of node1 and node2. Using a bonded interface will prevent a single point of failure should the client accessible network fail.
+
+Be sure to disable apparmor on both nodes before beginning or systems will be unable to start required services.
+
+<pre>
+sudo invoke-rc.d apparmor kill
+sudo update-rc.d -f apparmor remove
+</pre>
+
+Install ifenslave.
+
+<pre>
+apt-get -y install ifenslave
+</pre>
+
+Append the following to /etc/modprobe.d/aliases.conf:
+<pre>
+alias bond0 bonding
+options bond0 mode=0 miimon=100 downdelay=200 updelay=200 max_bonds=2
+</pre>
+
+Modify our network configuration and assign eth0 and eth1 as slaves of bond0.
+
+Example /etc/network/interfaces:
+<pre>
+auto lo
+iface lo inet loopback
+
+auto eth0
+iface eth0 inet manual
+
+auto eth1
+iface eth1 inet manual
+
+auto bond0
+iface bond0 inet static
+        address 10.10.1.51
+        netmask 255.255.255.0
+        broadcast 10.10.1.255
+        network 10.10.1.0
+        gateway 10.10.1.1
+        up /sbin/ifenslave bond0 eth0
+        up /sbin/ifenslave bond0 eth1
+</pre>
+
+We do not need to define eth0 or eth1 in /etc/network/interfaces as they will be brought up when the bond comes up. I have included them for documentation purposes.
+
+Review the current status of the bonded interface.
+
+<pre>
+cat /proc/net/bonding/bond0 
+Example output:
+Ethernet Channel Bonding Driver: v3.3.0 (June 10, 2008)
+
+Bonding Mode: load balancing (round-robin)
+MII Status: up
+MII Polling Interval (ms): 100
+Up Delay (ms): 200
+Down Delay (ms): 200
+
+Slave Interface: eth0
+MII Status: up
+Link Failure Count: 0
+Permanent HW addr: 54:52:00:6d:f7:4d
+
+Slave Interface: eth1
+MII Status: up
+Link Failure Count: 0
+Permanent HW addr: 54:52:00:11:36:cf
+</pre>
+
+Please note: A bonded network interface supports multiple modes. In this example eth0 and eth1 are in an round-robin configuration.
+
+Shutdown both servers and add additional devices. We will add an additional disk that will contain the DRBD meta data and the data that is mirrored between the two servers.  We will also add an isolated network for the two servers to communicate and transfer the DRBD data.
+
+The following partition scheme will be used for the DRBD data:
+<pre>
+/dev/vdb1 -- 10 GB unmounted (primary) DRBD replication data and DRBD meta data
+</pre>
+
+Sample output from fdisk -l:
+<pre>
+Disk /dev/vda: 10.7 GB, 10737418240 bytes
+255 heads, 63 sectors/track, 1305 cylinders
+Units = cylinders of 16065 * 512 = 8225280 bytes
+Disk identifier: 0x000d570a
+
+   Device Boot      Start         End      Blocks   Id  System
+/dev/vda1   *           1        1244     9992398+  83  Linux
+/dev/vda2            1245        1305      489982+   5  Extended
+/dev/vda5            1245        1305      489951   82  Linux swap / Solaris
+
+Disk /dev/vdb: 10.7 GB, 10737418240 bytes
+16 heads, 63 sectors/track, 20805 cylinders
+Units = cylinders of 1008 * 512 = 516096 bytes
+Disk identifier: 0xf505afa1
+
+   Device Boot      Start         End      Blocks   Id  System
+/dev/vdb1               1       20805    10485688+  83  Linux
+</pre>
+
+The isolated network between the two servers will be:
+<pre>
+LAMP server1: node1-private IP address: 10.10.10.51
+LAMP server2: node2-private IP address: 10.10.10.52
+</pre>
+
+We will again bond these two interfaces. If our server is to be highly available, we should eliminate all single points of failure.
+
+Append the following to /etc/modprobe.d/aliases.conf:
+<pre>
+alias bond1 bonding
+options bond1 mode=0 miimon=100 downdelay=200 updelay=200
+</pre>
+
+Example /etc/network/interfaces:
+<pre>
+auto lo
+iface lo inet loopback
+
+auto eth0
+iface eth0 inet manual
+
+auto eth1
+iface eth1 inet manual
+
+auto eth2
+iface eth2 inet manual
+
+auto eth3
+iface eth3 inet manual
+
+auto bond0
+iface bond0 inet static
+        address 10.10.1.51
+        netmask 255.255.255.0
+        broadcast 10.10.1.255
+        network 10.10.1.0
+        gateway 10.10.1.1
+        up /sbin/ifenslave bond0 eth0
+        up /sbin/ifenslave bond0 eth1
+
+auto bond1
+iface bond1 inet static
+        address 10.10.10.51
+        netmask 255.255.255.0
+        broadcast 10.10.10.255
+        network 10.10.10.0
+        up /sbin/ifenslave bond1 eth2
+        up /sbin/ifenslave bond1 eth3
+</pre>
+
+Ensure that /etc/hosts on both nodes contains the names and IP addresses of the two servers.
+
+Example /etc/hosts:
+<pre>
+127.0.0.1	localhost
+10.10.1.51	node1.home.local    node1
+10.10.1.52	node2.home.local    node2
+10.10.10.51	node1-private
+10.10.10.52	node2-private
+</pre>
+
+Install NTP to ensure both servers have the same time.
+
+<pre>
+apt-get -y install ntp
+</pre>
+
+You can verify the time is in sync with the date command.
+
+At this point, you can either modprobe the second bond, or restart both servers.
+
+Install DRBD and heartbeat.
+
+<pre>
+apt-get -y install drbd8-utils heartbeat
+</pre>
+
+As we will be using heartbeat with DRBD, we need to change ownership and permissions on several DRBD related files on both servers.
+
+<pre>
+chgrp haclient /sbin/drbdsetup
+chmod o-x /sbin/drbdsetup
+chmod u+s /sbin/drbdsetup
+chgrp haclient /sbin/drbdmeta
+chmod o-x /sbin/drbdmeta
+chmod u+s /sbin/drbdmeta
+</pre>
+
+Using /etc/drbd.conf as an example create your resource configuration. We will define a single resource.
+
+Example /etc/drbd.conf:
+<pre>
+resource lamp {
+        protocol C;
+ 
+        handlers {
+        pri-on-incon-degr "echo o > /proc/sysrq-trigger ; halt -f";
+        pri-lost-after-sb "echo o > /proc/sysrq-trigger ; halt -f";
+        local-io-error "echo o > /proc/sysrq-trigger ; halt -f";
+        outdate-peer "/usr/lib/heartbeat/drbd-peer-outdater -t 5";      
+        }
+
+        startup {
+        degr-wfc-timeout 120;
+        }
+
+        disk {
+        on-io-error detach;
+        }
+
+        net {
+        cram-hmac-alg sha1;
+        shared-secret "password";
+        after-sb-0pri disconnect;
+        after-sb-1pri disconnect;
+        after-sb-2pri disconnect;
+        rr-conflict disconnect;
+        }
+
+        syncer {
+        rate 100M;
+        verify-alg sha1;
+        al-extents 257;
+        }
+
+        on node1 {
+        device  /dev/drbd0;
+        disk    /dev/vdb1;
+        address 10.10.10.51:7788;
+        meta-disk internal;
+        }
+
+        on node2 {
+        device  /dev/drbd0;
+        disk    /dev/vdb1;
+        address 10.10.10.52:7788;
+        meta-disk internal;
+        }
+}
+</pre>
+
+Duplicate the DRBD configuration to the other server.
+
+<pre>
+scp /etc/drbd.conf root@10.10.1.52:/etc/
+</pre>
+
+Initialize the meta-data disk on both servers.
+
+<pre>
+[node1]drbdadm create-md lamp
+[node2]drbdadm create-md lamp
+</pre>
+
+If a reboot was not performed post-installation of DRBD, the module for DRBD will not be loaded.
+
+Start the DRBD service (which will load the module).
+
+<pre>
+[node1]/etc/init.d/drbd start
+[node2]/etc/init.d/drbd start
+</pre>
+
+Decide which server will act as a primary for the DRBD device that will contain the LAMP configuration files and initiate the first full sync between the two servers.
+
+We will execute the following on node1:
+
+<pre>
+[node1]drbdadm -- --overwrite-data-of-peer primary lamp
+</pre>
+
+Review the current status of DRBD.
+
+<pre>
+cat /proc/drbd 
+Example output:
+IT-hash: 9ba8b93e24d842f0dd3fb1f9b90e8348ddb95829 build by ivoks@ubuntu, 2009-01-17 07:49:56
+ 0: cs:SyncSource ro:Primary/Secondary ds:UpToDate/Inconsistent C r---
+    ns:761980 nr:0 dw:0 dr:769856 al:0 bm:46 lo:10 pe:228 ua:256 ap:0 ep:1 wo:b oos:293604
+        [=============>......] sync'ed: 72.3% (293604/1048292)K
+        finish: 0:00:13 speed: 21,984 (19,860) K/sec
+ 1: cs:Connected ro:Secondary/Secondary ds:Inconsistent/Inconsistent C r---
+    ns:0 nr:0 dw:0 dr:0 al:0 bm:0 lo:0 pe:0 ua:0 ap:0 ep:1 wo:b oos:10485692
+
+I prefer to wait for the initial sync to complete before proceeding, however, waiting is not a requirement.
+</pre>
+
+Once completed, format /dev/drbd0 and mount it.
+
+<pre>
+[node1]mkfs.jfs -q /dev/drbd0
+[node1]mkdir -p /srv/data
+[node1]mount /dev/drbd0 /srv/data
+</pre>
+
+To ensure replication is working correctly, create data on node1 and then switch node2 to be primary.
+
+<pre>
+[node1]dd if=/dev/zero of=/srv/data/test.zeros bs=1M count=100
+</pre>
+
+Switch to node2 and make it the primary DRBD device:
+<pre>
+On node1:
+[node1]umount /srv/data
+[node1]drbdadm secondary lamp
+On node2:
+[node2]mkdir -p /srv/data
+[node2]drbdadm primary lamp
+[node2[mount /dev/drbd0 /srv/data
+</pre>
+
+You should now see the 100MB file in /srv/data on node2. We will now delete this file and make node1 the primary DRBD server to ensure replication is working in both directions.
+
+Switch to node1 and make it the primary DRBD device.
+
+<pre>
+On node2:
+[node2]rm /srv/data/test.zeros
+[node2]umount /srv/data
+[node2]drbdadm secondary lamp
+On node1:
+[node1]drbdadm primary lamp
+[node1]mount /dev/drbd0 /srv/data
+</pre>
+
+Performing an ls /srv/data on node1 will verify the file is now removed and synchronization successfully occured in both directions.
+
+Next we will install packages to support the LAMP suite. The plan is to have heartbeat control the services instead of init, thus we will prevent LAMP services from starting with the normal init routines.  We will then place the LAMP configuration and data files on the DRBD device so both servers will have the information available when they are the primary DRBD device.
+
+Install LAMP packages on node1 and node2.
+
+<pre>
+[node1]tasksel install lamp-server
+[node2]tasksel install lamp-server
+</pre>
+
+Please note: You will be prompted to create a MySQL root password during the installation process.
+
+Temporarily stop all LAMP services.
+
+<pre>
+[node1]/etc/init.d/apache2 stop
+[node1]/etc/init.d/mysql stop
+[node1]/etc/init.d/mysql-ndb stop
+[node1]/etc/init.d/mysql-ndb-mgm stop
+[node2]/etc/init.d/apache2 stop
+[node2]/etc/init.d/mysql stop
+[node2]/etc/init.d/mysql-ndb stop
+[node2]/etc/init.d/mysql-ndb-mgm stop
+</pre>
+
+Verify all LAMP services are stopped by viewing the running processes and the listening network connections.
+
+<pre>
+[node1]ps aux | grep mysql
+[node1]ps aux | grep apache
+[node1]ss -at
+</pre>
+
+Remove LAMP from the init scripts.
+
+<pre>
+[node1]update-rc.d -f apache2 remove
+[node1]update-rc.d -f mysql remove
+[node1]update-rc.d -f mysql-ndb remove
+[node1]update-rc.d -f mysql-ndb-mgm remove
+[node2]update-rc.d -f apache2 remove
+[node2]update-rc.d -f mysql remove
+[node2]update-rc.d -f mysql-ndb remove
+[node2]update-rc.d -f mysql-ndb-mgm remove
+</pre>
+
+Relocate LAMP configuration to /srv/data.
+
+<pre>
+[node1]mkdir -p /srv/data/etc
+[node1]mkdir -p /srv/data/var/lib
+[node1]mkdir -p /srv/data/var/log
+[node1]mv /etc/apache2 /srv/data/etc
+[node1]mv /etc/php5 /srv/data/etc
+[node1]mv /etc/mysql /srv/data/etc
+[node1]mv /var/lib/mysql /srv/data/var/lib
+[node1]mv /var/lib/php5 /srv/data/var/lib
+[node1]mv /var/www /srv/data/var
+[node1]mv /var/log/apache2 /srv/data/var/log
+[node1]mv /var/log/mysql /srv/data/var/log
+[node1]ln -s /srv/data/etc/apache2 /etc/apache2
+[node1]ln -s /srv/data/etc/php5 /etc/php5
+[node1]ln -s /srv/data/etc/mysql /etc/mysql
+[node1]ln -s /srv/data/var/lib/mysql /var/lib/mysql
+[node1]ln -s /srv/data/var/lib/php5 /var/lib/php5
+[node1]ln -s /srv/data/var/www /var/www
+[node1]ln -s /srv/data/var/log/apache2 /var/log/apache2
+[node1]ln -s /srv/data/var/log/mysql /var/log/mysql
+[node2]rm -rf /etc/apache2
+[node2]rm -rf /etc/php5
+[node2]rm -rf /etc/mysql
+[node2]rm -rf /var/lib/mysql
+[node2]rm -rf /var/lib/php5
+[node2]rm -rf /var/www
+[node2]rm -rf /var/log/apache2
+[node2]rm -rf /var/log/mysql
+[node2]ln -s /srv/data/etc/apache2 /etc/apache2
+[node2]ln -s /srv/data/etc/php5 /etc/php5
+[node2]ln -s /srv/data/etc/mysql /etc/mysql
+[node2]ln -s /srv/data/var/lib/mysql /var/lib/mysql
+[node2]ln -s /srv/data/var/lib/php5 /var/lib/php5
+[node2]ln -s /srv/data/var/www /var/www
+[node2]ln -s /srv/data/var/log/apache2 /var/log/apache2
+[node2]ln -s /srv/data/var/log/mysql /var/log/mysql
+</pre>
+
+Last but not least configure heartbeat to failover a virtual IP address, Apache,  and MySQL in case a node fails.
+
+On node1, define the cluster within /etc/heartbeat/ha.cf.
+
+Example /etc/heartbeat/ha.cf:
+<pre>
+logfacility     local0
+keepalive 2
+deadtime 30
+warntime 10
+initdead 120
+bcast bond0
+bcast bond1
+node node1
+node node2
+</pre>
+
+On node1, define the authentication mechanism within /etc/heartbeat/authkeys the cluster will use.
+
+Example /etc/heartbeat/authkeys:
+<pre>
+auth3
+3 md5 password
+</pre>
+
+Change the permissions of /etc/heartbeat/authkeys.
+
+<pre>
+[node1]chmod 600 /etc/heartbeat/authkeys
+</pre>
+
+On node1, define the resources that will run on the cluster within /etc/heartbeat/haresources. We will define the master node for the resource, the Virtual IP address, the file systems used, and the service to start.
+
+Example /etc/heartbeat/haresources:
+<pre>
+node1 IPaddr::10.10.1.50/24/bond0 drbddisk::lamp Filesystem::/dev/drbd0::/srv/data::jfs mysql-ndb-mgm mysql-ndb mysql apache2
+</pre>
+
+Copy the cluster configuration files from node1 to node2.
+
+<pre>
+[node1]scp /etc/heartbeat/ha.cf root@10.10.1.52:/etc/heartbeat/
+[node1]scp /etc/heartbeat/authkeys root@10.10.1.52:/etc/heartbeat/
+[node1]scp /etc/heartbeat/haresources root@10.10.1.52:/etc/heartbeat/
+</pre>
+
+At this point you can either:
+
+   1. Unmount /srv/data, make node1 secondary for drbd, and start heartbeat
+   2. Reboot both servers 
+
+To test connectivity to our new Highly Available LAMP server, we will set up a Content Management System (CMS) that uses the LAMP stack.  I am a fan of Joomla, so this will be the CMS used in this turorial.
+
+You can follow the instructions located at the <nowiki>[[Joomla|Ubuntu Community Documentation Joomla Page]]</nowiki> to configure Joomla.  You will find detailed instructions along with screenshots.
+
+I will however, include a few simple instructions here to have a more complete tutorial.
+
+Complete the following steps:
+
+1.  Download Joomla
+2.  Unpack Joomla
+3.  Create database
+4.  Configure Joomla
+4.  Test failover
+
+Joomla 1.5.10 was the current version when this document was written.
+
+Download Joomla from the <nowiki>[[http://www.joomla.org/download.html|Joomla download page.]]</nowiki>
+
+<pre>
+[node1]wget http://joomlacode.org/gf/download/frsrelease/9910/37906/Joomla_1.5.10-Stable-Full_Package.tar.bz2
+</pre>
+
+Unpack Joomla.  We will allow Joomla to be our default Apache site.
+
+<pre>
+[node1]tar xjf Joomla_1.5.10-Stable-Full_Package.tar.bz2 -C /var/www
+</pre>
+
+Permissions may be set to the UID of the individual that created the archive. Change the ownership to the Apache user.
+
+<pre>
+[node1]chown -R www-data:www-data /var/www/*
+</pre>
+
+Create the MySQL database and user for Joomla.
+
+<pre>
+mysql -u root -p
+create database joomla;
+GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, INDEX, ALTER, CREATE TEMPORARY TABLES, LOCK TABLES ON joomla.* TO 'yourusername'@'localhost' IDENTIFIED BY 'password';
+FLUSH PRIVILEGES;
+quit
+</pre>
+
+Next we will configure Joomla to use our MySQL database using the database and credentials we created.
+
+Remove /var/www/index.html.  This file was installed when Apache was installed.
+
+<pre>
+[node1]rm /var/www/index.html
+</pre>
+
+To ease installation, create the file which stores Joomla's configuration information and temporarily allow it the be writable by the Apache user.  
+
+<pre>
+touch /var/www/configuration.php
+chown www-data:www-data /var/www/configuration.php
+chmod 644 /var/www/configuration.php
+</pre>
+
+Browse to http://10.10.1.50 (our Virtual IP address).
+
+You will be presented with the configuarion of Joomla.  Be sure to enter the previously created database name and username/password.
+
+For testing purpose install the example data.
+
+Once you have stepped through the Joomla configuration, you will be prompted to remove the installation directory.
+
+Remove the installation directory.
+
+<pre>
+[node1]rm -rf /var/www/installation
+</pre>
+
+Update the configuration file to be read only.
+
+<pre>
+[node1]chmod 444 /var/www/configuration.php
+</pre>
+
+The configuration of our highly available LAMP server is now complete.
+
+You can simply test the system by changing the pre-existing example data, or by creating new articles.
+
+Once you have created/modified the Joomla site, failover to the redundant node.
+
+<pre>
+[node1]/etc/init.d/heartbeat stop
+</pre>
+
+The changes should have been propagated to node2.  Make additional changes and failover to node1.  Starting heartbeat on node1 will cause the resource to failback.
+
+<pre>
+[node1]/etc/init.d/heartbeat start
+</pre>

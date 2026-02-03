@@ -1,0 +1,258 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+This page presents two methods of using LTTng to profile applications on Ubuntu Touch
+* <nowiki>[[#Timeline profiling with LTTng 2.9 and TraceCompass|Timeline profiling with LTTng and TraceCompass]]</nowiki> describes how to use LTTng to trace '''all''' the calls your application does to a library (Qt, Mir, etc) as long as you recompile the library using additional GCC flags. The result can be visualized in a clean timeline that shows the call stack and helps you detect performance bottlenecks in your application. <nowiki>[[attachment:faenil_profiling.png|Here's an example]]</nowiki> of the information that this method provides.
+
+* <nowiki>[[#LTTNG Profiling with default libraries|LTTng with default libraries]]</nowiki> describes how to trace the LTTng tracepoints already bundled in the system libraries shipped on device by default. It is much easier to setup, but also provides a much less detailed trace.
+
+== Timeline profiling with LTTng 2.9 and TraceCompass ==
+
+=== Why ===
+Just like when using the QML profiler provided by QtCreator, you might need to profile C++ code while looking for performance bottlenecks in your application.
+In particular, if you want to know '''when''' functions are called in order to detect what is causing your apps to miss frames, you will need to be able to visualize the call stack in a timeline.
+
+Profilers like perf and callgrind won't help here, because they don't show that information.
+
+Ideally, we want a tool with the following features:
+* a timeline that shows '''when''' the functions we want to profile were called, laid out in a call stack
+* automatic debuginfo resolution and function names demangling, to make it easier to see what function is being called at which point (looking at function addresses is only useful as long as you know what functions those addresses actually refer to!)
+* availability as free software, possibly opensource
+
+There was no such tool '''until a few weeks ago''', when <nowiki>[[lttng.org | LTTng 2.8]]</nowiki> and <nowiki>[[tracecompass.org | TraceCompass]]</nowiki> 2.0 were released!
+
+Here's a screenshot of a portion of the startup of Ubuntu Touch's Camera application, taken using an instrumented version of the QtDeclarative library:
+
+<nowiki>[[attachment:faenil_profiling.png | <nowiki>[[File:faenil_profiling.png | Result | width=600]]</nowiki></nowiki>]]
+
+=== Setup ===
+
+We're going to do everything inside a chroot on your device, so that you don't have to modify anything in your system. This is especially true for people who develop apps on the same device that they use as daily driver and hence need a reliable system.
+
+First make sure your device is connected via USB and you can access it using the "phablet-shell" command (for more info, see <nowiki>[[https://developer.ubuntu.com/en/phone/devices/installing-ubuntu-for-devices/#prepare-desktop | here]]</nowiki>)
+
+The setup process involves the following steps:
+# <nowiki>[[#Download the helper scripts|Download the helper scripts]]</nowiki>
+# <nowiki>[[#Create the chroot|Create the chroot]]</nowiki>
+# <nowiki>[[#Build LTTng 2.9|Build LTTng 2.9]]</nowiki>
+# <nowiki>[[#Build the instrumented libraries | Build the instrumented version of the library-binary]]</nowiki> you want to profile
+
+Once you've completed the setup, head over to the <nowiki>[[#Profiling|Profiling]]</nowiki> section to start profiling!
+
+==== Download the helper scripts ====
+
+If you do not have git installed (which is the case if you have an unmodified system image):
+<pre>
+cd ~
+mkdir lttng_tracing_scripts
+cd lttng_tracing_scripts
+wget https://raw.githubusercontent.com/faenil/lttng_tracing_scripts/master/tracing-helper
+</pre>
+
+Otherwise, just clone the repo:
+<pre>
+cd ~
+git clone https://github.com/faenil/lttng_tracing_scripts
+</pre>
+
+==== Create the chroot ====
+<pre>
+./tracing-helper create-chroot
+</pre>
+
+==== Build LTTng 2.9 ====
+LTTng 2.8 is affected by a <nowiki>[[https://bugs.lttng.org/issues/1035|bug]]</nowiki> that causes LTTng not to dump state info about the libraries which are NOT directly linked to the executable/library we want to trace.
+
+You can work that around by using LTTng 2.8 and LD_PRELOADing the libraries you want to trace, although that doesn't work well with, for instance, Mir plugins which are dynamically loaded (you can't LD_PRELOAD them).
+
+For that reason we have to build LTTng 2.9 (build time: about 3mins on Arale for the UST, 7mins for lttng-tools)
+
+===== Build LTTng-UST =====
+Enter the chroot (if you're not inside the chroot already) and build LTTng-tools:
+<pre>
+./tracing-helper enter-chroot
+cd ~
+sudo apt-get update
+sudo apt-get install git
+git clone https://github.com/lttng/lttng-ust.git
+sudo apt-get build-dep ust
+cd lttng-ust
+./bootstrap
+./configure --disable-man-pages
+make -j8
+sudo make install
+sudo ldconfig
+</pre>
+
+===== Build LTTng-tools =====
+Enter the chroot (if you're not inside the chroot already) and build LTTng-tools:
+<pre>
+./tracing-helper enter-chroot
+cd ~
+git clone https://github.com/lttng/lttng-tools.git
+sudo apt-get build-dep lttng-tools
+sudo apt-get install flex
+cd lttng-tools
+./bootstrap
+./configure --with-lttng-ust-prefix=/usr/local --disable-man-pages
+make -j8
+sudo make install
+</pre>
+
+Cool, LTTng is now set up!
+
+==== Build the instrumented libraries ====
+The main requirement of this process is that you have to recompile the libraries you want to profile using additional GCC flags.
+
+First of all, enter the chroot
+<pre>
+./tracing-helper enter-chroot
+</pre>
+
+Then download the sourcecode of the libraries you want to rebuild, and build them (following their process) with the following additional GCC flags:
+
+<pre>
+-finstrument-functions -g
+</pre>
+
+Let me show a couple of examples:
+
+===== CMake-based projects =====
+Rebuild them adding the following to the cmake call:
+<pre>
+-DCMAKE_CXX_FLAGS="-fno-omit-frame-pointer -finstrument-functions -finstrument-functions-exclude-file-list=/usr/include -g ${CMAKE_CXX_FLAGS}"
+</pre>
+
+The same for CMAKE_C_FLAGS, if your project also has .c files.
+
+===== qmake-based projects =====
+Rebuild them adding the following to the qmake call:
+<pre>
+QMAKE_CXXFLAGS+="-fno-omit-frame-pointer -finstrument-functions -finstrument-functions-exclude-file-list=/usr/include -g" CONFIG+="release force_debug_info qml_debug" CONFIG-=debug
+</pre>
+
+The same for QMAKE_CFLAGS, if your project also has .c files.
+
+You can omit -finstrument-functions-exclude-file-list if you don't mind profiling all the inline libstdc++ calls and friends.
+
+If you get "undefined reference to `int QGenericAtomicOps<QBasicAtomicOps<4> >::load<int>(int const&)'" (SEE <nowiki>[[https://bugreports.qt.io/browse/QTBUG-35884|QTBUG-35884]]</nowiki> for more details) add
+<pre>
+-finstrument-functions-exclude-file-list=qgenericatomic.h
+</pre>
+
+to the list of additional compiler flag (this is assuming you have not excluded /usr/include already, otherwise that should take care of the QGenericAtomicOps problem as well)
+
+=== Profiling ===
+'''Please make sure you have completed the <nowiki>[[#Setup]]</nowiki> before reading this section.'''
+
+There are mainly 2 things we want to be able to do:
+* profile an application (i.e. a Mir client)
+* profile an application '''and''' the Mir server it is connected to (usually Unity8)
+
+==== Profiling an application (Mir client) ====
+'''Note: if you also want to profile the Mir server your application will connect to, first follow the server profiling <nowiki>[[#Profiling an application (Mir client) and Unity8 (Mir server)|instructions]]</nowiki>.''' 
+
+First of all, you have to make sure the environment variables are properly setup. To do that, modify the "client_vars_customizable()" function which is at the top of the tracing-helper script, adding the paths to the instrumented libraries that you want to trace. 
+Here some hints about the environment variables you might want to tweak:
+* LD_LIBRARY_PATH, so that it points to the paths of the libraries you want to trace
+* If you want to trace QtUbuntu, make sure you also add QT_QPA_PLATFORM_PLUGIN_PATH=<instrumented_qtubuntu_lib_path>/qt5/plugins/platforms
+* If you want to trace the Mir client libs also add MIR_CLIENT_PLATFORM_PATH=<mir_lib_path>/client-modules
+
+Once that's done, enter the chroot and launch/trace the app:
+<pre>
+./tracing-helper enter-chroot
+./tracing-helper trace <app> <args>
+</pre>
+
+Once you're done tracing, just Ctrl+C to kill the application. That will cause the tracing process to also stop and save the data in $HOME/lttng-traces .
+
+==== Profiling an application (Mir client) and Unity8 (Mir server) ====
+If you want to also see what happens in the Mir server that the application is connected to (i.e. Unity8), you can use the tracing-helper script to relaunch Unity8 so that it uses the instrumented version of the libraries you want to trace.
+
+As with the client, you have to modify the "server_vars_customizable()" function at the top of the tracing-helper script to point to the paths where your instrumented libraries reside. All the hints provided in the <nowiki>[[#Profiling an application (Mir client)|client]]</nowiki> section still apply, moreover:
+* If you want to trace the Mir libs, you have to add both '''MIR_CLIENT_PLATFORM_PATH=<mir_lib_path>/client-modules''' and '''MIR_SERVER_PLATFORM_PATH=<mir_lib_path>/server-modules'''
+
+Once you have modified the script to export the correct environment variables, restart Unity8 with the following commands:
+<pre>
+./tracing-helper enter-chroot
+./tracing-helper restartUnity8
+</pre>
+
+Now open another phablet-shell session where you'll start the Mir client (the app you want to trace) and the tracing process using the instructions provided in the <nowiki>[[#Profiling an application (Mir client)|client section]]</nowiki>.
+
+==== Visualize the resulting trace ====
+
+First of all, grab the traces from the device. The files are in $HOME/lttng-traces. You can pull the files using "adb pull" or any tool you are accustomed to.
+<pre>
+adb pull <path_to_chroot>/home/phablet/lttng-traces
+</pre>
+
+You will need a modified version of TraceCompass, which can handle the new library loading events added in LTTng 2.9, plus additional performance fixes (compared to the released version) and a spinner that lets you filter events based on their duration, to avoid cluttering the UI with tiny events and focus on the big bottlenecks.
+
+On your host, get the sources of the modified TraceCompass and build it using the following commands:
+<pre>
+git clone https://github.com/faenil/tracecompass.git
+cd tracecompass
+sudo apt-get install maven
+mvn clean install -Dmaven.test.skip=true
+</pre>
+(see  <nowiki>[[http://git.eclipse.org/c/tracecompass/org.eclipse.tracecompass.git/about/|the upstream readme]]</nowiki> for more info)
+
+Once you're done building TraceCompass, open it and load the trace file.
+
+In order to get the function names resolution, you need to get the instrumented libraries that you recompiled on the device, and move them to your host (they don't have to be instrumented, they just need to have the debug symbols) '''keeping the directory structure''' i.e. 
+<pre>
+adb pull /usr/lib/libFoo.so <MY_PATH_ON_HOST>/usr/lib/libFoo.so
+</pre>
+
+Then, on TraceCompass, set <MY_PATH_ON_HOST> as the root path used in the resolution of function names
+(see <nowiki>[[http://archive.eclipse.org/tracecompass/doc/org.eclipse.tracecompass.doc.user/LTTng-UST-Analyses.html|the upstream documentation]]</nowiki>, section "Binary file location configuration")
+
+NOTE: The function names resolution is very expensive beacuse it involves calls to the addr2line process.
+If TraceCompass gets too slow, temporarily reset the root path used for function name resolution to scroll
+the trace and then set it back to <MY_PATH_ON_HOST>.
+
+== LTTNG Profiling with default libraries ==
+
+This section describes how to record the LTTng tracepoints emitted by the system libraries while your application is running.
+
+Unlike <nowiki>[[#Timeline profiling with LTTng 2.9 and TraceCompass|timeline profiling]]</nowiki>, this method does not require building LTTng yourself, does not use a chroot and does not require rebuilding the libraries you want to trace.
+
+However, that means LTTng will only record the tracepoints which have already been bundled in the libraries which are shipped with the Ubuntu Touch image.
+
+If you want to track '''every''' call that your application makes, e.g you want to see how your application uses Mir or Qt, QtUbuntu, system libraries and the likes, please refer to the <nowiki>[[#Timeline profiling with LTTng 2.9 and TraceCompass|timeline profiling]]</nowiki> chapter.
+
+=== Setup ===
+
+Both on the device and on your computer:
+
+<pre>
+sudo apt-get install lttng-tools babeltrace
+</pre>
+
+=== Profiling ===
+
+'''On laptop:'''
+
+<pre>
+lttng-relayd -d
+babeltrace --input-format lttng-live net://localhost/host/ubuntu-phablet/remotesession
+</pre>
+
+'''On device:'''
+
+<pre>
+initctl set-env --global UBUNTU_APP_LAUNCH_LTTNG_ENABLED=TRUE
+lttng create remotesession --live --set-url net://YOUR_COMPUTER_IP
+lttng enable-event -u -a
+lttng start
+</pre>
+
+Then launch an app from the dash.

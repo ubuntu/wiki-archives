@@ -1,0 +1,164 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+{| class="wikitable"
+|-
+| <tablestyle="float:right; width:40%; background:#F1F1ED; margin: 0 0 1em 1em;" style="padding:0.5em;">'''Table of Contents'''<<BR>>
+|}
+
+* '''Launchpad Entry''': UbuntuSpec:pam-config-framework
+* '''Created''': 2008-07-08
+* '''Contributors''': SteveLangasek
+* '''Packages affected''': pam, auth-client-config, libpam-*
+
+=== Summary ===
+
+To develop a declarative syntax for PAM modules to express the features they support, and tools to use this information to present a debconf-based interface to users (including sensible defaults) for enabling/disabling modules in the PAM config, `/etc/pam.d/common-*`.
+
+=== Release Note ===
+
+This section should include a paragraph describing the end-user impact of this change.  It is meant to be included in the release notes of the first release in which it is implemented.  (Not all of these will actually be included in the release notes, at the release manager's discretion; but writing them is a useful exercise.)
+
+It is mandatory.
+
+=== Rationale ===
+
+Currently, there is no easy way to integrate new PAM modules into the system configuration.  The best available option is `auth-client-config`, which is not scalable because complete PAM profiles must be registered centrally and there are various PAM modules that want to be used in combination with others, resulting in a geometric explosion of options.  We need a way for individual PAM modules, including third-party modules, to declare themselves to the system so that users can easily enable or disable their most straightforward functionality at install time.
+
+=== Use Cases ===
+
+ 1. Lenny upgrades his existing Ubuntu system, pulling in the new version of `libpam-runtime`.  He has never modified his /etc/pam.d/ config files.  His config must be automatically converted to the new `pam_unix`-based defaults, even if other non-default pam module packages are installed, so that the upgrade does not disrupt authentication on his system.
+
+ 1. Arnold upgrades his existing Ubuntu system, pulling in the new version of `libpam-runtime`.  He has modified `/etc/pam.d/common-auth` for his use.  He should be prompted on upgrade whether to accept the new configuration schema, with a default of "no".
+
+ 1. Carmen has installed a new Ubuntu system with the new PAM configuration support.  She then installs the `libpam-krb5` package.  Kerberos-based authentication is automatically configured for her without prompting.
+
+ 1. Carmen wishes to disable Kerberos authentication because of a problem with her site's infrastructure.  She launches a configuration tool from the System menu, which brings up a debconf UI permitting her to disable the krb5 authentication profile.
+
+=== Assumptions ===
+
+* Debconf is the correct interface to use for management of PAM config files
+* It is possible to reasonably model the vast majority of PAM configuration choices as a multiselect of per-module configuration profiles
+* When enabling a module profile will not break authentication for the existing system, it is generally reasonable to enable such a profile on install without prompting the user.
+
+=== Design ===
+
+* Declarative syntax for individual PAM modules to specify how they can be used:
+** A single PAM module package may declare multiple profiles, for the same module or for multiple modules in the same package.
+** Each profile declares the usage for one or more module type (auth/acct/session/passwd).
+** Each profile must provide a default form and optional "initial", "medial", and "isolate" forms to account for configuration differences when the module(s) is (are) at different points in the stack (e.g., "try_first_pass").
+* As a result, each module profile should not attempt to impose requirements on how other modules are stacked; it should be sufficient for each module to declare its own behavior so that config fragments are genuinely stackable.
+** In addition to supporting the full range of Linux-PAM options for the pam.d control field, an additional "end" keyword is supported when using the square-bracketed extended syntax, meaning "jump to the end of the current substack".
+** Profiles can declare themselves as enabled by default using "Default: yes"; if not declared the profile is disabled by default.
+** Profiles must use the Conflicts field to declare that they cannot (or are not meant to be) used in conjunction with another profile (e.g.: pam_smbpasswd "migrate" vs. pam_smbpass "auth"; "likewise-open" vs. "winbind").
+** A profile which declares it implements the <code>session</code> module type may also use the field <code>Session-Interactive-Only: yes</code> to indicate it should only be used in sessions for interactive services (e.g.: login, ssh, gdm).
+** There is a mandatory Priority field indicating the order in which the module should be stacked.  Priorities are evaluated separately for each of the Primary and Additional sections, with the highest-priority modules listed first.  Priorities should be calculated using the following assigned points:
+** password profile that provides configurable password strength checking: 1024 points
+** profile that authenticates against a central network service, with rules to exclude administrative/system accounts: 512 points
+** profile that provides local authentication: 256 points
+** profile that takes strong measures to prevent password eavesdropping (strong crypto for network services; password hashes stored in hardware in non-queryable form for local authentication): 128 points
+** profile that supports delegation of credentials for single sign-on: 64 points
+
+* Package config declarations are shipped in the packages in /usr/share/pam-configs, and are not user-editable.
+** no intention to support multiple paths for these configurations; if users want to make changes that are not tied to a package, they should do so directly in the PAM configs
+** this means in turn that the framework should, to the maximum extent possible, DTRT when the `/etc/pam.d/common-*` files are edited by users and leave references to unknown modules untouched; this unfortunately can only ever be a heuristic since user changes to the config may include editing of lines created by the framework
+*** must support the case where a user has added module options to a config line, including identifying such options as being associated with the system-provided config
+*** may handle the case that config-provided options are deleted by the user, but this is not required and should be regarded as unsupported due to the necessary heuristics
+*** if the user hand-edits `/etc/pam.d/common-*` and interposes modules that can't be back-associated with package-provided configs, we should punt to all-manual configuration unless the user explicitly requests an overwrite
+*** how do we handle the case where a package's config drops an option or a module on upgrade?
+
+* Selection of configs is done with a multiselect debconf interface, invoked by means of a script owned by the `libpam-runtime` package (i.e., the package which owns `/etc/pam.d/common-*`).
+
+=== Implementation ===
+
+==== PAM stack layout ====
+** Stack:
+<pre>
+## prime the stack with a positive return value if there isn't one already;
+## this avoids us returning an error just because nothing sets a success code
+## since the auth modules below will each just jump around
+   auth    required                        pam_permit.so
+## here are the per-package snippets (the "Primary" block)
+   auth    [success=2 default=ignore]      pam_krb5.so ignore_root
+   auth    [success=1 default=ignore]      pam_unix.so nullok_secure try_first_pass
+## here's the fallback if no module succeeds
+   auth    requisite                       pam_deny.so
+## and here are more per-package snippets (the "Additional" block)
+   auth    optional                        pam_smbpass.so migrate
+</pre>
+
+==== config file format ====
+* Config files are RFC822 stanza-based, à la Debian control files.
+* Profiles should be shipped in the package providing the module (or in a package depending on the module), and installed under `/usr/share/pam-configs/`.  File names should be short and descriptive (e.g., matching the package or module name).
+* As a special exception, libpam-runtime as the package which controls the default `/etc/pam.d/common-*` files will ship the default `unix` profile without depending on `libpam-modules` in order to avoid a circular dependency.
+* Examples:
+** `/usr/share/pam-configs/unix`:
+<pre>
+   Name: Unix authentication
+   Default: yes
+   Priority: 1
+   Conflicts: unix-session-only
+   Auth-Type: Primary
+   Auth:
+       [success=end default=ignore]        pam_unix.so nullok_secure try_first_pass
+   Auth-Initial:
+       [success=end default=ignore]        pam_unix.so nullok_secure
+</pre>
+
+** "Primary" == find any one that is okay
+** "Additional" == run all without regard to success of other "Additional" modules
+
+==== module package implementation ====
+Packages implementing PAM profiles under this spec should call `pam-auth-update` with the `--package` argument in their postinst script.  In the prerm script, these packages should call `pam-auth-update --package --remove` only when the prerm has been called with `remove` as its first argument; e.g.:
+<pre>
+if [ "$1" = remove ]; then
+        pam-auth-update --package --remove unix
+fi
+</pre>
+Packages which have previously modified `/etc/pam.d/common-*` ''may'' invoke `pam-auth-update` with the additional `--force` argument on initial upgrade to this system, ''if'' the package can reliably determine that the `/etc/pam.d/common-*` files on disk have not been modified by the user (i.e., `md5sum` or similar).  '''Use of the `--force` argument by a package maintainer script is prohibited in all other cases.'''
+Packages must depend on `libpam-runtime (>= 1.0.1-6)` to ensure availability of `pam-auth-update`.
+
+==== UI Changes ====
+
+This change introduces three new debconf questions. They will not be displayed on systems with the default configuration, but must be shown to users when upgrading from systems with modified PAM configs and when the user chooses to manually configure the authentication settings.
+
+==== Code Changes ====
+
+* create a new tool, `pam-auth-update`, which manages the contents of `/etc/pam.d/common-*`.
+* modify `libpam-runtime` to call this tool on first upgrade to convert existing configs to the new setup, and on first install to populate the initial state.  (Normally the module package would do this; in the case of `libpam-modules` and `libpam-runtime`, this would cause confusion because `libpam-runtime` currently provides the default config which points to modules in the `libpam-modules` package.)
+* modify other `libpam-*` packages to provide PAM profiles and call `pam-auth-update --package`
+* PAM module packages must also call `pam-auth-update --package --remove` on removal
+* care must be taken to preserve enough state in the system to recognize which parts of the config file are owned by a given package, to avoid being unable to update the config when a package's profile changes.
+
+==== Migration ====
+
+Because the central authentication config of the system is affected by this spec, it is very sensitive to migration concerns.  Care must be taken to never overwrite locally-modified configuration files without explicit permission from the user, and a copy of all local modifications must be preserved.
+
+=== Test/Demo Plan ===
+
+# install intrepid
+# install the libpam-cracklib package
+# change your user password using the 'passwd' command to something weak (short, all lower-case letters)
+# see that cracklib password strength checking has been automatically enabled!
+# remove libpam-cracklib
+# see that cracklib has been removed from /etc/pam.d/common-password
+
+It's that simple!
+
+=== Outstanding Issues ===
+
+Module packages shipping the PAM profiles in `/usr/share/pam-configs/` is conceptually incompatible with biarch, posing another barrier to the implementation of a biarch PAM package (see open bug #112937).  It would be better to address this with a full multiarch implementation in dpkg.
+
+Need to think through implied stacking semantics some more: we have interesting use cases that are either alternatives (unix or krb5 or winbind), or compound methods (passwd+secureid for auth, unix+smbpasswd for passwd), supporting all of these may require a more complex matrix of snippets with nesting of "alternative" sets; UI for this may be too unwieldly to live, how can we scale it back?  It would be possible to declare compound configs for e.g., "unix+smbpasswd" or such, but that's less scalable/flexible and provides fewer benefits over auth-client-config.  For now, the configurability is limited to one set of alternatives plus a set of "also required" methods, with configs declaring which they are.
+
+If a module ever needed to "sandwich" other modules, this isn't currently supported.
+
+----
+CategorySpec

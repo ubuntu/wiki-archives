@@ -1,0 +1,170 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+'''Note:''' This contents of this page is largely out-of-date.
+
+== Updating rustc and cargo in ubuntu ==
+
+=== Scope ===
+
+We maintain rustc and cargo in ubuntu almost entirely to support building firefox. If you're a rust developer looking to work on your own rust programs, you are probably going to have a better experience (for now, at least) using rustup.
+
+=== Generalities ===
+
+The maintenance uses git-ubuntu and the <nowiki>[[UbuntuDevelopment-Merging-GitWorkflow|git merge workflow]]</nowiki> both for merging upstream updates from debian and maintaining the stacks of patches required to backport rustc and cargo back to supported series.
+
+As part of writing this up, I wrote a <nowiki>[[https://gist.github.com/mwhudson/65e4ea998f347bbc7d69111b1ac37371|bunch of out of control shell scripts]]</nowiki>. They might come in useful.
+
+=== PPAs and pockets and timelines ===
+
+We upload new versions of rustc and cargo to the devel series like any other package.
+
+For supported releases, the ultimate destination for rustc and cargo is the security pocket. They are only copied there though when the version of firefox that requires them is copied there (All PPAs mentioned here must only depend on the security pocket, not updates, and in other ways configured to be suitable binary-copy-to-the-primary-archive sources e.g. build and publish debug symbols).
+
+The idealised timeline goes something like this:
+
+ 1. upstream firefox master changes to depend on a new version of rustc (and cargo)
+
+ 2. firefox maintainer (~ubuntu-desktop) files a bug to request the rustc/cargo update and assigns to ~canonical-foundations (see e.g. <nowiki>[[https://launchpad.net/bugs/1852982|bug #1852982]]</nowiki>)
+
+ 3. these versions of rustc and cargo are uploaded to devel and <nowiki>[[https://launchpad.net/~ubuntu-mozilla-security/+archive/ubuntu/rust-updates|ppa:ubuntu-mozilla-security/rust-updates]]</nowiki>. I (mwhudson) use another PPA (<nowiki>[[https://launchpad.net/~mwhudson/+archive/ubuntu/rust-stuff|ppa:mwhudson/rust-stuff]]</nowiki>) for my initial test builds but I don't ever copy things out of there. 
+
+ 4. when the version of firefox with the new rustc version requirement hits beta, rustc and cargo are binary copied to <nowiki>[[https://launchpad.net/~ubuntu-mozilla-security/+archive/ubuntu/rust-next|ppa:ubuntu-mozilla-security/rust-next]]</nowiki>. Beta versions of firefox are built in <nowiki>[[https://launchpad.net/~mozillateam/+archive/ubuntu/firefox-next|ppa:mozillateam/firefox-next]]</nowiki>, which depends on this one.
+
+ 5. when this version of firefox is released, rustc and cargo are binary copied to <nowiki>[[https://launchpad.net/~ubuntu-mozilla-security/+archive/ubuntu/ppa|ppa:ubuntu-mozilla-security/ppa]]</nowiki> and firefox is built in this PPA.
+
+ 6. when firefox has built, firefox, rustc, and cargo are all copied to the security pocket.
+
+It doesn't always happen like this of course. In particular, upstream doesn't always leave long enough between master switching to a new version and beta for us to get rust-updates updated before beta.
+
+=== Updating for the devel series ===
+
+As above, this uses the git ubuntu merge workflow. I have a repo that has remotes for the package import branch on launchpad, the Debian maintainers's git repo from salsa and lp:~canonical-foundations/ubuntu/+source/rustc . But be sure to check if those repositories are up-to-date - sometimes they can lag behind. If that's the case, things have to be done a bit more manual.
+
+To merge a new version, `1.$X`, I do something like this.
+
+ 1. first note the tag of the version from debian you want to merge, this can be the Debian maintainer's tag (e.g. `debian/1.32.0+dfsg1-3`) or the package importers tag (e.g. `pkg/import/1.30.0+dfsg1-1_exp`2 -- sometimes you end up merging from experimental). Let's call this `$newdebtag`.
+
+ 2. `$ git checkout -b merge-1.$X merge-1.$((X-1))`
+ 3. `$ git rebase -i $newdebtag --keep-empty`.
+    a. You might want to reword the first, empty, commit to indicate where the merge is from this time (unstable vs experimental vs NEW...)
+ 4. remove the bottom five or so commits: merge-changelogs, reconstruct-changelog, ubuntu-meta, updating upstream source and "releasing package rust version ..."
+ 5. work through the rebase, fixing conflicts as you go
+ 6. Note the git tag for the last release we merged from debian, let's call this `$olddebtag` (to be honest I often flail a bit at this step and just try things until it works)
+ 7. `$ git-ubuntu.merge-changelogs $olddebtag merge-1.$((X-1)) $newdebtag`
+ 8. `$ git commit -am 'merge-changelogs'`
+ 9. `$ dch -v $(dpkg-parsechangelog -SVersion | sed 's/+dfsg1/&+llvm/')ubuntu1 '' --release-heuristic log -D UNRELEASED`
+ 10. `$ git reconstruct-changelog $newdebtag`
+ 11. `$ git commit -am 'reconstruct-changelog'`
+ 12. `$ update-maintainer`
+ 13. `$ git commit -am 'ubuntu-meta'`
+ 14. Import a version of the orig that bundles llvm: `$ uscan`. Now this has a couple of pitfalls: 
+    1. The tarball is enormous and will make `mk-origtargz` from older releases choke. Install `devscripts` from disco or better (and even then it still takes quite a long time, several minutes on my machine).
+    2. The rust download page only lists the current release. If we're a bit behind and are packaging an old release (and we can't skip releases) you have to grab the source tarball directly. Luckily the URL of the old source tarball is very predictable. Then you have to run `mk-origtargz` by hand, which is super memorable:
+      `$ (cd .. && wget https://static.rust-lang.org/dist/rustc-1.${X}.0-src.tar.xz)`<<BR>>
+      `$ mk-origtargz --package rustc --version 1.${X}.0 --repack-suffix +dfsg1+llvm --signature 1 --signature-file ../rustc-1.${X}.0-src.tar.xz.asc --repack --compression xz --directory .. --copyright-file debian/copyright ../rustc-1.${X}.0-src.tar.xz`
+ 15. Import the freshly made orig tarball. (I use my-uupdate from <nowiki>[[https://gist.github.com/mwhudson/65e4ea998f347bbc7d69111b1ac37371|my gist]]</nowiki>, but that's probably overkill)
+ 16. Check that this update only touches `src/llvm-project` (i.e. `git show --stat -- . ':!src/llvm-project'` is empty). If it doesn't something odd is going on, maybe you didn't download the orig that matches the version from debian.
+ 17. At this stage I usually do a test build in a PPA and iterate until it builds: (`rustbuild.sh --test` from <nowiki>[[https://gist.github.com/mwhudson/65e4ea998f347bbc7d69111b1ac37371|my gist]]</nowiki> does this)
+    1. `$ dch -b -v $(dpkg-parsechangelog -SVersion)~ppa1 ""`
+    2. `$ dch -D $(distro-info -d) -r ""`
+    3. `$ dpkg-buildpackage -nc -S --hook-done='dput ppa:mwhudson/rust-stuff ../%p_%s_source.changes'`
+    4. `$ git reset --hard`
+ 18. When ready, release: (`rustbuild.sh --release`)
+    1. `$ dch -D $(distro-info -d) -r ''`
+    2. `$ debcommit -r -a --sign-tag`
+    3. `$ dpkg-buildpackage -nc -S  --hook-done='dput ../%p_%s_source.changes'`
+    4. `$ git push -u foundations && git push foundations --tags`
+
+The process for cargo is broadly the same, although there's no need to repack the tarball.
+
+=== Backports ===
+
+This process has fewer steps than the devel update but can be trickier (I guess because devel and Debian unstable are usually more or less in sync). Backporting cargo is usually much harder than backporting rustc, because cargo interacts with the wider world much more.
+
+For reasons that are hopefully obvious, work your way from newer to older series.
+
+To backport version `1.$X` to an older series, `$SERIES`, I do:
+
+# Create a backport branch: (`backportrust.sh` from <nowiki>[[https://gist.github.com/mwhudson/65e4ea998f347bbc7d69111b1ac37371|my gist]]</nowiki> automates this but is still a bit scary tbh)
+### `$ git checkout -b $SERIES-1.$X $SERIES-1.$((X-1))`
+    2. `$ git rebase -i --keep-empty merge-1.$X`
+       1. stop (`"e"`) on each commit that adds patches to check that the patches apply, and fix those up before continuing.
+    3. `$ dch -b -v $(dpkg-parsechangelog -SVersion)~$(ubuntu-distro-info --series=$(git rev-parse --abbrev-ref HEAD | cut -d- -f1) --release | awk '{ print $1 }').1 '' --release-heuristic log -D UNRELEASED` or something similar
+    4. `$ git reconstruct-changelog merge-1.$X`
+    5. `$ git commit -am reconstruct-changelog`
+ 2. More PPA test builds: (`rustbuild.sh --test` again)
+    1. `$ dch -b -v $(dpkg-parsechangelog -SVersion)~ppa1 ""`
+    2. `$ dch -D $(git rev-parse --abbrev-ref HEAD | cut -d- -f1) -r ""`
+    3. `$ dpkg-buildpackage -nc -S --hook-done='dput ppa:mwhudson/rust-stuff ../%p_%s_source.changes'`
+    4. `$ git reset --hard`
+ 3. Release when ready: (`rustbuild.sh --release`)
+    7. `dch -D $(git rev-parse --abbrev-ref HEAD | cut -d- -f1) -r ''`
+    8. `$ debcommit -a -r --sign-tag`
+    9. `$ dpkg-buildpackage -nc -S  --hook-done='dput ppa:ubuntu-mozilla-security/rust-updates ../%p_%s_source.changes'`
+    10. `$ git push -u foundations && git push foundations --tags`
+
+A  tip: if you have to make changes to a patch added by a commit at some point, you'll have to make the same changes to that patch for any older series. When doing the interactive part of `rebase -i` for the older series, you can replace the short sha of the change with the short sha of the new version of the change from the `$SERIES-1.$X` branch.
+
+=== Upstream updates ===
+
+Sometimes we need to run ahead of Debian (most likely when Debian is in freeze). In that case, the cargo and rustc source packages both contain README.source files that explain what to do. Good luck!!
+
+Update rustc before cargo, or you can end up with a cargo that's too new to work with the rustc in the archive and so makes bootstrap impossible.
+
+When repacking the rustc tarball for a new upstream version, you should change the +dfsg1 suffix to +dfsg0.1 to indicate that the repack was not done by debian. For cargo we're generating a orig-vendor tarball but such version-mangling should not be necessary, as we very rarely sync from Debian anyway.
+
+For cargo, running debian/make_orig_multi.sh to creating the orig-vendor tarball can be very tricky and can potentially require refreshing a lot of quilt packages. When dropped into the sub-shell, be sure to update the patches in both the respective vendor/<PACKAGE> and debcargo-conf/src/<PACKAGE> directories before exiting.
+
+Once devel Ubuntu has the new upstream version, backporting basically follows the same pattern. 
+
+=== How to bootstrap a new arch ===
+
+For example, riscv64 44-46 was failing to build from source, hence we bootstrapped up to 47 using above process, wihtout riscv64. Meaning we had to rebootstrap riscv64 architecture.
+
+Essentially it means to create a bileto ppa, and upload pre-built .debs into it. Then copy rustc source and binaries into it, thus triggering the missing build to complete and copything the whole lot back.
+
+This will result, in i.e. 2 build records for an architecture. One that failed in the main archive, and one that succeeded in the bootstrap bileto ppa. For example https://launchpad.net/ubuntu/+source/rustc/1.43.0+dfsg1+llvm-1~exp1ubuntu2
+
+Options in building the bootstrap debs is either crossbuilding, or using Debian debs.
+
+For crossbuilding:
+
+<pre>
+$ mk-sbuild --target riscv64 hirsute
+$ sbuild -d hirsute --host riscv64 rustc*.dsc
+</pre>
+
+For using debian debs, if they are installable:
+
+<pre>
+$ pull-debian-debs --arch riscv64 rustc
+</pre>
+
+Next we need to upload those debs into bileto.....
+
+<pre>
+$ mkdir empty-build
+$ cd empty-build
+$ cp -r ../rustc-*/debian .
+$ cp ../*_riscv64*deb debian/
+$ echo <<EOF >debian/rules
+%:
+	dh $@
+
+override_dh_builddeb:
+	dh_builddeb
+	cp debian/*.deb ../
+EOF
+</pre>
+
+Thus we are building a native package, with a non-native version number, that does nothing but copy prebuilt debs from `debian/` dir to `../`, such that we inject binary upload into the bileto ppa.
+
+It is advised to rebuild the compiler in-archive against itself as a no-change upload, such that bootstrap build is eliminated.

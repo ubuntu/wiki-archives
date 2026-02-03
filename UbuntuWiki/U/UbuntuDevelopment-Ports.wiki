@@ -1,0 +1,171 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+While most Ubuntu users are using so called x86/x86-64 hardware, Ubuntu also targets other architectures, such as PowerPC, or ARM.  How does development differ on these architectures?  It's mostly the same, except slower and with scarce hardware; there are however alternate ways to speed up development or to work around lack of hardware.  Here we will be looking at which options you have for development.
+
+=== Native development ===
+
+The most straightforward way to do development if you have sufficiently fast hardware -- with enough memory and storage -- is probably on your device itself.  The usual development tools and packages described in UbuntuDevelopment apply.
+
+=== QEMU ===
+
+QEMU is a processor emulator and supports emulation of ARM, PowerPC, SPARC, x86, x86-64 and more.
+
+QEMU has two operating modes:
+* User mode emulation: QEMU can launch Linux processes compiled for one CPU on another CPU, translating syscalls on the fly.
+* Full system emulation: QEMU emulates a full system (virtual machine), including a processor and various peripherals such as disk, ethernet controller etc.
+
+==== User mode emulation and binfmt_misc ====
+
+This QEMU mode is faster than full system emulation, but is not a perfect abstraction.  For instance, if a program reads /proc/cpuinfo, the contents will be returned by the host kernel and so will describe the host CPU instead of the emulated CPU.  Also, QEMU's emulation does not cover all syscalls so it might result in debug output like:
+<pre>
+qemu: Unsupported syscall: 335
+</pre>
+
+Which means that QEMU does not know how to emulate the guest syscall 335 (sys_pselect6).  Worse, QEMU might emulate syscalls which are actually unimplemented in the target architecture, causing the emulated program to believe the target architecture is more capable than it really is.
+
+To use QEMU syscall emulation, you can invoke `qemu-''cpu''` binaries followed by the command you'd like to run, e.g. `qemu-arm`; unfortunately, this is quite limited because you may only run static binaries like this, as the shared binaries/shared libraries would be under a different path than the ones these were compiled with.  For instance, in this interactive session we are at the top of an armel rootfs and we try running bin/ls with qemu-arm on an amd64 host:
+<pre>
+    % file bin/ls
+    bin/ls: ELF 32-bit LSB executable, ARM, version 1 (SYSV), dynamically linked (uses shared libs), for GNU/Linux 2.6.16, stripped
+
+    % qemu-arm bin/ls
+    /lib/ld-linux.so.3: No such file or directory
+
+    % qemu-arm lib/ld-linux.so.3 bin/ls
+    bin/ls: error while loading shared libraries: librt.so.1: wrong ELF class: ELFCLASS64
+
+    % qemu-arm lib/ld-linux.so.3 --library-path lib bin/ls
+    bin   dev  home  lost+found  mnt  proc  sbin     srv  tmp  var
+    boot  etc  lib   media       opt  root  selinux  sys  usr
+</pre>
+
+Worse, this doesn't propage to subprocesses, so if you try to run a shell:
+<pre>
+    % qemu-arm lib/ld-linux.so.3 --library-path lib bin/bash
+    $ qemu-arm bin/ls
+    /lib/ld-linux.so.3: No such file or directory
+</pre>
+
+This makes it impractical to call qemu-arm by hand.  However, thanks to a Linux module called binfmt_misc, it's possible to run any executable file with a specific filename or specific contents with a configurable interpreter.  The qemu-kvm-extras-static package in Ubuntu 10.04 and later registers QEMU interpreter for the binary patterns of binaries it can emulate with binfmt_misc; this means it's not needed to prefix commands with qemu-arm anymore:
+<pre>
+    % lib/ld-linux.so.3 --library-path lib bin/ls
+    bin   dev  home  lost+found  mnt  proc  sbin     srv  tmp  var
+    boot  etc  lib   media       opt  root  selinux  sys  usr
+</pre>
+
+This is still impractical with subcommands and even more so in chroots since qemu-arm is linked to amd64 shared libraries and would need /lib/ld-linux.so.2 for amd64 in the chroot:
+<pre>
+    % sudo cp /usr/bin/qemu-arm usr/bin
+    % sudo chroot . /bin/bash
+    chroot: cannot run command `/bin/bash': No such file or directory
+    % lib/ld-linux.so.3 --library-path lib bin/bash
+    $ bin/ls
+    /lib/ld-linux.so.3: No such file or directory
+</pre>
+
+  But the qemu-kvm-extras-static package, as it name implies, provides static versions of `qemu-''cpu''` interpreters, for instance `qemu-arm-static`.  These work exactly like their shared equivalents, but as soon as they are copied in a rootfs tree, it becomes possible to chroot into it (without the need for a host ld-linux dynamic loader, or the host shared libraries):
+<pre>
+    % sudo cp /usr/bin/qemu-arm-static usr/bin/qemu-arm-static
+    % sudo chroot . /bin/bash
+### ls
+    bin   dev  home  lost+found  mnt  proc  sbin     srv  tmp  var
+    boot  etc  lib   media       opt  root  selinux  sys  usr
+</pre>
+
+Such a chroot can be created with the `qemu-debootstrap` command (from the qemu-kvm-extras-static package) which behaves like `debootstrap`, but copies a static qemu interpreter in the chroot as well.
+
+This chroot should behave mostly like a regular chroot, with the associated drawbacks (no isolation as in virtual machines) and the limitations of qemu syscall emulation.
+
+One may combine syscall emulation with some tools like pbuilder or sbuild; read on for specific instructions for each tool.
+
+In summary, user mode emulation is a nice mode when it works and should be preferred when speed matters, but full system emulation mode should be used for a more complete emulation.
+
+==== Full system emulation ====
+
+This QEMU mode emulates a virtual machine with a configurable CPU, video card, memory size and mode.  It is much slower than user mode emulation since the target kernel is emulated, as well as device input/output, interrupts etc.  However, it provides a much better emulation for guest programs and isolates from the host.  It should not be considered a secure sandbox though.
+
+Full system emulation should be preferred to run programs like gdb, or to test a real installed system perhaps with graphical apps, or running an OpenSSH server.
+
+There are various ways to create a QEMU virtual machine.
+
+For ARM, the currently supported methods are:
+* using the "versatile" netboot images of the alternate installer; see below
+* using "rootstock"; see <nowiki>[[ARM-RootfsFromScratch]]</nowiki>
+* by hand, using debootstrap; see <nowiki>[[ARM-RootfsFromScratch-QemuDebootstrap]]</nowiki>
+
+To install Ubuntu on ARM using the alternate installer, create a qemu harddisk with:
+<pre>
+    qemu-img create -f qcow2 sda.qcow2 16G
+</pre>
+Next, download the "versatile" netboot images at http://ports.ubuntu.com/ubuntu-ports/dists/lucid/main/installer-armel/current/images/versatile/netboot/ and start the installer with for instance:
+<pre>
+    qemu-system-arm -M versatilepb -m 256 -cpu cortex-a8 -kernel vmlinuz -initrd initrd.gz -hda sda.qcow2 -append "mem=256M"
+</pre>
+
+=== pbuilder and QEMU syscall emulation ===
+
+To create a pbuilder environment using QEMU in syscall emulation mode to build packages is relatively straightforward:
+<pre>
+    % sudo pbuilder --create --basetgz /var/cache/pbuilder/base-armel.tgz --debootstrap qemu-debootstrap --mirror http://ports.ubuntu.com/ubuntu-ports/ --distribution lucid --architecture armel
+</pre>
+
+The `pbuilder-dist` script (in the ubuntu-dev-tools package) is also aware of `qemu-debootstrap` and will just do the right thing if you select an architecture which requires qemu emulation.
+
+=== schroot/sbuild and QEMU syscall emulation ===
+
+To create schroots using QEMU in syscall emulation mode is simiarly straightforward, using the `mk-sbuild` script (in the ubuntu-dev-tools package):
+<pre>
+    $ mk-sbuild --arch=powerpc lucid
+</pre>
+
+One can use this environment as a chroot environment, including X forwarding with:
+<pre>
+    $ schroot -p -c lucid-powerpc
+</pre>
+
+Running command-line programs will work normally, and launching X clients will transpaently forward to the host X server.
+
+One can also use this environment to build packages with:
+<pre>
+    $ sbuild -d lucid-powerpc foo.dsc
+</pre>
+
+By default, schroot environments are snapshots, with all changes destroyed on exit.  To modify the base source, use the following:
+<pre>
+    $ sudo schroot -c lucid-powerpc-source -u root
+    (lucid-powerpc-source) % apt-get update
+    (lucid-powerpc-source) % apt-get dist-upgrade
+    (lucid-powerpc-source) % exit
+</pre>
+
+=== qemubuilder ===
+
+qemubuilder is a pbuilder mode using QEMU as its backend; it launches QEMU in machine emulation mode and builds the package in the virtual machine.  The Debian wiki provides instructions for various architectures at http://wiki.debian.org/qemubuilder and Nikita V. Youshchenko provides some ARM-specific instructions at http://yoush.homelinux.org:8079/tech/setting-up-armel-qemubuilder with custom kernels.  The Ubuntu 10.04 versatile kernels should work fine for this mode and are available at http://ports.ubuntu.com/ubuntu-ports/dists/lucid/main/installer-armel/current/images/versatile/netboot/ but you don't need the initrd part of them.
+
+=== Cross-compilation ===
+
+Specific software such as the kernel or bootloaders are easily cross-compiled; this works as expected under Ubuntu, it's a matter of making sure the relevant cross-compiler is in the $PATH, either by installing it from packages which ship it in /usr/bin, or by installing it to /usr/local/bin, or by installing it in one's $HOME/bin directory and appending ~/bin to the $PATH.
+
+Some build systems will autodetect cross-compilation when passed host and target architectures, but others might expect the cross-compiler to be set in the CC, LD etc. environment variables.
+
+==== Kernel cross-compilation ====
+
+The Linux kernel is of course cross-compilation friendly; you can cross-compile the Linux kernel by setting the architecture and cross-tools prefix when invoking make, for instance if your cross-tools are named arm-linux-gnueabi-gcc, arm-linux-gnueabi-ld etc. use:
+<pre>
+    make ARCH=arm CROSS_COMPILE=arm-linux-gnueabi- menuconfig
+    make ARCH=arm CROSS_COMPILE=arm-linux-gnueabi- zImage
+</pre>
+
+Cross-toolchains are not currently available from official Ubuntu repositories (but are in the works); in the mean time, you might find some of the toolchains below useful:
+* this cross-toolchain was created by Matthias Klose and used for the initial chromeos-build cross-builds in i386 chroots: http://people.canonical.com/~cjwatson/armel-cross/
+* !CodeSourcery also provides cross-toolchains, either with or without a target libc, see their products pages: http://www.codesourcery.com/sgpp/editions.html
+* LoïcMinier is working on cross-toolchain packages in his PPA: https://launchpad.net/~lool/+archive/ppa
+

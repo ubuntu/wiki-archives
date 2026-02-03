@@ -1,0 +1,137 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== How to build kernel packages for a stable release ==
+
+=== Description ===
+
+This wiki page describes how to prepare Ubuntu kernel packages before releasing a new version of an Ubuntu kernel. The intended audience is Ubuntu Kernel Core Developers performing this task, or others interested in the process.
+
+=== A Note About Changelogs ===
+
+The source package we create only has a changelog that contains the changes since the last release in -updates, while the git repo has the entire changelog. You need to tell the packaging tools how far back to go in the changelog, so you need to determine the version that's in -updates. Special Case: In the rare case that there is a kernel in -proposed that you are certain will be released and you need to prepare the next one, use the version of the package in -proposed instead.
+
+=== Preparing a Release ===
+ 1. Get the original tarballs from the kernel version you're going to build<<BR>>
+ Building packages for the kernel requires that the tarballs upon which the originally released kernel were based are present, otherwise the final tarball for the source package will be only one containing all the tree with the changes inside (no .diff. file is created). To get the original tarball run
+ {{{
+ get-orig-tarballs
+ }}}
+ It's a simple script, from the stable tools in the kteam-tools repo, to download all master branch orig tarballs. It's a lot, so alternatively you can manually wget the tarball for only the version you are going to prepare (look at the script for the url). But despite it getting all master orig tarballs, it doesn't get orig tarballs for packages such as linux-ec2 or linux-ti-omap4. An alternative method is to use dget from the devscripts package, e.g.:
+ {{{
+ dget -d http://archive.ubuntu.com/ubuntu/pool/main/l/linux-ec2/linux-ec2_2.6.32-316.31.dsc
+ }}}
+ This command copies all of the files required to create a source package for that version, including the orig tarball if it exists.<<BR>>
+
+ 1. Get the package version in updates (to use as <updates-version> below):
+ {{{
+ rmadison -asource -s<seriesname>-updates linux
+ }}}
+    NOTE: Rmadison may not always display the latest kernel version in -updates.  It is always best to cross check the -updates version in Launchpad at the following link:  https://launchpad.net/ubuntu/+source/linux
+
+ 1. Clean the git tree  (throws away anything not in git)
+ {{{
+ git clean -d -x -f
+ fakeroot debian/rules clean
+ }}}
+
+ 1. Build the package unsigned, using <updates-version> from above
+ {{{
+ debuild -S -I -i -uc -us -v<updates-version>
+ }}}
+ Note: make sure the parent directory has the required *orig.* tarballs you got in the first step, before building the package<<BR>>
+
+ 1. Run the source package validation script using the .changes file as an argument
+ {{{
+ verify-src-pkg <path-to-changes>
+ }}}
+
+ 1. Sign the packages or ask a kernel package uploader to sign them for you. If you need someone else to sign them, put them where they can get to them, such as in zinc.canonical.com:for-signing/ Make sure that the packages and the directory they are in are writable by the kernel_team group so that they can be signed by someone else.
+ {{{
+ debsign <changes file>
+ }}}
+ 
+ 1. Optionally test build the produced file at least on one flavour
+ To do this requiresthe orig.tar.gz, the .dsc and the .diff.gz
+ {{{
+ dpkg-source -x <dsc file>
+ cd linux-...
+ build
+ }}}
+
+ 1. Use dput to upload to the PPA<<BR>>
+
+ 1. Push the master branch to origin/master-next<<BR>>
+
+ 1. When packages are built in the PPA, sru-workflow-manager (the stable bot, or "shank bot") should change the related prepare package tasks or upload-to-ppa to fix released. When that happens, do a startnewrelease on the master-next branch, with:
+  {{{
+  maint-startnewrelease --local --ckt-ppa
+  }}}
+
+NOTE - when pushing master to master-next, or doing a startnewrelease, MAKE SURE that no patches which recently arrived on the -next branch get dropped. When you change master-next git will tell you which SHA1s existed in that branch before and after the push. Check those. If any patches were dropped, cherry-pick them back onto master-next after doing a startnewrelease.
+
+When packages are copied to -proposed, all bugs which require verification (Upstream stable patches DO NOT) should have a comment added requesting testing, and have certain tags set. This is done using the spam-proposed-release-bugs script, in the stable tools in the kteam-tools repo. Note that verification spamming is only done for the main kernels and not for derivative and backport kernels.<<BR>>
+
+ 1. Generate the SRU report.
+
+  {{{
+  stable/sru-report --archive-versions > /tmp/sru-report.json
+  }}}
+
+ 1. Do a dry run of `spam-proposed-release-bugs` and verify that it completes without errors. In the following, `$STABLEDIR` is the path to the `kteam-tools/stable` directory, and you need to replace the series list with the correct list of series to be spammed. If this completes without errors, proceed to the next stop.
+
+  {{{
+  for SERIES in precise trusty vivid xenial yakkety; do
+    $STABLEDIR/spam-proposed-release-bugs --dry-run --verbose --comment=$STABLEDIR/boilerplate/bugtext-start-verification.txt --package=linux --series=$SERIES /tmp/sru-report.json;
+  done
+  }}}
+
+ 1. Run the command above without the `--dry-run` argument to send verification spam to the bug reports.
+
+After the packages are copied to propose an announcement should also be sent to `kernel-sru-announce@lists.ubuntu.com`. The following demonstrates the format of this message.
+
+  {{{
+  To: kernel-sru-announce@lists.canonical.com
+  Subject: Another Kernel SRU cycle begins...
+
+  cycle: 15-Jul through 06-Aug
+  ====================================================================
+           15-Jul   Last day for kernel commits for this cycle
+  18-Jul - 23-Jul   Kernel prep week.
+  24-Jul - 05-Aug   Bug verification & Regression testing..
+           08-Aug   Release to -updates.
+
+  Kernel Versions
+  ====================================================================
+     precise  3.2.0-107.148
+      trusty  3.13.0-93.140
+       vivid  3.19.0-66.74
+      xenial  4.4.0-34.53
+
+  lts-trusty  3.13.0-93.140~precise1
+  lts-vivid   3.19.0-66.74~14.04.1
+  lts-xenial  4.4.0-34.53~14.04.1
+
+  cycle: 05-Aug through 27-Aug
+  ====================================================================
+           05-Aug   Last day for kernel commits for this cycle
+  08-Aug - 13-Aug   Kernel prep week.
+  14-Aug - 26-Aug   Bug verification & Regression testing..
+           29-Aug   Release to -updates.
+  }}}
+
+The following steps are only required if there was an ABI bump:
+
+ 1. For each dependent package, bump the ABI and build and sign.
+    NEED MORE INFO, there are different ways to do this depending on the package
+
+ 1. (more steps for dependent packages)
+
+ 1. etc

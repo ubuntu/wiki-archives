@@ -1,0 +1,80 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+Multiple ideas were covered during the <nowiki>[[Specs-Mobile-QemuStaticExecutionEnv|UDS session on debootstrap with qemu-arm syscall emulation]]</nowiki>.  Here is some research on what can and can't be done.
+
+=== Packaging of qemu static flavours ===
+
+LoicMinier has the following issue with the proposal: one package per binary approach really makes too many packages; I don't mind if we provide static binaries as a service to Ubuntu users, but I doubt this will make it to Debian and I would hate having 13 qemu-static-$arch packages in Ubuntu.  I think it'd be nicer to have a qemu-static package which provides static versions of the binaries, even if it's a bit large.
+
+=== Debootstrap integration of qemu ===
+
+This is not terribly hard, but it's too ugly to add qemu specificities to debootstrap.  If binfmt has to be setup within debootstrap and/or if a non-static qemu-arm has to be copied into debootstrap, it becomes quickly intrusive to the debootstrap code.  debootstrap upstream probably wouldn't be ok to add some qemu specific code which relies on a specific host setup (binfmt).
+
+One way forward would be to add some kind of hook support in debootstrap, e.g. --post-stage1-script= or --pre-stage2-script=; you get the idea.  This could be passed by end-users or by a trivial wrapper provided in the qemu package or rootstock.
+
+But why bother?  An approach like qemu-kvm/debian/build-arm-chroot is fine, it basically does debootstrap --foreign, <magic armel setup>, debootstrap --second-stage.  (The only issue is with the actual magic armel setup which relies on host setup).
+
+Sample changes which we don't want to do in debootstrap but which would be easy to patch in:
+<pre>
++           --qemu)
++               WHAT_TO_DO="finddebs dldebs first_stage setup_qemu second_stage"
++               shift
++               ;;
+
+...
+
++if am_doing_phase setup_qemu; then
++       sysctl -w vm.mmap_min_addr=4097
++       mkdir -p "$TARGET/debootstrap/qemu"
++       mkdir -p "$TARGET/debootstrap/usr/share/binfmts"
+...
++fi
+</pre>
+
+=== Using a shared qemu instead of static one for armel chroots ===
+
+In short, we want to use an armel chroot with armel binaries and libs, is it possible to use the shared-libs version of qemu-arm to achieve this?  Do we need binfmt-support?
+
+==== binfmt ====
+
+First on whether we need binfmt-support: yes, we do.  It could have been that qemu would emulate the exec() syscall by prepending itself before calling into the kernel, but it does not.  That's probably do-able, but it's a bit ugly especally when compared to the binfmt-support experience.  One thing which was NOT tried out is the -L flag of qemu-arm as it goes into an infinite loop (there's a Debian bug open about this).  Another thing which might have allowed avoiding the use of binfmt-support would have been native kernel support for loading ARM ELF binaries, and then putting qemu-arm as the /lib/ld-linux.so dynamic loader, but the x86-64 kernel doesn't recognize them; again, binfmt-support is a nicer solution to this.  So binfmt-support it is!   :-)
+
+==== shared qemu ====
+
+Assuming you have setup binfmt-support to use /foobar as the arm interpreter, you have multiple options:
+
+* use a static qemu-arm
+
+* or copy the x86 dynamic loader in the chroot along with a static shell and use a static shell script to launch binaries, /foobar:
+<pre>
+##### !/debootstrap/qemu-libs/bash-static
+
+        exec /debootstrap/qemu-libs/ld-2.10.1.so --library-path /debootstrap/qemu-libs/ /debootstrap/qemu-arm "$@"
+</pre>
+
+* one idea is to use the shebang directly to avoid the static shell script step, but sadly shebangs can only pass one arg to the executable, so this shebang results in calling /debootstrap/qemu-libs/ld-2.10.1.so with the rest of the line as first argument (and hence doesn't work):
+<pre>
+##### !/debootstrap/qemu-libs/ld-2.10.1.so --library-path /debootstrap/qemu-libs/ /debootstrap/qemu-arm
+</pre>
+
+* or as a proof of concept just copy qemu-arm for x86-64 to /foobar in the chroot, /lib64/ld-linux-x86-64.so.2 into the armel chroot as well, and copy qemu NEEDED libs to karmic-armel/usr/lib/x86_64-linux-gnu; this is really ugly, but this is just a proof of concept; a clean way to do it is multiarch or a new chrpath-like utility which would change the dynamic loader instead of the RPATH
+
+=== Recommended approach and further research ===
+
+One thing which wasn't researched at all is whether binfmt-support can be made specific to a chroot/container, it probably can this should be verified.
+
+A recommended approach could be:
+* keep using the build-arm-chroot approach
+* this script should setup binfmt-support in the chroot to use /debootstrap/qemu-$arch for $arch binaries
+* this script could take as input either a static or a shared qemu + static shell, and in the latter case would copy them to /debootstrap/qemu-stuff/ along with required libs
+* cleanup stuff once debootstrap is done
+
+* on the long term, with multiarch we would just install qemu:$arch in the chroot and that would just work (tm)

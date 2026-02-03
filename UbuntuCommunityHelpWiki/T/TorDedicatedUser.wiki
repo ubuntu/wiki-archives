@@ -1,0 +1,217 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+This paper is a review of Tor setup and anonymity. It is totally different from https://help.ubuntu.com/community/Tor It focuses on a ways to get aninymity via Tor and how to keep even minimal control over own traffic. Here described setup of anonymous workstation, corresponding issues and a way to check whether or not all is going on as expected.
+
+== TOR SETUP FOR A DEDICATED USER ACCOUNT ==
+
+This paper describe a way to redirect possible every application's traffic into "torified" channel for a separated account. You must test and check yourself torification of every application to be in use. More over, some applications encapsulate into their traffic data identifying you definitely or with high degree of of validity.
+
+It is crucial to get everything right with a privacy and security application such as Tor - https://www.torproject.org/download/download#Warning Thus do not think this paper is step by step howto. This is howto, it describes the steps, but it is intended that you will not apply it until you fully understand objects and processes mentioned below. Use it at your own risk.
+
+Here described implementation of local only Tor transparent proxy on Ubuntu 12.04 Precise Pangolin with UFW enabled. Source materials are at https://trac.torproject.org/projects/tor/wiki/doc/TransparentProxy
+
+Tor installation procedure is described at https://www.torproject.org/docs/tor-doc-unix.html.en There are some discussions concerning possibilities to hijack apt-get and repositories.
+
+== TOR CONFIGURATION ==
+
+After installation check if you are hosting non Tor local DNS service on port 53. This may be the case when KVM-Qemu is installed (libvirt-bin depends on the server Dnsmasq). Keep it in mind.
+
+Tor services configuration may be as follows.
+File '/etc/tor/torrc':
+<pre>
+    SocksPort               9050
+    SocksListenAddress      127.0.0.1
+    ORPort                  9001
+    RelayBandwidthRate      100 KB  # Throttle traffic to 100KB/s (800Kbps)
+    RelayBandwidthBurst     200 KB # But allow bursts up to 200KB/s (1600Kbps)
+    VirtualAddrNetwork      10.0.0.0/24
+    AutomapHostsOnResolve   1
+    TransPort               9040
+    TransListenAddress      127.0.0.1:9040
+    DNSPort                 55333
+</pre>
+
+See 'man torrc' for options description. This configuration also will start Tor Relay on port 9001. It is optional and may be disabled. See https://www.torproject.org/docs/tor-doc-relay.html.en for details.
+
+Tor service can be restarted/stopped/started by commands:
+<pre>
+    $ sudo service tor restart
+    $ sudo service tor stop
+    $ sudo service tor start
+</pre>
+Stop or restart may take a minute or more because Tor is giving to it's pairs a time to find another active node without interrupting their torified connections. This behaviour may be changed.
+
+== ACCOUNT CREATION ==
+
+User 'anonymous' may be created by the commands:
+<pre>
+    $ sudo useradd anonymous
+    $ sudo passwd anonymous
+</pre>
+== TRAFFIC REDIRECTION ==
+
+Traffic for local user 'anonymous' may be redirected into Tor proxy via Iptables and Netfilter capabilities. Here are the commands.
+
+Accepting with UFW capabilities connections to Tor Relay.
+<pre>
+    ufw default deny
+    ufw logging on
+    ufw allow 9001/tcp
+    ufw deny in from any to any
+    ufw enable
+</pre>
+
+Drop all IPv6 traffic.
+<pre>
+    ip6tables -P INPUT DROP
+    ip6tables -P FORWARD DROP
+    ip6tables -P OUTPUT DROP
+    ip6tables -t filter -I INPUT 1 -j DROP
+    ip6tables -t filter -I INPUT 1 -i lo -j ACCEPT
+    ip6tables -t filter -I FORWARD 1 -j DROP
+    ip6tables -t filter -I OUTPUT 1 -j DROP
+    ip6tables -t filter -I OUTPUT 1 -o lo -j ACCEPT
+</pre>
+Redirect anonymous account's traffic to Tor transparent proxy and then drop all the rest for the account.
+<pre>
+    iptables -t mangle -I POSTROUTING 1 ! -o lo -p tcp -m multiport --ports 53 -m owner --uid-owner debian-tor -j DROP
+    iptables -t mangle -I POSTROUTING 1 ! -o lo -p udp -m multiport --ports 53 -m owner --uid-owner debian-tor -j DROP
+    iptables -t filter -I OUTPUT 1 -p icmp -j REJECT --reject-with icmp-port-unreachable
+    iptables -t filter -I OUTPUT 1 ! -o lo -m owner --uid-owner anonymous -j DROP
+    iptables -t filter -I OUTPUT 1 ! -d 127.0.0.0/8 -o lo -m owner --uid-owner anonymous -j DROP
+    iptables -t filter -I OUTPUT 1 -d 127.0.0.1/32 -p udp -m udp --dport 55333 -m owner --uid-owner anonymous -j ACCEPT
+    iptables -t filter -I OUTPUT 1 -d 127.0.0.1/32 -p tcp -m tcp --dport 9040 -m owner --uid-owner anonymous -j ACCEPT
+    iptables -t nat -I OUTPUT 1 -p udp -m udp --dport 53 -m owner --uid-owner anonymous -j REDIRECT --to-ports 55333
+    iptables -t nat -I OUTPUT 1 ! -o lo -p tcp -m owner --uid-owner anonymous -j REDIRECT --to-ports 9040
+</pre>
+These commands may be placed in '/etc/rc.local' '''before''' line with "exit 0". The rules (not UFW, only direct Iptables calls) are inserted into the beginning of corresponding chains. As the rules are inserted one by one, each time before rule No1, thus in the sequence the last inserted is the first in a chain. An order of Netfilter rules is fatal. Tables mangle, nat, filter are processed in definite order too, inside each chain, see manual on iptables. Be attentive.
+
+There are rules for 'debian-tor' account. Tor services are run as 'debian-tor' account, it is created automatically while installation. While experiments, I saw some unexpected DNS requests to striking addresses and with strange content. Even if there is my misunderstood of Linux kernel mechanics or Tor issues, the content of the requests was unexpected at all. I decide to drop it. You may decide on your own. In both cases the system will not block your access to Internet.
+
+This way is compatible with UFW. All rules are inserted before UFW chains. All traffic is processed by the rules, and if traffic is not dropped or accepted it will be processed inside UFW chains. Note: default policy for some chains remains ACCEPT, including OUTPUT. Id est if any kind of traffic was not blocked or accepted by the rules above, it may be accepted or even not blocked somewhere later in other chains.
+
+UFW used to accept connections to Tor Relay service because UFW out of the box have some chains useful for network defence. UFW manage it's own set of chains, it seems it do not touch any others, but I do not ever try to find a developers information about. Nevertheless the mentioned above direct calls to Iptables are constructed to insert rules before any other.
+
+Similar rules are at https://trac.torproject.org/projects/tor/wiki/doc/TransparentProxy Mentioned here rules are
+taking into consideration possible third party DNS server at "127.0.0.1:53" and slightly hardened. Third party DNS server or similar things at an anonymous station is definitely bad idea, even if you are an expert. The rules are only taking it into consideration, but nothing more complex.
+
+Consult UFW manual and other sources on how to deal with IPv6 traffic.
+
+One may wish to have more complex rules and logging. The rules set above is not the best in a complex environment. The best will be allow only selected traffic and then drop all for both incoming and outgoing. This is well known practice. Forward chain may be blocked too. For example, rule for "debian-tor" account is not needed automatically when used policy "drop all, allow the only wanted".
+
+== APPLICATIONS LAUNCH ==
+
+A way to launch a program with GUI as user 'anonymous':
+<pre>
+    $ xhost +local:anonymous
+    $ gksudo -u anonymous firefox &
+</pre>
+Or you may login as 'anonymous' and use applications.
+
+If everything is all right, this Firefox instance may be used for anonymous surf. Possibly in such a way any application may be redirected into Tor anonymous channel for the account and used for anonymous data exchange. Highlight: one more time, some applications themself by design may incorporate into a data to be transferred information identifying you definitely or with high degree of of validity. Tor unable withstand that. The data may be any combination of user names, passwords, e-mails and IM ids, software and hardware serial numbers or such identifiers as IMEI.
+
+If you'll combine any plain and torified traffic in same session, probably for third party it is possible with high degree of validity to discover and unveil resources have been visited. It depends on several issues and realizations. Never use same names, passwords, keys, etc. for torified and plain data exchange. Never. The rest of the article is optional, but highly recommended.
+
+== ISSUES ==
+
+* ) There is /etc/sudoers.d directory where some rules may be placed. But be careful not to open the door too widely. Check rules twice.
+
+* ) DNS servers list in '/etc/resolv.conf' may be managed by third party software. Take care about this. One may want to make ultimate steps:
+    $ sudo apt-get purge network-manager network-manager-gnome
+WiCd package may be good enough instead of Network-manager. Be sure to be able to find information on how network can be setup manually in '/etc/network/interfaces', '/etc/resolv.conf', via utilities 'ifconfig' and 'route'. Because after removing of Network Manager you'll lose network connectivity. Some information present in Ubuntu Wiki https://help.ubuntu.com/12.04/serverguide/network-configuration.html For example, one fake configuration:
+<pre>
+    $ sudo ifconfig eth0 192.168.0.2/24
+    $ sudo route add default gw 192.168.0.1 dev eth0
+    $ sudo su
+    $ sudo echo "nameserver 8.8.8.8" > /etc/resolv.conf
+    $ exit
+</pre>
+Another usefull command:
+<pre>
+    $ sudo dhclient
+</pre>
+
+* ) Local DNS service may be already up. Check this via command:
+    $ sudo netstat -anput | grep ":53 "
+Look for not Tor processes listed in column "PID/Program name".
+
+* ) You may debug your system with the help of 'tcpdump' or 'wireshark'. Both utilities have helpful traffic filtering rules and other amenities. For example:
+    $ sudo tcpdump -i lo -nn "port 9050"
+will show traffic only via loopback interface and port 9050, without a try to resolve domain names.
+
+== CORRELATIONS IN TRAFFIC OUTGOING FROM A NETWORK ==
+
+Torified workstation in LAN (with any kind of IP addresses - internal, external) must not advert to any service, which may be adverted without anonymity by any other station or the Tor station itself. For example, time synchronization over Network Time Protocol with equal servers custom set for all workstations and gateway in your network. Think "your subnet" is a whole home network, or your department network. Your mobile GPRS connection may be involved or separated. It depends on realization. You may find yourself some other combinations leading to information leaks.
+
+== TESTING ==
+
+Some things may be verified on https://check.torproject.org/
+
+I'm in frustration. For an unprotected user the link https://check.torproject.org/ tells me I'm able to surf anonymously (OK, may be someone able at all, if he have properly set up software) and shows me my real IP address of my gateway! For user account 'anonymous' it works as expected and this is approved by sniffer.
+
+As a test set one may use the commands and their variations:
+<pre>
+    $ sudo netstat -anput
+    $ sudo netstat -anput | grep "tor"
+    $ sudo tcpdump -i lo -nn -v '! (port 9001 || port 123)'
+    $ sudo tcpdump -i lo -nn -v 'port 53'
+    $ sudo tcpdump -i eth0 -nn -v '! (port 9001 || port 123)'
+    $ sudo tcpdump -i eth0 -nn -v 'port 53'
+    $ sudo iftop -i eth0
+</pre>
+
+To test DNS leaks do:
+<pre>
+    $ gksudo -u anonymous gnome-terminal &
+</pre>
+In the newly opened as anonymous terminal you may enter:
+<pre>
+    $ nslookup www.ubuntu.com
+</pre>
+And try to catch the traffic in tcpdump output and iptables log. Grep utility will be very useful. If plain DNS occurs only via loopback - success with standart DNS procedure. If another options are chosen it is possible to see whether or not packets passing by external interface have only encrypted data. Note: you'll observe tons of traffic, it's hard to understand these streams if you are not specialist. On the other hand it is not very complex, a lot is described in Iptables and Netfilter manuals. Helpful link - Kernel Packet Traveling Diagram - http://www.docum.org/docum.org/kptd/
+
+You may observe huge whistling of Chromium browser at start up. This is example of a legal, but unexpected for someone traffic. Also may be seen regular requests to databases with reported attack and forgery sites. This a part of browsers, but a lot of users even do not know about it. And this is an example of situation when you may visit same resources via anonymous and plain channels. You just may run browser as yourself and as anonymous, and this will the case...
+
+You must be able to separate yourself entries corresponding to torified and untorified packets in the logs, or you are not able to apply the checks.
+
+To have records in log files (/var/log/syslog) special Iptables rules and one separated chain may be added. The chain is TRASH, it may be used instead of DROP action.
+
+The chain (must be created before all the other rules):
+<pre>
+    -N TRASH
+    -A TRASH -m limit --limit 3/min --limit-burst 3 -j LOG --log-prefix "IPv4 packet died: " --log-level 6
+    -A TRASH -j DROP
+</pre>
+
+Other logging rules (the rules are not added but inserted, they are mentioned here in reverse order, as described above, the order is fatal):
+<pre>
+    -t mangle -I PREROUTING 1 -m limit --limit 3/min --limit-burst 3 -j LOG --log-prefix "IPv4 mangle.PREROUTING: " --log-level 6
+
+    -t mangle -I INPUT 1 -m limit --limit 3/min --limit-burst 3 -j LOG --log-prefix "IPv4 mangle.INPUT: " --log-level 6
+
+    -t mangle -I OUTPUT 1 -m limit --limit 3/min --limit-burst 3 -j LOG --log-prefix "IPv4 mangle.OUTPUT: " --log-level 6
+    -t mangle -I OUTPUT 1 -m owner --uid-owner anonimous -m limit --limit 3/min --limit-burst 3 -j LOG --log-prefix "IPv4 mangle.OUTPUT anonymous:" --log-level 6
+    -t mangle -I OUTPUT 1 -m owner --uid-owner debian-tor -m limit --limit 3/min --limit-burst 3 -j LOG --log-prefix "IPv4 mangle.OUTPUT debian-tor:" --log-level 6
+
+    -t mangle -I POSTROUTING 1 -m limit --limit 3/min --limit-burst 3 -j LOG --log-prefix "IPv4 mangle.POSTROUTING : " --log-level 6
+    -t mangle -I POSTROUTING 1 -m owner --uid-owner anonimous -m limit --limit 3/min --limit-burst 3 -j LOG --log-prefix "IPv4 POST anonymous" --log-level 6
+    -t mangle -I POSTROUTING 1 -m owner --uid-owner debian-tor -m limit --limit 3/min --limit-burst 3 -j LOG --log-prefix "IPv4 POST debian-tor" --log-level 6
+</pre>
+
+This will give you a kind of control over your traffic.
+
+== CONCLUSION ==
+
+Anonymous Internet usage via Tor is best when:
+1) Separated hardware computer used for anonymous access, or even _all_ traffic, without exceptions, explicitly is torified on LAN gateway. Do not create Tor over Tor configurations, they are unpredictable.
+2) Within single Tor session there is only torified outgoing traffic via gateway or any IP address in your subnet. No other untorified traffic occurs at all during Tor session.
+3) The torified traffic is made to be anonymous, but it is not protected from being read by third party at any Tor "exit node" or after the "exit node". To protect both anonymity and data to be transmitted you may use Tor and Openvpn with encryption by Openssl capabilities.
+4) There are some other recommendations on https://www.torproject.org/ Think yourself about them.

@@ -1,0 +1,185 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== SCST - Infiniband, iSCST and SRP Target and Ubuntu Lucid ==
+
+This Wiki will describe how to setup an Infiniband or iSCSI based SRP target on Ubuntu Lucid (10.04).
+
+=== A Word of Warning ===
+
+Configuring, designing and implementing an Infiniband based setup is not for the faint-hearted. It will take days or even weeks to understand its quirks, bottlenecks, complexities and you'll even end up doubting yourself why you had chosen Infiniband over 10GB ethernet.
+
+=== Before we jump ahead ===
+
+First of all: Check your BIOS settings! You may end up with really bad PCIe performance if not configured properly. Especially server boards tend to be configured very conservatively. "Optimized Defaults" may be your friend but your mileage may vary.
+
+=== Getting started with Infiniband ===
+
+If you're only planning on using iSCSI, you can skip this part. However, if you are planning on doing this properly, you should be using Infiniband. The kernel module for your Infiniband adapter will already be loaded (mine was ib_mtcha). Now you need to install/load the corresponding Infiniband-libs and modules:
+
+''apt-get install libibcm1 libibcommon1 libibmad1 libibumad1 libibverbs1 librdmacm1 rdmacm-utils ibverbs-utils''
+
+''lsmod |grep ib_'' will show you the available Infiniband kernel modules. Load any modules you need with ''modprobe ib_<name>''
+
+==== Getting started with iSCSI ====
+
+There is very little to be done if you're only planning on using Ubuntu as an iSCSI target. The major thing to be aware of is of disk throughput and ease of manageability. It's most likely that you're reading this because you want to set up Ubuntu as an iSCSI target for either VMware or Windows. For both of these, the most important thing is IOPS - I/O's Per Second. Even with reasonably slow drives, having a high number of IOPS will make a significant and noticeable difference to your system. 
+
+The easiest way to increase your IOPS is with large amounts of cache, and large numbers of physical spindles.
+
+=== Where do I get the appropriate Ubuntu packages? ===
+
+{| class="wikitable"
+|-
+| Whilst this isn't installed by default, if you've been investigating iSCSI under Ubuntu, you may have installed other iSCSI targets. You ''MUST'' uninstall all other iscsi target packages before installing SCST. The most common one that may have been installed is called '''iscsitarget''' and '''MUST''' be removed before installing iscsi-scst. There is a conflict between the two packages which prevents iscsitarget from being removed after iscsi-scst is installed. The result is having '''two''' targets running on your server, which is a very bad thing.
+|}
+
+Note that Launchpad suggests using ''apt-add-repository'', which is only installed if you '''enabled''' unattended upgrades whilst installing Ubuntu (a very bad idea for a storage server). Add this command by running ''sudo apt-get install python-software-properties''. Note that this '''will''' install the ''unattended-upgrades'' package, but it will not enable it. You can verify that it's not enabled by ensuring that /etc/apt/apt.conf.d/10periodic does not contain 'Unattended Upgrade'. See <nowiki>[[https://help.ubuntu.com/10.04/serverguide/C/automatic-updates.html|the documentation]]</nowiki>
+
+Initiator: You can find srptools and opensm in this PPA:
+
+<nowiki>[[https://launchpad.net/~ast/+archive/srp|https://launchpad.net/~ast/+archive/srp]]</nowiki>
+
+Target: You can find patched Kernels and SCST-Admin in this PPA:
+
+<nowiki>[[https://launchpad.net/~ast/+archive/scst2|https://launchpad.net/~ast/+archive/scst2]]</nowiki>
+
+After installing the packages from the PPA above, reboot your machine and verify that your Infiniband connections are working with ibstat, ibhosts, ibswitches, and/or iblinkinfo. More information about those commands can be found here: <nowiki>[[http://pkg-ofed.alioth.debian.org/howto/infiniband-howto-4.html|debian OFED HowTo]]</nowiki>
+
+=== Ok, my infiniband mesh is up. What now? ===
+
+{| class="wikitable"
+|-
+| Disclaimer: I am simply documenting my experiences to get a working SCST setup on my particular hardware and according to my storage requirements. '''There are many security options which have not been covered here. This should not be considered an acceptable setup for secure environments.''' It would be great if a storage expert could further develop this guide.
+|}
+
+Next, you will want to set up your '''scst target''' and all of your '''SRP initiators'''.
+
+==== scst target ====
+
+{| class="wikitable"
+|-
+| This step is run once on your scst target.
+|}
+
+There are two methods of setting up scst targets, either manually through the kernel's /proc interface, or through an automated tool known as scstadmin. If you are interested in using the /proc interface, look here for some pointers: <nowiki>[[http://iscsi-scst.sourceforge.net/iscsi-scst-howto.txt|iscs-scst howto]]</nowiki>. We will use the scstadmin tool in this guide. 
+
+My particular storage configuration was a 6TB softraid storage array running OCFS2 on Mellanox ConnectX2 Infiniband HBAs. You'll need to have some kind of parallel-write safe filesystem (OCFS2, GFS2, etc.) when using scst unless you know what you're doing. '''Ext4 and friends will not appreciate being mounted read/write on multiple machines at a time.''' There's sufficient documentation about how to setup these filesystems elsewhere, so I won't go into detail about it. For an OCFS2 filesystem (which currently provides the highest performance among shared-disk filesystems I believe), you can get documentation from the <nowiki>[[http://www.google.com/url?sa=t&source=web&cd=2&ved=0CBgQFjAB&url=http%3A%2F%2Foss.oracle.com%2Fprojects%2Focfs2%2Fdist%2Fdocumentation%2Fv1.4%2Focfs2-1_4-usersguide.pdf&ei=0dhJTNDuEpjrnQfT4fHiDQ&usg=AFQjCNGmABKQ-1epABHe1cj9ul7L57Fplw&sig2=c-J6I2jWAJUyh3j_B2PpTA|Oracle OCFS2 v1.4 User's Guide]]</nowiki>. If you use OCFS2, beware of a bug currently in Lucid which brings up the o2cb cluster manager before the infiniband mesh has time to come up. A temporary workaround is to append a 'post-up /etc/init.d/o2cb start ocfs2' under the infiniband entry in /etc/network/interfaces. It should be fixed in mavrick.
+
+The next few steps were taken from the scst howto page on sourceforge. They will set up your target name. 
+----
+''2. Set up /etc/iscsi/ininitiatorname.iscsi
+
+The most convenient way to set up this file is to install the open-iscsi
+package provided by your Linux distro first and then to run the shell commands
+shown below. Verify the contents of the generated file.
+
+  /etc/init.d/open-iscsi stop
+  { echo "InitiatorName=$(if [ -e /usr/sbin/iscsi-iname ]; then /usr/sbin/iscsi-iname; else /sbin/iscsi-iname; fi)";
+                          echo "InitiatorAlias=$(hostname)"; } >/etc/iscsi/initiatorname.iscsi
+  /etc/init.d/open-iscsi start
+  cat /etc/iscsi/initiatorname.iscsi
+
+3. Set up /etc/iscsi-scstd.conf
+
+You can do this by e.g. running the following shell commands:
+
+  echo "Target $(sed -n 's/InitiatorName=//p' /etc/iscsi/initiatorname.iscsi):storage" >/etc/iscsi-scstd.conf
+  cat /etc/iscsi-scstd.conf
+''
+----
+We will now set up your target disks or files. 
+
+Clear your config files first with
+   ''scstadmin -clearConfig /etc/scst.conf''
+
+Next, if you are connecting to a virtual disk, such as a linux softraid device or file, add the device to your kernel's scsi handler using
+   ''scstadmin -adddev <vdisk01> -path </dev/md0> -handler vdisk -options <BLOCKIO>''
+Replace the options in angled brackets with information relevant to your system. The BLOCKIO option provides block level access to any srp initiators, bypassing the target's kernel pagecache. This is suitable for any softraid devices etc. Note that scstadmin --help erroneously calls this the BLOCK_IO option. 
+
+Scst defines LUNs are a part of security groups. The command to do this in scstadmin is
+   ''scstadmin -assigndev <vdisk01> -group Default -lun <0>''
+Again, you can replace the options in angled brackets as necessary.
+
+Lastly, commit your changes to disk with 
+   ''scstadmin -WriteConfig /etc/scst.conf''
+
+By default, the scst service will start on boot and be detectable by SRPs on your network. However, you need to use lsmod to verify that the '''ib_srp and ib_srpt''' kernel modules are loaded. You be unable to establish any srp connections if they are not. Put the modules into /etc/modules.conf if needed.
+
+You can use /etc/initiators.allow and /etc/initiators.deny to add a bit more security to your setup, but I would advise coming back to this step later. In the event your iscsi connection has issues, you should keep things simple first.
+
+That's it for your target configuration. We'll be moving on to '''initiator configuration''' now.
+
+==== SRP initiator ====
+
+{| class="wikitable"
+|-
+| This step will need to repeated on each of your SRP initiators.
+|}
+
+Make sure that the '''ib_srp''' kernel module is loaded on your initiator.
+
+On your initiator, run
+   ''ibsrpdm -c''
+to see whether your initiator is able to establish an srp connection to your target. If you get output like 
+   ''id_ext=50001ff10005052a,ioc_guid=50001ff10005052a,dgid=fe8000000000000050001ff10005052a,pkey=ffff,service_id=2a050500f11f0050'' 
+then you're golden. If not, double check your infiniband connection.
+
+Next, edit your /etc/srp_daemon.conf file and add an entry with your id_ext and ioc_guid. For example, from the ipsrpdm output above, you would add the line 
+   ''a id_ext=50001ff10005052a,ioc_guid=50001ff10005052a''
+to your srp_daemon.conf file. Note the 'a' is for allow. For security reasons, the last line in the file should be 'd' to deny all other connections.
+
+You will also need to edit /etc/defaults/srptools to allow connections on your infiniband adapter. You will need to have the syntax
+   PORTS="<your_ib_card>:<your_ib_card_port>". 
+My mellanox card's entry was 
+   PORTS="mlx4_0:1"
+For some reason, the PORTS=ALL option does not work, despite being present in the config file.
+
+Lastly, restart the srptools service in /etc/init.d/srptools and you should see entries in dmesg about a new block device being discovered. fdisk -l should also show the new block device. Simply add it to your fstab and you're set!
+
+=== iSCSI Target ===
+
+There are a large number of similarities with the previous section, but I thought it was easier to split it up.
+
+==== Add the PPA ====
+
+The SCST2 repository needs to be added to your system first. Run the command ''sudo apt-add-repository ppa:/ast/scst2'' which will add the repository. As per the documentation, you then need to do a ''sudo apt-get upgrade''. This will propogate the local apt cache with the contents of the PPT. 
+
+To install the SCST compatible kernel, you the need to install the 'linux-scst' virtual package.
+
+''sudo apt-get install linux-scst''  
+
+This will install the new kernel with SCST. At the time of writing this document, it was 2.6.32-26. 
+
+Reboot,  and check that the machine has booted up with the correct kernel. If it hasn't, you may need to enable the grub boot menu (Remove the line 'GRUB_HIDDEN_TIMEOUT=0' from /etc/default/grub, and then run ''sudo update-grub''. When you reboot you will be able to manually select the correct kernel. After testing, use ''sudo grub-set-default 2.6.32-26'' (or whatever the correct version is) and then run ''sudo update-grub'' to save the changes.
+
+All of the following commands have to be run as root. It's easier to type ''sudo bash'' and run everything from there, so I've omitted the 'sudo' from all of the following commands. They '''do''' need to be run as root.
+
+Install the iscsi and scst packages with the command ''apt-get install iscsi-scst scstadmin''. This will automatically install the startup scripts, and a default /etc/scst.conf file (which will be almost useless). You'll need to load the modules, and start up the iscsi service. Run the following commands:
+
+''/etc/init.d/srtp start''
+
+''/etc/init.d/iscsi-scst start''
+
+You will get a '''lot''' of errors. Ignore these, these are for default devices that are not present. The easiest (and recommended) way is to start afresh and erase the config.
+
+Clear your config files with ''scstadmin -clearConfig /etc/scst.conf''. It will warn you that it's about to remove all the settings and wait 10 seconds. Let it finish.
+
+Whilst setting up disk layout is far beyond the scope of this document, a good rule of thumb for high throughput devices is that RAID5 is an exceptionally bad idea.  A far more reliable and fault-tolerant setup of drives is RAID1+0.  Also, to ease administration, it's a good idea to use LVM to manage your disk sets.  In the following example, we'll assume that you have 16 x 2TB Drives (which will be a reasonably high-end storage server), with dedicated hardware caching in case of power failures - eg, a UPS, or battery backed up cache on the server itself.  These drives have been set up in a RAID1+0, giving 16TB of available space.  This MD device - /dev/md5 - is now available to the system.
+
+As mentioned above, using LVM makes managing this large chunk of space easy. Mark it as a LVM PV by using ''pvcreate /dev/md5''. Create a Volume Group called 'raid10' by assigning the PV to that VG:  ''vgcreate raid10 /dev/md5''
+
+Now you can easily create slices of that RAID1+0 set using lvcreate. We start by creating a 2TB Logical Volume called 'vmfs1':  ''lvcreate -L2TB -nvmfs1 raid10''
+
+Next, we need to add that newly created volume to an iSCSI target.
+   ''scstadmin -adddev vmfs-vol-1 -path /dev/mapper/raid10/vmfs1 -handler vdisk -options NV_CACHE''
+
+----
+CategoryDocumentation

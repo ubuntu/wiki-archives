@@ -1,0 +1,171 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+== ARM Device Trees ==
+
+This page outlines the implementation details and progress for the device trees on ARM work. At present it's just to document what I'm up to, we could merge this with the UbuntuSpec:mobile-lucid-arm-device-tree-support spec. Contact Jeremy Kerr <jeremy.kerr@canonical.com> for comments/questions/etc.
+
+=== Objectives ===
+
+* Reduce time & effort required for ARM OEM bringup work
+** Most designs may only require a new DT, rather than new code
+* Reduce patchset required from OEMs
+** Vendors' code drops should become smaller and more manageable
+* Allow DT support to coexist with machine/platform IDs
+** Only the platforms we care about can be device-tree-ised, others can remain as existing
+* Provide a solid case for upstreaming the DT work
+
+=== Implementation Plan ===
+
+My currently plan is to use the qemu 'versatilepb' platform as a testing environment for the early boot code, then continue on an iMX51 (babbage 2.0) board for device support. This should involve the following:
+
+{| class="wikitable"
+|-
+| '''Item'''
+| '''Status'''
+|-
+| Add atag type for device tree pointer
+| done
+|-
+| Add dtb blob & atags support to bootloader/qemu
+| qemu done
+|-
+| Establish requirements of early mdesc usage
+| done
+|-
+| Parse DT pointer from bootloader/dtbImage
+| done
+|-
+| Little-endian support for drivers/of/
+| done
+|-
+| Provide memory and initrd parsing for early dt
+| done
+|-
+| Add machine probe infrastructure
+| done
+|-
+| Add machine probe support for versatile platform
+| done
+|-
+| Add machine probe support for mx51 platform
+| done
+|-
+| Add DT infrastructure to later boot
+| done
+|-
+| Add DT discovery to amba bus
+| done
+|-
+| Common clk API
+| inprogress
+|-
+| Add 'dtb wrapper' support
+| done
+|-
+| Explore options for early mdesc usage
+| inprogress
+|-
+| Add DT discovery support for drivers on platforms we'd like to DT-ise
+| in progress (by jk & gcl), of_bus being merged with platform bus
+|}
+
+=== Boot interface ===
+
+Rather than pass the device tree pointer in ATAGS, nico has suggested that we should pass the pointer directly in r2 on boot, removing the need for ATAGS on device tree platforms.
+
+The draft boot interface has been published here: <nowiki>[[http://devicetree.org/Boot_Environment]]</nowiki>
+
+=== dtbImage wrapper ===
+
+It is now possible to "embed" a device tree blob in a kernel image, forming a single bootable file (dtbImage) that includes the device tree for a specific machine.
+
+This is used to boot with a device tree with bootloaders that do not have device tree support.
+
+The dtbImage consists of three components: a kernel zImage, a device tree blob, and a small ASM wrapper. The ASM wrapper is executed first, adding a pointer to the device tree blob in r2, and then executes the zImage. Boot proceeds as per usual, as if the bootloader has passed the DTB to the kernel.
+
+dtbImage support is in the 'dtbimage' branch of the kernel git tree below. To use the dtbImage infrastructure, set CONFIG_ARM_EMBEDDED_DTB to the path to a .dtb file, and 'make dtbImage'. The resulting file will be in arch/arm/boot/dtbImage.
+
+If you're using a dtbImage, the kernel command line and memory configuration will need to be correct in the .dts file you compiled (as opposed to using qemu, where these properties are updated at boot time).
+
+=== Code ===
+
+Current development trees:
+
+* qemu with initial DT support: <nowiki>[[http://kernel.ubuntu.com/git?p=jk/dt/qemu.git;a=summary]]</nowiki> / git://kernel.ubuntu.com/jk/dt/qemu.git
+* kernel: <nowiki>[[http://kernel.ubuntu.com/git?p=jk/dt/linux-2.6.git;a=summary]]</nowiki> / git://kernel.ubuntu.com/jk/dt/linux-2.6.git
+* kernel (devicetree infrastructure): <nowiki>[[http://git.secretlab.ca/?p=linux-2.6.git;a=summary]]</nowiki> (see the test-devicetree and experimental-devicetree branches)
+
+These trees are in active development, and will be rebased frequently.
+
+==== Development details ====
+
+First, grab the device tree compiler from git://git.jdl.com/software/dtc.git. Compile and install to a local --prefix.
+
+Next, compile the qemu tree above, specifying the paths to dtc's install prefix:
+
+<pre>
+./configure --target-list=arm-softmmu --audio-drv-list="alsa pa" \
+          --enable-fdt \
+          --extra-cflags=-I<path-to-libfdt-prefix>/include \
+          --extra-ldflags=-L<path-to-libfdt-prefix>/lib
+</pre>
+
+=== Devices ===
+
+==== Versatile ====
+
+The 'versatile' branch of the kernel git tree above contains support for booting the versatile platform with a device tree.
+
+The branch contains a 'device tree source' (.dts) file, which can be compiled to provide the device tree blob (.dtb). The dts file is in arch/arm/boot/dts/versatile.dts. Compile this to a device tree blob:
+
+<pre>
+dtc -O dtb  -o versatilepb.dtb versatilepb.dts
+</pre>
+
+And place the .dtb file in the pc-bios/ directory of your qemu build tree.
+
+Build the 'versatile' branch of the kernel tree above, with the <nowiki>[[attachment:linux-versatile-dt.config|linux-versatile-dt.config]]</nowiki> config file.
+
+From your qemu build tree, boot the zImage:
+
+<pre>
+./arm-softmmu/qemu-system-arm -M versatilepb \
+    -kernel <path-to-kernel-tree>/arch/arm/boot/zImage \
+    -nographic -append "console=ttyAMA0 debug" 
+</pre>
+
+Add any -initrd <file> or -hda <file> arguments as necessary.
+
+==== mx51 ====
+
+mx51 support is currently under development, using the mx51 branch of the kernel tree. This support is based on Robert Herring's initial mx51 patch, and I'm currently working to move more of the device discovery and setup to DT-based methods.
+
+The DTS file for mx51 is in arch/arm/boot/dts/mx51_babbage.dts. Kernel .config: <nowiki>[[attachment:linux-mx51-dt.config|linux-mx51-dt.config]]</nowiki>.
+
+Since there is no bootloader support for device trees, you'll need to boot a dtbImage (a zImage with an embedded device tree blob). To create a dtbImage, set CONFIG_ARM_EMBEDDED_DTB to the path to your compiled dtb, and 'make dtbImage'.
+
+=== Potential Issues ===
+
+==== Early boot requirements ====
+The kernel uses the mdesc members very early during boot (first usage is for serial debug output in <code>__create_page_tables</code> when CONFIG_DEBUG_LL is enabled). At present, we don't do machine detection until we've reached a C environment, so we're currently incompatible with DEBUG_LL. Although users will not need DEBUG_LL, it's probably required for upstream adoption. A couple of options:
+
+* Do a little initial early parsing (in asm or C) before the full parse; only need to extract a few properties for early boot (phys_io and io_pg_offset?).
+* Do what powerpc does: make very early debug output non-portable (ie, depend on a compile-time IO address), bring up platform-independent debug code ASAP. Very early debug should only be needed for a small subset of problems, like MMU setup.
+
+==== Upstream acceptance ====
+
+For this work to be of value, we'd need to have it accepted by the ARM community. According to gcl, rmk is not convinced of the merits of DT for ARM, and would need to see benefits before accepting upstream. Work is in progress to demonstrate full platform support for device tree boot on mx51.
+
+=== Links ===
+
+* lp blueprint: UbuntuSpec:mobile-lucid-arm-device-tree-support
+* spec: <nowiki>[[Specs-ArmDeviceTreeSupport]]</nowiki>

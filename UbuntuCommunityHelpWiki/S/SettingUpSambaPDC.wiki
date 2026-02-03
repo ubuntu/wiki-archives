@@ -1,0 +1,203 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+This doc is here to describe how to install Samba as a Windows domain controller.
+For more information about Samba itself, see : SettingUpSamba
+
+Here, I will describe how to make a Windows domain controller with Samba and an Ubuntu Server 6.06.
+I actually use Samba on my home network with 7 computers and around 4 Windows computers to be able to log on each of them with the same login information and to have the network drives and printers automatically mounted.
+I won't describe how to install a LDAP server, because I don't use one for a so small domain. Instead I'll just use the standard Samba login database and the Unix accounts.
+It will include : Samba installation, network shares, printer shares and domain login.
+
+== Installation ==
+=== Samba installation ===
+Samba is available in Main so '''sudo aptitude install samba''' will install it.
+It includes two daemon smbd and nmbd and an init script that will load samba when your server start (/etc/init.d/samba), the configurations files are located in /etc/samba/.
+=== Cups installation ===
+Same way as samba : '''sudo aptitude install cupsys''' will install it.
+You may also need to install some extra package to have all the printer drivers you need.
+== Configuration ==
+=== Samba configuration ===
+As the default /etc/samba/smb.conf file wasn't done for domain login, I just did my own one from scratch.
+Here is my own smb.conf file with explanations of what I put and why.
+'''Global part''' (the server settings part)
+<pre>
+[global]
+   workgroup = LAN #Your domain name
+   server string = Server #The server description (as Windows call it)
+   netbios name = server #The server name
+
+   wins support = yes #Turn it to yes if your server will also be a WINS server (a server that converts Netbios name to IP)
+   dns proxy = no #If your server should also act as a DNS proxy server, not useful
+
+   log file = /var/log/samba.log #I like to have everything in the same logfile (not the default behavior)
+   log level = 1 #The level of details you want in your logs (increase it if you need more information)
+   max log size = 1000 #The maximum size of the log file (in lines ?)
+   syslog = 0 #If you want to also write in the syslog file
+
+   admin users = root #User or group that will have all rights on the server (They will also create also files as root on the shares)
+   security = user #In a domain environment it's better to have a user based security
+   guest account = nobody #The guest account
+   encrypt passwords = true #If you want the passwords to be encrypted (needed with unix password synchronization)
+   passdb backend = tdbsam #The password backend (as I don't use LDAP, it will be the default samba one)
+   obey pam restrictions = yes
+   invalid users = #If you have to reject some users, if you want the printer share to work, do not deny root
+   unix password sync = yes #Synchronize passwords between Samba and Unix 
+   passwd program = /usr/bin/passwd %u #The command used to change the passwords
+   passwd chat = *Enter\snew\sUNIX\spassword:* %n\n *Retype\snew\sUNIX\spassword:* %n\n *password\supdated\ssuccessfully* .
+   map to guest = Bad Password 
+   password level = 0 #Increase it if you have some password problem with some old Windows (95, 98, NT)
+
+   add user script = /usr/sbin/useradd -m '%u' -g smbusers -G smbusers
+   delete user script = /usr/sbin/userdel -r '%u'
+   add group script = /usr/sbin/groupadd '%g'
+   delete group script = /usr/sbin/groupdel '%g'
+   add user to group script = /usr/sbin/usermod -G '%g' '%u'
+   add machine script = /usr/sbin/useradd -s /bin/false -d /var/lib/nobody '%u' -g machines
+## That's the command used to create/delete users, or add/remove them from groups, you can custom them to use your own Unix groups.
+
+   logon path =
+   logon home =
+## You can have a server stored Windows profile (c:\Document and Settings\xxxx), but be careful, that can take a lot of place on the server and you need a really fast network. If you don't want it, you have to force these two values to empty (= )
+
+   domain logons = Yes #Your server will be able to check logins and make domain logons
+   os level = 64
+   preferred master = Yes #Your server will be the preferred domain master
+   domain master = Yes #Your server is a domain master
+   logon script = script.bat #The script launched when someone log on a computer connected to your domain, that's an BATCH (DOS) file or a Visual Basic script one.
+   
+   printcap name = cups #Your printing server list of printers
+   printing = cups #Your printing server
+   load printers = yes #Your samba server will act as a printing server
+
+   socket options = TCP_NODELAY #Increase speed (?)
+   time server = yes #Your server will be a time server (net time \\yourserver /SET /Y)
+</pre>
+
+'''Network shares part'''
+<pre>
+   [print$] #The share that contains the printer drivers
+   comment = drivers
+   path = /var/lib/samba/printers/
+   browseable = yes
+   guest ok = no
+   read only = yes
+   write list = @admin #A unix group that will have the admin rights on the printers (you can also specify a user) (@ means that's a group)
+
+   [printers] #The share used by Windows to access your printers
+   comment = Printers
+   browseable = no
+   path = /var/spool/samba
+   printable = yes
+   public = no
+   writable = no
+   guest ok = no
+   printer admin = @admin
+
+   [netlogon] #The share that contains the logon scripts
+   path = /data/netlogon
+   public = no
+   writeable = no
+   browsable = no
+   valid users = @smbusers #The users allowed to read them (all users allowed to logon the domain)
+</pre>
+Now, you need to create : /var/spool/samba, /var/lib/samba/printers and /data/netlogon (or with other names as soon as you also change them in smb.conf)
+Be careful with the file permissions on these directories.
+
+Know you can write your Windows logon script.
+Here is mine :
+<pre>
+   @echo off
+   REM Mounting network drives
+   net use X: /DELETE
+   net use X: %LOGONSERVER%\public
+   net use Y: /DELETE
+   net use Y: %LOGONSERVER%\download
+   net use Z: /DELETE
+   net use Z: %LOGONSERVER%\users\%USERNAME%
+
+   REM Syncronizing clocks
+   net time %LOGONSERVER% /SET /Y
+
+   REM Mounting printers
+   %LOGONSERVER%\netlogon\printer.vbs
+
+   REM Disactivating firewall
+   netsh firewall set opmode disable
+
+   REM Kill some annoying softwares
+   taskkill /IM qttask.exe
+</pre>
+It mounts three network drives, synchronize the time with the server, call a vbs script to mount a printer, disable the Windows firewall (useless in LAN and with a router that act as firewall) and finally kill some annoying softwares like qttask (it came back all the time and is useless at least for me).
+%LOGONSERVER% is the network path to the logon server (\\server for me).
+%USERNAME% is the username used to open the session.
+My printer.vbs file
+<pre>
+   Set net = CreateObject("WScript.Network")
+   net.AddWindowsPrinterConnection "\\server\laser"
+</pre>
+
+Your samba configuration should now be good.
+=== Cups configuration ===
+The Ubuntu's cups package has the webinterface login turned off, then you can't configure your printers with it, which is quite annoying with a server where you don't have the gnome-cups-manager gui.
+The way to turn it on is the following :
+<pre>
+   adduser '''yourself''' lpadmin
+   adduser cupsys shadow
+</pre>
+It allows Cups to read your /etc/shadow file and then be able to check if the login information is correct.
+The next problem is that CUPS only allow localhost login on the Webinterface, as you don't have any desktop environment and then no graphical network browser (who wants to set CUPS through the webinterface with lynx ?), you need to allow login from other computers.
+Just edit the /etc/cups/cupsd.conf (ex. sudo nano /etc/cups/cupsd.conf), and put "Allow all" for /, /admin and /admin/conf sections.
+Also add "DefautEncryption IfRequested" at the end of the file, to prevent CUPS webadmin to redirect you to a https server that isn't started.
+You can now restart the CUPS daemon with : '''/etc/init.d/cups'''
+You are now able to work through the CUPS web interface at : http://the-server-ip:631
+{{http://www.stgraber.org/download/ubuntu/samba-pdc/cups.png}}
+
+Now, just add your printers and check if they work.
+=== Starting everything ===
+Now you can start (or restart) both samba and cups daemons.
+<pre>
+   sudo /etc/init.d/samba start (or restart)
+   sudo /etc/init.d/cups start (or restart)
+</pre>
+Both should return a [OK], if that's not the case, check the log files.
+== Usage ==
+=== Windows client ===
+==== Users ====
+Before being able to join a Windows station in your domain, you need to set some Windows<->Linux group relations.
+For that, use the "net groupmap" command
+<pre>
+   net groupmap list #Show you the list of the actuals Windows groups and their Linux equivalent
+   net groupmap add #To add a group mapping
+   net groupmap modify #To change a group mapping
+</pre>
+The needed group mapping are :
+<pre>
+   net groupmap add ntgroup="Domain Admins" unixgroup="your-unix-group"
+   net groupmap add ntgroup="Domain Users" unixgroup="your-unix-group"
+</pre>
+Add your unix users in the good groups, and then add them to samba with : '''smbpasswd -a username'''
+==== Join the domain ====
+As I have a French windows here, the names and options can have a different name on your own Windows.
+To add a Windows client to your domain, log on an Administrator local session and go in the System proprieties (Windows+Pause shortcut), then go to the Computer name tab (or something like this) and click on the Modify (Edit ?) button, change your computer name (if you want), tick the Domain radiobox and enter your Domain name in the textbox.
+Validate with OK, and you should have a window asking you for a Domain Administrator account, enter your Samba root login/password and validate.
+You should see a : "Welcome on domain xyz" box.
+{{http://www.stgraber.org/download/ubuntu/samba-pdc/domain.png}}
+
+Then reboot and you should be able to log on your domain.
+=== Linux client ===
+I didn't try to add a Linux client to the domain, so I will only explain how to access the network drives and mount a CUPS network printer.
+To access your server network shares, simply point your nautilus (or konqueror) to : smb://your-server-ip
+To have your CUPS printers available on your Linux computer, add a new printer, then choose Network Printer and the CUPS IPP type.
+Put an URI like this one : http://server-ip:631/printers/cups-printer-name (ex. http://172.16.0.3:631/printers/laser)
+{{http://www.stgraber.org/download/ubuntu/samba-pdc/printer.png}}
+
+That's all, I hope this doc helped you to set your Samba domain server, if you have more question, you can find me on irc (irc.freenode.net) as "stgraber"
+This doc isn't complete, if someone can for example do some screenshots of an English windows, and also explain correctly how to add the printers drivers to samba (I did it, but I can't remember exactly how), feel free to edit this page (that's the goal of a wiki).

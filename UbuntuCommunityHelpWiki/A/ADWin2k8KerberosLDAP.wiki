@@ -1,0 +1,191 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+== Ubuntu single sign on integration with a Windows 2008 domain ==
+
+=== Introduction ===
+
+A common goal in any organization is to integrate the unix and windows hosts.  There are a few ways to do this and some have been written about before.  The use of Samba's winbind is popular and is documented here - [ActiveDirectoryWinbindHowto].  There is also a legacy document for configuring older Ubuntu installations with legacy win2k3 servers here - [ActiveDirectoryHowto].  
+
+This document has been tested on Windows Server 2008 and Ubuntu 10.04.  For successful integration we have 3 components.  We need a Kerberos ticket for the host to encrypt all user password authentications.  We need LDAP to allow for user token lookups to verify a users entry in passwd and group.  Finally we need to install the plugin authentication module (PAM) to allow for krb5/ldap authentication over a network.
+
+=== Basic unix prep work ===
+
+==== Configure static IP on your unix host ====
+
+The full networking documentation can be found here https://help.ubuntu.com/8.04/serverguide/C/networking.html.  
+
+For those that just need a hint edit /etc/network/interfaces as appropriate to set a static IP address.
+
+Verify the /etc/resolv.conf settings on your host.  You need to be able to contact and lookup your domain controllers, and search your domain name and any subdomains you use.
+
+==== Setup NTP to allow for time resolution ====
+
+For correct Kerberos authentication, you need the time on your DC and unix host to agree.  Setting up an NTP server/client environment is beyond the scope of this document, but you want your DC and unix client to be getting time updates from the same source on a regular basis.
+
+===== Overview =====
+** Install ntp daemon - '''sudo apt-get install ntp'''
+** Shut down the ntp daemon '''/etc/init.d/ntp stop'''
+** Edit the /etc/ntp.conf configuration to read time from suitable time source
+** Run '''ntpdate''' against your preferred time source as a one time time fix
+** Start the ntp daemon '''/etc/init.d/ntp start'''
+
+=== Active Directory Unix Attributes (Windows work) ===
+
+At this point, you will need administrative access to your Windows environment.  
+
+The first step is to add the ability to manage unix specific attributes in ADUC.
+
+** under the Server Roles for Active Directory in Windows 2008, there is now an option to enable identity services for Unix.  Enable the administrative tools. This will give you the Unix Attributes tab in ADUC. You need to create a NIS domain on the Windows side to edit the attributes in ADUC. You can still use other methods if you do not want to run NIS on your DC (or you can turn it off once it updates AD's database with the information.
+
+=== Ongoing user manipulation ===
+We now have additional schema attributes under the AD objects.  To be able to see LDAP users under unix you need to make some changes:
+
+** In active directory users and computers, go to the properties of an example unix user.  Then go to the unix attributes tab
+** Select the NIS domain, choose an appropriate UID.  Choose a suitable group.
+
+=== Setup Kerberos under Ubuntu (Unix Work) ===
+
+Install the following kerberos packages.  During the config it will ask you for a default realm, this should be the default AD domain the machine is in (all CAPS). 
+
+'''sudo apt-get install libpam-krb5'''
+
+Verify the  configuration with '''kinit''' (beware of capitalization in the example) - 
+<pre>
+examplehost# kinit testuser@DOMAIN.COM        ## PASSWORD ENTERED CORRECTLY
+examplehost#
+
+examplehost# kinit testuser@DOMAIN.COM        ## PASSWORD ENTERED INCORRECTLY
+Password for testuser@DOMAIN.COM:
+kinit(v5): Preauthentication failed while getting initial credentials
+
+examplehost# kinit testuser@domain.com        ## INCORRECT CAPITALIZATION
+Password for testuser@domain.com:
+kinit(v5): KDC reply did not match expectations while getting initial credentials
+</pre>
+
+If this does not work you can try explicitly configuring Kerberos, however if you are able to resolve domain resources (SRV records for Domain Controllers) this step should not be neccissary. An example is shown below for DOMAIN.COM pointing at '''DC1''' and '''DC2''' for its config. If you don't care which Domain Controllers you authenticate to in your domain (they are all local or you have a fast network) you can simply use the domain DNS name and kerberos will use DNS round-robin to reach them.
+
+'''/etc/krb5.conf - '''
+<pre>
+[libdefaults]
+        default_realm = DOMAIN.COM
+        dns_lookup_kdc = true
+        verify_ap_req_nofail = false
+
+[realms]
+        DOMAIN.COM = {
+        kdc = dc1.domain.com
+        kdc = dc2.domain.com
+        admin_server = dc1.domain.com
+        }
+
+[domain_realm]
+        .domain.com = DOMAIN.COM
+
+[logging]
+        default = FILE:/var/log/kerberos
+        kdc = FILE:/var/log/kerberos
+        kdc_rotate = {
+        period = 1d
+        version = 10
+        }
+
+[appdefaults]
+        kinit = {
+        renewable = true
+        forwardable= true
+        }
+</pre>
+
+=== Setting up LDAP/Kerberos Queries for passwd ===
+
+Install the needed packages
+
+'''sudo apt-get install libpam-ldapd libnss-ldapd'''
+
+You will be prompted for configuration, but this is irrelevant as we will be overwriting all this stuff.  You can also skip the /etc/nsswitch.conf changes - better to do this manually so you know what is going on.  The heavy lifting of our ldap client is performed by '''nslcd''' that is a dependency installed by '''libnss-ldapd'''
+
+Cleanup the spurious config file installed by this apt command -
+'''sudo mv /etc/ldap/ldap.conf /etc/ldap/ldap.conf.old;sudo mv /etc/ldap.conf /etc/ldap.conf.old'''
+
+Also note that when you go searching round the net, '''we do not use any of the following files''' 
+- 
+<pre>
+/etc/ldap.conf
+/etc/ldap/ldap.conf
+/etc/ldap/slapd*
+/etc/pam_ldap.conf
+/etc/libnss_ldap.conf
+</pre>
+
+Edit and fix '''/etc/nslcd.conf''' which is the one and only place this setup relies on.  Note that the ldap query user password is in this file in plain text, so this configuration file should be locked down and not permit interactive logins. If you have multiple domains you can use your Global Catalogs as your LDAP servers. Change the uri lines to ldap://gc.example.com:3268
+
+<pre>
+uid nslcd
+gid nslcd
+
+uri ldap://dc1.example.com ldap://dc2.example.com
+
+base dc=example,dc=com
+scope sub
+
+binddn CN=ldapquery,OU=Users,DC=example,DC=com
+bindpw ldaplookuppassword
+
+filter passwd (&(objectClass=user)(!(objectClass=computer))(uidNumber=*)(unixHomeDirectory=*))
+map passwd uid sAMAccountName
+map passwd uidnumber uidNumber
+map passwd homedirectory unixHomeDirectory
+map passwd loginshell loginShell
+map passwd gecos displayName
+filter shadow (&(objectClass=user)(!(objectClass=computer))(uidNumber=*)(unixHomeDirectory=*))
+map shadow uid sAMAccountName
+filter group (objectClass=group)
+map group uniqueMember member
+</pre>
+
+'''sudo /etc/init.d/nslcd restart'''
+
+'''sudo /etc/init.d/nscd restart'''
+
+Edit '''nsswitch.conf''' to use ldap:
+
+<pre>
+passwd: compat ldap
+group: compat ldap
+</pre>
+
+=== Conclusion ===
+
+At this point, you can test ldap using '''getent passwd'''.  You should see details from your AD in the output.
+
+If you got this far, your Kerberos testing was also successful.
+
+The missing piece of the puzzle is PAM.  The heavy lifting of this has already been done thanks to the APT system.  As such files under '''/etc/pam.d/common-*''' have already been updated with stanzas to match ldap and krb5. (you can grep for them and look a little deeper if you like)
+
+At this point, you should be able to login to your ubuntu host using AD credentials as long as your login has the unix attributes set for uid and home directory.
+
+=== Security ===
+
+This document will end up with plain text passwords being sent if pam_ldap is used before pam_krb5. You may want to consider removing pam_ldap from '''/etc/pam.d/common-auth'''. Kerberos should handle the authentication, LDAP is for authorization. Alternatively once the initial configuration is working you can add TLS support in your '''/etc/nslcd.conf'''
+
+=== Debugging ===
+
+There is some debugging info in /var/log/syslog that should show you if you are successfully binding to ldap.  
+
+In addition, be very aware of '''/etc/init.d/nscd'''.  The caching daemon can mean that the changes you make are not immediately apparent.  My advice would be to shut it down until your config is tested, then allow it to start when you reboot for testing.
+
+== External Links ==
+A description of how one admin got Precise Pangolin to work with AD (config for PAM, nscd and/or sssd, and Heimdal Kerberos) can be found at
+* http://jurjenbokma.com/ApprenticesNotes/Linux-AD-auth.html
+----
+CategoryEnterprise

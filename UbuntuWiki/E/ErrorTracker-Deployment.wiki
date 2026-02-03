@@ -1,0 +1,256 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+This document will help you create instances of http://daisy.ubuntu.com and http://errors.ubuntu.com deployed in the cloud.
+
+=== Setting up Juju ===
+
+First you'll need to create an environment for Juju to bootstrap to. Follow the directions <nowiki>[[https://wiki.canonical.com/InformationInfrastructure/IS/CanonicalOpenstack|here]]</nowiki> to get a basic environment going. I'd suggest doing something akin to the following to bootstrap the initial node:
+<pre>
+source ~/.canonistack/novarc
+juju bootstrap -e canonistackone --constraints "instance-type=m1.medium"
+</pre>
+
+This will ensure that the juju bootstrap node doesn't take ages to perform basic tasks because it's constantly going into swap.
+
+You should end up with something similar to the following in your <code>~/.juju/environments.yaml</code>:
+<pre>
+environments:
+  canonistack:
+  type: ec2
+    control-bucket: juju-replace-me-with-your-bucket
+    admin-secret: <secret>
+    ec2-uri: https://ec2-lcy02.canonistack.canonical.com:443/services/Cloud
+    s3-uri: http://s3-lcy02.canonistack.canonical.com:3333
+    default-image-id: ami-00000097
+    access-key: <access key>
+    secret-key: <secret key>
+    default-series: precise
+    ssl-hostname-verification: false
+    juju-origin: ppa
+    authorized-keys-path: ~/.ssh/authorized_keys
+</pre>
+
+=== Deploying the error tracker ===
+Now you're ready to checkout and deploy the individual charms that make up daisy.ubuntu.com and errors.ubuntu.com, which is done by a single script:
+
+<pre>
+bzr branch lp:error-tracker-deployment
+source ~/.canonistack/novarc
+error-tracker-deployment/deploy
+</pre>
+
+Follow along with <code>juju status</code>.
+
+Once all the nodes and relations are out of the pending state, you should be able to start throwing crashes at it.
+
+=== Using the Juju error tracker ===
+
+The following command sets up various SSH tunnels to the Juju instances of daisy and errors, redirects the local whoopsie daemon to report crashes against the Juju daisy instance instead of errors.ubuntu.com, and shows the local whoopsie and remote daisy-retracer logs until you press Control-C:
+
+<pre>
+error-tracker-deployment/run-juju-daisy
+</pre>
+
+This script has a commented out alternative of the ssh command to daisy which shows the Apache logs. Enable this, and disable the default one below if you want to debug problems with uploading the .crash files.
+
+=== Generating and uploading crashes ===
+
+You can generate a simple crash report with e. g. 
+<pre>
+bash -c 'kill -SEGV $$'
+</pre>
+
+and elect to report the crash in the popping up Apport window.
+
+Now open a browser to http://localhost:8081. You should have one problem in the most common problems table.
+
+For a more systematic and regular integration test you can use an automatically generated set of .crash files for various application classes (GTK, Qt, CLI, D-BUS, Python crash) from the <nowiki>[[https://code.launchpad.net/~daisy-pluckers/+recipe/apport-test-crashes|test crashes recipe]]</nowiki>, which currently builds the crashes for i386, amd64, and armhf for precise, quantal, and raring. You can download the current ones with
+
+<pre>
+error-tracker-deployment/fetch-test-crashes
+</pre>
+
+which will download them into `./test-crashes/`''release''`/`/''architecture''`/*.crash`. Then you can use the `submit-crash` script to feed them individually or as a whole into whoopsie:
+
+<pre>
+error-tracker-deployment/submit-crash test-crashes  # uploads all of them
+error-tracker-deployment/submit-crash test-crashes/raring/amd64
+error-tracker-deployment/submit-crash test-crashes/precise/armhf/_usr_bin_apport-*.crash
+</pre>
+
+=== Debugging tricks ===
+
+You can purge the whole Cassandra database with
+
+<pre>
+~/bzr/error-tracker-deployment/purge-db
+</pre>
+
+Call it with `--force` to do this without confirmation.
+
+You might want to watch out for exceptions thrown by daisy or errors themselves:
+<pre>
+juju ssh daisy/0
+watch ls /srv/local-oopses-whoopsie
+</pre>
+
+If you want to use the Launchpad functionality in errors you'll need to setup Launchpad OAuth tokens and put them in `/var/www/daisy/local_config.py` on your errors server.  Information regarding setting up OAuth tokens can be found <nowiki>[[https://wiki.ubuntu.com/ErrorTracker/Contributing/Errors|here]]</nowiki>.
+
+=== Prodstack ===
+
+We're moving the production deployment of the error tracker to prodstack.
+
+<pre>
+bzr branch lp:errors
+(cd errors; tar --exclude=errors/static -czvf ../errors.tgz .)
+
+bzr branch lp:daisy
+(cd daisy; tar -czvf ../daisy.tgz .)
+
+bzr branch lp:apport
+cd apport
+LATEST_TAG=`bzr tags | sort -nrk 2 | head -n1 | awk '{print $1}'`
+bzr uncommit --force -r tag:$LATEST_TAG
+bzr revert --no-backup
+bzr clean-tree --ignored --unknown --force
+rm -f apport/packaging_impl.py
+ln -s ../backends/packaging-apt-dpkg.py apport/packaging_impl.py
+tar -czvf ../apport.tgz .
+cd -
+
+bzr branch lp:error-tracker-deployment
+cd error-tracker-deployment
+mkdir -p charms/daisy/precise
+
+bzr branch lp:~daisy-pluckers/charms/precise/daisy/trunk/ charms/daisy/precise/daisy
+cp ../daisy.tgz charms/daisy/precise/daisy/files/
+
+bzr branch lp:~daisy-pluckers/charms/precise/daisy-retracer/trunk/ charms/daisy/precise/daisy-retracer
+cp ../daisy.tgz charms/daisy-retracer/precise/daisy-retracer/files/
+cp ../apport.tgz charms/daisy-retracer/precise/daisy-retracer/files/
+
+bzr branch lp:~daisy-pluckers/charms/precise/errors/trunk/ charms/daisy/precise/errors
+cp ../daisy.tgz charms/daisy/precise/errors/files/
+cp ../errors.tgz charms/daisy/precise/errors/files/
+
+for i in apache2 cassandra gunicorn haproxy postgresql rabbitmq-server; do bzr branch lp:~canonical-losas/canonical-is-charms/$i charms/daisy/precise/$i; done
+
+bzr branch lp:~daisy-pluckers/charms/precise/hadoop-cassandra/trunk charms/daisy/precise/hadoop-cassandra
+bzr branch lp:~charmers/charms/precise/hadoop/trunk charms/daisy/precise/hadoop
+
+mkdir -p charms/daisy/precise/cassandra/exec.d/dpkgcomparator/
+cat > charms/daisy/precise/cassandra/exec.d/dpkgcomparator/charm-post-install << EOF
+sudo apt-add-repository -y ppa:daisy-pluckers/daisy-seeds
+sudo apt-get update
+sudo apt-get -y install libcassandra-dpkgversiontype-java
+service cassandra status && service cassandra restart || :
+EOF
+chmod +x charms/daisy/precise/cassandra/exec.d/dpkgcomparator/charm-post-install
+ 
+source ~/.canonistack/lcy_02
+USER=stagingstack SRV_ROOT=. SWIFT_BUCKET=core_files CONFIG_DIR=. ./scripts/deploy-error-tracker deploy
+
+source ~/.canonistack/lcy_02
+./scripts/instance-reaper
+</pre>
+
+=== Iterative testing / deployment ===
+
+You can tell the charms to grab a new copy of the code. For example, if you're testing fixes to the retracers, you could run the following:
+<pre>
+tar --exclude="local_config.py*" -czvf ~/daisy.tgz .
+cp ~/daisy.tgz ~/bzr/error-tracker-deployment/charms/daisy/precise/daisy-retracer/files/
+cp ~/daisy.tgz ~/bzr/error-tracker-deployment/charms/daisy/precise/daisy/files/
+cp ~/daisy.tgz ~/bzr/error-tracker-deployment/charms/daisy/precise/errors/files/
+cd ~/bzr/error-tracker-deployment
+JUJU_REPOSITORY=charms/daisy juju upgrade-charm -e d02 e-t-retracer-app
+</pre>
+
+Make sure that the bzr revno has changed and you've run <code>make version</code> in the daisy source tree. You can work around this if you're not ready to commit by removing the <code>/srv/daisy.ubuntu.com/production/daisy-rXXX</code> directory for the revno you're re-deploying and by moving the daisy symlink onto a different revno, then running <code>upgrade-charm</code>.
+
+If the upgrade fails for any reason (see the charm.log under /var/lib/juju/unit/), you can retry it by running <code>juju resolved --retry e-t-retracer-app/0</code>. Be sure to tail the charm.log so you can see whether it succeeded, and be sure to check that the daisy symlink is pointed at exactly the code you intended to deploy.
+
+=== Running Local Errors Connected to Production ===
+
+It can be helpful to test the Errors web site with the production database,
+however doing this requires read only access to the database.  To set this up
+you first need to create a system running errors.  This can be done by
+following the steps in the error-tracker-deployment charm for errors.
+
+After doing this some changes will need to be made.  In
+'''/var/www/errors/views.py''' you'll want to comment out the following line:
+
+<pre>
+@can_see_stacktraces
+</pre>
+
+Those appear two times in that file.  Additionally, you'll need to setup 
+oauth access so you can query the Launchpad API.  Finally, you'll need to
+modify '''/var/www/errors/local_config.py'''.  There you will need to set
+'''cassandra_hosts''' to an ssh tunnel to the cassandra database,
+'''cassandra_username''' to your username on the database, and
+'''cassandra_password''' to your password.
+
+Now it can be helpful to use a python debugger to determine the cause of an issue in your code.  One way to setup a debugger is to install winpdb and use rpbd2.  To set up debugging you would add a line like:
+
+<pre>
+import rpdb2; rpdb2.start_embedded_debugger('password')
+</pre>
+
+After restarting apache and making a request of the webserver you'll be able to use rpdb2 to attach your code where the import appears.
+
+<pre>
+rpdb2
+password "password"
+attach
+</pre>
+
+After the attach command you'll see a list of running rpdb2 processes.  You can attach to yours via '''attach''' and the process number.  Now you can use the python debugger to determine where you went awry.
+
+=== Assets ===
+
+<pre>
+bzr branch lp:~daisy-pluckers/ubuntu-assets/errors ubuntu-assets.errors
+bzr branch lp:errors
+cd errors
+./tools/build ~/bzr/ubuntu-assets.errors
+cd ~/bzr/ubuntu-assets.errors
+bzr bind :parent
+bzr add rXX
+bzr commit -m "New assets (rXX)."
+</pre>
+
+This triggers a new build of assets (https://website.ci.canonical.com/job/build-assets.ubuntu.com/) and you can confirm the new code is available by visiting http://assets.ubuntu.com/sites/errors/rXX/some_file_that_exists. After confirming that exists ping webops to do a juju set of errors-static-url to the new rXXX.
+
+=== Tarmac ===
+
+<nowiki>[[..-Groundskeeper]]</nowiki>
+
+=== oops-repository ===
+
+You can set up a single Cassandra instance to run oops-repository's unit tests against. Since these rely on the libcassandra-dpkgversiontype-java library, some extra work is required.
+
+<pre>
+bzr branch lp:error-tracker-deployment
+cd error-tracker-deployment
+mkdir -p charms/daisy/precise
+bzr branch lp:~ev/charms/precise/cassandra/execd charms/daisy/precise/cassandra # temporary
+JUJU_REPOSITORY=charms/daisy juju deploy --constraints "instance-type=m1.large" --config=configs/errors-cassandra.yaml local:cassandra e-t-cassandra
+juju ssh e-t-cassandra/0 -L 9160:10.55.XX.XX:9160 -N
+</pre>
+
+In another shell:
+<pre>
+bzr branch lp:~daisy-pluckers/oops-repository/trunk oops-repository
+cd oops-repository
+testr init
+testr run
+</pre>

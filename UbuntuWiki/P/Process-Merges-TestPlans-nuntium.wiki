@@ -1,0 +1,146 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+* '''Test plan for component''': nuntium
+* '''Component Checklist''': https://wiki.ubuntu.com/Process/Merges/Checklists/Common
+* '''Trunk URL''': lp:nuntium
+* '''Ubuntu Package URL (LP)''': http://launchpad.net/ubuntu/+source/nuntium
+
+=== Dependents/Clients ===
+
+* telepathy-ofono
+* ofono
+* ubuntu-upload-manager
+* ubuntu-download-manager
+
+=== Test Plan ===
+
+These are only integration tests which require too much specialized infrastructure to automate (although they should eventually be worked through the ubuntu emulator).
+
+==== Definitions ====
+
+ SUT:: System Under Test
+ m-send.req:: An MMS originating from a terminal (sent over the cellular data network)
+ m-retrieve.conf:: An MMS downloaded from a message proxy (retrieved over the cellular data network)
+ m-notification.ind:: A push message sent from ofono to nuntium
+
+==== Prereqs ====
+
+* Two devices, one to be the SUT, others to be the originating terminals (Android, iOS)
+* A correct MMS context configured by ofono on the SUT.
+* SIMs on all terminals with a working cellular data connection.
+
+==== Plan ====
+
+* Install image on '''SUT''': <code>ubuntu-device-flash --channel ubuntu-touch/devel-proposed</code>
+* Run <code>citrain device-upgrade [silo]</code>
+
+===== Receiving =====
+
+* Send a <code>m-send.req</code> from an additional phone to the '''SUT'''
+* On the '''SUT''', verify that an <code>m-retrieve.conf</code> is correctly parsed and that a <code>MessageAdded</code> is signalled over dbus to <code>telepathy-ofono</code>: <code>dbus-monitor sender=org.ofono.mms</code>
+* Receive again but from a phone that has sent to more numbers that just the '''SUT'''.
+
+===== Sending =====
+
+* Send a <code>m-send.req</code> from '''SUT''' to a target phone.
+* On the '''SUT''', verify that no <code>TransientError</code> or <code>PermanentError</code> is signalled over dbus to <code>telepathy-ofono</code>: <code>dbus-monitor sender=org.ofono.mms</code>
+* Send again to more than one target device.
+
+===== Flight mode =====
+
+* Set flight mode
+* Unset flight mode
+* Repeat now the "Sending" and "Receiving" tests. Do this for one of krillin or arale, and for mako.
+
+===== Robustness when ofono aborts =====
+
+* Kill ofono (kill -9 `pgrep ofonod`) and wait for it to re-start and re-establish cellular data
+* Repeat now the "Sending" and "Receiving" tests
+
+===== Checking for the default context =====
+
+A default context can be set externally or chosen by nuntium from the first valid context that activates (selection is unit tested, activation isn't)
+
+After a successful send, you can get the list of services
+
+<pre>
+$ dbus-send --session --print-reply --dest=org.ofono.mms /org/ofono/mms org.ofono.mms.Manager.GetServices
+method return sender=:1.187 -> dest=:1.230 reply_serial=2
+   array [
+      struct {
+         object path "/org/ofono/mms/123456789012345"
+         array [
+            dict entry(
+               string "Identity"
+               variant                   string "123456789012345"
+            )
+         ]
+      }
+   ]
+</pre>
+
+The query the properties for the service
+
+<pre>
+dbus-send --session --print-reply --dest=org.ofono.mms /org/ofono/mms/123456789012345 org.ofono.mms.Service.GetProperties
+method return sender=:1.187 -> dest=:1.231 reply_serial=2
+   array [
+      dict entry(
+         string "UseDeliveryReports"
+         variant             boolean false
+      )
+      dict entry(
+         string "ModemObjectPath"
+         variant             object path "/ril_0"
+      )
+      dict entry(
+         string "PreferredContext"
+         variant             object path "/ril_0/context2"
+      )
+   ]
+</pre>
+
+If not run before, the `PreferredContext` property will be `/`
+
+To set it externally use something like https://gist.github.com/sergiusens/703f3eb664b05b891b91 which will generate traffic on the bus that looks like
+
+<pre>
+dbus-monitor interface=org.ofono.mms.Service
+signal sender=org.freedesktop.DBus -> dest=:1.192 serial=2 path=/org/freedesktop/DBus; interface=org.freedesktop.DBus; member=NameAcquired
+   string ":1.192"
+method call sender=:1.193 -> dest=org.ofono.mms serial=2 path=/org/ofono/mms/123456789012345; interface=org.ofono.mms.Service; member=SetProperty
+   string "PreferredContext"
+   variant       object path "/c2"
+signal sender=:1.190 -> dest=(null destination) serial=9 path=/org/ofono/mms/123456789012345; interface=org.ofono.mms.Service; member=PropertyChanged
+   string "PreferredContext"
+   variant       object path "/c2"
+</pre>
+
+Retrieving the properties of the service would reflect this change.
+
+==== Additional information ====
+
+Upon running tests it is of good information to provide the wire capture, to do so first you need to verify the interface the MMS would be sent through; you can accomplish that by running:
+
+<pre>
+phablet-shell
+/usr/share/ofono/scrips/list-contexts
+</pre>
+
+Locate a <code>type=mms</code> context; if it exists; activate the context and take note of the interface. If there is no <code>type=mms</code> context available what is most likely to be correct, given proper provisioning, is that the MMS would be sent through the <code>type=internet</code> context which by default should be activated (provided that it wasn't disabled manually either through a UI or call to ofono).
+
+The interface has the form of <code>rmnet_usb[X]</code>, where <code>X</code> corresponds to the one associated to the MMS context, so to get the capture, run:
+
+<pre>
+phablet-shell
+sudo tcpdump -w mms.pcap -i rmnet_usbX
+</pre>

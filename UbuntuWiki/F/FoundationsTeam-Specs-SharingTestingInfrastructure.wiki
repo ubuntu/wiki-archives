@@ -1,0 +1,136 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+* '''Launchpad Entry''': UbuntuSpec:foundations-m-upgrade-and-install-testing
+* '''Created''':
+* '''Contributors''': EvanDandrea
+* '''Packages affected''': ubiquity, dput
+
+=== Summary ===
+
+Members of the foundations team are creating infrastructure to test critical software in the distribution.  This work should be continued to expand coverage.  Steps should also be taken to share overlapping infrastructure and centralize publishing of data where possible.
+
+=== Release Note ===
+
+* The installer is now built and testing under a public-facing continuous integration system.
+* A PPA is now available for running package tests.  Uploads to this PPA that pass the tests will be automatically copied to the Ubuntu archive.
+
+=== Rationale ===
+
+* Bugs in the installer have nearly caused us to miss the targeted release date for Ubuntu on more than one occasion.  In most cases this was the result of trying to fix one critical or opportunistic bug, only to create an equal or greater problem.
+
+=== User stories ===
+
+* Evan is a developer of ubiquity.  He merges a branch from another developer into trunk and Hudson starts notifying him that the commit causes several tests to fail.
+
+=== Assumptions ===
+
+We will be able to run Hudson on Canonical-owned, Internet-facing hardware.
+
+=== Design ===
+
+A public facing instance of Hudson will collect test results from a set of slave machines, both physical and virtual, or possibly from a private Hudson that speaks to datacenter-located physical hardware.  This will at a minimum run tests for the installer and provide detailed data on their results.
+
+For other projects we will investigate migrating them to this system, or if the project's tests do not fit the Hudson model, we may use Hudson to consume the results of these tests and provide a common interface for tracking their output.
+
+=== Implementation ===
+
+===== Centralized testing =====
+
+Hudson provides an API for exposing its results to external sources.  We may use this to connect automatic installer tests and automatic upgrade tests to the ISO testing tracker, but will do so only if deemed necessary.
+
+===== Installer testing =====
+
+A Hudson instance will be configured with a set of jobs that will do the following:
+* Build ubiquity on a new bzr commit (or possibly on a tag) and run its in-tree tests.  The tests will be written to JUnit XML using <code>python-junitxml</code> and published in Hudson.
+* If the ubiquity build succeeds, an ISO will be remastered with the resulting debs and the dependencies for Sikuli (openjdk-6-jre, libcv4, libcvaux4, and libhighgui4).  These debs will be placed in <code>pool/</code> rather than the squashfs to prevent contamination of the install tests.
+* The ISO will be loopmounted and exported over NFS.  A running PXE server will be restarted to point to the new nfsroot.
+* A Hudson job will then ask all slaves to wipe their MBR and reboot once they're done with their current task.  It will then schedule live environment installation tests for  a group that contains all of the slaves.
+* Upon rebooting, the slaves will PXE boot into the aforementioned live image and start the Hudson slave via JNLP.  The pending live environment installation test job will then be delivered to each slave, which will clean the build tree, pull down sikuli and a set of tests, and then run them.  The results will be written to JUnit XML using <code>python-junitxml</code> and published in Hudson.
+
+For security, we could run two instances of Hudson, one that lives behind the firewall and talks to the private slaves, and another that's public facing and receives results from the private Hudson via the <nowiki>[[http://wiki.hudson-ci.org/display/HUDSON/Build+Publisher+Plugin|Build Publisher Plugin]]</nowiki>
+
+Hudson's concepts of axes can be leveraged to easily integrate further types of live environment tests, like preseeded tests.
+
+===== Package upload testing =====
+
+A PPA will created in Launchpad with permissions that match that of the Ubuntu archive.  A bot will monitor this PPA and run tests on any packages in it, then copy the packages into the archive if the tests pass.
+
+piuparts may be used at as one possible source of tests, provided it does not generate too many false positives.
+
+Depending on how useful the initial implementation turns out to be, the documentation and default dput configuration could be changed to point at this PPA.  A clear note that this test system can be subverted by uploading straight to the Ubuntu archive.
+
+===== Upgrade testing =====
+
+* The output of http://people.canonical.com/~mvo/automatic-upgrade-testing/current/ will be improved to show more clearly what failed.
+* The kvm autotest update-manager upgrade test will be run on pommerac in the datacenter.
+
+===== Mago Tests =====
+
+After a successful installation, it would be nice to run GUI tests to show that the installed system is complete.
+
+As Mago reports in both HTML and XML, it is possible to attach the report to the Hudson results using the HTML plugin. They HTML plugin can be easily enabled through "Manage Hudson" -> "Manage Plugins".
+
+Xvfb is set up to be able to run the GUI tests:
+
+<pre>
+$ /usr/bin/Xvfb :5 -ac -screen 0 1024x768x8
+</pre>
+
+As a proof of concept, this the the config.xml file needed to run the gedit tests:
+
+<pre>
+<?xml version='1.0' encoding='UTF-8'?>
+<project>
+  <actions/>
+  <description></description>
+  <keepDependencies>false</keepDependencies>
+  <properties/>
+  <scm class="hudson.scm.NullSCM"/>
+  <canRoam>true</canRoam>
+  <disabled>false</disabled>
+
+  <blockBuildWhenUpstreamBuilding>false</blockBuildWhenUpstreamBuilding>
+  <triggers class="vector"/>
+  <concurrentBuild>false</concurrentBuild>
+  <builders>
+    <hudson.tasks.Shell>
+      <command>rm -rf mago
+bzr branch lp:mago
+cd mago
+DISPLAY=:5.0 PYTHONPATH=. ./bin/mago --noa11y --target=/var/lib/hudson/userContent/mago -a gedit</command>
+    </hudson.tasks.Shell>
+
+  </builders>
+  <publishers>
+    <htmlpublisher.HtmlPublisher>
+      <reportTargets>
+        <htmlpublisher.HtmlPublisherTarget>
+          <reportName>Mago Report</reportName>
+          <reportDir>/var/lib/hudson/userContent/mago/gedit</reportDir>
+          <reportFiles>gedit_chains.html</reportFiles>
+
+          <keepAll>true</keepAll>
+          <wrapperName>htmlpublisher-wrapper.html</wrapperName>
+        </htmlpublisher.HtmlPublisherTarget>
+      </reportTargets>
+    </htmlpublisher.HtmlPublisher>
+  </publishers>
+  <buildWrappers/>
+</project>
+</pre>
+
+====== Unresolved issues ======
+
+* The connection between LDTP client and server seems to fail when run from Hudson. A workaround is to import ldtp module at least once before running the job.
+
+----
+CategorySpec

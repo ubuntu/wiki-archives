@@ -1,0 +1,197 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+{| class="wikitable"
+|-
+| <tablestyle="background:#ffffcc;border:1;">This page is specific to Ubuntu versions 7.04, 8.04, 9.04
+|}
+''If you find this information applicable to additional versions/releases, '''''please''''' edit this page and modify this header to reflect that. Please also include any necessary modifications for this information to apply to the additional versions.''
+----
+
+== Installation/RAID1+LVM ==
+
+All the following commands should be run as root.
+<pre>
+sudo -s -H
+</pre>
+
+This guide assumes you've successfully setup the hardware and got a bootable (but unconfigured) Ubuntu server install. It may work on previous/future versions of Ubuntu or even other distros. It also assumes you have four SATA drives of the same size (but this guide should work with PATA drives and partitions/drives of varying sizes - if done properly), on which you wish to setup an LVM + RAID 1 system.
+
+It should also be noted that this guide is intended for those wishing to setup a file/data server/store with RAID 0+1 functionality (but with LVM taking the place of RAID 0), and not for those looking to install Ubuntu onto an existing LVM/RAID 1 system (although it ''may'' be useful for that).
+
+'''BROKEN LINK:''' Thanks to Aypok for writing this guide originally, which can be found at:
+http://www.aypok.co.uk/main.php?desktop=2&selected=evolution&rant_id=55
+
+=== Disk Setup ===
+
+First off, we setup the drives. I'll assume your four SATA drives are /dev/sda, /dev/sdb, /dev/sdc and /dev/sdd.
+
+One disk at a time! Repeat these steps for four drives. It's the same deal; just replace /dev/sda with the appropriate device /dev/sdb, etc.
+
+==== cfdisk ====
+<pre>
+cfdisk /dev/sda
+</pre>
+
+ It should say that no partitions exist, so create a new one by choosing "New". Make it a "Primary" partition and give it as much space as you want - I gave it the entire disk (the default). Now you should be back to the main menu, with one partition showing up on the list at the top. For this setup, the drives will need to be set to "Linux raid autodetect" - so choose the "Type" option and you'll see a list of dozens of formats - choose "Linux raid autodetect", which is "fd".
+
+ You should be once again back at the main menu. Choose "Write" and say "yes" - you do want to write the changes to the disk. Finally; choose "Quit".
+
+==== fdisk ====
+<pre>
+fdisk /dev/sda
+</pre>
+ Press 'm' for a helpful list of commands.  Pressing 'p' for "print the partition table", it should say that no partitions exist, so 'n' for "add a new partition" to create a new one.  Select 'p' for "primary partition" and give it as much space as you want - or give it the entire disk (the default).  Now you should be back to the main menu, with one partition showing up on the 'p' list at the top. For this setup, the drives will need to be set to "Linux raid autodetect" - so choose the 't' for the "Type" option and you'll see a 'L' list of dozens of formats - choose "Linux raid autodetect", which is "fd".
+
+=== Software Setup ===
+
+Now that the disks are ready, you need LVM and the related tools.
+
+==== Ubuntu 9.04 (Jaunty) ====
+<pre>
+apt-get install lvm2 dmsetup mdadm
+</pre>
+
+==== Ubuntu 7.04 (Feisty) ====
+<pre>
+apt-get install lvm2 lvm-common dmsetup mdadm
+</pre>
+
+ Once mdadm is installed, it will bring up some config stuff that you need to deal with. I'm going to assume that you're booting your system from a PATA (old-style IDE, 44-pin) drive not associated with the SATA disks. You can therefore enter "none" into the first input box, since you don't require any arrays to boot your system. I don't think choosing "all" (the default value) will have much affect on your system, though.
+
+ It'll then ask if you want to start MD arrays automagically - you do. Choose "Yes".
+
+=== RAID Setup ===
+
+<pre>
+mdadm --create /dev/md0 --level=1 --raid-devices=2 /dev/sda1 missing
+mdadm --create /dev/md1 --level=1 --raid-devices=2 /dev/sdb1 missing}}}
+
+You should be given messages like: "mdadm: array /dev/md0 started." and "mdadm: array /dev/md1 started.". Let's add the extra two disks in as the mirrors:
+
+{{{
+mdadm --manage --add /dev/md0 /dev/sdc1
+mdadm --manage --add /dev/md1 /dev/sdd1}}}
+
+=== LVM Setup ===
+
+That's the RAID 1 bit of the setup taken care of - so this is the point at which we get LVM to create a nice big partition out of the first two disks. But there's a problem - the pvcreate command is a little broken. We need to run the command:
+
+{{{
+pvcreate /dev/md0 /dev/md1
+</pre>
+
+==== Ubuntu 7.04 (Feisty) ====
+ But running that gives the following error: "No program "pvcreate" found for your current version of LVM". Thankfully, someone over on the Ubuntu forums worked out how to fix it. It's quite simple, too. Run this:
+
+ <pre>
+cp -r /lib/lvm-200/ /lib/lvm-0
+</pre>
+
+ Now run pvcreate again:
+
+ <pre>
+pvcreate /dev/md0 /dev/md1
+</pre>
+
+Success! On to the next step.
+
+<pre>
+vgcreate datavg /dev/md0 /dev/md1
+</pre>
+
+You can call "datavg" anything you want - it's just a name for the "volume group". "datavg" is what I used - simple and descriptive. Onwards:
+
+<pre>
+lvcreate --name datalv --size 931.51G datavg
+</pre>
+
+Again, "datalv" (notice the difference to the above name) can be whatever you like, but this is fine for me. If you didn't use "datavg" as the name in the previous line, make sure you replace the "datavg" in this line with whatever you used. The value given after "--size" is the total size of the new partition - the sum of the combined partitions. My two 500 GB (465 GiB) drives make 1 TB (931 GiB), so that's how much I put.
+
+Assuming that all went well (you can check with the lvdisplay command), you'll now have a large partition with no usuable (to you) format. Time to change that. I'm going to be using Ext3, but you can use Ext2, ReiserFS, or whatever you want.
+
+<pre>
+mkfs.ext3 -m 0 -T largefile /dev/datavg/datalv
+</pre>
+
+The "-m 0" tells it to reserve zero percent of the disk for the super user (root). If I didn't set that and used the default value, it would eat 60 GiB of my partition! If the system were going to be using it for the OS, then leaving some for root would be important (possibly) - but this is to be a pure data drive, so we don't need it.
+
+"-T largefile" is used because the files created for my recordings are large wave files, so using this is better than using a system optimized for small files. If you're going to use your system for small files (pictures, text files, etc), you can omit this option.
+
+Creating the file system may take a while - it took few minutes on my system. Once it's done, you'll have a nice large Ext3 (or whatever format you chose) partition ready to be mounted. Let's give it a spin. Create a mount point then mount it:
+
+<pre>
+mkdir /mnt/data
+mount /dev/mapper/datavg-datalv /mnt/data/
+chmod 777 /mnt/data/
+</pre>
+
+Notice the device used. If you didn't use the names "datavg" and "datalv" as per the above examples, your device will be named differently. It should be trivial to work out. :)
+
+Do a "df -h" and look on with a smile:
+
+<pre>
+/dev/mapper/datavg-datalv 932G 200M 932G 1% /mnt/data
+</pre>
+
+That's it! You now have the first two disks working under LVM - as if they were using RAID 0 - and they're mirrored with RAID 1. Easy, wasn't it? :D
+
+=== Mount On Boot ===
+
+Another step you may want to take is adding the partition to "/etc/fstab" so that it's automagically mounted every time the system is booted. Yeah, yeah - it's not likely be rebooted, but it's worth doing. Open "/etc/fstab" with whatever editor you want. I prefer Vim, but Nano is also cool.
+
+<pre>
+vim /etc/fstab
+</pre>
+
+And add the line: (the larger gaps being tabs, but I don't think it matters as long as there is some space there):
+
+<pre>
+/dev/mapper/datavg-datalv /mnt/data ext3 rw,noatime 0 0
+</pre>
+
+=== Monitoring RAID ===
+
+A really useful feature is the ability to check on the status of the RAIDs. Simply type:
+
+<pre>
+cat /proc/mdstat
+</pre>
+
+This shows which drives are related to what, in which "md" device, their status, etc - loads of useful stuff. Also; if you do this shortly after setting up the stuff above, you'll see a progress bar - it shows the progress of the mirroring. That is, it will show you how far it has gotten with copying the good drive to the mirror.
+
+=== Testing RAID ===
+
+The second bit I wanted to demonstrate is how to simulate (through software) a drive failure, so you can see if it still works after you remove one of the mirrored drives and gets replaced with a "fresh" replacement drive. If the mirroring mentioned above is still in progress, you may want to wait until it finishes. The mirroring can take many hours - it takes three to four hours on my 500 GB drives (each - but they can work in parallel).
+
+<pre>
+mdadm --manage --fail /dev/md0 /dev/sda1
+</pre>
+
+You can replace /dev/md0 and /dev/sda1 with any drive you want to test - that's just what I tried. And you can do it as many times as you want - so you can do it with all of them, if you want (although not at the same time! :P).
+
+Anyhoo, if you do another cat /proc/mdstat, you'll see that it looks different. You should see something like:
+
+{{{
+md0 : active raid1 sda1[2](F) sdb1[1]
+488383936 blocks [2/1] [_U]}}}
+
+You will also notice that you can continue to use the system as normal. So you now know it works with a missing drive, but the most important bit has yet to be tested; the mirroring. It's as simple as removing the device from the array (md0 in this case) and re-adding it. In Real Life™, you'd also physically replace the failed drive before re-adding it through mdadm - but we can skip that part here.
+
+{{{
+mdadm --manage --remove /dev/md0 /dev/sda1
+mdadm --manage --add /dev/md0 /dev/sda1}}}
+
+Simple. If you once again check the status through cat /proc/mdstat, you'll see that all the drives are listed as being fine and you should have a progress bar showing that /dev/sda1's mirror (which is /dev/sdc1 in this example) is being copied back to /dev/sda1.
+
+=== Sources ===
+
+* http://www.linuxdevcenter.com/pub/a/linux/2006/04/27/managing-disk-space-with-lvm.html
+* http://tldp.org/HOWTO/Software-RAID-HOWTO-6.html

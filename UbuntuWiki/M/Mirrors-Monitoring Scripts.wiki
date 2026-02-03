@@ -1,0 +1,175 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+{| class="wikitable"
+|-
+| <tablestyle="float:right; width:30%; background:#F1F1ED; margin: 0 0 1em 1em;" style="padding:0.5em;">'''Contents'''
+|}
+
+If you have scripts to monitor the status of your mirror, please post them here.
+
+== Nagios ==
+
+=== Non-HTTP-based monitoring script ===
+
+<pre>
+
+. /usr/lib/nagios/plugins/utils.sh
+
+TO=/srv/ftp.root/ubuntu
+HOSTNAME=$(hostname -f)
+STAMP=${TO}/project/trace/${HOSTNAME}
+WARN=6
+CRITICAL=12
+
+while [ $# -gt 0 ]
+do 
+	case "$1" in
+		-c|--critical)  CRITICAL=$2; shift; shift;;
+		-w|--warn)      WARN=$2; shift; shift;;
+		--)     shift; break;;
+		-*)     echo "You lost me at '$1'"; exit 1;;
+** )      STAMP=$1; shift; break;;
+	esac
+done
+
+HOUR=$[ 60 * 60 ] # Hour of seconds
+NOW=$(date +%s) # Unix time
+STAMPAGE=$[ $NOW - $(stat -c %Y ${STAMP}) ]
+STAMPHOURS=$[ $STAMPAGE / $HOUR ]
+
+echo "$STAMP is over $STAMPHOURS hours old."
+
+if [ $STAMPHOURS -lt $WARN ]; then
+	exit $STATE_OK
+elif [ $STAMPHOURS -lt $CRITICAL ]; then
+	exit $STATE_WARNING
+else
+	exit $STATE_CRITICAL
+fi
+</pre>
+
+=== HTTP-based monitoring script ===
+
+This check is suitable for Nagios installations. It will do a HEAD-request on the requested file on both your webserver and the main webserver and calculate the time-difference between the two last-modified headers.
+
+Call this script as follows:
+<pre>
+define command {
+        command_name    check_ubuntu
+        command_line    /etc/nagios-plugins/custom/check_ubuntu $HOSTNAME$ $ARG1$ $ARG2$
+        }
+</pre>
+
+And:
+<pre>
+define service{
+        use                             generic-service
+        host_name                       <your mirrors hostname>
+        service_description             Mirror status
+        check_command                   check_ubuntu!<hostname of main mirror>!<file to check>!<mode, archive or cd>
+}
+</pre>
+
+Good files to check are:
+* ubuntu/ls-lR.gz for archive mirrors
+* .pool/MD5SUMS for releases mirrors
+
+<pre>
+
+use LWP::UserAgent;
+use Net::DNS;
+use Date::Parse;
+use strict;
+use lib "/usr/lib/nagios/plugins";
+use utils qw($TIMEOUT %ERRORS &print_revision &support);
+
+my ($host, $file, $mode) = @ARGV;
+
+my $resolver = Net::DNS::Resolver->new;
+
+my $dnsquery = $resolver->search($host);
+
+if ($dnsquery) {
+    foreach my $rr ($dnsquery->answer) {
+        next unless $rr->type eq "A";
+        if ($rr->address =~ /91\.189\.91|185\.125\.190/) {
+		print "OK - Mirror ok (runs at Canonical)";
+		exit $ERRORS{"OK"};
+        }
+    }
+} else {
+	print "CRITICAL - Cannot resolve hostname $host";
+	exit $ERRORS{"CRITICAL"};
+}
+
+my $ua = LWP::UserAgent->new;
+$ua->agent("UbuntuMirrorCheck/0.1 ");
+
+my $canonicalhost = $host;
+my $canonicalfile;
+if ($canonicalhost =~ m/(archive|releases)\.ubuntu\.com/) {
+	$canonicalhost =~ s/^..\.//;
+	$canonicalfile = $file;
+} else {
+	if (defined($mode) && $mode =~ m/archive/) {
+		$canonicalhost = 'archive.ubuntu.com';
+		$canonicalfile = 'ubuntu/ls-lR.gz';
+	} elsif (defined($mode) && $mode =~ m/cd/) {
+		$canonicalhost = 'releases.ubuntu.com';
+		$canonicalfile = '.pool/MD5SUMS';
+	} else {
+		print "CRITICAL - Cannot figure out the mode from hostname $host, and mode is not set";
+		exit $ERRORS{"CRITICAL"};
+	}
+}
+
+my $canonical = HTTP::Request->new(HEAD => 'http://'.$canonicalhost.'/'.$canonicalfile);
+my $mirror    = HTTP::Request->new(HEAD => 'http://'.$host.'/'.$file);
+
+my $canonical_res = $ua->request($canonical);
+my $mirror_res    = $ua->request($mirror);
+
+if ($mirror_res->is_success) {
+	my $canonical_time = str2time($canonical_res->header('last-modified'));
+        my $mirror_time    = str2time($mirror_res->header('last-modified'));
+
+	if (!defined($mirror_time)) {
+		print "OK - Unable to determine mirror's last-modified timestamp";
+		exit $ERRORS{"OK"};
+	}
+
+	if ($mirror_time > $canonical_time) {
+		print "WARNING - Mirror seems to live in the future";
+		exit $ERRORS{"WARNING"};
+	} else {
+		my $diff = $canonical_time - $mirror_time;
+		my ($rest, $days, $hours, $minutes, $seconds) = (0, 0, 0, 0, 0);
+		$days = int($diff/86400);
+		$rest = $diff-($days*86400);
+		$hours = int($rest/3600);
+		$rest = $rest-($hours*3600);
+		$minutes = int($rest/60);
+		$rest = $rest-($minutes*60);
+		$seconds = $rest;
+		if ($diff > 64800) {
+			print "CRITICAL - Mirror is $days days, $hours hours, $minutes minutes and $seconds seconds behind";
+			exit $ERRORS{"CRITICAL"};
+		} else {
+			print "OK - Mirror is up to date";
+			exit $ERRORS{"OK"};
+		}
+	}
+} else {
+    print "CRITICAL - Mirror is unavailable";
+    exit $ERRORS{"CRITICAL"};
+}
+
+</pre>

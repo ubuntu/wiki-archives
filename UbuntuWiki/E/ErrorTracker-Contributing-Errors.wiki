@@ -1,0 +1,92 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+This page should get you up and running with your own branch of lp:errors, the code that powers the web view of the Ubuntu Error Tracker, https://errors.ubuntu.com.
+==== Setting up Postgres for caching OAuth credentials ====
+
+TODO
+
+==== Creating OAuth tokens for use with Launchpad ====
+<pre>
+curl --dump-header - -H "Content-Type: application/x-www-form-urlencoded" -X POST --data 'oauth_consumer_key=testing&oauth_signature_method=PLAINTEXT&oauth_signature=%26' https://qastaging.launchpad.net/+request-token
+</pre>
+That will return something like:
+<pre>
+oauth_token=OAuthTokenHex&oauth_token_secret=OAuthTokenSecretHex
+</pre>
+Then authorize it:
+<pre>
+https://qastaging.launchpad.net/+authorize-token?oauth_token=OAuthTokenHex
+</pre>
+Then accept it:
+<pre>
+curl --dump-header - -H "Content-Type: application/x-www-form-urlencoded" -X POST --data 'oauth_consumer_key=testing&oauth_token=OAuthTokenHex&oauth_signature_method=PLAINTEXT&oauth_signature=%26OAuthTokenSecretHex' https://qastaging.launchpad.net/+access-token
+</pre>
+Which returns:
+<pre>
+oauth_token=NewOAuthTokenHex&oauth_token_secret=NewOAuthTokenSecretHex&lp.context=None
+</pre>
+Then put the values for oauth_token ('NewOAuthTokenHex') and oauth_token_secret ('NewOAuthTokenSecretHex') in local_config.py (as lp_oauth_token and lp_oauth_secret) on the errors-app units.
+
+The errors code branch contains a script, setup-oauth-token.sh, which helps automate the above steps although you still need to authorize the application.
+
+==== Setting up your environment ====
+
+This assumes that you keep your bzr branches in <code>~/bzr</code>. Adapt to suit your needs.
+
+Create a branch of daisy for its configuration: <code>bzr branch lp:daisy ~/bzr/daisy</code>. Copy <code>~/bzr/daisy/configuration.py</code> to <code>~/bzr/daisy/local_config.py</code>. Put the values you obtained for oauth_token and oauth_token_secret in the steps above. Put in the values for the postgres database you created in the steps above.
+
+Create <code>~/bzr/errors.your-branch-name/</code>. Then run <code>bzr branch lp:errors ~/bzr/errors.your-branch-name/errors</code>.
+
+Next, copy the sample configuration in place: <code>sudo cp ~/bzr/errors.your-branch-name/errors/000-default /etc/apache2/sites-enabled/000-default</code>. Modify this to point at your branch:
+<pre>
+<VirtualHost *:80>
+     DocumentRoot /home/you/bzr/errors.your-branch-name/errors
+    WSGIDaemonProcess localhost python-path=/home/you/bzr/errors.your-branch-name:/home/you/bzr
+    WSGIProcessGroup localhost
+    WSGIScriptAlias / /home/you/bzr/errors.your-branch-name/errors/wsgi.py
+    Alias /static /home/you/bzr/errors.your-branch-name/errors/static
+    Alias /oops-local /home/you/bzr/errors.your-branch-name/errors/oops-local
+        ServerAdmin webmaster@localhost
+
+        ErrorLog ${APACHE_LOG_DIR}/error.log
+
+##### Possible values include: debug, info, notice, warn, error, crit,
+##### alert, emerg.
+        LogLevel warn
+
+        CustomLog ${APACHE_LOG_DIR}/access.log combined
+
+</VirtualHost>
+</pre>
+
+Restart Apache: <code>sudo /etc/init.d/apache2 restart</code>
+
+==== Testing ====
+
+===== Bug creation =====
+
+Creating of bug reports in Launchpad for Error Tracker issues is done via a javascript function, createBug, which in turn utilizes the create-bug-report API of the Error Tracker. This in turn uses the create_bug function of launchpad which is part of daisy. Subsequently, when debugging an issue with the "Create" link on an Error Tracker bucket page you'll want to test the functionality of individual part.
+
+After adding oauth tokens to the local_config file on the server you can test the bug creation process.
+
+Testing the create_bug function can be done via the following:
+
+<code> PYTHONPATH=/srv/errors.staging.ubuntu.com/devel/daisy/:/srv/errors.staging.ubuntu.com/devel/errors/:/srv/errors.staging.ubuntu.com/devel/local_config python -c "from daisy import launchpad; launchpad.create_bug('this is my signature', source='2vcard')" </code>
+
+Once that is working, and after you've obtained your sessionid and csrftoken from your cookie for errors.staging.ubuntu.com, you can test the create-bug-report portion of the Error Tracker API with curl:
+
+<code> curl -i 'https://errors.staging.ubuntu.com/api/1.0/create-bug-report/?format=json&' --insecure --data-raw '{"signature": "%2Fbin%2Fcat%3A11%3A__GI___libc_read%3Aread%3Asafe_read%3Asimple_cat%3Amain" }' --compressed  -H 'Content-Type: application/json' -H 'Referer: https://errors.staging.ubuntu.com/' -H "X-CSRFToken: $token" -H "Cookie: csrftoken=$token; sessionid=$sessionid" </code>
+
+Without the X-CSRFToken and Cookie headers set this should now return Unauthorized:
+
+<pre>
+curl --dump-header - -H "Content-Type: application/json" -X POST --data '{"signature": "/usr/lib/unity-scope-video-remote/unity-scope-video-remote:GError:<module>:main:function"}' http://localhost/api/1.0/create-bug-report/
+</pre>

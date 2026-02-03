@@ -1,0 +1,85 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== Jokosher project collaboration via Ubuntu One ==
+
+=== Jokosher project Storage Format ===
+
+Jokosher currently stores each project in a folder:
+<pre>
+my-project/
+   audio/               (all of the audio files used in the project)
+   levels/              (cache data for quickly displaying waveforms)
+   my-project.jokosher  (gzipped XML data describing the project)
+</pre>
+
+Previously Jokosher asked the user where to save the project. In unreleased trunk, Jokosher stores all projects in ~/.local/share/jokosher/projects/ (or whatever $XDG_DATA_HOME is set to). This means that new projects are automatically created and saved there, and the user does not need to manually manage files or even know they exist.
+
+We chose to move projects, because we like how Tomboy makes it easy to manage notes by removing the need to manage files or even hit save.
+
+=== Jokosher object model ===
+
+Jokosher's object are quite simple. There are only three important objects:
+* Project (references any number of instruments)
+* Instrument (references any number of events)
+* Event (references all or part of an audio file)
+
+In the XML file format, project can contain many instruments, and each instrument can contain many events.
+
+=== Changes needed in project storage format ===
+==== Instrument ====
+The main requirement for collaboration is for instruments to be separated from the project. This would allow instruments from separate authors to be combined into one project. 
+
+Each instrument would be owned by its author, and all other users would have '''read-only''' access to the instrument. Having one single owner for each instrument avoids many of the issues of concurrent modification and conflict resolution.
+
+==== Project ====
+However, a shared project would have multiple owners. Since projects have various attributes which can be changed as well, we would also have to support syncing modifications to the project.
+
+Most of the project attributes are simple string values:
+* name
+* notes
+* export file format (ogg, mp3, etc.)
+* volume
+* zoom level
+* etc.
+
+For these attributes we would probably want a most-recent-modification-wins conflict resolution in case multiple users change the same attribute at once.
+
+Notes is essentially a mini text file, and might be a special case. Maybe we would have separate notes for each user who is sharing the project.
+
+==== CouchDB ====
+CouchDB already has replication, most-recent-modification-wins conflict resolution, and Ubuntu One supports it. As an added bonus, using a database would simplify Jokosher's querying and handling of project files in .local/share/jokosher/projects/.
+
+It appears that using CouchDB is the best option for the project attributes at least. Each project would contain references to the instruments it contains instead of containing them directly.
+
+CouchDB could be used for storing instruments as well. Since there is no need for conflict resolution with instruments, there might not be any advantages to using CouchDB over the current XML file (plus Ubuntu One file sync). However if we are saving projects in CouchDB, probably it would make sense to have instruments use the same storage format.
+
+Even though CouchDB supports having the entire object hierarchy (project with its instruments and events) in a single CouchDB document, we would separate projects and instruments. Instead we would include a list of instrument IDs in the project, like you would if we were storing this in a relational database. This is only so that instruments can be modified separately, without causing conflicts in the project document. There would be no relational-style split for instruments and events. We would take advantage of CouchDB's ability to put events directly inside the instrument document.
+
+If we use CouchDB it might be best to implement an abstract storage system that can make use of either CouchDB or our current XML format. Currently desktopcouch appears to be unavailable for either Windows or MacOS X, so relying on it as the only storage mechanism would make maintenance of the Windows and any future MacOS X port more difficult. We may have to do something along these lines anyway, at least for project loading to support older projects, so I think it'd make sense to go all the way and support multiple save backends as well.
+
+=== Undo history ===
+Currently undo history is stored at the project level, and references instrument and event objects. Undo history is a list of actions to reverse what was modified. It is extended constantly as the user works.
+
+It makes sense for each user to have their own separate undo history:
+* each user has their own perspective
+* it doesn't make sense to click undo and have it undo something you don't remember doing (because someone else changed that)
+* if you cannot modify someone else's instruments, it doesn't make sense to undo anything they did (and you wouldn't have permission to propagate the undo even if it did)
+
+However, the user might expect to undo a change done in the project attributes, even if they didn't do that change. Most of these problems can probably be avoided by, for example, having separate project notes for each user.
+
+If the user ever wants to unshare, and convert the project to be a regular one where he/she can edit all the instruments locally, it might be difficult to merge the undo histories. In the short term it might be wise to '''not''' support this.
+
+=== Questions for Ubuntu One ===
+* Can I share all of my application's CouchDB documents with another Ubuntu One user, just as I would a folder? ''no - sil''
+* Can I force a sync of my CouchDB instance with the server? If not, how often does it check for updates? ''no, and every 10 minutes - sil''
+* Do files sync as soon as they are written? How often does it check for new files on the server? ''yes, and instantly; server and client changes both happen instantly for files - sil''
+* Is there a way to store files privately and disabling storage of old versions? If we choose to use files instead of CouchDB, Jokosher will be constantly writing to the files, and I don't want to unnecessarily use extra disk space. ''U1 doesn't do versioning of files - sil''
+* Do you have any recommendations for whether to use synced project files or store everything in CouchDB? Are there any disadvantages to CouchDB with Ubuntu One we might not know about? ''my inclination is to use files, I think - sil''

@@ -1,0 +1,190 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+The Ubuntu MIR process require rust packages in Ubuntu to have their crates vendored, see https://github.com/canonical/ubuntu-mir/blob/main/vendoring/Rust.md
+
+The page describe the steps we are currently taking to do the vendoring for our GNOME packages as part of gnome-team@salsa
+
+== Create a new Ubuntu repository ==
+
+The vendored crates are often large and to avoid adding that extra cost to the Debian repository we create a fork under the ubuntu-dev-team namespace
+
+```1. Use gbp clone to clone the Debian repository```
+
+```2. Create the Ubuntu branch```
+
+<pre>
+$ git checkout -b ubuntu/latest
+</pre>
+
+```3. Edit debian/gbp.conf```
+
+Add 'debian-tag = ubuntu/%(version)s' to the [DEFAULT] section of debian/gbp
+
+Edit debian-branch to set it to 'ubuntu/latest'
+
+```4. Update changelog and control```
+
+<pre>
+$ dch -i "Vendor the crates for Ubuntu"
+$ update-maintainer
+$ sed -i 's/gnome-team/ubuntu-dev-team/' debian/control
+</pre>
+
+```5. git commit all these changes```
+
+<pre>
+$ git commit debian -m "Creating Ubuntu branch"
+</pre>
+
+```6. Fork the Salsa repository to ubuntu-dev-team```
+
+Go on https://salsa.debian.org/gnome-team/$PROJECT/-/forks/new , select ubuntu-dev-team (you need to be a member) and “only the default branch” option.
+
+```7. Push your work```
+
+<pre>
+$ git push --set-upstream git@salsa.debian.org:ubuntu-dev-team/<PROJECT>.git
+</pre>
+
+```8. Change the default branch```
+
+Visit https://salsa.debian.org/ubuntu-dev-team/<PROJECT>/-/settings/repository#branch-defaults-settings
+
+Set the default branch to '''ubuntu/latest'''
+
+Visit Code > Branches and delete the ''debian/latest'' branch.
+
+== Vendor the crates ==
+
+```1. Update debian patches```
+
+Remove any Debian debian/patches modifying Cargo.toml's dependencies from the series
+
+```2. Add a patch to tell Cargo to use our vendored source instead of looking online```
+
+create debian/patches/use-vendored-crates.patch and add it to the series
+
+{{{#!highlight diff
+Subject: Use the vendored crates to build without network access
+
+Forwarded: not-needed
+---
+ .cargo/config | 5 +++++
+ 1 file changed, 5 insertions(+)
+ create mode 100644 .cargo/config
+
+diff --git a/.cargo/config b/.cargo/config
+new file mode 100644
+index 0000000..8c56c72
+--- /dev/null
++++ b/.cargo/config
+@@ -0,0 +1,5 @@
++[source.crates-io]
++replace-with = "debian"
++
++[source.debian]
++directory = "debian/missing-sources"
+}}}
+
+``` 3. Disable all librust* Build-Depends in debian/control```
+
+<pre>
+$ sed -i 's/ librust/# librust/#' debian/control
+</pre>
+
+```4. Add debian/.gitingore to avoid static libraries```
+
+debian/.gitignore:
+
+{{{#!highlight diff
+!missing-sources/**
+/missing-sources/**/*.a
+}}}
+
+<pre>
+$ git add debian/.gitignore
+</pre>
+
+```5. Vendor the crates```
+
+It requires 'cargo-vendor-filterer' to be installed
+
+In case of refresh
+<pre>
+$ rm -rf debian/missing-sources/
+</pre> 
+
+Then
+
+<pre>
+$ cargo vendor-filterer --platform='*-*-linux-gnu' --platform '*-*-linux-gnueabi' --all-features debian/missing-sources/
+$ git add debian/missing-sources
+$ git commit -m "Include vendored crates"
+</pre>
+
+Generate the orig tarball with gbp or download it with apt source $package
+
+{{{ 
+$ dpkg-source --include-binaries -b .
+$ git add debian/source/include-binaries
+$ git commit -m "Update debian/source/include-binaries"
+}}}
+
+revert the applied patches and clean .pc
+<pre>
+$ git reset --hard && git clean -fdx
+</pre>
+
+```6. Generate XS-Vendored-Sources-Rust and add it to debian/control```
+
+<pre>
+$ rm Cargo.toml
+</pre>
+
+<pre>
+$ CARGO_VENDOR_DIR=debian/missing-sources/ /usr/share/cargo/bin/dh-cargo-vendored-sources
+</pre>
+
+Add the the XS-Vendored-Sources-Rust definition to the top section of debian/control (before Standards-Version works for example)
+
+Commit the changes and reset the Vcs state
+
+<pre>
+git add debian/control
+git commit -m "Define vendored crates as XS-Vendored-Sources-Rust"
+git reset --hard # restore Cargo.toml
+</pre>
+
+```7. Simplify debian/rules and make minor changes```
+
+* Remove dh-cargo rules
+* Add execute_before_dh_auto_build and execute_after_dh_auto_build sections
+
+example https://salsa.debian.org/ubuntu-dev-team/papers/-/commit/a65b36b8
+
+```8. Include vendoring README```
+
+example https://salsa.debian.org/ubuntu-dev-team/papers/-/blob/ubuntu/latest/debian/README.source
+
+== Refresh the crates ==
+
+Replay the step 5. and 6. from the previous section
+
+== Patches ==
+
+If you have patches that modify Cargo.toml's dependencies, then you'll need to apply
+the patches before running cargo vendor. Patching Cargo.toml may not be needed
+since we are vendoring all the Rust crates. Perhaps it is needed in the future
+if we figure out how to exclude unnecessary Windows crates or if there is a subset
+of Rust crates that are shipped by the system.
+
+If you're using git-buildpackage, gbp pq import before the first rm command and
+gbp pq export after the cargo vendor command takes care of this.

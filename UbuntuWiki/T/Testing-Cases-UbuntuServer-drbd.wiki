@@ -1,0 +1,426 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+== DRBD 8.3.0 ==
+
+=== DRBD 8.3.0 installation & prerequisites ===
+
+For drbd testing, two working Ubuntu Server Jaunty installations are needed. This can be done with ubuntu-vm-builder or tests can be done on real hardware. Both servers need to be able to reach each other over the network.
+
+Each server needs one additional partition (additional to the one for the system). The size of partition isn't relevant for testing, but both partitions on servers need to be of the same size.
+
+For the purpose of this tutorial, I'll name them drbd-1 and drbd-2. Servers need to be able to resolve each others hostnames, so you should either have DNS or enter hostnames to /etc/hosts manually. Since drbd can start before dhcp client gets an IP, you should set up both servers with static IPs.
+
+{| class="wikitable"
+|-
+| hostname
+| IP address
+| partition for drbd
+|-
+| drbd-1
+| 192.168.0.1
+| /dev/sdb1
+|-
+| drbd-2
+| 192.168.0.2
+| /dev/sdb1
+|}
+
+/etc/hosts:
+
+`127.0.0.1 localhost` <<BR>>
+`192.168.0.1 drbd-1` <<BR>>
+`192.168.0.2 drbd-2` <<BR>>
+
+From this point you should do everything as root (sudo -i).
+
+Next, install '''drbd8-utils''' package.
+
+=== Documentation and User's Guide ===
+
+Note that there is more information and in-depth documentation available at the <nowiki>[[http://www.drbd.org|DRBD homepage]]</nowiki>.
+<nowiki>[[http://www.drbd.org/users-guide/|DRBD users guide]]</nowiki> & <nowiki>[[http://www.linbit.com/en/downloads/tech-guides?limitstart=0|official DRBD pfd manuals]]</nowiki>
+
+=== Configuration ===
+
+drbd has one single configuration file - /etc/drbd.conf. This file should be identical on both servers. This file should look like this:
+
+`global { usage-count no; }` <<BR>>
+`common { syncer { rate 100M; } }` <<BR>>
+`resource r0 {` <<BR>>
+`        protocol C;` <<BR>>
+`        startup {` <<BR>>
+`                wfc-timeout  15;` <<BR>>
+`                degr-wfc-timeout 60;` <<BR>>
+`        }` <<BR>>
+`        net {` <<BR>>
+`                cram-hmac-alg sha1;` <<BR>>
+`                shared-secret "test";` <<BR>>
+`                allow-two-primaries;` <<BR>>
+`        }` <<BR>>
+`        on drbd-1 {` <<BR>>
+`                device /dev/drbd0;` <<BR>>
+`                disk /dev/sdb1;` <<BR>>
+`                address 192.168.0.1:7788;` <<BR>>
+`                meta-disk internal;` <<BR>>
+`        }` <<BR>>
+`        on drbd-2 {` <<BR>>
+`                device /dev/drbd0;` <<BR>>
+`                disk /dev/sdb1;` <<BR>>
+`                address 192.168.0.2:7788;` <<BR>>
+`                meta-disk internal;` <<BR>>
+`        }` <<BR>>
+`}` <<BR>>
+
+See also: <nowiki>[[http://www.drbd.org/docs/install/|User's Guide, Configuring DRBD]]</nowiki>
+
+Once you've created this file on both servers, reboot both servers or just start drbd service:
+
+`/etc/init.d/drbd start`
+
+Then, on both of them run command:
+
+`drbdadm create-md r0` <<BR>>
+
+This will create r0 resource on both servers. Then, choose one server to be your primary server (drbd-1), and mark it:
+
+`drbdadm -- --overwrite-data-of-peer primary all` <<BR>>
+
+As soon as you run this command, the other server (drbd-2) will start syncing data. You can check the progress with:
+
+`cat /proc/drbd`
+
+You should get something like this:
+
+`version: 8.3.0 (api:88/proto:86-89)` <<BR>>
+`GIT-hash: 9ba8b93e24d842f0dd3fb1f9b90e8348ddb95829 build by ivoks@ubuntu, 2009-01-17 07:49:56` <<BR>>
+` 0: cs:SyncSource ro:Primary/Secondary ds:UpToDate/Inconsistent C r---` <<BR>>
+`    ns:76524 nr:0 dw:0 dr:84352 al:0 bm:4 lo:1 pe:11 ua:245 ap:0 ep:1 wo:b oos:429772` <<BR>>
+`	[==>.................] sync'ed: 16.2% (429772/505964)K` <<BR>>
+`	finish: 0:00:22 speed: 19,048 (19,048) K/sec` <<BR>>
+
+Once syncing is done, this will change to:
+
+`GIT-hash: 9ba8b93e24d842f0dd3fb1f9b90e8348ddb95829 build by ivoks@ubuntu, 2009-01-17 07:49:56` <<BR>>
+` 0: cs:Connected ro:Primary/Secondary ds:UpToDate/UpToDate C r---` <<BR>>
+`    ns:505964 nr:0 dw:0 dr:505964 al:0 bm:31 lo:0 pe:0 ua:0 ap:0 ep:1 wo:b oos:0` <<BR>>
+
+=== Tests ===
+==== A: ext3 in primary/secondary ====
+
+Create ext3 fileystem on primary server (drbd-1):
+
+`mkfs.ext3 /dev/drbd0` <<BR>>
+
+Mount special device /dev/drbd0 to /mnt/drbd and copy a file to it:
+
+`mkdir /mnt/drbd` <<BR>>
+`mount -t ext3 /dev/drbd0 /mnt/drbd` <<BR>>
+`cp /etc/hosts /mnt/drbd` <<BR>>
+
+Unmount the partition and demote the current primary (drbd-1) to secondary:
+
+`umount /mnt/drbd` <<BR>>
+`drbdadm secondary r0` <<BR>>
+
+On the other server (drbd-2), promote it to primary, mount drbd device and check copied filed:
+
+`drbdadm primary r0` <<BR>>
+`mkdir /mnt/drbd` <<BR>>
+`mount -t ext3 /dev/drbd0 /mnt/drbd` <<BR>>
+`ls -d /mnt/drbd/*` <<BR>>
+
+NOTE: At this point, the primary role is no longer with drbd-1, but drbd-2, and drbd-1 is now in secondary role.
+'''Primary''' and '''Secondary''' are roles which can be associated with any node.
+
+==== B: secondary off ====
+
+NOTE: Run test A first.
+
+Shutdown secondary server (drbd-1). Check /proc/drbd:
+
+`cat /proc/drbd` <<BR>>
+
+You should see that the other server is unavailable:
+
+`version: 8.3.0 (api:88/proto:86-89)` <<BR>>
+`GIT-hash: 9ba8b93e24d842f0dd3fb1f9b90e8348ddb95829 build by ivoks@ubuntu, 2009-01-17 07:49:56` <<BR>>
+` 0: cs:WFConnection ro:Primary/Unknown ds:UpToDate/DUnknown C r---` <<BR>>
+`    ns:11 nr:530744 dw:530767 dr:561 al:2 bm:31 lo:0 pe:0 ua:0 ap:0 ep:1 wo:b oos:24` <<BR>>
+
+Create couple of files on primary server (drbd-2):
+
+`cp /etc/hosts.* /etc/group /mnt/drbd` <<BR>>
+
+Now, power up secondary server (drbd-1). As soon as it boots, it will start syncing data.
+The amount of data being resynced in this case is '''independent''' of the device size,
+and only depends on the amount of changed blocks.
+On primary server (drbd-2), /proc/drbd should look like this:
+
+`GIT-hash: 9ba8b93e24d842f0dd3fb1f9b90e8348ddb95829 build by ivoks@ubuntu, 2009-01-17 07:49:56` <<BR>>
+` 0: cs:Connected ro:Primary/Secondary ds:UpToDate/UpToDate C r---` <<BR>>
+`    ns:63 nr:530744 dw:530788 dr:614 al:2 bm:33 lo:0 pe:0 ua:0 ap:0 ep:1 wo:b oos:0` <<BR>>
+
+NOTE: instead of shutdown/power up, you can also just stop (or disconnect) and start (or reconnect) DRBD.
+
+==== C: primary off ====
+
+NOTE: Run test A first. Running test B isn't needed for this one, but it doesn't hurt.
+
+===== C1) orderly shutdown of a Primary =====
+
+Shutdown primary server (drbd-2) with device /dev/drbd0 mounted.
+
+NOTE: for an orderly shutdown of DRBD, you need to first ''unmount'' it.
+In a fully integrated deployment, you'd have a cluster manager that does that
+for you.  Also make sure you the shut down drbd first, and only then the network.
+
+	Otherwise you are '''not''' doing an "orderly" shutdown, but actually simulating
+	multiple failures: if the network is shut down while this is still Primary,
+	you are simulating network failure.  If you don't umount first, DRBD cannot be
+	deactivated, thus you would be simulating a double failure: first network failure
+	while still Primary, then Primary crash.
+
+	In any case, if this shutdown is not "orderly" in the sense that DRBD goes
+	"Connected Secondary/Secondary" before disabling the network, the expected
+	end result of this test will be a "Split-Brain detected" message from DRBD,
+	because you forced it to be Primary on one node (drbd-2), then cut the connection
+	(while it still is Primary) -- so it could be (and in general will be) changed
+	independently from the other node.  Then you make the other node (drbd-1) Primary
+	(while the communication link is still down), which means that its data set
+	will also diverge from where it had been on connection loss.
+
+	Now in general you have two data sets, that used to be identical (at the point
+	in time where connection was lost), but now have evolved in different directions.
+	And once communication is re-established, you have to help DRBD to resolve this:
+	which data set is the "better" one?
+
+Anyways, back to the "orderly" shutdown.
+/proc/drbd on secondary (drbd-1), after few seconds, should look like this:
+
+`version: 8.3.0 (api:88/proto:86-89)` <<BR>>
+`GIT-hash: 9ba8b93e24d842f0dd3fb1f9b90e8348ddb95829 build by ivoks@ubuntu, 2009-01-17 07:49:56` <<BR>>
+` 0: cs:WFConnection ro:Secondary/Unknown ds:UpToDate/DUnknown C r---` <<BR>>
+`    ns:0 nr:53 dw:53 dr:0 al:0 bm:2 lo:0 pe:0 ua:0 ap:0 ep:1 wo:b oos:0` <<BR>>
+
+Make it primary:
+
+`drbdadm primary r0` <<BR>>
+
+NOTE: From this point, primary is again drbd-1, and secondary is again drbd-2.
+
+Now, you should be able to mount /dev/drbd0 on primary (drbd-1):
+
+`mount -t ext3 /dev/drbd0 /mnt/drbd` <<BR>>
+
+Once secondary (drbd-2) boots up again,
+it should automatically connect to the now Primary node,
+detect that the other node has better data, and do a resync.
+
+If it does not, and in the kernel log (`dmesg`) is something about
+`Split-Brain detected, ...`, you need to fix your shutdown process.
+See above for the definition of "orderly".
+
+Split-Brain should only ever occur when you lose the replication link while one
+node is Primary, ''and'' you make the other node Primary before connectivity is
+restored. So try to avoid that.
+
+Which means, for an orderly shutdown, you need to first stop any process accessing
+DRBD, umount any file system mounted from a DBRD, demote every DRBD to Secondary,
+and only then stop the network.  In a real-life deployment, these tasks would
+be done by the cluster manager.
+
+If you stop the network while DRBD is still acting as Primary,
+you are actually simulating a network failure first.
+If you then even reboot or poweroff while DRBD is still acting as Primary,
+overall you are simulating a double failure, namely a network failure followed
+by a Primary crash.
+
+===== C2) simulated crash of a Primary =====
+
+A variant of this test is a simulated crash. To simulate a crash, hit the reset button.
+Or choose either one of the following command lines:
+<pre>
+echo 1 > /proc/sys/kernel/sysrq ; echo b > /proc/sysrq-trigger
+reboot -f -n
+</pre>
+
+===== Notes on Split-Brain recovery =====
+
+In case you manage to get yourself into a split-brain,
+there still is a way out.
+On secondary (drbd-2) run this commands:
+
+`drbdadm secondary r0` <<BR>>
+`drbdadm -- --discard-my-data connect r0` <<BR>>
+
+And on the primary (drbd-1) run this command:
+
+`drbdadm connect r0` <<BR>>
+
+For more on Split-Brain, and how to recover from it,
+see ''Troubleshooting and error recovery, Manual split brain recovery''
+in <nowiki>[[http://www.drbd.org/docs/working/|User's Guide, Working with DRBD]]</nowiki>.
+
+This will bring them back in sync. cat /proc/drbd:
+
+`version: 8.3.0 (api:88/proto:86-89)` <<BR>>
+`GIT-hash: 9ba8b93e24d842f0dd3fb1f9b90e8348ddb95829 build by ivoks@ubuntu, 2009-01-17 07:49:56` <<BR>>
+` 0: cs:Connected ro:Primary/Secondary ds:UpToDate/UpToDate C r---` <<BR>>
+`    ns:8192 nr:0 dw:62 dr:8598 al:2 bm:4 lo:0 pe:0 ua:0 ap:0 ep:1 wo:b oos:0` <<BR>>
+
+==== D: primary-primary with cluster-suite ====
+
+NOTE: Previous test are optional. This test requires installation of additional programs.
+
+Install '''redhat-cluster-suite''' package. After installation, create on both servers file /etc/cluster/cluster.conf:
+
+`<?xml version="1.0" ?>` <<BR>>
+`<cluster config_version="2" name="drbd">` <<BR>>
+`	<fence_daemon post_fail_delay="0" post_join_delay="3"/>` <<BR>>
+`	<clusternodes>` <<BR>>
+`		<clusternode name="drbd-1" nodeid="1" votes="1">` <<BR>>
+`			<fence/>` <<BR>>
+`		</clusternode>` <<BR>>
+`		<clusternode name="drbd-2" nodeid="2" votes="1">` <<BR>>
+`			<fence/>` <<BR>>
+`		</clusternode>` <<BR>>
+`	</clusternodes>` <<BR>>
+`	<cman expected_votes="1" two_node="1"/>` <<BR>>
+`	<fencedevices>` <<BR>>
+`		<fencedevice agent="fence_xvm" name="KVM"/>` <<BR>>
+`	</fencedevices>` <<BR>>
+`	<rm>` <<BR>>
+`		<failoverdomains>` <<BR>>
+`			<failoverdomain name="drbd" ordered="0" restricted="0">` <<BR>>
+`				<failoverdomainnode name="drbd-1" priority="1"/>` <<BR>>
+`				<failoverdomainnode name="drbd-2" priority="1"/>` <<BR>>
+`			</failoverdomain>` <<BR>>
+`		</failoverdomains>` <<BR>>
+`		<resources/>` <<BR>>
+`	</rm>` <<BR>>
+`</cluster>` <<BR>>
+
+Edit file /etc/default/cman on DRBD-1 server
+
+`CLUSTERNAME="DRBD"` <<BR>>
+`NODENAME="drbd-1"` <<BR>>
+`USE_CCS="yes"` <<BR>>
+`CLUSTER_JOIN_TIMEOUT=300` <<BR>>
+`CLUSTER_JOIN_OPTIONS=""` <<BR>>
+`CLUSTER_SHUTDOWN_TIMEOUT=60` <<BR>>
+
+Edit file /etc/default/cman on DRBD-2 server
+
+`CLUSTERNAME="DRBD"` <<BR>>
+`NODENAME="drbd-2"` <<BR>>
+`USE_CCS="yes"` <<BR>>
+`CLUSTER_JOIN_TIMEOUT=300` <<BR>>
+`CLUSTER_JOIN_OPTIONS=""` <<BR>>
+`CLUSTER_SHUTDOWN_TIMEOUT=60` <<BR>>
+
+Reboot both servers. After they come up, check if both servers are in cluster. On both, run:
+
+`cman_tool status | grep 'Cluster Member'` <<BR>>
+
+Both should return `Cluster Member: yes`. Now, set up both servers as primary. On both, run:
+
+`drbdadm primary r0` <<BR>>
+
+On one server, create GFS2 filesystem:
+
+`mkfs.gfs2 -j 2 -p lock_dlm -t drbd:drbd /dev/drbd0`
+
+mkfs will report existing filesystem, so in that case, just answer `y` on asked question.
+
+After filesystem is created, mount the filesystem on both servers:
+
+`mkdir /mnt/drbd` (create directory if you skipped test A) <<BR>>
+`mount /dev/drbd0 /mnt/drbd`
+
+Now write a file on one server and check if that file exists on the other
+server. If that's true, congratulations, you've successfully tested
+low-cost-easy-to-setup alternative for a shared-storage (iSCSI/FC).
+
+=== Integrating with cluster managers, using DRBD with LVM, GFS2, OCFS2, Xen, ... ===
+
+All documented in 
+<nowiki>[[http://www.drbd.org/docs/applications/|Part IV. DRBD-enabled applications]]</nowiki>
+of the DRBD User's Guide.
+
+=== Test notes ===
+
+Note that the "tests" A to D described above do not actually so much test DRBD
+as such, but rather your configuration, init script startup/shutdown ordering,
+and your understanding of the concepts behind it.
+
+If you want serious testing of DRBD, consider using the
+<nowiki>[[http://oss.linbit.com/drbd-testsuite/|DRBD Test Suite]]</nowiki>.
+
+If you have questions setting up the test suite, or other questions regarding DRBD
+or DRBD integration with other software, contact the
+<nowiki>[[http://lists.linbit.com/listinfo/drbd-user|drbd-user mailing list]]</nowiki>.
+Note that you have to subscribe to get your posts through automatically.
+
+=== Test results ===
+
+Before you say "C FAIL because split brain detected after reboot",
+please go back to the notes on "orderly" shutdown, and understand that this was
+expected because you did the shutdown the way you did, and not 'orderly'. Fix
+your shutdown process. No, this is not something the package should do for you.
+
+{| class="wikitable"
+|-
+| Tester
+| Date
+| A (Pass/Fail)
+| B (Pass/Fail)
+| C (Pass/Fail)
+| D (Pass/Fail)
+| Bug #
+| Comment
+|-
+| ivoks
+| 2009/01/29
+| Pass
+| Pass
+| Pass
+| Pass
+| 
+| 
+|-
+| shang
+| 2009/02/03
+| Pass
+| Pass
+| Pass
+| 
+| 
+| 
+|-
+| victorhugops
+| 2009/02/04
+| Pass
+| Pass
+| Fail
+| Pass
+| 
+| Test C Fail because Split-Brian is detected after reboot
+|-
+| Peter Matulis
+| 2009/04/17
+| Pass
+| Pass
+| Fail
+| 
+| 
+| Test C Fail because Split-Brian is detected after reboot
+|}

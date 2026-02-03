@@ -1,0 +1,74 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+=== Introduction ===
+
+This is a quick summary of what an administrator should consider when trying to move guests from IBM-KVM to Ubuntu KVM.
+
+=== Machine Types ===
+For a live migration (and to some extend even offline) between two hosts they need to agree how the virtual hardware of the guest is defined. This is encapsulated in the ''Qemu machine types''. Since every Distributor - and in this sense IBM-KVM is one - has slight changes to the code defining the virtual hardware they are defining custom types to make sure they are recognized as being different (and better maintainable over time).
+Note: Some extra <nowiki>[[https://wiki.ubuntu.com/QemuKVMMigration|Background on Machine Types]]</nowiki>
+
+On one hand a bad message - for a change of a machine type to become "effective" a guest has to restart - therefore live migration is not really an option here.
+On the other hand a good message - those "differences" from upstream are currently minimal in both hypervisors for s390x.
+So while we have to neglect live migration, offline migration is relatively easy without too much issues to be expected.
+This is not perfect (=no delta between both), but so far it worked for all tested cases with the guest not realizing the change underneath.
+
+Since we have to adapt the types we need to know how they match, the following table lists IBM-KVM machine types and their closest matching Ubuntu Type supported on s390x:
+
+<pre>
+IBM-KVM                 based on Upstream    Ubuntu KVM
+s390-ccw-kvmibm-1.1.0   2.3                  s390-ccw-virtio-xenial
+s390-ccw-kvmibm-1.1.1   2.4                  s390-ccw-virtio-xenial
+s390-ccw-kvmibm-1.1.2   2.6                  s390-ccw-virtio-yakkety
+</pre>
+
+You will need the Ubuntu Release >=the release you see at the end of the Ubuntu Type.
+So for example ''s390-ccw-virtio-yakkety'' is available in Ubuntu Yakkety and later.
+If you are on an older version e.g. xenial you can still try going from e.g. ''s390-ccw-kvmibm-1.1.2'' to ''s390-ccw-virtio-xenial''.
+Yet this means the virtual HW might go back a revision and that is usually discouraged.
+Please do note that the <nowiki>[[https://wiki.ubuntu.com/OpenStack/CloudArchive|cloud archive]]</nowiki> usually brings newer versions. So the cloud archive for Ocata on Xenial will have the qemu supporting ''s390-ccw-virtio-zesty''.
+If in doubt you can check the output of ''qemu-system-s390x -M ?'' to list the types your current installation can work with.
+
+=== Other adaptations in the guest description ===
+Changing machine types is no standard operation in libvirt or such, so this involves manually tweaking xml files.
+For some comfort here we use xmlstarlet to modify the xml representing the guest.
+
+Depending on your configuration of source and target more might differ, in my case - but that is only an example - the network device names did.
+There might be more or less differences for other cases, but all are usually simple replacements of identifiers in the xml.
+
+=== Migrating a Guest ===
+==== Task Overview ====
+With all that known here an example of a simple offline migration to a Ubuntu KVM, we will:
+* move a guest named ''s1lp3g001'' from source to target
+* remove ''selinux seclabel'' (Ubuntu uses apparmor)
+* change IBM-KVM ''machine type'' to the closest match on Ubuntu
+* adapt network source device from ''vlan2654'' to ''encc000.2654''
+Note: my guest is backed by a dasd that is accessible on both hosts (''/dev/disk/by-path/ccw-0.0.1500'' in my case)
+
+If you don't have access to the same storage device you need to raw-copy the disk data from a disk at source to another one at target and adapt the guest XML to point to that.
+Fortunately s390x is always on SAN, so being able to set up shared storage isn't a rare thing at all.
+
+==== Example ====
+Note: I'll prefix the commands with to indicate if it shall be executed on ''source'' our ''target'' of the migration.
+<pre>
+source$ virsh dumpxml --migratable s1lp3g001 > s1lp3g001.xml
+source$ scp s1lp3g001.xml ubuntu@10.245.237.5:~/
+target$ sudo apt-get install xmlstarlet
+target$ xmlstarlet edit --inplace --delete "/domain/seclabel" s1lp3g001.xml
+target$ xmlstarlet edit --inplace --update "/domain/os/type/@machine" --value "s390-ccw-virtio-xenial" s1lp3g001.xml
+target$ xmlstarlet edit --inplace --update "/domain/devices/interface/source/@dev" --value "encc000.2654" s1lp3g001.xml
+target$ virsh define s1lp3g001.xml
+source$ virsh shutdown s1lp3g001
+target $virsh start s1lp3g001
+</pre>
+
+Note: in case anything went wrong, we didn't modify the guest on the source. So if it is ''not running'' at ''target'' you can just (re)start it on ''source'' and you are back were you began.

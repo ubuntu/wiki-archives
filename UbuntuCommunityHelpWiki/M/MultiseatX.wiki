@@ -1,0 +1,385 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+== Introduction To Multiseat ==
+
+Multiseat X refers to a single machine that supports multiple concurrent users each with their own set of keyboards, mice, and monitors providing a traditional desktop experience to each user. Contrast this with multi-''head'' X, in which a single keyboard and mouse is associated with two or more screens under the control of one user session. Both setups will be discussed in this document as they are not mutually exclusive. In theory, there are several different ways to achieve multi-seat; in practice there are very few approaches which are both simple and stable.
+
+Automatic multiseat is not currently available in Ubuntu through the standard repositories. There are a few components required to have true automatic multiseat. We will refer to these components in generic terms. There needs to be a mechanism that can detect hardware events and communicate with the display manager and Xorg in a meaningful way. There also needs to be a mechanism that governs how this hardware gets allocated and which seat has access to it. Access control is important here. Once a group of hardware is considered a seat, Xorg should launch the login manager greeter session for the seat. The display manager then must launch the Xsession. The tools in use by Ubuntu that should provide this functionality include Xorg, ConsoleKit, udev, and LightDM, KDM, or GDM. Multiseat branches for <nowiki>[[http://cgit.freedesktop.org/ConsoleKit/log/?h=wip/multi-seat|ConsoleKit]]</nowiki>, <nowiki>[[http://git.gnome.org/browse/gdm/log/?h=wip/multi-seat-2-30|GDM-2.3]]</nowiki> and <nowiki>[[http://git.gnome.org/browse/gdm/log/?h=wip/multi-seat|GDM-3.x]]</nowiki> do exist which should provide for automatic multiseat functionality. These branches are maintained by Brian Cameron of Oracle. Use of these repositories is outside the scope of this document, although it would be nice if the work could be merged into the master branches :)
+
+The main body of this document will focus on the current Ubuntu LTS releases and we will maintain information for legacy users following.
+
+== Ubuntu 12.04 LTS Precise / 12.10 Quantal / 13.04 Raring ==
+
+=== Xorg ===
+
+Setting up your Xorg files can be done in 2 ways. You can either use a single xorg.conf file containing multiple layout sections, or you can use multiple .conf files. Both are described here. Please use the <nowiki>[[http://www.x.org/releases/X11R7.6/doc/man/man5/xorg.conf.5.xhtml|xorg documentation]]</nowiki> for clarification on all of the relevant xorg.conf sections.
+
+==== Single xorg.conf ====
+
+This setup is best suited for static multiseat where hot-plugging is not needed. We will use an <nowiki>[[http://pastebin.com/BY3763Dz|example xorg.conf]]</nowiki> file provided by <nowiki>[[http://ubuntuforums.org/member.php?u=671213|bastafidli]]</nowiki> in the "Known to be working hardware" section at the end of this page together with all the other modified configuration files.
+
+Let's cover some of the less obvious things helpful for our purposes. Starting with the ServerFlags section.
+
+'''ServerFlags'''
+
+ .'''Option "AllowMouseOpenFail" "true"''' only pertains to mousedrv and vmmouse and has no effect on evdev or others. It is probably not needed, but will not hurt us here.
+ .'''Option "AutoAddDevices" "false"''' lets us control which seat gets which input devices.
+ .'''Option "AutoEnableDevices" "false"''' prevents input devices from being automatically enabled (and potentially going to the wrong seat).
+ .'''Option "DontZap" "false"''' prevents killing X with a Ctrl+Alt+Backspace event. This is already disabled in Ubuntu by default, but it wont hurt to reinforce it here.
+Additional ServerFlags not covered in that example include:
+ .'''Option "AutoAddGPU" "FALSE"''' which is used to "stop the X server adding non-primary devices as gpu screens." See this <nowiki>[[http://www.mail-archive.com/xorg-devel@lists.x.org/msg31094.html|mail archive]]</nowiki>.
+ .'''Option "DontVTSwitch" "FALSE"''' prevents virtual terminal switching. I suggest not making this global, but instead putting this either in the statement that your display manager uses to launch X, or in the ServerLayout section. You may find it necessary to be able to switch to another vt at some point.
+
+'''ServerLayout'''
+
+This is where you put all the pieces together and define your seats. One ServerLayout per seat. Multihead seats are possible. Any options specified in the ServerFlags section may be overridden or individually defined in ServerLayout. Use this fact to your advantage.
+
+'''InputDevice'''
+
+This where you define your input devices, such as mice and keyboards. You need an InputDevice section for each device. It is recommended to use /dev/input/by-path/ when possible as the event# can change between boots. If you have a multi-function device such as a keyboard with multimedia keys, be sure to have an InputDevice section for each "sub"device and to include them in the ServerLayout section. There are a few methods you can use to find the device names.
+<pre>
+cat /proc/bus/input/devices
+ls -la /dev/input/by-path/
+ls -la /dev/input/mouse*
+dmesg | tail after plugging in a device
+</pre>
+'''*NOTE*'''
+<<BR>>
+'''Option "GrabDevice" "TRUE"''' might be needed if you're having input device glitches. See this <nowiki>[[http://www.x.org/archive/X11R7.5/doc/man/man4/evdev.4.html|archive]]</nowiki>.
+
+'''Device'''
+
+This is where you define each GPU and configure any driver specific Options you need to. One Device section for each GPU. If you are using more than one monitor in a multihead configuration, you will need to have a Device section for each "Screen". Example shown in the Multiple xorg.conf section.
+Use lspci | grep VGA to find the BusID.
+<pre>
+anthony@terminal:~$ lspci | grep VGA
+01:00.0 VGA compatible controller: NVIDIA Corporation GF108 [GeForce GT 430] (rev a1)
+06:00.0 VGA compatible controller: NVIDIA Corporation GF108 [GeForce GT 430] (rev a1)
+</pre>
+
+'''*NOTE*'''
+<<BR>>
+If using the Nvidia binary, you may need to use '''Option "ProbeAllGpus" "FALSE"''' See <nowiki>[[http://us.download.nvidia.com/XFree86/Linux-x86_64/304.51/README/xconfigoptions.html|here]]</nowiki> for usage information.
+
+==== Multiple xorg.conf Files ====
+
+Using an individual xorg.conf file for each seat is preferred if you require hotplug support as it allows us to use InputClass sections coupled with udev rules. We will create our .conf files in /etc/X11 and they will be called by the display manager. Here are 2 example seats.
+
+Let's start with <nowiki>[[http://pastebin.com/T20xZkE2|xorg_seat1.conf]]</nowiki> as it is a simpler example. The first thing you should notice is how empty it looks. It has a Device section which simply specifies the driver to use and the BusID the card is on. There's that "AutoAddGPU" option. But the interesting work happens in the two InputClass sections. The first one tells Xorg to ignore all input devices. The second one overrides the "Ignore" option only for the devices that have the "input_htpc" tag assigned by udev. Pay attention to MatchTag. The value listed here needs to match what you define in your udev rule.
+
+<nowiki>[[http://pastebin.com/XEQ93YUe|xorg_seat0.conf]]</nowiki> follows the same method of using InputClass to control the keyboard and mouse assignment, but also is an Nvidia dualhead setup. This is not TwinView or Xinerama. Each screen has it's own panels and background. Windows do not span across one large virtual screen, nor can you drag windows between screens. The pertinent bits should be self explanatory. The not so obvious important bit is that you need to specify in each Device section what Screen the Device is used by.
+
+=== Udev ===
+
+For our purposes, udev provides us a way to associate devices with seats based on a set of rules that we can create. This will not be an in depth tutorial on udev, but you will be exposed to some basic concepts and tools. See <nowiki>[[http://linux.die.net/man/7/udev|man udev]]</nowiki> and <nowiki>[[http://www.reactivated.net/writing_udev_rules.html|this site]]</nowiki> for additional information regarding writing udev rules. For your sanity and to allow the most flexibility, it is highly recommended that you use a usb hub for each seat. This will allow you to write your rules such that you are matching the hub, not the individual devices specifically. All devices plugged into it will be automagically named appropriately. Let's start by looking at the rules used for our example xorg_seat files.
+
+This file is named /etc/udev/rules.d/99-seat.rules.
+<pre>
+SUBSYSTEM=="input", ENV{ID_INPUT.tags}="input_default"
+SUBSYSTEM=="input", DEVPATH=="/devices/pci0000:00/0000:00:1d.2/usb8/8-2/*", ENV{ID_INPUT.tags}="input_htpc"
+</pre>
+Fairly simple and to the point here. The first rule matches all devices with a subsystem value of "input" and assigns the tag "input_default". This will ensure that all input devices not otherwise specified here are linked to seat0 only. The second rule matches all devices with a subsystem value of "input" that live in the device path "/devices/pci0000:00/0000:00:1d.2/usb8/8-2/*" and assigns the tag "input_htpc". This rule is used in seat1 and allows us to use any keyboard and mouse plugged into the usb hub. There are a number of ways you can identify your devices. I choose the device path for this example because it offered the shortest, most human readable rule while still getting the job done. This rule should match even if the usb hub needs to be replaced, so long as the usb hub is not moved to a different usb port on the motherboard. Notice the '''ENV{ID_INPUT.tags}=""''' bits. The value you assign here needs to be the same value you use in your InputClass MatchTag lines in your xorg files. See <nowiki>[[http://cgit.freedesktop.org/xorg/xserver/commit/?id=c6d9bc092c84ad5c68083a126aa7577baa42cef7|here]]</nowiki> for additional explanation. 
+
+To get the information you need for your rules, start by plugging in (or unplugging) your device and checking the output of dmesg | tail which will show you information like:
+<pre>
+anthony@terminal:~$ dmesg | tail -n 5
+[ 6252.074259] input: HID 04d9:1400 as /devices/pci0000:00/0000:00:1d.2/usb8/8-2/8-2:1.0/input/input20
+[ 6252.074342] generic-usb 0003:04D9:1400.0003: input,hidraw0: USB HID v1.10 Keyboard [HID 04d9:1400] on usb-0000:00:1d.2-2/input0
+[ 6252.107312] input: HID 04d9:1400 as /devices/pci0000:00/0000:00:1d.2/usb8/8-2/8-2:1.1/input/input21
+[ 6252.107602] generic-usb 0003:04D9:1400.0004: input,hidraw1: USB HID v1.10 Mouse [HID 04d9:1400] on usb-0000:00:1d.2-2/input1
+[ 7133.376112] usb 8-2: USB disconnect, device number 3
+</pre>
+Next, we will use udevadm to get all the info we need to write our rules.
+<pre>
+udevadm info --query=all --path=/devices/pci0000:00/0000:00:1d.2/usb8/8-2/8-2:1.1/input/input21 --attribute-walk
+</pre>
+From this output, we can see info on the specific device in question, and every parent device. Every multiseat setup is different, so use the information presented carefully. In some circumstances, it might be prudent to use device specific {ATTRS}. In others, using the device path may be more practical.
+
+=== Display Manager ===
+
+The Display Manager is responsible for putting a login screen on every seat and launching the Xserver. The list of display managers that have supported multiseat setups has varied over the years. The predominant display manager of choice has been KDM which has been documented in the Ubuntu 10.04 section and will be reiterated here.
+
+==== LightDM ====
+
+LightDM is has replaced GDM as the default display manager for Ubuntu. LightDM is <nowiki>[[https://bugs.launchpad.net/lightdm/+bug/883189|largely undocumented]]</nowiki> except for a reference config file included in /usr/share/doc/lightdm/lightdm.conf.gz which includes terse comments for each line. The simplicity of LightDM does make it easy to setup multiseat though. Looking at this <nowiki>[[http://pastebin.com/7GqELp0k|example]]</nowiki>, you can see that the vast majority of things are commented out. What is left is the bare minimum to make multiseat work. Let's review each section and the uncommented lines individually.
+* '''[LightDM]''' - General configurations for LightDM
+  .'''minimum-display-number=0''' - Minimum display number to use for X servers.
+  .'''minimum-vt=7''' - First VT to run displays on. The first seat will launch on vt7 and each seat thereafter will be vt(n+1). This makes it so we don't need to specify -vt7 in our xserver-command statement.
+* '''[SeatDefaults]''' - Default configurations applied to all seats.
+  .'''xserver-command=/usr/bin/X''' - X server command to run when a user logs in. You may use any command-line <nowiki>[[http://www.x.org/releases/X11R7.7/doc/man/man1/Xorg.1.xhtml#heading7|options]]</nowiki> that Xorg takes.
+  .'''greeter-session=lightdm-gtk-greeter''' - The session to load for greeter. This is dependent on which *buntu you use.
+  .'''greeter-show-manual-login=true''' - True if the greeter should offer a manual login option. Helpful if you have hidden users that are able to login.
+  .'''user-session=xubuntu''' - The session to load for users. Available sessions can be found in /usr/share/xsessions.
+  .'''exit-on-failure=true''' - True if the daemon should exit if this seat fails. I haven't tested this fully.
+* '''[Seat:0]''' - All seats sections must start with the format [Seat:n]
+  .'''xserver-command=/usr/bin/X :0''' - Starts Xsession on display :0
+  .'''xserver-config=xorg_seat0.conf''' - Config file to pass to X server. (Multiple xorg.conf file example above)
+* '''[Seat:1]'''
+  .'''xserver-command=/usr/bin/X :1 -sharevts''' - Starts second seat on display :1
+  .'''xserver-config=xorg_seat1.conf'''
+  .'''autologin-user=htpc''' - Automatically logs this user in.
+  .'''autologin-user-timeout=15''' - Time granted to make a manual selection before auto-login.
+Some additional notes:
+* The -sharevts command-line argument has been shown to be necessary on all seats except the primary. I haven't found a reason why.
+* At least one seat must have an autologin-user. See this <nowiki>[[https://bugs.launchpad.net/ubuntu/+source/lightdm/+bug/976124|bug]]</nowiki>.
+* If you are using a single xorg.conf file - Do not use '''xserver-config='''. Instead, use '''xserver-layout=''' and reference the appropriate Layout section from your xorg.conf file.
+* In my example (I'm using the multiple xorg.conf files and the lighdm.conf that have been linked), only seat0 is able to switch virtual terminals.
+ 
+==== KDM ====
+
+The information provided in the <nowiki>[[https://help.ubuntu.com/community/MultiseatX#Ubuntu_10.04_.28Lucid.29|Ubuntu 10.04]]</nowiki> section is still current so I will not expand on that here. Examples of all the system configuration files required to be modified for KDM on multiseat system are available in the "Known to be working hardware" section at the end of this page. 
+
+To change from the LightDM to KDM use
+
+<pre>
+dpkg-reconfigure kdm
+</pre>
+
+If you observe artifacts on one of your screens, you might be affected by the following defect <nowiki>[[https://bugs.launchpad.net/ubuntu/+source/kde-runtime/+bug/1120077|Bug #1120077]]</nowiki>
+
+=== Pulseaudio ===
+
+I've spent many hours researching online, testing various setups and talking to Pulseaudio devs. The bottom line of it all is that running pulseaudio in normal user mode will allow only the active session as marked by ConsoleKit to access the audio hardware. Since current ConsoleKit is only able to mark one session as active at a time, this means that we must run a system-wide instance of pulseaudio. The upside: Each seat can have individual audio. The downside: ALL audio hardware is available to any user and can be manipulated AT WILL. This is not an ideal situation for an internet cafe or other public setting where security is a real concern. Keep this in mind when creating your site security policy. It might be prudent to restrict pavucontrol execution to admins only.
+
+As always, make a backup of all of your default config files. If you have tinkered with your configs without backing up, you may retrieve the pulseaudio package with apt-get -d install pulseaudio. This will download the package (to /var/cache/archives/apt) only and you can extract the contents to retrieve the default configs. Be aware that client.conf is not included in there.
+
+To run pulseaudio as a system-wide daemon, we need to edit a few files.
+
+* For 12.04 <nowiki>[[http://pastebin.com/Vsj77mhU|/etc/default/pulseaudio]]</nowiki><pre>
+PULSEAUDIO_SYSTEM_START=1
+</pre>
+* For 12.10 <nowiki>[[http://pastebin.com/qbnPakUw|/etc/init/pulseaudio.conf]]</nowiki><pre>
+start on runlevel [2345]
+</pre>
+ 
+* <nowiki>[[http://pastebin.com/2dacSQqv|/etc/pulse/daemon.conf]]</nowiki> - See man pulse-daemon.conf for more information. <pre>
+daemonize = yes
+local-server-type = system
+</pre>
+* /etc/pulse/client.conf<pre>
+autospawn = no
+</pre>
+
+We also need to add users to the pulse-access group.
+ <pre>
+sudo usermod -a -G pulse-access <username>
+ }}}
+ 
+Now that all users are able to access the audio hardware, we need to select the hardware each user will use. This can be done using <nowiki>[[http://manpages.ubuntu.com/manpages/precise/man1/pavucontrol.1.html|pavucontrol]]</nowiki>. Please be aware that the settings are stored PER USER and will not follow the seat. If users switch seats, you will need to re-select the desired audio hardware.
+
+An alternative to using pavucontrol is to statically define the seats in the <nowiki>[[http://pastebin.com/2wiS35c9|/etc/pulse/system.pa]]</nowiki> configuration file using 
+ {{{
+load-module module-alsa-sink device="hw:1,7" sink_name=seat0
+load-module module-alsa-sink device="hw:2,0" sink_name=seat1
+load-module module-alsa-sink device="hw:3,0" sink_name=seat2 
+ }}}
+
+The individual devices in the output above can be identified using
+ {{{
+sudo aplay -l
+ }}}
+
+Once the sound cards are tied to a seat, the user can statically configure which sound card should be used using <nowiki>[[http://pastebin.com/xerRxdhA|/home/username/.pulse/client.conf]]</nowiki> file as
+
+ {{{
+default-sink=seat1
+autospawn=no
+ }}}
+
+Examples of all the system configuration files required to be modified for Pulse Audio on multiseat system are available in the "Known to be working hardware" section at the end of this page.
+
+'''Additional Comments on Pulseaudio'''
+
+ .I had hoped that there would be a more elegant solution for getting per seat audio working. Using a systemwide Pulseaudio in multiseat has many drawbacks and is not entirely stable between reboots. I had attempted to start a systemwide instance and have user instances connect to it as a server via localhost. That doesn't seem to work since when '''pulseaudio --start''' is run it sources daemon.conf.
+ 
+ .The issue we see when running a normal per-user pulseaudio is that one seat has access to the hardware and all others have Dummy Output. This is due to ConsoleKit not being entirely seat aware. CK considers all of our seats as sessions of seat1 and can only mark one session as active. This fact can be seen by running '''getfacl /dev/snd/*'''. The thought occurred to me that we might be able to edit the acl of the appropriate /dev/snd/ files based on which $DISPLAY a particular user is using. This is an option that I have not explored. Please consider contributing to the multiseat cause by exploring this hypothesis and editing the document with your findings.
+
+'''Additional Notes'''
+ .It would be wise to also disallow users from loading modules '''DISALLOW_MODULE_LOADING=1'''.
+ .'''autospawn = no''' is not entirely necessary as seen in <nowiki>[[http://pastebin.com/vsdQn1jq|my example file]]</nowiki>. It causes no issues.
+
+<<BR>>
+<<BR>>
+-----
+<<BR>>
+<<BR>>
+
+== Ubuntu 11.04 (Natty) ==
+The steps are practically the same as in 10.04. Please view the sample configurations files to compare relevant details.
+
+Multiseat sample for ATI 5850 and Intel Sandy Bridge 2600K Onboard graphics (Both using open source drivers)
+
+/etc/X11/xorg.conf:
+
+http://pastebin.com/YeCsnmhy
+
+/etc/kde4/kdm/kdmrc:
+
+http://pastebin.com/AaFSsqgE
+
+== Ubuntu 10.04 (Lucid) ==
+The steps are the same as 9.10 -- GDM 2.30 and !ConsoleKit 0.4.1 do not have native Multiseat support, nor will GDM launch two static X sessions like it used to in 2.20.  If you do not want to use KDM, Multiseat branches exist for GDM and !ConsoleKit; they are described here: http://permalink.gmane.org/gmane.comp.gnome.gdm.general/1859
+
+For a PPA containing patched builds of !ConsoleKit; and GDM look here:
+https://launchpad.net/~a7x/+archive/multiseat
+
+For xorg.conf, follow the steps in 9.10 below. If you are having problems with devices attached to the correct seats, or finding errors in <code>/var/log/Xorg.[01].log</code>, in addition to !AutoEnableDevices=false, try:
+{{{
+  Option  "AutoAddDevices"  "false"
+</pre>
+
+This kdmrc is slightly different than the example for 9.10, but allows the users of each seat to switch to their VT and get their session marked "ACTIVE" in !ConsoleKit.  One seat gets display :0 with vt7, the other gets :1 with vt9. By pressing Ctrl+Alt+F7, the first seat will be marked active. You can verify the active seat by running: <code>ck-list-sessions</code>.  On the second seat, pressing Ctrl+Alt+F9 will then make it active. An active session allows that user to auto-mount USB devices, auto-run scanner software, etc.
+
+/etc/kde4/kdm/kdmrc:
+<pre>
+[General]
+StaticServers=:0,:1
+ReserveServers=:2,:3
+ServerVTs=7,9
+ConsoleTTYs=tty1,tty2,tty3,tty4,tty5,tty6
+PidFile=/var/run/kdm.pid
+...
+
+[X-:0-Core]
+AutoLoginAgain=false
+AutoLoginDelay=0
+AutoLoginEnable=false
+AutoLoginLocked=false
+AutoLoginUser=
+ClientLogFile=.xsession-errors
+ServerVT=7
+ServerCmd=/usr/bin/X0 -sharevts -layout seat0 -isolateDevice PCI:1:0:0 -keeptty
+
+[X-:1-Core]
+AutoLoginAgain=false
+AutoLoginEnable=false
+AutoLoginLocked=false
+ClientLogFile=.xsession-errors
+ServerVT=9
+ServerCmd=/usr/bin/X1 -sharevts -novtswitch -layout seat1 -isolateDevice PCI:2:0:0 -keeptty
+</pre>
+
+Again, X0 and X1 are just symlinks to X. The <code>ServerVT=</code> variable is required as it is passed to the final command.  When viewed in <code>ps aux |grep X[01]</code> they should look something like this:
+<pre>
+root ... /usr/bin/X0 -sharevts -layout seat0 -isolateDevice PCI:1:0:0 -keeptty -nr -nolisten tcp :0 vt7 -auth /var/run/xauth/A:0-oRERAb
+root ... /usr/bin/X1 -sharevts -novtswitch -layout seat1 -isolateDevice PCI:2:0:0 -keeptty -nr -nolisten tcp :1 vt9 -auth /var/run/xauth/A:1-o9Y68b
+</pre>
+
+=== Pulse Audio ===
+If you have only one sound card, you may wish to run pulseaudio as a system daemon and not have it run once per user.
+
+ 1. Add any multiseat users to the "pulse-access" group
+ {{{
+sudo usermod -a -G pulse-access <username>
+ }}}
+ 1. Edit /etc/pulse/daemon.conf
+ {{{
+daemonize = yes
+system-instance = yes
+ }}}
+ 1. Edit /etc/pulse/client.conf
+ {{{
+autospawn = no
+ }}}
+ 1. Edit /etc/default/pulseaudio
+ {{{
+PULSEAUDIO_SYSTEM_START=1
+ }}}
+
+If you have multiple sound cards and wish to route sound to each seat, this guide should be helpful:
+
+http://disjunkt.com/jd/2010/en/multiseat-linux/multiseat-linux-system-wide-pulseaudio-for-routing-sounds-109/
+
+== Ubuntu 9.10 (Karmic) ==
+GDM in 9.10 does not support multi-seat setups, so it is recommended to install and use KDM instead (as posted on http://forum.ubuntuusers.de/topic/multiseat-in-karmic/#post-2264923):
+
+First, set up your xorg.conf according to your devices and:
+
+ 1. Boot or switch into console mode to turn of X window system <code>sudo stop gdm</code>, then have Xorg's output an auto-configured xorg.conf <code>Xorg -configure</code>, copy it to /etc/X11/xorg.conf and modify:
+
+ 1. For each seat disable AutoEnableDevices:
+ {{{
+Section "ServerLayout"
+    Identifier  "seat_1"
+    Screen      0 "screen_1" 0 0
+    InputDevice "kbd_1a"
+    InputDevice "mouse_1"
+    Option      "AutoEnableDevices"     "false"
+    Option      "AutoAddDevices"        "true"
+    Option      "AllowEmptyInput"       "true"
+EndSection
+ }}}
+
+ 1. Note that PS/2 devices are now also managed by "evdev":
+ {{{
+Section "InputDevice"
+    Identifier  "kbd_1a"
+    Driver      "evdev"
+    Option      "Device"        "/dev/input/by-path/platform-i8042-serio-0-event-kbd"
+    Option      "XkbRules"      "xorg"
+    Option      "XkbModel"      "cymotionlinux"
+    Option      "Protocol"      "Standard"
+    Option      "XkbLayout"     "de"
+    Option      "XkbVariant"    "nodeadkeys"
+    Option      "XkbOptions"    "compose:rctrl"
+EndSection
+ }}}
+
+ 1. You need to use "GrabDevice" for mice:
+ {{{
+Section "InputDevice"
+    Identifier  "mouse_1"
+    Driver      "evdev"
+    Option      "Device"        "/dev/input/by-id/usb-Logitech_USB_RECEIVER-event-mouse"
+    Option      "GrabDevice"    "on"
+    Option      "Buttons"       "12"
+    Option      "Resolution"    "800"
+EndSection
+ }}}
+
+Then you can setup KDM to start multiple seats:
+
+/etc/kde4/kdm/kdmrc:
+ {{{
+...
+[X-:0-Core]
+AutoLoginAgain=false
+AutoLoginDelay=0
+AutoLoginEnable=false
+AutoLoginLocked=false
+AutoLoginUser=
+ClientLogFile=.xsession-errors
+ServerCmd=/usr/bin/X1 :0 vt07 -audit 0 -isolateDevice PCI:1:0:0 -nolisten tcp -layout seat_1
+
+[X-:1-Core]
+AutoLoginAgain=false
+AutoLoginEnable=false
+AutoLoginLocked=false
+ClientLogFile=.xsession-errors
+ServerCmd=/usr/bin/X2 :1 vt05 -audit 0 -sharevts -isolateDevice PCI:3:5:0 -nolisten tcp -layout seat_2
+ }}}
+
+The different binaries "X1" and "X2" mentioned are just symlinks to "X", this is only optional to make the seats distinguishable in the process list.
+
+== Other implementations ==
+* <nowiki>[[MultiseatOneCard]]</nowiki> - Multiseat solution using Xephyr on Ubuntu 10.04 LTS (lucid) with only one video-card
+* <nowiki>[[http://userful.com/products/dm|Desktop Multiplier]]</nowiki> by Userful - closed source, but free for limited personal use available in 6.06 and above, see the above instructions for installation
+
+== Known to be working hardware ==
+
+Very few modern motherboards allow both onboard and PCI express VGA cards to work at the same time. If you build a new system, you might either buy motherboard with multiple PCIx slots (such as <nowiki>[[http://www.newegg.com/Product/Product.aspx?Item=N82E16813186176|Foxconn Inferno Katana LGA 1156 Intel P55 ATX Intel Motherboard]]</nowiki>) or use low budget motherboards that allows both onboard and PCIx VGA cards to work. There is also untested method of using USB VGA cards.
+
+Here is list of the motherboard/PCIx VGA card combination that are known to work:
+* Ubuntu 13.04 (Raring), 3 way multiseat, Gigabyte GA-990FXA-UD3, 2 x GeForce GTS 450 (also used as audio for seats 1 and 2), 1 x GeForce GT 440 (also used as audio for seat 3), . Config files: <nowiki>[[http://pastebin.com/BY3763Dz|/etc/X11/xorg.conf]]</nowiki>, <nowiki>[[http://pastebin.com/bxGbHNra|/etc/kde4/kdm/kdmrc]]</nowiki>, <nowiki>[[http://pastebin.com/dPab7Rwm|/etc/default/pulseaudio]]</nowiki>, <nowiki>[[http://pastebin.com/qbnPakUw|/etc/init/pulseaudio.conf]]</nowiki>, <nowiki>[[http://pastebin.com/gdK6NGk6|/etc/init.d/pulseaudio]]</nowiki>, <nowiki>[[http://pastebin.com/Kns9hryL|/etc/modprobe.d/alsa-base.conf]]</nowiki>, <nowiki>[[http://pastebin.com/2wiS35c9|/etc/pulse/system.pa]]</nowiki>, <nowiki>[[http://pastebin.com/uzXxKRE4|/etc/pulse/daemon.conf]]</nowiki>, <nowiki>[[http://pastebin.com/hYPDcLb1|/etc/pulse/client.conf]]</nowiki>, <nowiki>[[http://pastebin.com/h20W4jWa|/etc/rc.local]]</nowiki>, <nowiki>[[http://pastebin.com/xerRxdhA|/home/username/.pulse/client.conf]]</nowiki>
+* Ubuntu 12.10 (Quantal) / 12.04 (Precise), 3 way multiseat, Gigabyte GA-990FXA-UD3 also used for onboard audio on seat 3, 2 x GeForce GTS 450 (also used as audio for seats 1 and 2), 1 x GeForce Quadro NVS 295, . Config files: <nowiki>[[http://pastebin.com/BY3763Dz|/etc/X11/xorg.conf]]</nowiki>, <nowiki>[[http://pastebin.com/qa6uHZ7M|/etc/kde4/kdm/kdmrc]]</nowiki>, 12.04: <nowiki>[[http://pastebin.com/dPab7Rwm|/etc/default/pulseaudio]]</nowiki>, 12:10 <nowiki>[[http://pastebin.com/qbnPakUw|/etc/init/pulseaudio.conf]]</nowiki>, <nowiki>[[http://pastebin.com/gdK6NGk6|/etc/init.d/pulseaudio]]</nowiki>, <nowiki>[[http://pastebin.com/Kns9hryL|/etc/modprobe.d/alsa-base.conf]]</nowiki>, <nowiki>[[http://pastebin.com/2wiS35c9|/etc/pulse/system.pa]]</nowiki>, <nowiki>[[http://pastebin.com/uzXxKRE4|/etc/pulse/daemon.conf]]</nowiki>, <nowiki>[[http://pastebin.com/hYPDcLb1|/etc/pulse/client.conf]]</nowiki>, <nowiki>[[http://pastebin.com/h20W4jWa|/etc/rc.local]]</nowiki>, <nowiki>[[http://pastebin.com/xerRxdhA|/home/username/.pulse/client.conf]]</nowiki>
+* Ubuntu 12.04 (Precise) / 11.11 (Oneiric), 3 way multiseat, MSI 790FX-GD70, 1 x GeForce GTS 450 (also used as audio), 2 x GeForce 7300 SE/7200 GS, 2 x Creative Labs CA0106 Soundblaster, the onboard audio doesn't cooperate with the Soundblasters at the same time. Config files: <nowiki>[[http://pastebin.com/BY3763Dz|/etc/X11/xorg.conf]]</nowiki>, <nowiki>[[http://pastebin.com/qa6uHZ7M|/etc/kde4/kdm/kdmrc]]</nowiki>, <nowiki>[[http://pastebin.com/dPab7Rwm|/etc/default/pulseaudio]]</nowiki>, <nowiki>[[http://pastebin.com/gdK6NGk6|/etc/init.d/pulseaudio]]</nowiki>, <nowiki>[[http://pastebin.com/Kns9hryL|/etc/modprobe.d/alsa-base.conf]]</nowiki>, <nowiki>[[http://pastebin.com/2wiS35c9|/etc/pulse/system.pa]]</nowiki>, <nowiki>[[http://pastebin.com/uzXxKRE4|/etc/pulse/daemon.conf]]</nowiki>, <nowiki>[[http://pastebin.com/hYPDcLb1|/etc/pulse/client.conf]]</nowiki>, <nowiki>[[http://pastebin.com/h20W4jWa|/etc/rc.local]]</nowiki>, <nowiki>[[http://pastebin.com/xerRxdhA|/home/username/.pulse/client.conf]]</nowiki>
+* TBD4

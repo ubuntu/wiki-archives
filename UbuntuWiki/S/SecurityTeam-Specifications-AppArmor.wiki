@@ -1,0 +1,154 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+* '''Launchpad Entry''': https://launchpad.net/distros/ubuntu/+spec/apparmor/
+* '''Created''':  by MagnusRunesson
+* '''Contributors''': MagnusRunesson, JohnMoser
+* '''Packages affected''': Kernel-packages and new AppArmor packages
+
+=== Summary ===
+
+Implement an easy to use application security framework based on AppArmor in Ubuntu, to be available by default. The kernel packages must be patched to include a small kernel patch. The rest of the AppArmor framework will have its own packages. Profiles (security profiles) must be created for suid:ed applications and server daemons. The profiles can either be provided in a dedicated packages or in the packages which the profile is created for.
+
+=== Rationale ===
+
+<nowiki>[[http://en.opensuse.org/Apparmor|AppArmor]]</nowiki> proactively protects the system from security threats, both internal and external. It enforce the applications to only be able to access resources aimed to be accessed by the application. In this way the system is protected to both known and unknown threats.
+
+For each application we want to protect or increase the security around, a security profile is created. The profile describes what files or devices the application is allowed to read, write and/or execute. 
+
+=== Use cases ===
+
+* A new security flaw is presented as a zero-day in a daemon based application, eg ssh and httpd. The security flaw allows an unauthorized user to upload and execute any code of the intruder's choice. Since the server daemon will be protected by an AppArmor security profile, the possible intruder on the Ubuntu system will not be able to upload and then run the code. Since the application's profile describes that the application do not have the right to execute files it has the right to edit.
+
+=== Scope ===
+
+The recommended priority order from the AppArmor project to create profiles are:
+ 1. Network daemons (such as sshd, web-servers, and web-applications)
+ 2. cron jobs
+ 3. root-privileged programs run in the boot sequence
+ 4. network-facing user applications such as Firefox, Thunderbird,
+    Gaim, Konqueror, KMail, and Kopete etc
+
+I the first stage I recommend to do 1, 2 and may be 3. In a later stages we even want to create profiles for softwares included in 4.
+
+=== Design ===
+
+ Copy as much as possible from Suse and adapt it to Ubuntu.
+
+=== Implementation ===
+
+ 1. Apply patch to linux-image-*
+ 2. Build packages for the AppArmor application (proof of concept exists, see below.)
+ 3. Create profiles for all network agents in main and default installed cron-jobs.
+ 4. Continue creating profiles for software with lower priorty.
+
+Later it may be interesting to port the YAST-GUI to a clean GNOME-GUI, this will need some coding (about Yast in Ubuntu and Debian: <nowiki>[[https://wiki.ubuntu.com/DesktopTeam/Universal_Control_Panel|Universal_Control_Panel]]</nowiki> <nowiki>[[http://yast4debian.alioth.debian.org|yast4debian]]</nowiki>,  <nowiki>[[https://wiki.ubuntu.com/YaST|YaST in Ubuntu]]</nowiki>, <nowiki>[[https://code.launchpad.net/~yast/+branch/yast/packaging-trunk|Yast launchpad]]</nowiki>, <nowiki>[[http://en.opensuse.org/Porting_YaST|Porting_YaST]]</nowiki> ).
+
+==== Code ====
+
+Some minor corrections in the scripts are needed.
+
+==== Data preservation and migration ====
+
+None
+
+=== Outstanding issues ===
+
+=== BoF agenda and discussion ===
+
+=== References ===
+* <nowiki>[[http://en.opensuse.org/Apparmor|AppArmor home page]]</nowiki>
+* <nowiki>[[http://forge.novell.com/modules/xfmod/project/?apparmor|AppArmor development page]]</nowiki>
+* <nowiki>[[http://www.linuxalert.org/ubuntu/apparmor/|Proof of concepts packages for Ubuntu]]</nowiki>
+
+=== Comments ===
+
+==== Hacking through AppArmor ====
+JohnMoser:  I am all for mandatory access control, it puts up road blocks and makes things generally better isolated.  AppArmor and SELinux are not, however, magic bullets.  Remember AppArmor and SELinux do the same job.
+
+Let's first explore our use case (I'm going to break it).  The description above is shown as:
+
+* A new security flaw is presented as a zero-day in a daemon based application, eg ssh and httpd. The security flaw allows an unauthorized user to upload and execute any code of the intruder's choice. Since the server daemon will be protected by an AppArmor security profile, the possible intruder on the Ubuntu system will not be able to upload and then run the code. Since the application's profile describes that the application do not have the right to execute files it has the right to edit.
+
+Let's first use a real attack on an unprotected system as a starting point for our frame of thought.  On nUbuntu, I used MetaSploit against a Win2000 machine to exploit MS03-026, which was used by the Blaster worm.  For academic purposes I've listed below a basic explanation of what MetaSploit did; this is not meant to be technically accurate, but it would work.
+
+* Craft a special packet to begin the corruption in the RPCSS service that the exploit causes, i.e. a stack overflow.
+* Append to the TCP stream a series of packets containing a 300K VNC DLL.
+* Cause a series of returns to the VNC DLL just injected to open a VNC server in a new thread.
+* Return a packet through the TCP stream to indicate that the VNC DLL was successfully binded to the service.
+* Exit the current thread cleanly.
+* MetaSploit picks up the returned value and opens VNC to connect me to the remote machine.
+
+This is all well and good but ssh won't be allowed to open a VNC server or whatever.  We need to examine what ssh normally does and work inside that.  So here's a normal ssh log-in:
+
+* ssh gets a connection.
+* ssh gets a user and password.
+* ssh calls PAM to check the user and password.
+* ssh transitions to the user (ssh is currently root).
+* ssh executes a shell for the user and serves the terminal over the TCP pipe.
+
+Let us also assume that all other protections are removed; we are evaluating AppArmor, not GccSsp or an NX bit or PaX or ExecShield or address space layout randomization, so all that extra cruft is gone.  This means the following:
+
+* The stack is executable, or can be made executable by returning to mprotect()
+* The locations of libraries are rather fixed, or the user has managed to locate libc based on its prelink address by using a legitimate log-in.
+* The stack doesn't move around in memory.
+* Buffer overflows aren't detected.
+
+Let us follow the below progression then:
+
+* Attacker connects to ssh.
+* ssh receives data that causes a buffer overflow on the stack.
+* Return pointer on the stack is changed to point to freshly injected code.
+* Freshly injected code calls setuid() to change users.
+* Freshly injected code creates a shell for the user.
+* Freshly injected code passes the shell to the user.
+
+This will actually work.  With a non-executable stack it's slightly trickier; you have to return to the functions you want to use, or just return to the function in ssh that switches users once the user and password are validated.  AppArmor and SELinux can't detect this, they don't step by step debug the execution of a program.
+
+If ssh denies root log-ins, then an AppArmor or SELinux policy can prevent ssh from giving sysadmin privileges, only granting it by default the privilege to user transition.  User transitioning would give the privilege to execute things like shells.  In this way you could guarantee that an attacker won't get root access, only access to non-root accounts.
+
+In conclusion, AppArmor and SELinux have their uses; but they are not magic bullets and will not stop any kind of attack from being partially useful.  Our theoretical example here shows logging in as random users using overflows in ssh; this is enough to gain access to confidential information and destroy data.
+
+==== Comment on Hacking through AppArmor Comment ====
+
+SethArnold: JohnMoser is correct that AppArmor is no silver bullet. Necessarily, if an attack can be performed that requires the privileges the application has been granted, then the attack will succeed. Notably, a domain that requires access to a database will also grant access to the database to any attackers who gain control of the domain. No MAC system will be able to address this, for the reason you mentioned earlier: they don't enforce _correct_ behaviour, only access to the correct resources.
+
+However, AppArmor does provide a mechanism that applications can use to restrict access to resources: change_hat. change_hat allows an application to ask the operating system to change the privileges available to the process. This mechanism was intended to be used for application servers such as Apache, however it can also be used via PAM to help limit the amount of code running with unnecessary privileges. For example, any bugs in sshd post-authentication will be restricted to only the privileges available in whichever sub-profile was selected. Pre-authentication bugs can be restricted to a different set of resources.
+
+The caveat: if the application wants to "change back out", so to speak, the separation is only as good as the memory protection of the process, as a four-byte cookie is used to 'authenticate' change_hat requests. A "null cookie" will make the change irreversible, but many pre-written applications cannot function this way.
+
+==== Another Comment To Make This Page Bigger ====
+
+JohnMoser:  You're quite right Seth, although you should consider another caveat.  The "cookie" you describe would on the face seem to be akin to the "canary" in GccSsp; however, it is actively used and known by the application when it requests a privilege change.  If we are to assume that, say, `sshd` has a function `sshd_change_hat_get_setuid_privileges()` to get `setuid()` privileges granted; then we are also to assume that, naturally, there is at some point a strip of code (perhaps in the middle of a function) that can be returned into to execute this.  A short return-to-libc chain returning into `sshd`'s main executable or some loaded library (remember if this fails then the attack would have failed anyway) and causing THAT to return to the exploit path (shellcode, ret2libc path) will quickly subvert this.
+
+The moral of this story is that we can assume no security from applications which manage their own security.  We can create an ''amortized'' security situation (as with GccSsp) where the "reality" of the situation is that we see substantial security gains; but until the kernel steps in and says, "No, you're not doing that, I don't care how many times you ask," security devices can be defeated (for example GccSsp triggers a call to `__stack_chk_fail()`, which an application could supply in the main executable as an empty body function).  In our case, we're looking at an application being allowed to turn its privileges up and down; whatever the highest privilege level it can reach when it's attacked is will become the privilege level the attacker can get (a skilled attacker can get this just as easily as he can get the current privilege level).
+
+At least, that's my analysis.
+
+==== Irony :) ====
+
+CrispinCowan: That's pretty funny; I'm aware of the limitations of the canary approach, as I coined the term "stack canary" in 1997 in the original StackGuard paper. GccSsp is substantially a re-implementation of StackGuard, with some improvements and differences.
+
+The change_hat() mechanism can be looked at in 3 important ways.
+
+ 1. Hats are primarily intended to be used for application server platforms. The original inspiration was for Apache and mod_perl. Here, Apache has the magic cookie, and then calls the mod_perl interpreter to execute a specific script, but does not share the cookie with the script. To get at the cookie, the attacker has to be able to break out of the scripting language, access Apache's memory, and '''exactly''' hit the magic cookie on the stack on the first try, because AppArmor will kill the process if you guess the magic cookie wrong. This same approach is being used to provide hats for other application servers that run applications without forking processes, such as Tomcat.
+ 2. Hats have limited applicability within a single application process. Here, to defend against the obvious memory corruption attacks for stealing the magic cookie, the application should use the special 0 value cookie that SethArnold described, so that no matter the hackery, the process can never get the hat off.
+ 3. Hats are strictly weaker than outer profiles. Just as JohnMoser says, with the right vulnerability and the right exploit code, you could break out of a hat. You '''do''' have to have just the right kind of vulnerability to do it, and what it gains you is access to the outer profile, not administrative control. But if that isn't good enough security, then don't use hats, and separate your software into discrete processes so that they can each have a separate outer profile.
+
+So hats are useful, if not perfect, if they fit your circumstances. If they don't fit your circumstances, then don't use them.
+
+Credit where it is due: the magic cookie mechanism for change_hat() was invented by GregKh  back when he worked for Immunix.
+
+==== GTK YaST ====
+Just a note that work on porting YaST to GTK actually began some time ago in openSUSE, and it's being shipped with 10.3. For all the dated screenshots and links to SVN see: http://en.opensuse.org/YaST2-GTK
+
+----
+CategorySpec CategorySpec

@@ -1,0 +1,145 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+
+== What is Firmware? ==
+Many devices have two essential software pieces that make them function in your operating system. The first is a working driver, which is the software that lets your system talk to the hardware. The second is firmware, which is usually a small piece of code that is uploaded directly to the device for it to function correctly. You can think of the firmware as a way of programming the hardware inside the device. In fact, in almost all cases firmware is treated like hardware in that it's a black box; there's no accompanying source code that is freely distributed with it.
+
+=== Where Do You Get Firmware? ===
+The firmware is usually maintained by the company that develops the hardware device. In Windows land, firmware is usually a part of the driver you install. It's often not seen by the user. In Linux, firmware may be distributed from a number of sources. Some firmware comes from the Linux kernel sources. Others that have redistribution licenses come from <nowiki>[[http://git.kernel.org/?p=linux/kernel/git/firmware/linux-firmware.git|upstream]]</nowiki>. Some firmware unfortunately do not have licenses allowing free redistribution.
+
+In Ubuntu, firmware comes from one of the following sources:
+
+* The linux-image package (which contains the Linux kernel and licensed firmware)
+* The linux-firmware package (which contains other licensed firmware)
+* The linux-firmware-nonfree package in multiverse (which contains firmware that are missing redistribution licenses)
+* A separate driver package
+* Elsewhere (driver CD, email attachment, website)
+
+Note that the linux-firmware-nonfree package is not installed by default.
+
+The firmware files are placed into /lib/firmware. If you look inside there on your Ubuntu installation you will see hundreds of firmware files that have been installed by these packages.
+
+=== How is Firmware Used? ===
+Each driver for devices that require firmware have some special logic to retrieve firmware from files in /lib/firmware. The basic process is:
+
+ 1. Driver requests firmware file "ar9170.fw"
+ 2. The kernel sends an event to udev asking for the firmware
+ 3. The udev program runs a script that shoves the data in the firmware file into a special file created by the kernel
+ 4. The kernel reads the firmware data from the special file it created and hands the data to the driver
+ 5. The driver then does what it needs to do to load the firmware into the device
+
+If everything goes well you should see something like the following in your /var/log/syslog:
+
+<pre>
+[ 12.860701] iwlagn 0000:03:00.0: firmware: requesting lbm-iwlwifi-5000-1.ucode
+[ 12.949384] iwlagn 0000:03:00.0: loaded firmware version 8.24.2.12
+</pre>
+
+If there's an issue, you may see something like the following:
+
+<pre>
+[  77.481635] e100 0000:00:07.0: firmware: requesting e100/d101m_ucode.bin
+[ 137.473940] e100: eth0: e100_request_firmware: Failed to load firmware "e100/d101m_ucode.bin": -2
+</pre>
+
+== Debugging Firmware Loading ==
+Luckily, the firmware loading process is not too difficult to watch in action. Using the following debugging steps we can pin point what step in the process is failing.
+
+=== Initial Step ===
+First, ensure that the firmware file is present. If you are missing the firmware file, try searching on the web for a copy of it. If you find it, consider filing a bug against <nowiki>[[https://bugs.edge.launchpad.net/ubuntu/+source/linux-firmware|linux-firmware]]</nowiki> if the firmware has a redistribution license or against <nowiki>[[https://bugs.edge.launchpad.net/ubuntu/+source/linux-firmware-nonfree|linux-firmware-nonfree]]</nowiki> otherwise.
+
+If the file is present, check that it's not empty using 'ls -l':
+
+<pre>
+$ ls -l /lib/firmware/iwlwifi-5000-1.ucode
+-rw-r--r-- 1 root root 345008 2009-11-30 06:29 /lib/firmware/iwlwifi-5000-1.ucode
+</pre>
+
+The size of the file is the number listed after the user and group owners ("root" and "root" in this case). It should be non-zero. At this point, you may want to search the web for an md5sum hash of the file and compare it to this file, but it's not likely that the file is corrupted. If the firmware is corrupted, you will likely see an error message from the driver stating that the firmware was invalid or failed to upload anyways.
+
+At this point we've verified that the firmware file exists, but wasn't uploaded. We need to figure out which of steps 2-4 mentioned above are failing. Let's start with step 2.
+
+=== Kernel Event Sent to Udev ===
+The second step involves the kernel sending an event to the udev subsystem. Luckily, there's a handy tool we can use for monitoring these event messages: udevadm. Start with your driver unloaded. Then execute:
+
+<pre>
+$ udevadm monitor --property
+</pre>
+
+Now load your driver. Sometimes loading the driver alone will cause a firmware request. Other times, as with the e100 driver, you will need to do something to initiate a firmware request. In the case of the e100 driver, the firmware is requested after the user tries to bring up the ethernet interface by running 'ip link set eth0 up'.
+
+Once you have initiated a firmware request you should see a udev event that looks like the following:
+
+<pre>
+UDEV [1267652192.246883] add /devices/pci0000:00/0000:00:07.0/firmware/0000:00:07.0 (firmware)
+UDEV_LOG=3
+ACTION=add
+DEVPATH=/devices/pci0000:00/0000:00:07.0/firmware/0000:00:07.0
+SUBSYSTEM=firmware
+FIRMWARE=e100/d101m_ucode.bin
+SEQNUM=1206
+</pre>
+
+There are three key pieces of information in this event:
+
+* ACTION=add: This means the event is for the addition of the devices, as opposed to the removal of the device
+* SUBSYSTEM=firmware: This means the event is a firmware request event
+* FIRMWARE=<filename>: This is the filename of the firmware requested by the driver.
+
+If you do not see an event with these three items, then the kernel request is not being propagated to udev. You should file a bug at this point against the udev package. If you do see this event, continue to the next step.
+
+=== Udev Sends Firmware to Kernel ===
+Now that udev has seen the firmware request, it has to decide how to process it. There should be a "rules" file in /lib/udev/rules.d/50-firmware.rules with a single udev rule:
+
+9.10 (Karmic Koala) and earlier:
+<pre>
+SUBSYSTEM=="firmware", ACTION=="add", RUN+="firmware.sh"
+</pre>
+
+10.04 (Lucid Lynx) and later:
+<pre>
+SUBSYSTEM=="firmware", ACTION=="add", RUN+="firmware --firmware=$env{FIRMWARE} --devpath=$env{DEVPATH}"
+</pre>
+
+This rule tells udev to run the firmware program, which may be found in /lib/udev/, whenever it sees an event with both ACTION=add and SUBSYSTEM=firmware. In 9.10 and earlier, the firmware program will be passed the rest of the udev event information as environment variables. In 10.04 and later, the firmware filename and device path will be passed as parameters.
+
+We can watch udev process the event by turning on extra logging:
+
+<pre>
+$ sudo udevadm control --log-priority debug
+</pre>
+
+When you initiate a firmware request, udev will log what it does with the event to /var/log/syslog. For example, you should see something like:
+
+<pre>
+udevd-work[31292]: RUN 'firmware.sh' /lib/udev/rules.d/50-firmware.rules:4
+</pre>
+
+If you do not see firmware.sh get run, then you likely have an issue with your udev rules. Check for any custome udev rules you have in /etc/udev/rules.d. Any files in this directory will override files with the same name under /lib/udev/rules.d. Rules in /etc/udev/rules.d may also prevent the firmware rule from executing properly. If you have any issues at this step you should seek help from the <nowiki>[[http://www.ubuntu.com/support/CommunitySupport|community]]</nowiki>. If you believe you have found an issue in udev, feel free to open a <nowiki>[[https://bugs.launchpad.net/ubuntu/+source/udev|bug]]</nowiki>.
+
+After you have debugged udev execution, you should return the logging output to the normal level:
+
+<pre>
+$ sudo udevadm control --log-priority err
+</pre>
+
+=== Kernel Reads the Firmware ===
+If the firmware.sh script has been executed by udev, any errors it encounters should show up in your /var/log/syslog file. If you see any errors here they may be caused by the firmware.sh script (which is part of udev), or by the kernel. If you see the following error:
+
+<pre>
+udev firmware loader misses sysfs directory
+</pre>
+
+you should <nowiki>[[https://bugs.launchpad.net/ubuntu/+source/linux|open a kernel bug]]</nowiki>. If you see any other error, you should <nowiki>[[https://bugs.edge.launchpad.net/ubuntu/+source/udev|open a bug against udev]]</nowiki>.
+
+=== Kernel Gives Firmware to Driver ===
+If the firmware loading process properly runs firmware.sh without an error, but the driver complains about the firmware, one of two things may be wrong. First, the firmware file may be incorrect or corrupted. You can try to reinstall the firmware or get the firmware from another source. Second, there may be an issue with the driver itself. If you have tried all the firmware versions you could find, you should <nowiki>[[https://bugs.edge.launchpad.net/ubuntu/+source/linux|open a kernel bug]]</nowiki>.

@@ -1,0 +1,208 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+=== Summary ===
+
+Extensions to the <nowiki>[[MultiarchSpec]]</nowiki> necessary for automated cross-building and 
+
+=== Motivation ===
+
+Many people want cross-compiling to work easily on Debian systems. This requires the availability of cross-toolchains, and the ability to install cross-dependencies before building a package. Both of these things can be provided by minor developments of the base <nowiki>[[MultiarchSpec]]</nowiki>. We do already have methods to achieve these things (buildcross, dpkg-cross, cross-toolchain-base), but in the case of cross-toolchains there is a lot of complexity and unnecessary rebuilding, and in the case of build-dependencies there are limitations and unreliability. Using multiarch will result in cleaner packaging and more reliable build-dep installation mechanisms than pre-multiarch methods.
+
+Building cross-compilers in the archive, with autobuilders, requires cross-architecture build dependencies to be specifiable, or to have a second compiler-supplied copy of the host-arch libc, libsdtc++ and libgcc1 libraries (Ubuntu cross compilers are built the latter way).
+
+Installing cross-dependencies benefits from library-dev packages being multiarchified as well as the library packages so that both the HOST and BUILD architectures can be installed together. Many packages can be cross-built without this, but some require both architectures of the same library to be installed together, and it is much more convenient for developers if installing the HOST arch version of a library does not remove the BUILD arch version of it and vice versa.
+
+=== Pre-Multiarch Status ===
+
+==== Build-dependencies ====
+
+Prior to multiarch, only packages for the machine architecture can be installed, so dpkg-cross is used to convert library and -dev packages to be of arch all, and move library and header files to a co-installable path under /usr/<triplet>/. Multiarch removes the need to create these -cross packages by having standard (library and -dev) packages install to /usr/lib/<triplet> and /usr/include/<triplet>, such that they are co-installable. 
+
+==== Toolchains ====
+
+The binutils package can be told to build a cross variant by passing a special environment variable (TARGET=<arch>). As there are no dependencies on target packages, this works for any GNU triplet supported by upstream, and can be automated easily.
+
+The gcc package has a mechanism in place that rewrites various files in debian/ so that a set of cross compiler packages is built. The rewritten control file then declares build dependencies on several packages whose names end in a dash, the target Debian triplet and "-cross". These must be generated with the "dpkg-cross" tool from target packages (Note: This is a restriction only found in Debian and emdebian, in Ubuntu the dpkg-cross use is only needed for building the eglibc cross packages). Automated bootstrap of new architectures is not possible this way, as a C library package compiled for the target is necessary to start building the packaged compiler.
+
+foo:<arch> arch-specific dependencies were implemented in 1.16.2
+
+Cross-gcc and cross-toolchain-base packages have been provided for Ubuntu which automate the process of doing a cross-toolchain bootstrap build, by utilizing the "binutils-source", "gcc-source", "glibc-source"/"uclibc-source", "kernel-source" and "gdb-source" binary packages together with a framework package containing build scripts and several small helper packages that can be fed to autobuilders. See MultiarchCrossCompilers for details of the build processes.
+
+Individual packages can be cross-compiled by passing a "-a" option to dpkg-buildpackage, which presets the environment variables accordingly. The package is responsible for honouring these variables, which for autotools-using packages can be achieved by passing --build and --host parameters to the configure script. The package's build dependencies need to be split into build and host dependencies and the easiest way to do this is to re-use the multiarch specification with some minor extensions.
+
+=== Utilizing Multiarch ===
+
+==== Build Dependencies ====
+
+What is required in package dependencies is for the depending source package to distinguish build-dependencies which are satisfiable by any architecture ('tools') from build-dependencies which can only be satisfied by packages of the same architecture ('libraries' generally). This is very similar to the Multi-Arch: field options 'foreign' (for tools) and 'same' (for libraries), respectively. However it's not exactly the same because the architecture relationship is defined by the depending package, not the depended-on package, because only the depending-on package knows what it needs the build-dependecny for. This is recognised in the multiarch spec with the Multi-Arch: option 'allowed' and the Depends: package:any syntax. 
+
+Despite the relationship being 'from the wrong end', in practice it is almost always right to use the Multi-arch field to decide if the build or host version (or both) of a package should be installed. By marking the exceptions to this rule in a packages' build-dependencies we minimise the package metadata changes needed (most packages will need no changes to their Build-Depends for this reason). 
+
+Exceptions to the normal case are specified using the build-dependency qualifiers ":native" and ":any". ":native" is appended to a build-dep to signify that it should be installed for the build (i.e 'native') architecture rather than the host architecture. It can be used on Multi-Arch: same, allowed or None packages. The ":any" qualifier signifies that a Multi-Arch: allowed build-dep should be treated as 'foreign'. i.e. it allows the dependency to be met by any package with an architecture that can be executed on the builder, regardless of whether that is the same architecture as the current DEB_BUILD_ARCH. In order to maintain backwards-comptibility, the table of which arch a dependency resolves to is somewhat unintuitive.
+
+Build Dependencies are resolved according to this table:
+
+{| class="wikitable"
+|-
+| ''''''
+| '''Build-Depends: foo'''
+| '''Build-Depends: foo:any'''
+| '''Build-Depends: foo:native'''
+|-
+| '''no Multi-Arch field'''
+| DEB_HOST_ARCH
+| ''disallowed''
+| DEB_BUILD_ARCH
+|-
+| '''Multi-Arch: same'''
+| DEB_HOST_ARCH
+| ''disallowed''
+| DEB_BUILD_ARCH
+|-
+| '''Multi-Arch: foreign'''
+| any, preferably DEB_BUILD_ARCH
+| ''disallowed''
+| ''disallowed''
+|-
+| '''Multi-Arch: allowed'''
+| DEB_HOST_ARCH
+| any, preferably DEB_BUILD_ARCH
+| DEB_BUILD_ARCH
+|}
+
+:any was implemented in dpkg v1.16.1.2. :native was implamented in dpkg v1.16.5
+
+Apt implements this behaviour from v0.9.4
+
+The practical effect is that apt-get build-dep <package> will work as before, whilst apt-get build-dep --arch=<arch> <package> will install the dependecies for the build and host architectures as required, given correct multiarch information in the depended-upon packages.  
+
+==== Toolchains ====
+
+There are two aspects of 'multiarching cross toolchains'. 
+
+ 1. Making the cross-toolchains look in the correct default paths for libraries and system headers
+
+ 1. Enabling toolchains to build on autobuilders, using the existing libc, libgcc for the appropriate architecture.
+
+These two aspects are independent: either or both can be done first. (1) is simpler as it involves no changes in other tools and most of the work has to be done for the base multiarch spec and native toolchain build anyway.
+
+===== Toolchain multiarch paths =====
+
+This was implemented early in the mulitarch transition for native toolchains. For libraries the search path is /lib/<triplet>/:/lib:/usr/lib/<triplet>/:/usr/lib
+
+For headers it is /usr/include/<triplet>:/usr/include
+
+===== Cross-architecture dependencies =====
+
+Toolchains depend and build-depend on libraries and -dev packages of specific architectures. In multiarch this is most naturally specified as cross-arch arch-specific dependencies, as opposed to the pre-mulitarch scheme of creating arch all -cross packages continaing the same files (using dpkg-cross or cross-toolchain-base).
+
+To specify these cross-architecture dependencies and build-dependencies :<arch> qualifiers (such as libc6:armhf, libgcc1:powerpc) are use. This is an explicit change from the base multiarch spec, which disallowed them.
+
+They are implemented in dpkg v1.16.7 onwards. It is important that these qualifies are not used for binary dependencies of packages until the dpkg which is doing the upgrade understands this syntax. A lintian check is in place in wheezy and set to fatal for uploads to stop this happening too soon.
+
+=== Multiarching -dev packages ===
+
+Multiarch already goes most of the way by specifying new paths where libraries are to be found; while the <nowiki>[[MultiarchSpec]]</nowiki> lists library -dev packages as unresolved, the transition plan is already pretty specific on making binutils and gcc look into multiarch inlcude directories, which is only needed for -dev packages.
+
+The extra explicit changes are:
+
+ 1. moving arch-dependent include files into /usr/include/<triplet>.
+
+ 1. dealing with scripts and utilities.
+
+pkg-config files do not need to change for multiarch - they just move into /usr/lib/<triplet>
+
+=== Header files ===
+
+The base Multiarch spec only covers library files. To be useful for cross-building include files must also be put into arch-specific locations so that cross-builds can find them. This is quite easy to do. In practice most header files are actually architecture independent and thus can be left in /usr/include. Only arch-dependent headers need to move to /usr/include/<triplet>.
+
+This mean only packages which have arch-dependent headers need to change. There will be issues during transition when headers will be found (because the native package is installed) even though the cross-dependency is not installed. But finding the wrong headers happens quite often already so the situation should be no worse, and these cases do represent bugs.
+
+This does mean that there is more than one system headers directory per architecture, where previously there was only one so there will be software that has problems finding its arch-specific headers. Anything that just uses the compiler will be fine, but plenty of software no doubt will try to specify its own paths and get it wrong. It will be important to test that reverse build-dependencies still build against the multiarch version of the -dev packgage after conversion (and preferably before upload). 
+
+As described above, both toolchains and cross-toolchains need to be modified to automatically search both header paths for system (<>) headers.
+
+=== Executables in -dev packages ===
+
+In order be able to install the host arch version of a -dev package under multiarch the package needs to be marked M-A: same (or allowed). However many -dev packages contain files in /usr/bin (or sometimes /usr/lib/<package> which vary with architecture. Some are elf binaries which definitely differ between arches. Others are scripts which may or may not vary with arch. Files which are identical across arches are not a problem, as dpkg will just deal with them. 
+
+Many of these binaries are foo-config utilities to do the same job as pkg-config in terms of providing path and flag information on how to build or how the package was built so that plugins/modules match up. 
+
+Various actions can be taken to fix this:
+
+1) Change the package to use pkg-config instead. In general this is an excellent solution (and many of these scripts simply pre-date pkg-config), and may be appropriate in many cases, but really needs to be done upstream, not just in Debian. (you also need to use the pkg.m4 pkg-config macros for this, or detect the <triplet>-pkg-config symlink/wrapper, or use the macros and then call $PKG_CONFIG instead of just calling "pkg-config")
+
+2) Move the script into /usr/lib/<triplet>/<package>/. This means each version has an arch-specific path so files do not clash and the correct one can be called. It also allows co-installability of build and host arch versions, which is necessary for packages needed in both build and host versions for a build. However this also moves it off the PATH, which may be inconvenient.
+
+3) Move the binaries into a separate -dev-bin package which is arch: any. This makes particular sense when the -dev package contains several binary utilities. Doing this avoids multiarch file clashes but does not allow co-installability of build and host versions of scripts/utilities. 
+
+4) Rename the script from foo-config to foo-config-wrapper, and then call it as <triplet>-foo-config to get the appropriate arch behaviour. This requires symlinks to be created for the package, either in the package or in the (forthcoming) cross-support package.
+
+Note that any of these changes will require changes in the reverse build-depends so that they call the new config-script in the right path/way (or use pkg-config). 
+
+MultiarchCrossExecutables contains an analysis of -dev packages to determine the size of this issue. Note that sometimes these files are arch independent _until_ the package is multiarched at which point the multiarch library path causes arch-dependence. 
+
+=== Making Library packages cross-install safe ===
+
+library packages must be cross-installable. This means that install scripts must not rely on being able to run. Utilities are run in the postinst scripts of some library packages, such as:
+* libgvc5: libgvc5-config-update
+* libglib2.0-0: glib-compile-schemas, gio-querymodules (fixed to not fail)
+* libgdk-pixbuf2.0-0: gdk-pixbuf-query-loaders
+* libgtk2.0-0: gtk-query-immodules-2.0
+* libgtk-3-0: gtk-query-immodules-3.0
+
+Packages should arrange that a failure of these to run when cross-installing should not cause an error. The simplest way to do this is add '| true' to the command, which will still print a warning, but will not prevent installation.
+
+If it is important that the utility is run and that the packages fails to install in the non-cross-install case if there is an error then a suitable check along the lines of: 
+<pre>
+if (command that fails && $DEB_BUILD_ARCH != `dpkg --print-architecture`) then barf
+else OK
+</pre>
+(Note: This is not properly tested yet)
+
+=== Terminology and semantics of package relationships ===
+
+Cross-build and cross-arch terminology is always confusing. We need package maintainers to be able to get this right, when annotating dependencies, without becoming deep experts. It is almost impossible to find terms that are unambiguous and obvious, but we have done our best.
+
+':native' is best thought of as meaning 'I need the build arch version of this library, not the target(host) arch'. i.e only the build-arch version of the package will satisfy the build-dependency. 'Native' normally refers to 'version that will run on this (i.e the build) machine (note that xdeb somehwat unhelpfully uses it in the opposite sense, meaning the arch package being built (host)).
+
+':any' is used in an equivalent way to the base multiarch spec. for depends, to indicate that any suitable arch will satisfy the build-depends. 
+
+=== Transition ===
+
+These extra modifiers cannot be used in the Depends field until the versions of apt and dpkg in stable can parse them. They could be used in the Build-Depends field because that is only parsed by the version of dpkg in the same suite as the package itself, except that buildds run the stable version of dpkg so we still have to wait. A lintian check will be added to ensure this.
+
+Any package which directly parses build-dependencies needs to understand/ignore these modifers. Most packages use dpkg-checkbuilddeps or libdpkg or deb822 to do the parsing for them. Other packages that parse dependencies and build-dependencies directly and thus need to grok this are: xdeb, xapt, pbuilder, sbuild, apt, aptitude. There are no doubt others. Simply ignoring these dependency annotations allows packages using them to be uploaded.
+
+==== Phase 1 ====
+
+* apt is changed to handle ":native" and ":any" in build dependencies. --(<nowiki>[[http://bugs.debian.org/558103|#558103]]</nowiki>)-- done.
+* dpkg is taught to handle ":native" and ":any" in build dependencies. --(<nowiki>[[http://bugs.debian.org/558095|#558095]]</nowiki>)-- done.
+* Multiarch-built cross-toolchains are uploaded to emdebian/debian experimental.
+* apt gains support for installing cross build dependencies (done)
+* apt and dpkg learn about architecture-specific dependency and build-dependency qualifiers (done)
+
+==== Phase 2 (after wheezy releases) ====
+
+* Buildds are updated
+* The Debian archive starts accepting packages with qualified build dependencies in unstable. <nowiki>[[http://bugs.debian.org/558104|#558104]]</nowiki>
+
+At this point, multiarch cross-toolchains are installable in wheezy and it is possible to cross-compile all suitably updated Debian packages.
+
+Build dependencies on not-yet converted libraries cannot be handled correctly; this is equivalent to the status quo. Accepting ":native" references to those packages allows for reverse dependencies to be updated ahead of time; this can be switched to "''disallowed''" after the transition of library packages is complete.
+
+==== Phase 3 ====
+
+* The Debian archive starts accepting packages with cross-architecture dependency and build-dependency qualifiers.
+
+At this point multiarch-built cross-compilers can be uploaded to Debian unstable. 
+
+This will allow firmware files and boot blocks to be generated on any host, eliminating the need for architecture-independent files that can be built only on a single host.

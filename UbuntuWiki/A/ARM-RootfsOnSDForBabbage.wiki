@@ -1,0 +1,65 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+This page describes the process for building a root filesystem on the SD boot device without having to go through an install media.  This allows one to boot a Jaunty Ubuntu armel release directly on SD on the iMX51 Babbage board.  Much of this is based on the existing <nowiki>[[http://wiki.ubuntu.com/ARM/RootfsFromScratch|Rootfs From Scratch]]</nowiki> work.
+
+=== Creating a bootable SD ===
+
+The cheapest and easiest way to do so is probably to use usb creator to write the existing alternate install image to a SD device.  This will then create two partitions.  The first partition will be a redboot partition with the kernel and initrd image based on 2.6.28 that will boot on the Babbage, and the second partition is a live install.  You may also simply dd the first 16 megs of an existing babbage SD to get the redboot and kernel setup, since we need nothing else.
+
+Another way to do this is to follow the instructions on <nowiki>[[http://wiki.ubuntu.com/ARM/BuildingBabbageRedBoot|Building Babbage RedBoot]]</nowiki>, which allows you to build an entirely custom redboot from scratch, and ultimately add your own kernel.  However, the process is far more complex and will require you to setup an arm cross-compiler environment as well.  If you do go that approach, I had success using ct-ng.
+
+=== Partitioning ===
+
+Now we can partition the device in a more useful way.  To do this, I suggest fdisk, which will detect the geometry and let you manipulate the SD easily.  If you have an existing alternate or desktop live install, simply delete the second partition.  Leave the first partition, type df, alone, as this is the redboot & kernel.
+
+Now, you can create a new primary partition on the SD for "swap" if you want, but I do not suggest doing so.  You can instead depend on the comps swap support in the kernel to use compressed swap pages in ram.  The Babbage 1 (iMX51) has 512 megs or ram, and you probably do not wish to have an external swap on SD as it will shorten the life of the flash drive. 
+
+Next, with the remaining space on the SD, create a standard ext2 Linux filesystem partition.  This will become your new "root" filesystem.  You will not want to use journaled filesystems like ext3 as they also can shorten the life of a flash device, and given the much lower write speed, the performance hit will likely also be substantial.
+
+=== Create a root tarball ===
+
+The ARM/RootfsFromScratch page can be consulted for this.  Basically, you will need to get Oliver's <nowiki>[[http://people.ubuntu.com/~ogra/arm/build-arm-rootfs|build-arm-rootfs script]]</nowiki>.  A simple rootfs can be created for the LXDE desktop, which runs well on the Babbage, with something like:
+
+ <code>sudo ./build-arm-rootfs --fqdn ubuntu --login ubuntu --password ubuntu --seed kxde,gdm</code>
+
+Other ideas can be found on the ARM/RootfsFromScratch page.  Or you can build a custom root seeded with any base set of packages you may wish.  This script, when if finishes, will produce a "armel-....-.tgz" file that is your new "root".
+
+=== Put tarball on your SD root ===
+
+First, you will need to create the ext2 filesystem.  If your SD appears as something like /dev/mmcblk0, then you will use <code>mke2fs /dev/mmcblk0p2</code> or <code>mke2fs /dev/mmcblk0p3</code> (if you have a swap) to create the initial ext2 filesystem on the device.
+
+Now you should be able to mount your SD root filesystem somewhere.  Perhaps /tmp/sd, as in <code>mount /dev/mmcblk0p2 /tmp/sd</code>.  Now you can unpackage the root tarball created by the build-arm-rootfs script.  You can use <code>sudo tar -C /tmp/sd -xvzf armel-...-.tgz</code>.  You must do so as root because the rootfs needs device nodes and other things created under root or other user permissions.
+
+=== Making your partition bootable ===
+
+Now you will need some redboot magic.  <code>sudo apt-get install redboot-tools</code>.  If your SD appears as /dev/mmcblk0, then you can use something like <code>sudo fconfig -r -d /dev/mmcblk0 -o 0x5F000 -n boot_script_data</code>.  If you used the original live install image for Babbage from ports.cdimage.com, then you should see something like: 
+
+ <code>fis load initrd</code>
+
+ <code>fis load kernel</code>
+
+ <code>exec -r 16777216 -s 9699328 -c "console=ttymxc0,115200 console=tty0 file=/cdrom/preseed/ubuntu.seed boot=casper --"</code>
+
+All you need to do is tell the kernel to use your root partition rather than boot casper by changing the boot_script_data string and the kernel options it passes.  First, you need to know the uuid of your new root partition.  You can find this out using <code>sudo blkid /dev/mmcblk0p2</code>.  This will give you something like:
+
+ <code>/dev/mmcblk0p2: UUID="55eece57-8736-45ec-b5da-29b0df3be823" TYPE="ext2"</code>
+
+Now, you will reset the boot_script_data using fconfig.  You will need to do sudo bash or be root, or deal with shell expansion issues.  But essentially, as root, you would enter:
+
+ <code>fconfig -w -d /dev/mmcblk0 -o 0x5F000 -n boot_script_data -x 'fis load initramfs\fis load kernel\exec -r 16777216 -s 9699328 -c "console=ttymxc0,115200 console=tty0 root=UUID=<the uuid from blkid>"'</code>
+
+Just make sure you keep the same -r, -s, and console values as returned from reading the config string.  You can also specify the root device by partition.  On the Babbage, your SD will be mmcblk0, so you can set your root=/dev/mmcblk0p2 or p3 if you prefer not to use uuid.  This may also make it easier if you later scratch and replace the root file system image with a different one.
+
+Plug the SD into your Babbage.  Your new root image should now boot and run directly off your SD. 
+
+=== Post Install ===
+
+You will want to make sure root is mounted with noatime to reduce writes.  You can add something like <code>/dev/mmcblk0p2 / ext2 noatime,errors=remount-ro 0 1</code> to your <code>/etc/fstab</code>.

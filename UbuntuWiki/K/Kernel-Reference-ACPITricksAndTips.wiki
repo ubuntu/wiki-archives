@@ -1,0 +1,368 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== ACPI Tricks and Tips ==
+{| class="wikitable"
+|-
+| <tablebgcolor="#f1f1ed" tablewidth="40%" tablestyle="float: right; font-size: 0.8rem; margin: 1.25rem 0 1rem 1rem;" style="padding: 0 0.5rem;"><<BR>>
+|}
+
+=== The ACPI driver ===
+The '''Advanced Configuration and Power Interface (ACPI)''' specification is large and unwieldy, which has led to the Linux ACPI driver becoming a commensurately large and complex software component. There are many varieties of ACPI tables that store the specification data, but they can be broadly split into two major categories:
+* Configuration data
+* ACPI Machine Language (AML) byte code
+
+The driver is responsible for locating and extracting data from the ACPI tables and interpreting it in the manner described by the specification. The driver must also, in many cases, behave the same way that Windows interprets the specification. The driver contains workarounds to firmware, embedded controller and southbridge bugs, all of which adds further complexity to the code.
+
+The need for the driver to interpret the two very different data types mentioned above, the straightforward configuration values ''and'' the much more opaque AML byte code, is a primary cause for the tools that interface with it being so opaque. It also contains an OS abstraction layer that maps to the Linux kernel approach to memory access and I/O regions, representing yet another layer of indirection. All-in-all, ACPI is a heavily over-engineered solution to dynamic power management, but one that is powerful nevertheless because it provides an abstract view of how to control machine-specific hardware available to any operating system.
+
+The tradeoff for ACPI's power is its requirement for a driver to be able to correctly implement the specification predictably despite regularly encountering data from manufacturers contained therein which violates the specification in unpredictable ways. Linux and its ACPI tooling is especially disadvantaged by the fact that most firmware vendors engineer their ACPI implementations looking only to achieve good results with with a very Microsoft-centric interpretation of ACPI, which is known to be somewhat lax in some areas and at variance with the specification.
+
+=== ACPI bugs ===
+
+Bugs fall into several areas:
+
+==== ACPI AML code bugs ====
+
+The AML code allows firmware vendors to interface with the underlying hardware (e.g. Southbridge, Embedded Controller, I/O ports, etc) in a machine specific way but be able to present to the host operating system a
+standardised interface which has been carefully abstracted and defined fairly clearly in the ACPI spec.
+For example, to be able to query the current backlight brightness level, the vendor writes an AML method called _BQC (Backlight Query Current) which returns the level.  The method could be implemented in many different ways, for example, just reading a value from the Embedded Controller's memory, or maybe it jumps into the BIOS to fetch information using a System Management Mode service.  As it is, the kernel has no idea of how the method is implemented - it just executes the AML byte code which has full access to I/O regions and memory to allow it to interact with the hardware.
+
+Unfortunately the AML code is normally hand crafted code and being software can have bugs, here are just a few:
+
+* Timing issues - e.g. interacting with the Embedded Controller, mis-timed read/writes. AML may execute correctly in Windows but not in Linux because of the different speed AML operations are being executed in different host operating systems.
+* Race conditions - e.g. poor locking on regions that need atomic locking
+* Mishandling of time-outs - e.g. not checking mutex lock time-out errors
+* Busy loops - e.g. busy loops checking Embedded Controller port status changes, and looping forever in a tight loop.
+* Methods returning incorrect values, or wrong data types
+* Methods having multiple return paths where some return values, others don't.
+* Semantic bugs - methods expected to behave according to the specification but don't.
+* Syntactic bugs - AML compiles correctly on the Microsoft AML compiler but won't with the stricter Intel iasl compiler.
+* Access of data outside predefined I/O or memory regions.  Indexes into regions fall outside and leave undefined behaviour.
+* Recursion - methods that recurse deeper than 255 levels are broken and stopped from overflowing the stack.
+* Missing methods - e.g. brightness controls missing, or misspelt (such as _BQC spelled as _BCQ).
+
+In fact the list is endless since it's just like program code.
+
+The AML code is found in two types of tables; the DSDT and the SSDT. There should be only one DSDT but there can be one or more SSDTs.  To view the code requires the following steps:  Extract the tables from ROM and disassemble the AML byte code into AML assembler:
+
+{{{#!highlight shell numbers=off
+sudo acpidump >acpidata.dat
+acpixtract -sSSDT acpidata.dat
+acpixtract -sDSDT acpidata.dat
+iasl -d DSDT.dat SSDT*.dat
+}}}
+
+…and then look at the .dsl files that contain the AML assembler.
+
+==== Mis-configured Tables ====
+
+Tables contain data that defines how a system is configured and behaves. ACPI is very feature rich (probably too feature rich) and defines many aspects of system configuration.  For example, CPU frequency levels can be defined in the ACPI tables, and it has been known for the maximum frequency level on some Atom netbooks to be omitted from the _PSS (Performance Supported States) object and hence the user cannot run their machine at the maximum frequency. The _PSS object is in fact in the DSDT or SSDT as AML code, so one needs to extract the table and disassemble this.
+
+However, some tables are just pure configuration data structures, such as the FACP. To look at the individual fields one needs to extract the table and disassemble it. One can use:
+
+{{{#!highlight shell numbers=off
+sudo acpidump >acpidata.dat
+acpixtract -sFACP acpidata.dat
+iasl -d FACP.dat
+}}}
+
+..and then look at the FACP.dsl file and check each field against the ACPI specification which can be found at https://uefi.org/specifications
+
+The development version of the firmware test suite (for 11.04) will contain the ability to dump and annotate the ACPI tables as follows:
+
+{{{#!highlight shell numbers=off
+sudo fwts acpidump -
+}}}
+
+which is a little easier.
+
+==== Interaction with BIOS ====
+
+This is where things are just plain evil. ACPI AML byte code can trigger System Management Interrupts by writing a magic number to a magic port. This then triggers a non-maskable interrupt out of kernel context straight into the BIOS context. The BIOS can then do anything it wants in a SMI, and return back to the kernel context at some arbitrary point in the future. The BIOS is at liberty to twiddle with any I/O ports or memory region and it also messes up the CPU cache during the SMI.  So expect weird issues when SMIs are being used.
+
+Incidentally, the FACP contains information concerning the SMI - the word at 0x2e contains the SCI interrupt number (which should show up as the acpi interrupt in /proc/interrupts) and the 4 byte integer at offset 0x30 in the FACP contains the SMI command port address.  One writes a magic value to this command port to generate an SMI.
+
+==== Interaction with the Embedded Controller ====
+
+This is where really difficult to diagnose issues occur. The Embedded Controller (EC) contains proprietary code
+to control peripherals.  For example, the EC may be directly connected to the sleep button, so that when a user presses the sleep key, the EC is interrupted and it then pokes the southbridge which generates an General Purpose Event (GPE) which the ACPI driver handles. Then the ACPI driver checks attempts to execute a AML method to handle this GPE event. The naming convention is as follows:
+
+<pre>
+_Lxx for level triggered GPE,
+_Exx for edge triggered GPE.
+</pre>
+
+the xx maps on the hexadecimal number of the GPE, e.g. level triggered GPE 0x1e will require a Method called _L1E in the DSDT to handle this event.
+
+Another way the EC is interacted with is by reading/writing to the EC memory. This memory is mapped into the kernel's address space using AML OperationRegion() definitions, for example on an Lenovo 3000N200, this is declared as follows
+
+{{{#!highlight c numbers=off
+        OperationRegion (ERAM, EmbeddedControl, Zero, 0xFF)
+        Field (ERAM, ByteAcc, Lock, Preserve)
+        {
+                    Offset (0x60), // offset 0x60 from start of ERAM
+            SMPR,   8,
+            SMST,   8,
+            SMAD,   8,
+…
+etc.
+…
+            GAU1,   8,
+            CYC1,   8,
+            BPC1,   16,
+            BAC1,   16,
+            BAT1,   8,
+            BTW1,   16
+        }
+}}}
+
+Note how a symbolic name is mapped onto 8 or 16 bit fields in the embedded controllers RAM. Methods can then
+refer to the symbols to read/write to the EC RAM in a straight forward load/store instruction. However, the ACPI driver knows that these regions are EmbeddedControl addresses and maps the load/stores into data read/write commands that are issued over the EC command and data ports.
+
+The EC command port location can be found by using:
+
+{{{#!highlight console numbers=off
+$ cat /proc/acpi/embedded_controller/*/info
+
+  gpe:				0x1c
+  ports:			0x66, 0x62
+  use global lock:		no
+}}}
+
+The convention is that the command port/status port is listed first (0x66) then the data port (0x62). The EC signals to the kernel via the acpi interrupt and generates GPE 0x1c.  The global lock flag indicator if the EC uses a global lock to protect it when doing read/write transactions.  The driver for the EC is found in drivers/acpi/ec.c
+
+Generally, most Embedded Controllers share common features in their memory locations, with minor vendor specific changes from machine to machine.  Hence most Lenovos share the same basic functionality mappings onto the EC memory, which enables one to figure out which memory location may be used for specific features.  Since these fields are proprietary there is scant documentation and a lot of the debugging at this level is down to intelligent guesswork and reverse engineering the AML methods to figure out what how the EC works.
+
+Section 5.6.4.1.1 if the version 4.0 of the ACPI specification "Queuing the Matching Control Method for Execution" explains another aspect of EC and ACPI interaction - the _Qxx embedded controller event methods.
+
+General-purpose events can be raised from a GPE bit tied to an embedded controller. When these occur, the event is handled by acpi_ec_gpe_handler() which ultimately calls acpi_ec_sync_query() - this queries the EC for an 8 bit event code (via acpi_ec_query_unlocked()). The 8 bit event code indicates which _Qxx method to be called (xx is the hexadecimal number of the query).  Note that query event code 0x00 is reserved - it indicates that there are no outstanding events.
+
+The following examples of _Qxx events handle event codes 0xba and 0xbb for LID close and LID open events. Note how they store lid state and then generate a LID notification.
+
+{{{#!highlight c numbers=off
+                    Method (_QBA, 0, NotSerialized)
+                    {
+                        Store (Zero, ^^^^LID0.LIDS)
+                        Notify (LID0, 0x80)
+                    }
+
+                    Method (_QBB, 0, NotSerialized)
+                    {
+                        Store (One, ^^^^LID0.LIDS)
+                        Notify (LID0, 0x80)
+                    }
+}}}
+
+To debug this, build a kernel with dynamic debug enabled "CONFIG_DYNAMIC_DEBUG=y" and boot. Then as root, enable debug as follows:
+
+{{{#!highlight shell numbers=off
+echo -n 'file ec.c +p' | sudo tee /sys/kernel/debug/dynamic_debug/control >/dev/null
+}}}
+
+and messages appear in the kernel log. The following messages are of interest:
+
+* "~~~> interrupt" - an EC GPE has occurred.
+* "push query execution (0xXX) on queue" - XX is the hexadecimal EC event code.
+* "push gpe query to the queue" - shows a EC SCI has occurred and a EC query is being pushed
+* "---> status = 0xXX" - EC read status, XX is the hex status value
+* "---> data = 0xXX" - EC read of data, XX is the hex data value
+* "<--- command = 0xXX", EC command, XX is the hex command
+* "<--- data = 0xXX", EC data write, XX is the hex data value
+
+==== How to Debug ====
+
+If you have got this far and not feeling completely put off then well done!  The next step to figuring out bugs in the ACPI domain is to be able to effectively tweak the ACPI driver debug code to get the required information out of the driver at run time.
+
+The first step is to enable the ACPI debug code. This is a compile time kernel option. Enable CONFIG_ACPI_DEBUG and build a debug kernel.
+
+Next, install the kernel and increase the internal kernel printk() circular buffer to ~8-16M as one can generate a lot of debug messages with the ACPI debug enabled. Use the kernel parameter:
+
+<pre>
+log_buf_len=16M
+</pre>
+
+Note that the size must be in powers of 2 to work correctly.
+
+Next we need to select the appropriate debug bit masks. These come in two forms - the debug_layer which controls which component of the ACPI driver can generate debug and then the debug_level which debugs various types of messages (e.g. initialisation, method execution, info messages etc).
+
+You can either set these at boot type using kernel parameters, e.g.:
+
+<pre>
+acpi.debug_layer=0x8400082 acpi.debug_level=0x31000200
+</pre>
+
+or at run time by echoing the hexadecimal values into the /sys/module/acpi/parameters files as root:
+
+{{{#!highlight shell numbers=off
+echo 0x8400082 >/sys/module/acpi/parameters/debug_layer
+echo 0x31000200 >/sys/module/acpi/parameters/debug_level
+}}}
+
+Below is a program to calculate the bit masks to enable specific debug features:
+
+{{{#!highlight c numbers=off
+
+int main(int argc, char **argv)
+{
+	unsigned long debug_layer =
+		ACPI_HARDWARE |
+		ACPI_EXECUTER |
+		ACPI_PCI_COMPONENT |
+		ACPI_MEMORY_DEVICE_COMPONENT;
+	unsigned long debug_level =
+		ACPI_LV_EXEC |
+		ACPI_LV_MUTEX |
+		ACPI_LV_AML_DISASSEMBLE |
+		ACPI_LV_VERBOSE_INFO;
+
+	printf("echo 0x%lx > /sys/module/acpi/parameters/debug_layer\n", debug_layer);
+	printf("echo 0x%lx > /sys/module/acpi/parameters/debug_level\n", debug_level);
+}
+}}}
+
+in the example above, I wanted to debug the ACPI AML code being executed and I wanted to observe possible race conditions around the EC hence I wanted to look at the way mutexes were being used, so I enabled ACPI_LV_EXEC,  ACPI_LV_MUTEX, ACPI_LV_AML_DISASSEMBLE, ACPI_LV_VERBOSE_INFO.  I wanted to trace inside the driver's hardware component to observe read/writes to the EC memory space, and I wanted to debug all PCI and memory operations as well as see how the AML executer was functioning.
+
+As you can see, there is a lot of fine control. Be prepared to see lots of output and be patient - one needs to look at how the AML bytecode is being executed and compare that to the AML inside the DSDT and SSDTs. Needless to say, it is a very time consuming exercise. There is plenty of good documentation available in the Linux kernel, in document: Documentation/acpi/debug.txt
+
+=== Sanity Checking ACPI Tables ===
+
+Fortunately we have tools to sanity check the ACPI tables.
+
+==== fwts ====
+
+This is the firmware test suite, designed to interrogate and look at BIOS + ACPI firmware bugs. Several tests are available in the latest development version:
+
+* Get general ACPI information (shallow test)
+
+sudo fwts acpiinfo -
+
+* Check for one instance of APIC defined in the tables:
+
+sudo fwts apicinstance -
+
+* Checksum the ACPI tables
+
+sudo fwts checksum -
+
+* FADT SCI_EN enabled check.
+
+sudo fwts fadt -
+
+* MCFG PCI Express* memory mapped config space.
+
+sudo fwts mcfg -
+
+* Re-assemble the DSDT and find syntax errors, warnings and some semantic check of AML code.
+
+sudo fwts syntaxcheck -
+
+* Dump and annoate ACPI tables.
+
+sudo fwts acpidump -
+
+* Test suspend/resume
+
+sudo fwts s3 -
+
+* Test hibernate/resume
+
+sudo fwts s4 -
+
+* Interactive tests, hotkeys, lid, battery, etc..
+
+sudo fwts --interactive
+
+==== acpiexec ====
+
+As yet, this tool is not packaged up in debian or Ubuntu, so one needs to build this oneself. This tool allows one to load in the ACPI tables into an emulator and then interogate and probe the methods interactivelt. The downside is that it cannot emulate ACPI/BIOS and ACPI/EC interactions.
+
+The acpiexec tool is an AML emulator that allows one to execute and interactively ACPI AML code from your BIOS.  The tarball can be downloaded from the ACPICA website  and built as follows:
+
+* Expand the <nowiki>[[https://downloadmirror.intel.com/852044/acpica-unix-20250404.tar.gz|acica-unix-20250404.tar.gz]]</nowiki> tarball from the <nowiki>[[https://www.intel.com/content/www/us/en/developer/topic-technology/open/acpica/download.html|ACPICA page]]</nowiki> at intel.com.
+* cd into tools/acpiexec
+* run make
+
+This should build acpiexec. Now for the fun part - executing your ACPI inside the emulator. To do this grab your ACPI tables and extract them using:
+{{{#!highlight shell numbers=off
+sudo acpidump >acpi.info && acpixtract -a acpi.info
+}}}
+
+Now load these tables into the emulator and run with verbose mode:
+
+{{{#!highlight shell numbers=off
+./acpiexec -v *.dat
+}}}
+
+Inside the emulator you can type help to navigate around the help system.  It may take a little bit of work to get familiar with all the commands available.
+
+As a quick introduction, here is how to execute the battery information _BIF method.
+
+1. Get a list of all the available methods, type:
+
+<pre>
+methods
+</pre>
+
+on a Lenovo 3000N200 laptop the battery information method is labelled \_SB_.PCI0.LPCB.BAT1._BIF, so to execute this method one uses:
+
+<pre>
+execute \_SB_.PCI0.LPCB.BAT1._BIF
+Executing \_SB_.PCI0.LPCB.BAT1._BIF
+Execution of \_SB_.PCI0.LPCB.BAT1._BIF returned object 0x19669d0 Buflen 178
+  [Package] Contains 13 Elements:
+    [Integer] = 0000000000000001
+    [Integer] = 0000000000000FA0
+    [Integer] = 0000000000000FA0
+    [Integer] = 0000000000000001
+    [Integer] = 0000000000002B5C
+    [Integer] = 00000000000001A4
+    [Integer] = 000000000000009C
+    [Integer] = 0000000000000108
+    [Integer] = 0000000000000EC4
+    [String] Length 08 = PA3465U
+    [String] Length 05 = 3658Q
+    [String] Length 06 = Li-Ion
+    [String] Length 07 = COMPAL
+</pre>
+
+To single stepped through the code use the debug command on the method as follows:
+
+<pre>
+debug \_SB_.PCI0.LPCB.BAT1._BIF
+</pre>
+
+at each % prompt, one can press enter to step the next instruction. If the method requires arguments, these can be passed into the method by specifying them after the method name from the debug command.
+
+To see any local variables used during execution, use the locals command. The list command lists the current AML instructions. The set commands allows one to set method data and interact with the debugging processes.
+
+Hopefully this gives one a taste of what the emulator can do. The internal help is enough to get one up and running, and one does generally require the current ACPI specification to figure out what's happening in your ACPI tables.
+
+==== Serialized Code ====
+
+ACPI in a multi processor environment can be a headache - a subtle one at that. The Differentiated System Description Table (DSDT) contains AML bytecode that gets interpreted by the Linux Kernel ACPI driver. The DSDT varies from machine to machine as it is totally hardware specific. Sometimes an AML method is declared as NotSerialized when in fact it should be Serialised to prevent multiple threads of execution occurring simultaneously. To fix this, one could re-write the DSDT (non exactly user friendly), or ask for the BIOS to be fixed.
+
+Fortunately the Linux kernel has a workaround - the acpi_serialize boot flag. Boot the kernel with the acpi_serialize kernel boot flag and hopefully this will resolve this kind of issues.
+
+If acpi_serialize fixes an issue then one should identify which Methods need to be declared as NotSerialized and then recommend a BIOS fix to the vendor.
+
+=== References ===
+
+* '''<nowiki>[[https://uefi.org/specifications#ACPI|ACPI Specification official website]]</nowiki>'''
+* '''<nowiki>[[https://launchpad.net/~firmware-testing-team|Firmware Test Suite project page]]</nowiki>'''
+** <nowiki>[[https://launchpad.net/~firmware-testing-team/+archive/ppa-firmware-test-suite-dev|Development Firmware Test Suite]]</nowiki>
+* From  Colin Ian King's blog, ''A Smackerel of Opinion'':
+** <nowiki>[[https://smackerelofopinion.blogspot.com/2010/03/debugging-acpi-using-acpiexec.html|Debugging ACPI using acpiexec]]</nowiki>
+** <nowiki>[[https://smackerelofopinion.blogspot.com/2010/08/firmware-test-suite-biosacpi-health.html|Firmware Test Suite: BIOS+ACPI health check]]</nowiki>
+* <nowiki>[[http://kernel.ubuntu.com/%7Ecking/presentations/gpes-and-embedded-controller/EmbeddedControllerAndACPI.odp|GPEs, Emebedded Controller and ACPI]]</nowiki>
+* <nowiki>[[http://smackerelofopinion.blogspot.com/2010/01/simple-acpi-monitoring-tools.html|Simple ACPI Monitoring Tools]]</nowiki>
+* <nowiki>[[http://smackerelofopinion.blogspot.com/2009/10/dumping-acpi-tables-using-acpidump-and.html|Dumping ACPI Tables]]</nowiki>
+* <nowiki>[[http://smackerelofopinion.blogspot.com/2009/08/acpi-wake-alarm-bugs.html|ACPI Wake Alarm Bugs]]</nowiki>
+* <nowiki>[[http://smackerelofopinion.blogspot.com/2009/08/acpiserialize-boot-flag.html|acpi_serialize boot flag]]</nowiki>

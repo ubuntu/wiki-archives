@@ -1,0 +1,395 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+This page is part of the <nowiki>[[3GNetworkingIntrepid]]</nowiki> effort.
+
+'''Contents'''
+
+== Probing your modem ==
+
+Many modems are internally installed in a laptop, or are rebranded/rebadged devices from other providers. They also vary in terms of their capabilities, many of which can't be discovered from the USB device IDs alone. 
+
+This page details some steps you can take to find out more about your modem so the NetworkManager team have more information to work with during testing and development.
+
+=== Finding the bus type and device identifiers for your modem ===
+
+''If you already know your device's USB product and vendor IDs, you might as well skip this section. If you file a hardware support bug, consider including the output of <code>lsusb -vvv</code> (or an excerpt of it showing the output for the device of interest).''
+
+Most cellular modems seem to present a USB interface, even the internal mini-PCI-E and mini-PCI cards. Unless you know your modem isn't a USB device you should start by using `lsusb' to check for your device and, if you find it, get its vendor and device IDs.
+
+Make sure you run <code>update-usbids</code> before you try to find your modem, as more details are always being added to the USB device IDs database.
+
+<pre>
+craig$ sudo /usr/sbin/update-usbids
+</pre>
+
+Now, to find the modem:
+
+<pre>
+craig$ lsusb
+Bus 007 Device 003: ID 05a9:7670 OmniVision Technologies, Inc. OV7670 Webcam
+Bus 007 Device 001: ID 1d6b:0002 Linux Foundation 2.0 root hub
+Bus 003 Device 001: ID 1d6b:0002 Linux Foundation 2.0 root hub
+Bus 006 Device 001: ID 1d6b:0001 Linux Foundation 1.1 root hub
+Bus 005 Device 001: ID 1d6b:0001 Linux Foundation 1.1 root hub
+Bus 004 Device 004: ID 0421:04f0 Nokia Mobile Phones 
+Bus 004 Device 002: ID 04f2:0618 Chicony Electronics Co., Ltd 
+Bus 004 Device 001: ID 1d6b:0001 Linux Foundation 1.1 root hub
+Bus 002 Device 002: ID 413c:8138 Dell Computer Corp. Wireless 5520 Voda I Mobile Broadband (3G HSDPA) Minicard EAP-SIM Port
+Bus 002 Device 001: ID 1d6b:0001 Linux Foundation 1.1 root hub
+Bus 001 Device 007: ID 0a5c:4503 Broadcom Corp. 
+Bus 001 Device 006: ID 0a5c:4502 Broadcom Corp. 
+Bus 001 Device 005: ID 413c:8126 Dell Computer Corp. Wireless 355 Bluetooth
+Bus 001 Device 004: ID 0a5c:4500 Broadcom Corp. 
+Bus 001 Device 001: ID 1d6b:0001 Linux Foundation 1.1 root hub
+</pre>
+
+In this case it's pretty clear that the modem is the <code>Dell Computer Corp. Wireless 5520 Voda I Mobile Broadband (3G HSDPA) Minicard EAP-SIM Port</code> with USB ID <code>413c:8138</code>, ie vendor=0x413c product=0x8138 . However, there's also a Nokia mobile phone that's capable of being used as a modem shown in the list.
+
+In some cases your device will have a less useful name - like, say, <code>Dell</code>. You may be able to find it using <code>lsusb -vvv</code> (run as root).
+
+<pre>
+sudo lsusb -vvv > /tmp/usb_info
+</pre>
+
+There's a lot of information there. What you're looking for is a <code>CDC ACM</code> device category, which most phones and some, but far from all, internal modems provide. The following awk script will search lsusb for you and print some details for anything with CDC ACM interface descriptors:
+
+<pre>
+/^Bus/ {
+	curdev = $0;
+}
+/iManufacturer/ {
+	curman = $2
+}
+/iProduct/ {
+	curprod = $2
+}
+/bInterfaceNumber/ {
+	curiface = $2
+}
+/CDC ACM/ {
+	printf "%s iM=%s iP=%s if=%s\n",curdev,curman,curprod,curiface;
+}
+</pre>
+
+Save it as <code>searchusb.txt</code> to your Desktop then run:
+
+<pre>
+sudo lsusb -vvv | awk -f ~/Desktop/searchusb.txt
+</pre>
+
+Hopefully you'll see something like:
+
+<pre>
+Bus 004 Device 004: ID 0421:04f0 Nokia Mobile Phones  iM=1 iP=2 if=10
+Bus 004 Device 004: ID 0421:04f0 Nokia Mobile Phones  iM=1 iP=2 if=12
+</pre>
+
+which gives you the vendor and product IDs (0421 and 04f0 respectively) as well as a few other handy details.
+
+Note that the Dell built-in modem was '''not''' detected, because it doesn't use the standard CDC ACM descriptors. You just have to know what it is, identify it by elimination (ie you know what every other device is), etc. When you're pretty sure you know the vendor and product IDs, try talking to it with the <code>usbserial</code> driver (see the instructions for devices that aren't detected below) and see if it responds sensibly to a probe.
+
+Some devices won't be found by the lsusb command above, but will be known to one of the kernel drivers. In that case you may well be able to see details about the device in the output of <code>dmesg</code> or <code>lshal</code>. Drivers to look out for include <code>airprime</code> and <code>option</code>.
+
+There are also non-USB cellular modems. Some external modems connect to the host using RS232 serial lines, and may not be detected by Linux at all, though you can still probe them using the procedures below if you know which serial port they're connected to. Others appear on the PCI or cardbus interfaces.
+
+If you just can't find your device, make sure you still add it to the <nowiki>[[NetworkManager-Hardware-3G|3G hardware table]]</nowiki>. Submit a bug report that includes (as individual file attachments):
+
+* the full output of '''nm-tool'''
+* the full output of '''lshal'''
+* the full output of '''sudo lsusb -vvv'''
+* '''/var/log/syslog'''
+* '''/var/log/kern.log'''
+* the full output of '''sudo lspci -vvv'''
+* the full output of '''sudo pccardctl ident''' (if you have a PCMCIA, ie "PC Card" bus)
+
+=== Finding your modem's serial device ===
+
+To probe your modem, you need to find out your modem's device node. That'll normally be printed in <code>/var/log/kern.log</code> when you plug the modem in, or will appear in dmesg during boot. Common device nodes are <code>/dev/ttyUSB0</code> and <code>/dev/ttyACM0</code>.
+
+If it doesn't seem to be detected at all and it's a USB device (almost all, even internal modems, are) then try using <code>lsusb</code> to find its vendor and product codes (see above) and load the <code>usbserial</code> module manually. (You can probe a bluetooth modem too with a bit more work - see the end of the document for setup). For example, if <code>lsusb</code> shows:
+
+<pre>
+Bus 002 Device 002: ID 413c:8138 Dell Computer Corp. Wireless 5520 Voda I Mobile Broadband (3G HSDPA) Minicard EAP-SIM Port
+</pre>
+
+the vendor ID is 413c and the device ID is 8138, so I can load the driver with:
+
+<pre>
+sudo modprobe usbserial vendor=0x413c product=0x8138
+</pre>
+
+after which I can access the modem as <code>/dev/ttyUSB0</code> since I have no other USB serial devices on the system.
+
+=== Probe script for modem capabilities ===
+
+Save the following text to a file named 'probe.txt' on your GNOME desktop. This script will be used to probe your modem for its capabilities and a few other details.
+
+<pre>
+REPORT +GCAP:
+REPORT +COPS:
+REPORT +CREG:
+
+TIMEOUT 2
+''
+ATZ+CPIN="0000"
+OK-ATZ-OK
+AT+GCAP
++GCAP:
+AT+COPS?
++COPS:
+AT+CREG?
++CREG:
+</pre>
+
+=== Probing the modem ===
+
+Once you know the device node for your modem, execute the following shell command, replacing MODEMDEVICE with the path to the device node: 
+
+<pre>
+chat -s -f ~/Desktop/probe.txt >/dev/MODEMDEVICE </dev/MODEMDEVICE
+</pre>
+
+For example, the following shows me probing my my built-in HSDPA modem on <code>/dev/ttyUSB0</code> then my USB mobile phone on <code>/dev/ttyACM0</code>:
+
+<pre>
+craig$ chat -s -f ~/Desktop/probe.txt >/dev/ttyACM0 </dev/ttyACM0 
+chat:  Sep 03 10:40:47 +GCAP: +CGSM,+DS,+W
+chat:  Sep 03 10:40:47 +COPS: 0,2,"50501",2
+chat:  Sep 03 10:40:47 +CREG: 0,1
+craig$ chat -s -f ~/Desktop/probe.txt >/dev/ttyUSB0 </dev/ttyUSB0
+chat:  Sep 03 10:40:51 +GCAP: +CGSM,+DS,+ES
+chat:  Sep 03 10:40:52 +COPS: 0,0,"Telstra Mobile",2
+chat:  Sep 03 10:40:52 +CREG: 0,1
+</pre>
+
+The part of the output you want to include on this wiki page is the bit after <code>+GCAP:</code>, eg <code>+CGSM,+DS,+ES</code>. It'd be helpful if you could post the <code>COPS</code> output, too, eg <code>0,0,"Telstra Mobile",2</code>.
+
+=== Getting more hardware details ===
+
+Lots of GSM/CDMA modems are rebranded. Everything in a Dell machine, for example. You can get hardware details from these modems using <code>gsmctl</code> from the <code>gsm-utils</code> package in universe:
+
+<pre>
+craig$ # My Dell 5520 internal HSDPA modem
+craig$ gsmctl -d /dev/ttyUSB0 ME
+<ME0>  Manufacturer: Novatel Wireless Incorporated
+<ME1>  Model: Expedite EU870D MiniCard
+<ME2>  Revision: 10.9.0102.0-00  [2007-07-03 13:50:21]
+<ME3>  Serial Number: 351380115216121
+craig$
+craig$ # My N95-3
+craig$ gsmctl -d /dev/ttyACM0 ME
+<ME0>  Manufacturer: Nokia
+<ME1>  Model: Nokia N95
+<ME2>  Revision: V 06wk41v57.1
+24-04-08
+RM-160
+(c) Nokia
+<ME3>  Serial Number: 318911111771193
+</pre>
+
+''Note: The serial numbers in the above have been replaced with dummies''.
+
+If you file a bug with an issue about phone support, consider attaching the output of <code>gsmctl -d /dev/MODEMDEVICE ALL</code> to the bug report (in ''addition'' to the output of <code>lshal</code> and the other information requested by the NM team). It might prove handy. Remember to add the device to the <nowiki>[[NetworkManager-Hardware-3G|3G hardware table]]</nowiki> and link to the bug from there if it's not already listed.
+
+=== Probing bluetooth modems ===
+
+A bluetooth modem generally works as a virtual serial device over an rfcomm channel. You can probe these much the same way as shown above, but first you need to set up the channel.
+
+To start with, make sure the tools you'll need are installed:
+
+<pre>
+sudo aptitude install bluez-utils ppp
+</pre>
+
+Turn bluetooth on in your phone and set it to be visible to all (discoverable). If it's a dedicated modem not a phone, you might need to press the "connect" or "discover" button instead. It'll also help if you pair your phone/modem and laptop then set the pairing to trusted on the phone/modem so that you're not prompted to approve connections all the time.
+
+Now find its bluetooth MAC address using <code>hcitool scan</code>:
+
+<pre>
+craig$ hcitool scan 
+Scanning ...
+	00:1D:E9:F5:55:AF	Craig's N95
+</pre>
+
+You can now set your phone/modem back to invisible (not discoverable) mode if you prefer to. We'll be talking to it directly from now on, so bluetooth must be on but does not need to be discoverable.
+
+Use <code>sdptool</code> to discover the rfcomm port for DUN (dial-up networking) communication:
+
+<pre>
+craig$ sdptool search --bdaddr 00:1D:E9:F5:55:AF DUN
+Searching for DUN on 00:1D:E9:F5:55:AF ...
+Service Name: Dial-Up Networking
+Service RecHandle: 0x1001f
+Service Class ID List:
+  "Dialup Networking" (0x1103)
+Protocol Descriptor List:
+  "L2CAP" (0x0100)
+  "RFCOMM" (0x0003)
+    Channel: 4
+Language Base Attr List:
+  code_ISO639: 0x454e
+  encoding:    0x6a
+  base_offset: 0x100
+Profile Descriptor List:
+  "Dialup Networking" (0x1103)
+    Version: 0x0100
+</pre>
+
+The RFCOMM channel we need is 4, as shown on the line below <code>RFCOMM</code> in the output above. Note that this often varies; some phones change RFCOMM DUN channels when rebooted, for example.
+
+We now know enough to set up an RFCOMM binding we can use to talk to the modem. Specify your device's bluetooth MAC address and its RFCOMM channel (the last argument to <code>rfcomm</code>) in place of mine when you run the command below:
+
+<pre>
+craig$ sudo rfcomm bind /dev/rfcomm0 00:1D:E9:F5:55:AF 4
+craig$
+</pre>
+
+It will generate no output, but running <code>rfcomm</code> again without arguments should show a binding.
+
+<pre>
+craig$ rfcomm
+rfcomm0: 00:1D:E9:F5:55:AF channel 4 clean
+</pre>
+
+You can now use <code>/dev/rfcomm0</code> as the serial device node to talk to the modem when probing it using the instructions above. The phone and/or gnome-bluetooth on your laptop might prompt you for a passkey to set up a pairing if you haven't used the two devices together before. Additionally, the phone/modem may prompt you to accept the bluetooth connection from the laptop, so make sure you're ready to accept if prompted. Setting up a trusted pairing will eliminate that prompt.
+
+This setup procedure will also let you use ppp over the rfcomm channel to connect to the Internet through your phone. Use a ppp and chat setup, or use a tool like <code>wvdial</code> just as you would a USB or serial GSM modem once you've created the binding. Here's a little shell script I use to re-bind the phone before connecting:
+
+<pre>
+BT=00:1D:E9:F5:55:AF
+if test "$(id -u)" -ne 0 ; then
+	exec sudo $0
+fi
+CHAN=$(sdptool search --bdaddr $BT DUN | awk '/Channel/ { print $2}')
+rfcomm release 2
+rfcomm bind 2 "$BT" "$CHAN"
+rfcomm
+</pre>
+
+This full procedure has been tested on a Nokia N95 and an LG U990.
+
+== Testing your modem using wvdial ==
+
+Even if NetworkManager can't find your modem, you can probably still dial out with it using <code>pppd</code> and <code>chat</code>, or using <code>wvdial</code>. I'll give instructions for wvdial here, as using wvdial is a bit more self contained and perhaps easier for people to debug.
+
+'''WARNING WARNING WARNING'''
+
+Note that some cellular providers charge a LOT for data connections - often charging a session fee to connect, plus punitive data transfer charges. For example, my provider in Australia charges users on a default business plan AU$10/MB, which at HSDPA 7.2 data rates works out to around AU$32000/hour (somewhere around $25,000 US/hour). '''Make sure your provider's charges are reasonable before you attempt to connect to the cellular network for data services.''' If you're unsure about your provider's data rates, do not attempt to use cellular data services.
+
+To begin testing, first install wvdial:
+
+<pre>
+sudo aptitude install wvdial
+</pre>
+
+then copy the following text into the file <code>~/.wvdialrc</code> (ie <code>.wvdialrc</code> in /home/YOURUSERNAME}}}:
+
+<pre>
+[Dialer cellular]
+
+Modem = /dev/ttyACM0
+
+Baud = 115200
+
+Init = ATZ
+
+Init2 = AT+CGDCONT=1,"IP","YOUR_ISP_APN"
+
+Phone = *99#
+
+Username = dummy
+Password = dummy
+</pre>
+
+Read through it and make sure the <code>Modem</code>, <code>Init</code>, <code>Init2</code>, <code>Username</code> and <code>Password</code> entries are correct for your provider. Then try to dial (running wvdial as root):
+
+<pre>
+sudo wvdial cellular
+</pre>
+
+With luck, and if you have the right settings, you should see output like:
+
+<pre>
+craig$ sudo wvdial cellular
+--> WvDial: Internet dialer version 1.60
+--> Cannot get information for serial port.
+--> Initializing modem.
+--> Sending: ATZ
+ATZ
+OK
+--> Sending: AT+CGDCONT=1,"IP","Telstra.Internet"
+AT+CGDCONT=1,"IP","Telstra.Internet"
+OK
+--> Modem initialized.
+--> Sending: ATDT*99#
+--> Waiting for carrier.
+ATDT*99#
+CONNECT
+~[7f]}#@!}!} } }2}#}$@#}!}$}%\}"}&} }*} } g}%~
+--> Carrier detected.  Waiting for prompt.
+~[7f]}#@!}!} } }2}#}$@#}!}$}%\}"}&} }*} } g}%~
+--> PPP negotiation detected.
+--> Starting pppd at Wed Sep  3 13:55:10 2008
+--> Pid of pppd: 22341
+--> Using interface ppp0
+--> local  IP address 10.164.32.250
+--> remote IP address 10.6.6.6
+--> primary   DNS address 203.50.2.71
+--> secondary DNS address 139.130.4.4
+</pre>
+}}}
+
+You might have issues with <code>resolvconf</code> stomping on your DNS configuration in <code>/etc/resolv.conf</code> - but if you're getting an IP address from the remote peer then the modem is working, even if you can't access any websites etc. If you don't use resolvconf, consider just uninstalling it.
+
+If wvdial reports something like:
+
+<pre>
+--> PPP negotiation detected.
+--> Starting pppd at Wed Sep  3 13:54:13 2008
+--> Pid of pppd: 22239
+--> Using interface ppp0
+--> Disconnecting at Wed Sep  3 13:54:19 2008
+--> The PPP daemon has died: A modem hung up the phone (exit code = 16)
+--> man pppd explains pppd error codes in more detail.
+--> Try again and look into /var/log/messages and the wvdial and pppd man pages for more information.
+</pre>
+
+then it's quite likely that your APN, username, or password are wrong. Run <code>tail -f /var/log/messages</code> and redial. If it's the APN, you might see something like:
+
+<pre>
+Sep  3 13:54:44 ayaki pppd[22271]: pppd 2.4.4 started by root, uid 0
+Sep  3 13:54:44 ayaki pppd[22271]: Using interface ppp0
+Sep  3 13:54:44 ayaki pppd[22271]: Connect: ppp0 <--> /dev/ttyACM0
+Sep  3 13:54:47 ayaki pppd[22271]: PAP authentication succeeded
+Sep  3 13:54:47 ayaki pppd[22271]: LCP terminated by peer
+Sep  3 13:54:50 ayaki pppd[22271]: Connection terminated.
+Sep  3 13:54:50 ayaki pppd[22271]: Modem hangup
+Sep  3 13:54:50 ayaki pppd[22271]: Exit.
+</pre>
+
+Note the successful authentication, then connection termination by the remote end.
+
+That, or successful negotiation followed by the inability to send and receive IP packets, could also indicate that your cellular service has barring active on data connections. You'd need to talk to the accounts people at your cellular provider.
+
+== Notes ==
+
+The <code>gsmctl</code> program from the <code>gsm-utils</code> should be able to probe most modems, but appears to have issues parsing provider information returned by many devices. As I wasn't able to get it to reliably probe my modems I've provided a chat script to do the job instead. However, it and libgsm appear to be an ideal way to talk to modems, and should probably be considered for use by NetworkManager when doing things like:
+
+* Determining battery level and charging state for a bluetooth or USB phone/modem (I'm thinking in terms of a NetworkManager popup: "WARNING: The modem you are using for your network connection is almost out of battery power")
+* Determining network connection quality
+* Getting operator details
+* Getting make/model information
+* Discovering operators within range for roaming etc
+* Testing PIN locking status
+
+Also, some handy commands for GSM hardware control and probing can be found <nowiki>[[http://www.gsm-modem.de/gsm-modem-faq.html|here]]</nowiki> and <nowiki>[[http://www.gsm-modem.de/gsm-faq.html|here]]</nowiki>.
+
+''This document was originally written by Craig Ringer <code><craig at postnewspapers dot com dot au></code>''

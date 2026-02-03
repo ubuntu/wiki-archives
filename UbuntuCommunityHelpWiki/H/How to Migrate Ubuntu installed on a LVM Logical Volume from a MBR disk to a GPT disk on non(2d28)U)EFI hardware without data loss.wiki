@@ -1,0 +1,160 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== Introduction ==
+
+Here is an example where this could be useful: you have a RAID with a size greater than 2TB and you have an existing system installed on a non-(U)EFI hardware (or virtual hardware). By default, Ubuntu installs MBR onto a disk on a non-U(EFI) system. My use case is a file sharing VM (Xen-based virtualization) on a 5TB RAID-5.
+In examples (given in a comment after a generalized command) assume that /dev/xvda is a source disk and /dev/xvdb is a destination disk (xvd - stands for Xen Virtual Disk) and there is a volume group 'ubuntu-vg' on a source disk. The source disk's layout is assumed to be as follows: ext2_Boot_Partition, LVM_Partition. Physical volume names are identical to the respective device names. 'Disk' and 'Device' terms are used somewhat interchangeably. Source and destination disks could be of a different size so I added *optional* steps that allow you to do the resizing for ext4 file system (would also work for ext2 and ext3).
+
+== 1. Create a GPT record on a new disk (using parted or gparted) ==
+
+<pre>
+sudo parted /dev/<device> # e.g. parted /dev/xvdb
+mklabel gpt
+</pre>
+
+== 2. Create a BIOS boot partition (BBP) ==
+
+Create a 1MB BIOS boot partition (BBP) (set a bios_grub flag in GParted) at the start of the GPT disk without file system (unformatted or cleared in GParted) which is used to store grub stage 1.5.
+
+<pre>
+mkpart <bbpPartitionName> 1MB 2MB # e.g. mkpart bbp 1MB 2MB
+
+set 1 bios_grub on
+</pre>
+
+== 3. Create a partition for a destination Physical Volume ==
+Create a partition for a Physical Volume which is going to be used as a destination for moving.
+
+<pre>
+mkpart <LVMPartitionName> 2MB 100% # e.g. mkpart lvmPartition 2MB 100%
+
+quit
+</pre>
+
+== 4. Create a destination Physical Volume ==
+Create a Physical Volume which is going to be used as a destination for moving.
+
+<pre>
+sudo pvcreate /dev/<device> # e.g. pvcreate /dev/xvdb2
+</pre>
+
+== 5. Add the created Physical Volume to the existing Volume Group ==
+
+<pre>
+sudo vgextend <volumeGroupName> <physicalVolumePath> # e.g. vgextend ubuntu-vg /dev/xvdb2
+</pre>
+
+== 6. Move the source Physical Volume to the destination PV ==
+<pre>
+
+sudo pvmove /dev/<sourcePhysicalVolume> /dev/<destinationPhysicalVolume> # e.g. pvmove /dev/xvda2 /dev/xvdb2
+</pre>
+
+== 7. Remove the source Physical Volume from the existing Volume Group ==
+<pre>
+sudo vgreduce <volumeGroupName> <sourcePhysicalVolume> # e.g. sudo vgreduce /dev/xvda2
+</pre>
+
+== 8. Mount the boot partition on the source disk and the 'root' LV ==
+Mount the boot partition on the source disk and the 'root' LV (which was just moved to the destination PV).
+
+<pre>
+sudo mkdir /mnt/bootp/ && sudo mkdir /mnt/rootp
+sudo mount /dev/<ext2_Boot_Partition> /mnt/bootp && sudo mount /dev/mapper/<rootLogicalVolume> /mnt/rootp
+</pre>
+
+== 9. Copy /boot directory from the boot partition on the source disk to the '/' of the root LV ==
+
+<pre>
+sudo cp -r /mnt/bootp/* /mnt/rootp/boot
+</pre>
+== 10. Bind the directories that grub needs to access to detect operating systems ==
+<pre>
+sudo mount --bind /dev /mnt/rootp/dev &&
+sudo mount --bind /dev/pts /mnt/rootp/dev/pts &&
+sudo mount --bind /proc /mnt/rootp/proc &&
+sudo mount --bind /sys /mnt/rootp/sys
+</pre>
+
+== 11. Chroot into the 'root' LV ==
+
+<pre>
+sudo chroot /mnt/rootp
+</pre>
+
+== 12. Install grub into the destination disk ==
+Install grub into the destination disk which contains the BIOS boot partition (this is going to write grub stage 1.5 into BBP).
+
+<pre>
+sudo grub-install /dev/<destinationDevice> # e.g. grub-install /dev/xvdb
+
+sudo grub-install --recheck /dev/<destinationDevice> # e.g. grub-install --recheck /dev/xvdb
+
+sudo update-grub2
+</pre>
+
+== 13. Comment out (or remove) fstab entry corresponding to the old boot partition ==
+Comment out (or remove) fstab entry corresponding to the old boot partition (which we got rid of by copying its contents directly to '/'). Otherwise the operating system is going to fail to boot, not being able to mount the boot partition.
+
+<pre>
+sed -i "s|.*UUID.*/boot.*|#\0|" /mnt/rootp/etc/fstab
+
+</pre>
+
+14) *Optional* 'Unhide' menu entries in generated boot.cfg (the generated file has menu entries in hidden state sometimes for some reason)
+
+<pre>
+
+sudo sed -i 's/set timeout_style=hidden/set timeout_style=menu/' /mnt/rootp/boot/grub/grub.cfg
+</pre>
+
+== 15. *Optional* (VM-related) Fix GPT to have a record located at the end of the destination disk ==
+Fix GPT to reside at the end of the new disk using parted (say 'Fix' when prompted) and resize the LVM partition. This is required if you resized your virtual disk image in some way, for example
+<pre>
+qemu-img resize <imageName> +<size><unit>
+</pre>
+
+<pre>
+sudo parted
+
+unit MB
+print
+
+resize <partitionNumber> <startSize> <endSize>
+</pre>
+
+== 16. *Optional* Extend the root Logical Volume to occupy all free space on the new PV ==
+
+<pre>
+lvextend -l +100%FREE /dev/<volumeGroupName>/<rootLogicalVolume>
+</pre>
+
+== 17. *Optional* Resize the filesystem on the root Logical Volume ==
+In this case ext4 is assumed. Would also work for ext2 and ext3.
+
+<pre>
+
+sudo resize2fs /dev/<volumeGroupName>/<rootLogicalVolume> # e.g. sudo resize2fs /dev/ubuntu-vg/root
+</pre>
+
+== See Also ==
+* https://wiki.ubuntu.com/Lvm
+* http://askubuntu.com/questions/161279/how-do-i-move-my-lvm-250-gb-root-partition-to-a-new-120gb-hard-disk
+
+== External Links ==
+* http://www.anchor.com.au/blog/2012/10/booting-large-gpt-disks-without-efi/
+* https://en.wikipedia.org/wiki/GNU_GRUB#Boot_process
+* https://www.gnu.org/software/grub/manual/html_node/BIOS-installation.html
+* http://velenux.wordpress.com/2012/07/12/grub-failing-to-install-on-debianubuntu-with-gpt-partitions/
+* http://www.rodsbooks.com/gdisk/mbr2gpt.html - MBR to GPT conversion which did not work for me and includes some magic which is not 'clean' in my opinion
+* https://wiki.archlinux.org/index.php/GUID_Partition_Table#Convert_from_MBR_to_GPT - almost ditto
+----
+CategoryHardware

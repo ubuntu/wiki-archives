@@ -1,0 +1,169 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== autopkgtest test classes ==
+
+=== Motivation ===
+
+proposed-migration currently runs package tests exactly once in a generic virtualized environment (cloud instance, QEMU, or LXC container) whenever that package or one of its dependencies changes. But for packages which are closely tied to specific hardware or system configurations, such as Linux, X.org/Mir, graphics drivers, IPMI etc. this does not suffice and we actually want to run these tests on several different pieces of real hardware, and/or several kernel versions.
+
+=== Summary ===
+
+This proposal adds the concept of a "test class" to autopkgtests. These are an abstract and very coarse categorization of a test, such as `bare-metal` (for testing new kernels), `kernel-specific` (for testing LXC or systemd), or `touch` (for testing e. g. Mir on supported phone models). proposed-migration then translates these abstract classes into concrete lists of machines, kernels or other packages etc., and issues test requests for each of those. The "default class" tests are continued to be run in VMs as usual, but workers which drive real hardware through MaaS, adb (for phones) etc. serve the "classed" requests. Finally, proposed-migration takes all of these results into account for making a decision about propagating a package.
+
+=== Test declaration in source packages ===
+
+Autopkgtest already <nowiki>[[https://people.debian.org/~mpitt/autopkgtest/README.package-tests.html|defines a Classes: field]]</nowiki> for this purpose, which currently does not have any semantics and is not being used by anything. We will introduce a few classes, and use these (sparingly) in package test declarations.
+
+We use two examples here to demonstrate what is happening at each step. First, a kernel flavor itself:
+
+<pre>
+$ cat linux-lts-xenial/debian/tests/control
+Tests: stress-ng, fs-smoke
+Classes: bare-metal
+
+Tests: rebuild
+</pre>
+
+The `rebuild` test has no class and thus should continue to run only in VMs, and only once. The `stress-ng` and `fs-smoke` tests declare that they are intended for being run on bare metal, as well as in the default environment (which we always assume can be done -- if not, a test needs to gracefully skip itself, or we keep it as "always failed").
+
+Second, LXC is rather sensitive to kernel changes, so whenever we get a new version of LXC we want to run this against all supported kernel flavors:
+
+<pre>
+$ cat lxc/debian/tests/control
+Tests: testsuite
+Classes: kernel-specific
+</pre>
+
+`dpkg-source` adds the class information to the `Testsuite:` field so that proposed-migration can see it. It collects all classes of all `Tests:` writes e. g. `Testsuite: autopkgtest(bare-metal,graphics)` for `linux-lts-xenial`. Of course these packages can manually add that field until that `dpkg` change gets implemented.
+
+=== Test class definition ===
+
+The abstract classes characterize the nature of the test, not the concrete hardware and scenarios we want to run it under. The latter is specific to the available CI environment, available/supported kernel flavors, and also the current use case. For example, we might decide that when running a `touch` class test for a merge proposal it gets run in an emulator with the default kernel only, but for landing a silo it gets run on all supported phones.
+
+There are two independent dimensions of defining a test class:
+
+* particular type of hardware; for example, "Dell laptop", "HP server", "Nexus 5"
+* particular configuration of the testbed, e. g. "install linux-lts-vivid", "install nouveau", "run grub with UEFI and Secure Boot"
+
+Finally, this configuration is (or can be) specific to a distro release and architecture, e. g. available kernel flavors or hardware which older distro releases do not support. Thus the structure of `classes.conf` is
+
+<pre>
+release:
+  architecture:
+    classname:
+      instances:
+      - inst1
+      - inst2
+      scenarios:
+        scen1: setup commands for this scenario 1
+        scen2: setup commands for this scenario 2
+</pre>
+
+If `instances:` is missing, then tests are merely ran in different scenarios on the default VMs. If `scenarios:` is missing, tests are merely ran on the given hardware instances without any particular setup commands.
+
+An excerpt `classes.conf` from the examples above could look like this:
+
+<pre>
+precise:
+  armhf:
+    kernel-specific:
+      scenarios:
+        default:  # nothing to do here, we expect linux-meta to be installed
+        lts-v: apt-get install -y linux-headers-lts-vivid linux-image-lts-vivid
+        omap4: apt-get install -y linux-ti-omap4
+trusty:
+  amd64:
+    bare-metal:
+      instances:
+        - hp9000
+        - thinkpadx230
+      scenarios:
+        std:
+        secureboot: grub-install [...]
+</pre>
+
+=== Requesting tests in proposed-migration ===
+
+When proposed-migration encounters a package with test classes, it uses `classes.conf` to map these into a set of (hardware) ''instances'' and ''scenarios''. It generates a test request for all ''instances'' ⨯ ''scenarios'', and puts these into the queues ``debci-``''release''`-`''architecture''`-`''instance'' (a class-less test will continue to go to ``debci-``''release''`-`''architecture'' as usual).
+
+This queue structure allows particular workers to listen to only those hardware specific requests that it can actually serve, and we immediately notice when proposed-migration is trying to put a request for a hardware instance that is not available.
+
+The test request's parameter JSON contains all the information from above, plus a synthesized field `platform-id` which is a short name for aggregating architecture, instance, and scenario (this will be used for reporting test results, see below).
+
+In our examples above, testing LXC involves four test requests to '''debci-precise-armhf''', three for the `kernel-specific` class and one for the default "empty" class:
+
+<pre>
+lxc {"trigger": "glibc/2.22-1", "class": "kernel-specific", "instance": "", "scenario": "default",
+     "platform-id": "armhf-default", "setup-commands": ""}
+lxc {"trigger": "glibc/2.22-1", "class": "kernel-specific", "instance": "", "scenario": "lts-v",
+     "platform-id": "armhf-lts-v", "setup-commands": "apt-get install -y linux-generic-lts-vivid"}
+lxc {"trigger": "glibc/2.22-1", "class": "kernel-specific", "instance": "", "scenario": "omap4",
+     "platform-id": "armhf-omap4", "setup-commands": "apt-get install -y linux-ti-omap4"}
+lxc {"trigger": "glibc/2.22-1", "class": "", "instance": "", "scenario": "",
+     "platform-id": "armhf", "setup-commands": ""}
+</pre>
+
+Testing the kernel would send two test requests to each of the '''debci-trusty-amd64''', '''debci-trusty-amd64-hp9000''', and '''debci-trusty-amd64-thinkpadx230''' queues; e. g. for the latter:
+
+<pre>
+linux-lts-xenial {"class": "bare-metal", "instance": "thinkpadx230", "scenario": "std",
+     "platform-id": "amd64-thinkpadx230-std", "setup-commands": ""}
+linux-lts-xenial {"class": "bare-metal", "instance": "thinkpadx230", "scenario": "secureboot",
+     "platform-id": "amd64-thinkpadx230-secureboot", "setup-commands": "grub-install [...]"}
+</pre>
+
+=== Executing the tests in the worker ===
+
+The new fields in the test request JSON parameters are handled as follows:
+
+* '''class''': This is passed as a new option to `adt-run --class` ''classname''. If given, adt-run will only run `Tests:` with that class name and ignore the others. This avoids unnecessarily running non-hardware specific tests, e. g. the kernel's `rebuild` test.
+* '''instance''': This is used to select target hardware, and depends on the particular testbed backend. Usually this will be the ssh setup script for MaaS, and machines in MaaS would be tagged with these instance type names. Then this would be translated as e. g.
+  <pre>
+adt-run [..]--- ssh -s maas -- --acquire 'tag=thinkpadx230 [..]'
+  }}}
+* '''setup-commands''': Passed to `adt-run --setup-commands`.
+* '''scenario''', '''platform-id''': No operational semantics for running the test.
+
+All fields will be copied to the `testinfo.json` result so that proposed-migration (or other clients) can match the result to the request.
+
+There is no change in the structure of the results in Swift.
+
+=== Results evaluation ===
+
+The test's class name does not need to be explicitly handled or represented in tracking the results, as this is merely a CI platform neutral way to refer to a particular configuration of concrete platforms/scenarios. The two new "dimensions" that need to be represented and tracked are "instance" (i. e. hardware type) and "scenario".
+
+However, we expect that we'll have test classes for only a handful of packages. Showing these two new dimensions in `excuses.{html,yaml}` for all of the thousands of packages that we have would be unwieldy, and it would also break backwards compatibility with existing tools that parse `excuses.yaml`.
+
+Therefore we consider a hardware type instance and a scenario as an extension of "architecture" (which by itself is also already a kind of "hardware type instance"). For tests with classes, proposed-migration will move from using the raw architecture name (like "armhf") to the `platform-id` value. This will require only very little code change and leaves the existing data structures, `excuses.html` etc. intact.
+
+The `excuses.yaml` for `linux-lts-xenial` would then look like:
+
+{{{
+tests:
+  autopkgtest:
+    linux-lts-xenial 4.3.0-1:
+      amd64:
+      - PASS
+      - http://autopkgtest.ubuntu.com/packages/l/linux-lts-xenial/trusty/amd64
+      amd64-thinkpadx230-std:
+      - ALWAYSFAILED
+      - http://autopkgtest.ubuntu.com/packages/l/linux-lts-xenial/trusty/amd64
+      amd64-hp9000-secureboot:
+      - REGRESSION
+      - http://autopkgtest.ubuntu.com/packages/l/linux-lts-xenial/trusty/amd64
+      [...]
+</pre>
+
+'''Note:''' For these results the generic links to autopkgtest.ubuntu.com don't lead you to the particular run of that platform-id. This is already the case for tests which give different results for different triggers. The reported links could be changed to point to the particular test `result.tar`, log, or we add another field for the run ID. But this is purely an UI/presentation matter and should be handled outside of this specification.
+
+Correspondingly, `excuses.html` would show these platform IDs as additional architectures:
+
+* autopkgtest for linux-lts-xenial 4.3.0-1: amd64: Pass, amd64-thinkpadx230-std: Always failed, ...

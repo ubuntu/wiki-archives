@@ -1,0 +1,133 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+AppArmor profiles in Ubuntu can come from 1 of 3 places:
+# A package which provides its own profile (eg cupsys)
+# The apparmor-profiles package from universe
+# The user (eg either manually generated or downloaded from the internet)
+
+This document deals with moving profiles from apparmor-profiles into a package providing its own profile, while being careful not to destroy user generated profiles.
+
+=== Life of a Profile ===
+A profile can either be hand-generated or come from upstream's AppArmor sources. In either case, if it is well-made and general enough, it is put in the apparmor-profiles package for wider testing. To add a profile to apparmor-profiles, you can <nowiki>[[https://help.ubuntu.com/community/ReportingBugs|file a bug against apparmor]]</nowiki>. Profiles in apparmor-profiles should come installed in 'complain mode', and should also be a conffile. Once the profile has received wider testing and deemed appropriate for general use, it can migrate from apparmor-profiles to the package providing its own profile. Once the profile has migrated to this package, the profile should be in 'enforce mode'. Profile migration should occur in the development release of Ubuntu, and migrated profiles are generally not appropriate for StableReleaseUpdates.
+
+=== Migration Steps ===
+Migrating a profile involves updating apparmor-profiles, the package that will provide  the profile, and testing.
+
+==== Updating apparmor-profiles ====
+Ubuntu's keeps its AppArmor configuration in a bzr tree in Launchpad. To update apparmor-profiles:
+ 1. Checkout the 'ubuntu' branch of apparmor: <pre>
+bzr branch lp:ubuntu/trusty/apparmor
+</pre>
+ 1. Remove the profile for bzr: <pre>
+cd apparmor
+bzr rm profiles/apparmor.d/<profile>
+</pre>
+# Bump the changelog version and make an appropriate note using 'dch', making note of this new version
+# Commit and push the changes to the bzr branch if you have write access, otherwise, create a patch with: <pre>
+bzr commit -m "Removed profile foo"
+bzr diff -p1 > apparmor-profiles.patch
+</pre>
+ You can now <nowiki>[[https://help.ubuntu.com/community/ReportingBugs|file a bug against apparmor]]</nowiki> and attach apparmor-profiles.patch to the bug.
+
+==== Updating the package ====
+The most important part of migrating a profile is to not break a user's system without the user explicitly being asked about a profile change. The basic idea is:
+* The default profile is in enforce mode on new installs
+* The default profile is in complain mode on upgrades of packages earlier than Ubuntu 7.04 "Feisty" (the first version of Ubuntu to support AppArmor). Ubuntu 7.04 has been end-of-lifed, but the packages can be found in the <nowiki>[[http://old-releases.ubuntu.com/ubuntu/dists/feisty/|old releases archive]]</nowiki>.
+* The user is prompted on installs/upgrades when there is an existing profile and it is different from the newly installed version
+* The default profile is in complain mode on upgrades from before the package first shipped an enforcing profile, when there is no existing profile or the existing profile is the same as the one in the old apparmor-profiles 
+
+Updating the package providing the profile requires several steps, and will require tailoring for the specific package. In general, the steps to migrate the profile into this package is:
+ 1. Update debian/control to use a Conflicts and Replaces on versions of apparmor-profiles earlier than the one you just updated, above. For example, if the newly updated apparmor-profiles is version '2.1+1075-0ubuntu4', then debian/control should have these entries in the binary package section that will provide the profile: <pre>
+Conflicts: apparmor-profiles (<< 2.1+1075-0ubuntu4)
+Replaces: apparmor-profiles (<< 2.1+1075-0ubuntu4)
+</pre> '''Note:''' Technically 'Replaces' should be enough according to [http://www.debian.org/doc/debian-policy/ Debian Policy]. Observed behavior, however, shows if you install this package and then later the old version of apparmor-profiles, apparmor-profiles will overwrite your package's profile.  The 'Conflicts' prevents this.
+
+ 1. Update the package's dirs file to contain <code>etc/apparmor.d/force-complain</code>
+
+ 1. Update the packages's preinst script to force complain mode on certain upgrades: <pre>
+APP_PROFILE="<profile name>"
+APP_CONFFILE="/etc/apparmor.d/$APP_PROFILE"
+APP_COMPLAIN="/etc/apparmor.d/force-complain/$APP_PROFILE"
+if [ "$1" = "upgrade" ]; then
+    mkdir -p `dirname $APP_COMPLAIN` 2>/dev/null || true
+    if dpkg --compare-versions $2 lt <version of package in Feisty> ; then
+##### force-complain for pre-apparmor upgrades
+        ln -sf $APP_CONFFILE $APP_COMPLAIN
+    elif dpkg --compare-versions $2 lt <first version of package shipping enforcing profile> ; then
+        if [ -e "$APP_CONFFILE" ]; then
+            md5sum="`md5sum \"$APP_CONFFILE\" | sed -e \"s/ .*//\"`"
+            pkg_md5sum="`sed -n -e \"/^Conffiles:/,/^[^ ]/{\\\\' $APP_CONFFILE'{s/.* //;p}}\" /var/lib/dpkg/status`"
+            if [ "$md5sum" = "$pkg_md5sum" ]; then
+######### force-complain on upgrade from pre-shipped profile and
+######### existing profile is same as in conffiles
+                ln -sf $APP_CONFFILE $APP_COMPLAIN
+            fi
+        else
+####### force-complain on upgrade from pre-shipped profile and
+####### there is no existing profile
+            ln -sf $APP_CONFFILE $APP_COMPLAIN
+        fi
+    fi
+fi
+</pre>
+
+ 1. Update the package's postinst script to reload the profile: <pre>
+APP_PROFILE="/etc/apparmor.d/<profile>"
+if [ -f "$APP_PROFILE" ] && aa-status --enabled 2>/dev/null; then
+    apparmor_parser -r "$APP_PROFILE" || true
+fi
+</pre> This is usually done as the last step in 'configure' or before invoke-rc.d is called.
+
+ 1. Update the package's postrm script to have: <pre>
+if [ "$1" = "purge" ]; then
+    APP_PROFILE="<profile name>"
+    rm -f /etc/apparmor.d/force-complain/$APP_PROFILE >/dev/null 2>&1 || true
+    rm -f /etc/apparmor.d/disable/$APP_PROFILE >/dev/null 2>&1 || true
+    rmdir /etc/apparmor.d/disable >/dev/null 2>&1 || true
+fi
+</pre>
+
+ 1. Copy the file to debian/apparmor-profile (making sure it is in 'enforce mode')
+
+ 1. Update debian/rules to install the file to /etc/apparmor.d/<profile name>. This step will require tailoring specific to the package
+
+ 1. Update README.Debian to have a clause like (being careful to format it like the other parts of the file): <pre>
+Apparmor Profile
+----------------
+If your system uses AppArmor, please note that the shipped enforcing profile works with the default installation, and changes in your configuration may require changes to the installed apparmor profile. Please see https://wiki.ubuntu.com/DebuggingApparmor before filing a bug against this software.
+</pre>
+
+ 1. Bump the changelog version and describe all the changes made to the package using 'dch'
+
+ 1. '''OPTIONAL:''' Update debian/control to: <pre>
+Suggests: apparmor (>= 2.1+1075-0ubuntu6)
+</pre> (this version is required because it is the first to include the force-complain/ directory)
+
+=== Testing ===
+Testing the profile for general usage is '''''extremely''''' important, as uploading an untested enforcing profile will be very disruptive for users. See DebuggingApparmor for details of the process of debugging. In general, you should:
+# Test the enforcing profile against the default installation of the package
+# Test the enforcing profile against common usage of the package
+# Verify the packaging is correct by being able to answer 'yes' to the following questions:
+** Does a new installation work correctly?
+** Does an upgrade work correctly?
+** Does an upgrade from a pre-apparmor version work correctly (eg dapper - hardy should be no prompt/force-complain)?
+** Does an upgrade with an unchanged apparmor-profiles profile work correctly (no prompt/force-complain)?
+** Does an upgrade with an existing modified profile work correctly?
+** Does a new installation with the old apparmor-profiles work correctly?
+** Does a new installation with the old apparmor-profiles with an existing modified profile work correctly?  
+** Does a new installation with the new apparmor-profiles work correctly?
+** Does a new installation with the new apparmor-profiles with an existing modified profile work correctly?
+** Does an upgrade of the package and apparmor-profiles work correctly?
+** Does an upgrade of the package and apparmor-profiles with an existing modified profile work correctly?
+
+ '''IMPORTANT:''' Unless otherwise noted, 'work correctly with an existing modified profile' means that dpkg will prompt the user on what to do with the modified profile, and not simply overwrite it.
+
+Exercising the profiles should be done with the <nowiki>[[https://code.launchpad.net/qa-regression-testing|QA Regression Testing]]</nowiki> scripts, if available. If the script is lacking, it should be modified, and if a script does not exist for the package, one should be created. Once testing is completed, create a debdiff for the package and <nowiki>[[https://help.ubuntu.com/community/ReportingBugs|file a bug against apparmor]]</nowiki>, attaching the debdiff to the bug (see UbuntuDevelopment for details).

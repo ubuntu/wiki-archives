@@ -1,0 +1,96 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+=== Problem Statement ===
+
+Within a Juju deployed OpenStack cloud based on Neutron networking, tenant networks are created as overlay networks which are tunnelled between compute nodes and neutron gateway nodes using GRE encapsulation.
+
+GRE encapsulation has a 46 byte overhead over the standard 1500 MTU normal traffic generates.  So if tenant instances are configured with 1500 MTU, packet fragmentation and no-frag blocks will be seen within instances.
+
+=== Solutions ===
+
+==== Configure instances with a lower MTU ====
+
+Its possible to configure instances via DHCP to use a lower MTU; this is supported in the neutron-gateway charm, for example:
+
+<pre>
+juju set neutron-gateway instance-mtu=1450
+</pre>
+
+New Ubuntu instances will pickup this setting a lower the interface MTU accordingly; however support for this setting is non consistent across operating systems - for example, Windows and CirrOS don’t honour this setting by default.
+
+We have also seen odd behaviour from network tools that use multicast and UDP traffic - such as TFTP and corosync/pacemaker.
+
+For these reasons, this is not the preferred solution to this problem.
+
+==== Increase the MTU on physical network interfaces supporting overlay traffic ====
+
+By increasing the MTU’s on the physical interfaces carrying GRE traffic, a standard 1500 MTU packet can be accommodated without fragmentation.  1546 should be sufficient, however moving to jumbo frames with MTU of 9000 better.
+
+Note that you have to have support in the physical switches for increasing the MTU’s on the interfaces, otherwise MTU will never increase over 1500.
+
+===== Altering the MTU of network interfaces =====
+
+To set the MTU on an interface:
+
+<pre>
+sudo ip link set eth0 mtu 9000
+</pre>
+
+on a Juju managed deployment, you also need to the the mtu on br0:
+
+<pre>
+sudo ip link set juju-br0 mtu 9000
+</pre>
+
+This is of course not persistent, so follow the instructions for configuring MAAS to provide this option via DHCP.
+
+===== MAAS DHCP Configuration =====
+
+MAAS DHCP can be configured to provide interface MTU options to servers that it controls; this is done in the /etc/maas/templates/dhcp/dhcpd.conf.template file by adding:
+
+<pre>
+       option interface-mtu 9000;
+</pre>
+
+to the subnet template definition.  Tweak the cluster controller network configuration via the MAAS WebUI to ensure that this gets picked up and generated in /etc/maas/dhcpd.conf.
+
+===== Juju managed LXC containers =====
+
+If you are running Juju managed LXC containers on the same nodes you need to set the MTU on any veth interfaces attached to juju-br0 first otherwise the physical interface MTU will revert back to 1500:
+
+<pre>
+for container in `sudo lxc-ls`; do
+  config=/var/lib/lxc/$container/config
+  if ! sudo grep -q "lxc.network.mtu" $config; then
+    echo "lxc.network.mtu = 9000" | sudo tee --append $config
+    sudo lxc-stop --name $container
+    sudo lxc-start -d --name $container
+  fi
+done
+</pre>
+
+The stop/start of the container is critical otherwise settings will not be correct if the container is rebooted internally.
+
+===== Testing =====
+
+You can verify MTU configuration using iperf between physical servers:
+
+<pre>
+servera$ iperf -m -s
+</pre>
+
+<pre>
+serverb$ iperf -m -c servera
+</pre>
+
+Check it both ways :-).  And then do the same between instances within a tenant network in the cloud and to/from and instance to a physical network resource outside of the tenant network.
+
+Physical servers will show an MTU just under 9000, instances should be 1500.

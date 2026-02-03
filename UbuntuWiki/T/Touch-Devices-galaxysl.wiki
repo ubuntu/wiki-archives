@@ -1,0 +1,154 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+{| class="wikitable"
+|-
+| <tablebgcolor="#F1F1ED" tablewidth="40%" tablestyle="float:right;font-size:0.9em;margin:0 0 1em 1em;"style="padding:0.25em;"><<BR>>
+|}
+
+This page documents the steps and current status of the porting effort of Ubuntu to the Samsung Galaxy SL (i9003) device.
+
+{*} ''This work wouldn't have been possible without the invaluable help and guidance of '''Dheeraj CVR''' (<nowiki>[[http://forum.xda-developers.com/member.php?u=2875964|dhiru1602]]</nowiki>), a Recognized XDA Developer who created and maintains the Cyanogen``Mod i9003 port. Thanks!''
+
+=== Environment setup ===
+ 1. Install the build tools: <pre>
+sudo apt-get install git gnupg flex bison gperf build-essential \
+  zip bzr curl libc6-dev libncurses5-dev:i386 x11proto-core-dev \
+  libx11-dev:i386 libreadline6-dev:i386 libgl1-mesa-glx:i386 \
+  libgl1-mesa-dev g++-multilib mingw32 ubuntu-dev-tools tofrodos \
+  python-markdown libxml2-utils xsltproc zlib1g-dev:i386 schedtool bsdiff
+</pre>
+ 1. Install the Java 6 JDK to build Android itself (the Java 7 SDK will not work) <pre>
+sudo apt-get install openjdk-6-jdk
+</pre>
+ 1. Install the phablet tools, which include `repo` to sync Android git repositories <pre>
+sudo add-apt-repository ppa:phablet-team/tools
+sudo apt-get update
+sudo apt-get install phablet-tools android-tools-adb android-tools-fastboot
+</pre>
+ 1. Install heimdall, a tool to flash Samsung phones. Not strictly necessary, but if something goes wrong or you need to flash images directly, it comes handy, as the i9003 does not seem to support ADB's fastboot mode <pre>
+sudo apt-get install heimdall-flash
+</pre>
+
+=== Building Android for Ubuntu ===
+
+Ubuntu on phones boots from an Ubuntu image, but we still require some bits of Android to be present to talk to some proprietary drivers. Android (without the UI) then runs in an LXC container that is set up during the Ubuntu boot.
+
+These steps describe how to build this Android compatibility layer, and how to flash it on an i9003 along with the Ubuntu image.
+
+ 1. Initialise the Ubuntu Cyanogen``Mod 10.1 Android repository <pre>
+repo init -u git://phablet.ubuntu.com/CyanogenMod/android.git -b phablet-saucy
+</pre>
+ 1. Sync the repository. Note: this step will download several GBs worth of code and can take quite long <pre>
+repo sync -j 8
+</pre>
+ 1. Create a local manifest folder <pre>
+mkdir .repo/local_manifests
+</pre>
+ 1. Create the local manifest for the galaxysl device ('''FIXME''': investigate if the bluetooth bluedroid dependency can be dropped, as we're using bluez) <pre>
+echo '<?xml version="1.0" encoding="UTF-8"?>
+<manifest>
+  <project name="dplanella/android_device_samsung_galaxysl" path="device/samsung/galaxysl" remote="github" revision="cm-10.1-ubuntu" />
+  <project name="dhiru1602/android_vendor_samsung_galaxysl" path="vendor/samsung/galaxysl" remote="github" revision="cm-10.1" />
+  <project name="dplanella/android_kernel_samsung_latona" path="kernel/samsung/latona" remote="github" revision="cm-10.1-ubuntu" />
+</manifest>' > .repo/local_manifests/roomservice.xml 
+</pre>
+ 1. Sync the new repositories added to the local manifest <pre>
+repo sync -j 8
+</pre>
+ 1. Add additional directories to build by including this snippet in `build/core/main.mk`, after the `subdirs :=` lines <pre>
+ifeq ($(TARGET_PRODUCT), cm_galaxysl)
+subdirs += \
+	external/wpa_supplicant_8_ti \
+	external/bluetooth \
+	libnativehelper
+endif
+</pre>
+ 1. Generate a version.h file manually for the kernel build to work ('''FIXME''': find out why the version.h file is not generated during build as specified in the Makefile) <pre>
+cd hardware/ti/wlan/mac80211/compat_wl12xx/drivers/net/wireless/wl12xx
+echo 'static const char *wl12xx_timestamp = __TIMESTAMP__;
+static const char *wl12xx_git_head = "'$(git describe --dirty)'";' > version.h
+cd -
+</pre>
+ 1. Set up the build environment <pre>
+. build/envsetup.sh
+</pre>
+ 1. Build the image <pre>
+brunch galaxysl
+</pre>
+
+==== Output ====
+
+* The build results in a file named similarly to: <pre>
+out/target/product/galaxysl/cm-10.1-20131113-UNOFFICIAL-galaxysl.zip
+</pre>
+
+Where `20131113` is the date of the build
+* To make it more consistent with the official builds, rename the file to <pre>
+saucy-preinstalled-touch-armel+latona.zip
+</pre>
+
+==== Flashing ====
+
+# Have the device-specific image you created in the previous step ready, or alternatively <nowiki>[[http://ubuntuone.com/1yqr3AkKXUhl2H6t1X5f60|download a pre-compiled image from here]]</nowiki>
+# <nowiki>[[http://cdimage.ubuntu.com/ubuntu-touch/saucy/daily-preinstalled/20131018/saucy-preinstalled-touch-armhf.zip|Download the Ubuntu image]]</nowiki>
+# Connect your device to the computer via USB and reboot the device into recovery: <pre>
+adb reboot recovery
+</pre>
+# From the recovery menu, wipe the device's data
+# Copy the device-specific image to the device: <pre>
+adb push saucy-preinstalled-touch-armel+latona.zip /sdcard
+</pre>
+# Once the copy is complete, select the .zip file from the recovery menu and install it
+# Reboot into recovery again
+# '''FIXME''' after flashing recovery does no longer work: the phone won't boot. Looking at the kernel log, it seems it cannot find the system partition for some reason. Specifying `systempart` in the kernel config does not seem to make a difference, either. 
+# Copy the Ubuntu image to the device: <pre>
+adb push saucy-preinstalled-touch-armhf.zip /sdcard
+</pre>
+# Reboot
+# '''FIXME''' the boot is stuck at the Samsung logo
+** I can use <code>adb</code> commands, but not <code>adb shell</code>
+
+=== Building Android for CyanogenMod 10.1 ===
+
+'''This step is optional''' and only included here for reference purposes and to test that the upstream build works. At the end of these steps, you'll end up with a Cyanogen``Mod 10.1 image for the Samsung Galaxy SL (i9003).
+
+ 1. Initialise the Cyanogen``Mod 10.1 Android repository <pre>
+repo init -u git://github.com/CyanogenMod/android.git -b cm-10.1
+</pre>
+ 1. Sync the repository. Note: this step will download several GBs worth of code and can take quite long <pre>
+repo sync -j 8
+</pre>
+ 1. Create a local manifest folder <pre>
+mkdir .repo/local_manifests
+</pre>
+ 1. Create the local manifest for the galaxysl device <pre>
+echo '<?xml version="1.0" encoding="UTF-8"?>
+    <manifest>
+      <project name="dhiru1602/android_device_samsung_galaxysl" path="device/samsung/galaxysl" remote="github" revision="cm-10.1" />
+      <project name="dhiru1602/android_vendor_samsung_galaxysl" path="vendor/samsung/galaxysl" remote="github" revision="cm-10.1" />
+      <project name="dhiru1602/android_kernel_samsung_latona" path="kernel/samsung/latona" remote="github" revision="cm-10.1" />
+      <project name="CyanogenMod/android_packages_apps_SamsungServiceMode" path="packages/apps/SamsungServiceMode" remote="github" revision="cm-10.1" />
+    </manifest>' > .repo/local_manifests/roomservice.xml
+</pre>
+ 1. Sync the new repositories added to the local manifest <pre>
+repo sync -j 8
+</pre>
+ 1. Manually download some required pre-built packages <pre>
+sh vendor/cm/get-prebuilts
+</pre>
+ 1. Set up the build environment <pre>
+. build/envsetup.sh
+</pre>
+ 1. Build the image <pre>
+brunch galaxysl
+</pre>
+
+==== Output ====

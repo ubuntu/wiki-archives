@@ -1,0 +1,344 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+This page documents the Ubuntu-specific default compiler flags in the toolchain used to help provide additional <nowiki>[[Security-Features|security features]]</nowiki> to Ubuntu.  It is based on the work from GccSsp, <nowiki>[[Security-HardeningWrapper]]</nowiki>, and DistCompilerFlags.  Please attempt to fix a source package's problems before disabling a given compiler feature, and document the package and bug numbers in the Problems section below.
+
+== Default Flags ==
+
+=== -fstack-protector-strong ===
+
+First enabled in Ubuntu 6.10 as <code>-fstack-protector</code>, which enables run-time stack overflow verification using a stack canary.  See GccSsp for further details.  Most problems are related to packages that do not use stdlib directly (kernel modules, certain libraries, etc).
+
+Starting in Ubuntu 10.10, <code>--param ssp-buffer-size=4</code> was added as well to increase the number of functions protected by the stack protector. (The upstream default is "8".)
+
+Starting in Ubuntu 14.10, <code>-fstack-protector-strong</code> became the default protection level and setting <code>ssp-buffer-size</code> is no longer necessary.
+
+Failure examples:
+ <pre>
+'__stack_chk_fail' symbol not found
+</pre>
+  Indicates a program was compiled to expect to have the stdlib available, but did not find it at runtime.
+
+ <pre>
+undefined reference to `__stack_chk_fail_local'
+</pre>
+  Indicates a program is being linked without the needed libraries.  Usually this is a result of calling `ld` instead of `gcc` during a build to perform linking (e.g. see https://launchpad.net/bugs/588519).
+
+ <pre>
+* ** stack smashing detected ***
+Aborted
+</pre>
+  A function did not correctly maintain its stack variables.  Usually indicates a stack buffer overflow.
+
+Disabled with <code>-fno-stack-protector</code> or <code>-nostdlib</code> in <code>CFLAGS</code> / <code>CXXFLAGS</code>.
+
+=== -D_FORTIFY_SOURCE=3 ===
+
+First enabled as -D_FORTIFY_SOURCE=2 in Ubuntu 8.10 and updated to -D_FORITFY_SOURCE=3 in Ubuntu 24.04. Updated to Provides compile-time best-practices errors for certain libc functions, and provides run-time checks of buffer lengths and memory regions.  Only activated when compiled with <code>-O1</code> or higher.  Most problems are related to common unsafe uses of certain libc functions.  (For implementation details, see <nowiki>[[http://gcc.gnu.org/ml/gcc-patches/2004-09/msg02055.html|this post]]</nowiki>.  Starting with Jaunty, <nowiki>[[https://lists.ubuntu.com/archives/ubuntu-devel/2009-March/027832.html|fwrite]]</nowiki> was <nowiki>[[http://launchpadlibrarian.net/24428002/glibc_2.9-4ubuntu3_2.9-4ubuntu4.diff.gz|removed]]</nowiki> from the list of functions that are marked with "warn_unused_result".)
+
+Failure examples:
+ <pre>
+error: ignoring return value of 'int system(const char*)', declared with attribute warn_unused_result
+</pre>
+  The return value from <code>system()</code>, <code>write()</code>, and similar functions should be evaluated and handled appropriately.  In cases where one absolutely must throw away the return value, it can be discarded with an empty test: <code>if (system("...")) { } </code>, though this is not recommended.
+
+ <pre>
+error: call to '__open_missing_mode' declared with attribute error: open with O_CREAT in second argument needs 3 arguments
+</pre>
+  When using <code>open()</code> with <code>O_CREAT</code>, best-practice is to define a valid <code>mode</code> argument.  For the least modes, try using <code>(S_IRUSR|S_IWUSR)</code> first.  If that doesn't work as expected in the program, then start adding back perms.  For example, user and group: <code>(S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP)</code>; user, group, and other: <code>(S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH|S_IWOTH)</code>.
+
+ <pre>
+warning: call to ‘__read_chk_warn’ declared with attribute warning: read called with bigger length than size of the destination buffer
+</pre>
+  The call to <code>read()</code> was done into a buffer with the wrong size.  Double-check the size argument and the buffer size.
+
+ <pre>
+* ** %n in writable segment detected ***
+Aborted
+</pre>
+  On x86, use of <code>"%n"</code> in a format string is limited to read-only memory (not stack or heap allocated strings).
+
+ <pre>
+* ** buffer overflow detected ***
+Aborted
+</pre>
+  A buffer was going to be written past the end of its maximum length. For example, a call to <code>sprintf</code> should be changed to use <code>snprintf</code>. Other common cases include <code>read</code> warnings above, or <code>realpath</code> and <code>getwd</code> notes below. Since glibc version 2.15, <code>select</code> macros also make sure <code>FD_*</code> uses will not overflow. Please use <code>poll</code> instead. For a list of most of the run-time checked functions, see the output of:
+
+   <pre>
+readelf -sW $(ldd /bin/ls | awk '{if ($1 ~ /^libc\.so\./) {print $3; exit}}') | \
+  egrep ' FUNC .*_chk(@@| |$)' | \
+  sed -re 's/ \([0-9]+\)$//g; s/.* //g; s/@.*//g;' | \
+  egrep '^__.*_chk$' | \
+  sed -re 's/^__//g; s/_chk$//g' | \
+  sort
+</pre>
+
+  In the case of structures with "char allocme[1]" style strings where the string is mapped on top of a preallocated memory range, swapping <code>strcpy</code> with either <code>strncpy</code> or <code>memcpy</code> with the actual length of the allocated target is the right change to make.
+
+ <pre>
+* ** invalid %N$ use detected ***
+Aborted (core dumped)
+</pre>
+  Format string positional values are being skipped, which means their type (and size on the stack) cannot be checked.  This could cause unexpected results including stack content leaks, especially when using `%n`.  This is invalid, for example: `printf("%2$s\n", 0, "Test");` because position 1 is skipped.
+
+ <pre>
+* ** longjmp causes uninitialized stack frame ***: $program terminated
+</pre>
+  Something has gone wrong with an invalid longjmp use.
+
+Disable unused result tests with <code>-Wno-unused-result</code> in <code>CFLAGS</code> / <code>CXXFLAGS</code>. Totally disabled with <code>-U_FORTIFY_SOURCE</code> or <code>-D_FORTIFY_SOURCE=0</code> in <code>CPPFLAGS</code>.
+
+=== -Wformat -Wformat-security ===
+
+First enabled in Ubuntu 8.10.  Enables compile-time warnings about misuse of format strings, some of which can have security implications.  These options should only cause build failures if the package is compiling with <code>-Werror</code> or <code>-Werror=format-security</code>.  For details on marking up source to gain these warnings, see the <nowiki>[[http://library.gnome.org/devel/glib/stable/glib-Miscellaneous-Macros.html#G-GNUC-PRINTF--CAPS|glib macro documentation]]</nowiki> about gcc's "format" attribute.
+
+Failure examples:
+ <pre>
+warning: format ‘%s’ expects type ‘char *’, but argument 3 has type ‘int’
+</pre>
+  For packages that aren't already building with <code>-Wall</code>, format character to argument types will be checked.  Verify the correct variables for a given format string.
+
+ <pre>
+warning: format not a string literal and no format arguments
+</pre>
+  This is caused by code that forgot to use <code>"%s"</code> for a <code>*printf</code> function.  For example:
+   <pre>
+fprintf(stderr,buf);
+</pre>
+  should be:
+   <pre>
+fprintf(stderr,"%s",buf);
+</pre>
+
+Note: <code>-Werror=format-security</code> is turned on by default in 13.04 and later releases of Ubuntu.
+
+Disabled with <code>-Wno-format-security</code> or <code>-Wformat=0</code> in <code>CFLAGS</code> / <code>CXXFLAGS</code>.
+
+=== -fPIE ===
+
+First enabled in Ubuntu 16.10. Builds all objects with text relocation to allow for full ASLR. This option depends on <nowiki>[[#linker-PIE|-pie]]</nowiki>, below.
+
+Disabled with <code>-fno-PIE</code>.
+
+Ubuntu's GCC uses the `--enable-default-pie` configuration, which means that the flags `-fPIE -pie` are enabled by default.
+
+=== -fstack-clash-protection ===
+
+First enabled in Ubuntu 19.10 for all non-32bit ARM architectures, which
+ensures all variable length memory allocated from the stack (via `alloca()`
+or gcc variable length arrays etc) are probed at the time they are
+allocated. This mitigates stack-clash attacks by ensuring all stack memory
+allocations are valid (or by raising a segmentation fault if they are not,
+and turning a possible code-execution attack into a denial of service).
+
+Disabled with `-fno-stack-clash-protection` in <code>CFLAGS</code> / <code>CXXFLAGS</code>.
+
+=== -fcf-protection ===
+
+First enabled in Ubuntu 19.10 for x86 architectures (amd64, i386 and x32),
+which generates instructions to support Intel's Control-flow Enforcement
+Technology (CET). 
+
+Disabled with `-fcf-protection=none` in <code>CFLAGS</code> / <code>CXXFLAGS</code>.
+
+Note that `-fcf-protection` is incompatible with
+`-mindirect-branch` (which is used to implement <nowiki>[[https://software.intel.com/security-software-guidance/insights/deep-dive-retpoline-branch-target-injection-mitigation|retpoline]]</nowiki>).
+In such cases it is recommended to disable `-fcf-protection`.
+
+== Flags passed to the linker ==
+
+=== -Wl,-z,relro ===
+
+First enabled in Ubuntu 8.10.  Provides a read-only relocation table area in the final ELF.  This option paves the way for using <code>-z now</code> which forces all relocations to be resolved at run-time (which would cause some additional initial load delay), providing an even higher level of protection to the relocation table -- it could then be entirely read-only which can be used to further harden long-running programs like daemons.
+
+No known failure examples.
+
+Disabled with <code>-Wl,-z,norelro</code> in <code>LDFLAGS</code>.
+
+=== -Wl,-z,now ===
+
+First enabled in Ubuntu 16.10. When linking as <nowiki>[[#linker-PIE|PIE]]</nowiki> (an executable shared object), this enables immediate relocation table binding (BINDNOW) to gain full <nowiki>[[#relro|RELRO]]</nowiki> coverage over the resulting ELF binary.
+
+Disabled with <code>-Wl,-z,lazy</code>
+
+=== -Wl,-pie ===
+
+First enabled in Ubuntu 16.10. This builds binary as a Position Independent Executable (an executable shared object). (This option depends on <nowiki>[[#PIE|-fPIE]]</nowiki> and is augmented by <nowiki>[[#immediate-binding|immediate binding]]</nowiki>)
+
+Disabled with <code>-Wl,-no-pie</code>
+
+Ubuntu's GCC uses the `--enable-default-pie` configuration, which means that the flags `-fPIE -pie` are enabled by default.
+
+=== -Wl,--hash-style= ===
+
+First enabled in Ubuntu 8.04 (or earlier?) as <code>-Wl,--hash-style=both</code>. Enabled as <code>-Wl,--hash-style=gnu</code> in Ubuntu 10.10.  Set the type of the linker's hash table(s). The gnu hash style results in smaller objects and faster dynamic linking at runtime.
+
+=== -Wl,--no-copy-dt-needed-entries ===
+
+Also known as <code>--no-add-needed</code>.  First enabled in Ubuntu 11.04 (but disabled in the final 11.04 release), and permanently enabled in Ubuntu 11.10. This option affects the treatment of dynamic libraries referred to by DT_NEEDED tags inside ELF dynamic libraries mentioned on the command line. This option also has an effect on the resolution of symbols in dynamic libraries. This will be the default in the upcoming binutils-2.22 release.
+
+This may result in build errors. More information and recipes how to fix such build errors can be found at 
+NattyNarwhal/ToolchainTransition and <nowiki>[[http://wiki.debian.org/ToolChain/DSOLinking#Not_resolving_symbols_in_indirect_dependent_shared_libraries|the corresponding Debian page]]</nowiki>.
+
+=== -Wl,--as-needed ===
+
+First enabled in Ubuntu 11.04 (but disabled in the final 11.04 release), and permanently enabled in Ubuntu 11.10. 
+With this option the linker will only add a DT_NEEDED tag for a dynamic library mentioned on the command line, if if the library is actually used.
+
+A common build error with this option enabled is seen when libraries appear on the command line before objects referencing these libraries.  More information and recipes how to fix such build errors can be found at 
+NattyNarwhal/ToolchainTransition and <nowiki>[[http://wiki.debian.org/ToolChain/DSOLinking#Only_link_with_needed_libraries|the corresponding Debian page]]</nowiki>.
+
+== Failure Triage ==
+
+=== catching backtraces from glibc abort ===
+When glibc aborts due to the stack protector or glibc fortification checks, it writes a backtrace to the controlling terminal of the process (<code>/dev/tty</code>) and not <code>stderr</code>.  This can lead to unexpected results when running scripts, X, or other applications where <code>stderr</code> and the controlling terminal are not the same location.  To have this written to <code>stderr</code> instead, the process needs to run with the environment variable <code>LIBC_FATAL_STDERR_=1</code> set (yes, there is a trailing underscore in the variable name).
+
+=== FORTIFY return value checking ===
+
+When encountering "ignoring return value of ..." build problems due to the FORTIFY flag, it is best to follow this general approach (and to refer to the above individual sections on a case-by-case basis):
+
+# If there are examples of error handlers in near-by code, emulate them. An example can be seen with <nowiki>[[http://launchpadlibrarian.net/19891829/fortify-warnings.patch.dpatch|conntrack]]</nowiki>.  This is, obviously, the preferred method of dealing with it.
+# If there isn't an obvious way to handle the error, then stubbing out an empty handler is the next way to go -- fundamentally, this doesn't improve (or weaken) the quality of the code -- ignoring the return code is what's already happening, so this doesn't change anything.  However, what it _does_ do, is allows the FORTIFY option to still be enabled, which means the program will gain the run-time FORTIFY protections.
+# If there isn't a way to work around the error, and the problem is isolated to a small area of the source code, I've disabled FORTIFY for _only_ <nowiki>[[http://launchpadlibrarian.net/17169346/sysklogd_1.5-2ubuntu5_1.5-2ubuntu6.diff.gz|those source files]]</nowiki>, which can be a pain, depending on the package's build methods.
+# If nothing works, and other people have looked at it, and no one has any ideas about how to work around a problem with FORTIFY, then it's time to disable it for the entire build using the -U_FORTIFY_SOURCE CFLAG.
+
+Now, in all of these situations, upstream needs to be notified.  Especially for the #2, where they need to make a larger design decision about how to deal with the unhandled error condition.
+
+Also, in situations where you've had to disable FORTIFY (#3, #4), please document the issue in the "Problems" section below (preferably also with a bug).
+
+==== Ignoring return code of write() ====
+
+If the error is ignoring the return code of write() or a similar function then it indicates that the
+code is not implementing retry support for writes. write(2) says
+
+<pre>
+       If  a  write()  is interrupted by a signal handler before any bytes are
+       written, then the call fails with the error EINTR; if it is interrupted
+       after  at  least  one  byte  has  been  written, the call succeeds, and
+       returns the number of bytes written.
+</pre>
+
+So something like the following should be used to retry when there is a short write
+(thanks to SteveLangasek)
+
+<pre>
+  do {
+      written = write(fd, buf, count);
+      if (written == count)
+          break;
+      if (written > 0) {
+          buf += written;
+          count -= written;
+      }
+  } while (written >= 0 || errno == EINTR);
+  if (written < 0) {
+    /* Handle error */
+  }
+</pre>
+
+=== aborts in realpath and getwd ===
+Some applications call <code>realpath(3)</code> and <code>getwd(3)</code> with a buffer that is potentially too small (it should be <code>PATH_MAX</code> long).  This is usually a result of not including <code>limits.h</code> or not using <code>PATH_MAX</code> to define the size of the buffer used in the <code>realpath(3)</code> call (there is some confusion here: MAXPATHLEN should be equal to PATH_MAX, but may not be defined without <code>limits.h</code>).  So far, xulrunner and linux86 have been found and fixed, so there may be others.  For an example of how to fix this, please see the <nowiki>[[http://launchpadlibrarian.net/25307061/linux86_0.16.17-3ubuntu1_0.16.17-3ubuntu2.diff.gz|linux86 debdiff]]</nowiki>.
+
+=== thread sanitizer vs PIE ===
+
+If an executable linked with the thread sanitizer fails on startup with a message like
+
+<pre>
+==3581==ERROR: ThreadSanitizer failed to allocate 0x4000 (16384) bytes at address 1ff65735c0000 (errno: 12)
+</pre>
+
+then it needs to be built without PIE (i.e. pass -no-pie to the link step).
+
+== Extending FORTIFY ==
+If you are writing libraries or other code where you want to provide mark-up in headers to yell loudly when a function is misused, you can add them yourself.
+
+=== warn_if_result_ignored ===
+
+* Add to your function declaration: <code>__attribute__ ((warn_unused_result))</code>
+
+== Problems ==
+If the upstream source cannot be reasonably fixed and a package must have compiler flags disabled or some other work-around, please open a launchpad bug, tag it with "hardening-ftbfs", and link to it here along with an explanation of what the problem is:
+
+=== General ===
+
+==== libxfont1 ====
+   doesn't work with -Bsymbolic-functions (can't work, see https://launchpad.net/bugs/230460 for analysis).
+
+==== sysklogd ====
+  When built with FORTIFY_SOURCE, klogd misdirects calls to syslog() into glibc instead of into syslog.o.  See https://bugs.launchpad.net/ubuntu/+source/sysklogd/+bug/255635
+
+  Workaround: added -U_FORTIFY_SOURCE to klogd.o's Makefile line.
+
+==== synergy ====
+  Fails to build with FORTIFY_SOURCE, and when patched to solve the warnings, it seems to hang and behave strangely.  See https://bugs.launchpad.net/bugs/250869 and http://bugs.debian.org/cgi-bin/bugreport.cgi?bug=488460
+
+  Workaround: added -U_FORTIFY_SOURCE to debian/rules CXXFLAGS.
+
+==== gclcvs ====
+  FTBFS with the error "__stack_chk_fail is undefined" and needs the "-fno-stack-protector" CFLAG to fix the FTBFS, see https://bugs.launchpad.net/ubuntu/+source/gclcvs/+bug/638068
+
+==== pth ====
+  Runtime error on ARM, where the package uses setjmp/longjmp to implement user space threading. It does not work however since the stack pointer sanity check introduced in longjmp in glibc 2.11 . Disabled FORTIFY_SOURCE for the armel build of the package, see https://bugs.launchpad.net/ubuntu/+source/gnupg2/+bug/599862
+
+==== tcc ====
+  tcc 0.9.27~git20140923.9d7fb33-3 introduces new tests (test3 and abitest) which fail on i386 with undefined symbol '__stack_chk_fail_local' when stack protection is enabled.  Added "-fno-stack-protector" as a workaround, see https://bugs.launchpad.net/ubuntu/+source/tcc/+bug/1500147
+
+=== Valid Code, But Compiler Is Unhappy ===
+
+==== bacula ====
+   Upstream has strange unions that upsets FORTIFY_SOURCE.  https://bugs.launchpad.net/ubuntu/+source/bacula/+bug/265102
+
+==== wine ====
+   FORTIFY_SOURCE generates too many false positives, upstream is disabling it entirely.  http://bugs.winehq.org/show_bug.cgi?id=24606 https://bugs.launchpad.net/ubuntu/+source/wine1.2/+bug/665270
+
+==== zsnes ====
+   Upstream has strange memory manipulations that upsets FORTIFY_SOURCE.  https://bugs.launchpad.net/ubuntu/intrepid/+source/zsnes/+bug/250425
+
+=== Conflicting Goals ===
+
+==== duma ====
+
+   Duma is a library specifically to find various overflows, etc, so it get confused by glibc getting in the way.
+
+=== Test Suites Not Updated ===
+
+==== binutils ====
+   Add -Wno-format-security to CFLAGS, CXXFLAGS, due to picky default hardening options.
+
+==== binutils-avr ====
+   Set -Wno-format-security and -U_FORTIFY_SOURCE to avoid FTBFS.  https://bugs.edge.launchpad.net/ubuntu/+source/binutils-avr/+bug/301732
+
+==== gdb ====
+   Testsuite reports false failures due to warnings, etc.
+
+==== scheme2c ====
+
+   https://launchpad.net/ubuntu/+source/scheme2c/2011.07.26-2 shows longjmp failures.
+
+== Notes ==
+
+Sometimes 
+
+* To see a list of all CPP #define'd variables, use: <code>cpp -dM /dev/null</code>
+* Sometimes you need to get not only the command-line listed, but all built in defaults. There are ways to get that for the effective built environment you are in, here an example for gcc:
+<pre>
+## In the build env dpkg-dev gcc should already be present
+## get built in -m options 
+  $ gcc -Q --help=target
+## Get any -f and similar options built-in or derived from default buildflags
+  $ echo "int main(void) {}" | gcc $(dpkg-buildflags --get LDFLAGS) -o /dev/null -v -x c - &> /dev/stdout| grep collect
+## Get linker options built in or derived from default buildflags
+  $ echo "int main(void) {}" | gcc $(dpkg-buildflags --get CFLAGS) -o /dev/null -v -x c - 2>&1 | grep 'cc1'
+## get Defines
+  $ gcc -dM -E - < /dev/null
+## If a package build you are debugging inserts any further flags/defines/options you
+## should add them to these calls as well so that the result is the full list.
+</pre>

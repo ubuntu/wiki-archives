@@ -1,0 +1,143 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+* '''Launchpad Entry''': UbuntuSpec:foundations-lucid-ubiquity-partitioner-optimisation
+* '''Created''': 2009-11-25
+* '''Contributors''': EvanDandrea, ColinWatson, ...
+* '''Packages affected''': ubiquity
+
+=== Summary ===
+
+ubiquity's partitioner is kind of slow, especially with lots of disks/partitions. This is partly due to slowness in the underlying partitioner that's also visible in d-i (though less annoying there) and partly due to inefficiencies in the ubiquity integration. Let's make it be more pleasant to use.
+
+(Note that this is mainly about the manual partitioner, although some effects would likely ripple out to the automatic partitioner as well.)
+
+=== Release Note ===
+
+Ubiquity's manual partitioner is now substantially faster.
+
+=== Rationale ===
+
+This has been an ever-increasing source of user complaints, and it would be lovely to spend some time optimising it. We just need to make sure that the time spent doing so isn't open-ended, of course.
+
+=== Design ===
+
+Exact optimisation strategies often need to be determined during implementation, but we discussed a number of tools and techniques we might use.
+
+"Scanning disks" is more or less equivalent to pressing Enter on each partition in d-i to fetch information about it, and then going back to the next one. This implies that there are two main avenues of attack: make ubiquity's partitioning wrapper code need to do less work in terms of partman operations, and make partman itself faster.
+
+==== Reducing partman operations in ubiquity ====
+
+The way ubiquity scans all partitions incidentally involves asking partman to "redisplay" the partition tree at each step, even though no changes have been made. We should be able to cache or avoid this for a speed-up on the order of 50%.
+
+Ubiquity's partitioner is a trade-off between maintainability and efficiency. We will identify places where we're asking partman for a relatively small amount of information at high cost, and replace those by using our existing Python bindings to `parted_server`.
+
+Using `cdebconf` rather than Perl `debconf` in ubiquity didn't make a significant speed difference the last time Colin tried it, but we should recheck this. Ubiquity already has a switch for this which would at most just need a small amount of bitrot-fixing. Note, though, that there are some intentional semantic differences between `cdebconf` and `debconf`, particularly in the area of the `seen` flag, so we would need to be very careful of semantics here.
+
+`ntfsresize` and other resizing tools are called quite often to determine resize bounds of partitions. These are expensive, so we'll figure out how the number of calls here can be reduced.
+
+There are a number of places where we rescan all partitions, even though we can determine that only a certain number of partitions need to be rescanned (for example, resizing a partition only affects the resized partition and the part of the disk immediately following it). We will assess and reduce these.
+
+The partition bar construction in cairo is quite slow; it apparently repeatedly calls `os-prober`, and the caching attempt seems not to be working.
+
+There is a long pause after the partitioner while a check script runs `du` to find out the size of `/rofs`. We will do this statically when building the live filesystem instead.
+
+==== Speeding up partman ====
+
+Progress on this in the past has been blocked on the absence of a good shell profiling tool; `strace` is too intrusive and tends to disturb timings too much, and in any case does not make it easy to see the big picture. During the UDS session, `bootchart` was pointed out as a promising tool here. We'll apply this to manual partitioning sessions. The main focus should be on `choices` scripts in `/lib/partman` and their descendants, since those are used to generate menus and inefficiencies here will be very noticeable.
+
+(Implementation note: it turns out that `bootchart` is too cumbersome, and the images it generates are very large and don't contain quite the right kind of information anyway. In practice, changing `/lib/partman/lib/base.sh` to log `$0` and the timestamp (`date --rfc-3339=ns`) each time it's sourced seems to be quite sufficient for practical, lightweight profiling.)
+
+=== Implementation ===
+
+==== UI Changes ====
+
+Even with speed increases, the pop-up progress window is jarring. We will follow up on Bug:336751 to restyle this.
+
+=== Test/Demo Plan ===
+
+We'll designate a test system for timings, which will probably be a virtual machine on Colin's laptop (though of course anyone can do similar timings from Karmic->Lucid on some other system). The most important attribute is the partition layout, and we already know that the partitioner is slow when there are lots of partitions, so we will time a system containing two disks with eight partitions each.
+
+A sensible goal seems to be to get the time for "Scanning disks" on such a system down to 20% of the time in Karmic.
+
+=== Benchmarks ===
+
+==== Methodology ====
+
+(It's not science unless you show reproducible methods ...)
+
+I used the following commands in `parted` to initialise each disk: <pre>
+mklabel msdos
+mkpartfs primary ext2 1 100M
+mkpart extended 100M -1
+mkpartfs logical ext2 100M 200M
+mkpartfs logical ext2 200M 300M
+mkpartfs logical ext2 300M 400M
+mkpartfs logical ext2 400M 500M
+mkpartfs logical ext2 500M 600M
+mkpartfs logical ext2 600M 700M
+mkpartfs logical ext2 700M 800M
+</pre>
+
+(You have to tell `parted` to ignore an exception for each of the `mkpartfs logical` calls. This is probably a bug but I haven't bothered to investigate it as yet.)
+
+Edit `/lib/partman/lib/base.sh` and make the following change: <pre>
+-[ "$PARTMAN_TEST" ] || log '*******************************************************'
++[ "$PARTMAN_TEST" ] || log "******************************************************* $(date --rfc-3339=ns)"
+</pre>
+
+Edit `/usr/lib/ubiquity/ubiquity/debconffilter.py` and make the following change: <pre>
+-            # bizarre time formatting code per syslogd
+-            time_str = time.ctime()[4:19]
+-            print >>sys.stderr, "%s debconf (%s): %s" % (time_str, key,
+-                                                         ' '.join(args))
++            print >>sys.stderr, "%.6f debconf (%s): %s" % (time.time(), key,
++                                                           ' '.join(args))
+</pre>
+
+Edit `/usr/lib/ubiquity/ubiquity/filteredcommand.py` and make the following change: <pre>
+-            # bizarre time formatting code per syslogd
+-            time_str = time.ctime()[4:19]
+             message = fmt % args
+-            print >>sys.stderr, '%s %s: %s' % (time_str, PACKAGE, message)
++            print >>sys.stderr, '%.6f %s: %s' % (time.time(), PACKAGE, message)
+</pre>
+
+Now:
+* Run the installer with `ubiquity -d`, and step through it until the partitioner.
+* Select manual partitioning and press Forward.
+* Wait until the "Scanning disks" progress window disappears and you get the manual partition list.
+* Quit the installer.
+* Copy `/var/log/partman` and `/var/log/installer/debug` to another machine for safekeeping. 
+* Inspect `/var/log/installer/debug` in a pager, and regex-search for "Building cache$". Take that line's timestamp. Go to the end of the file and take the last recorded timestamp, which should read "partition_cache end". Subtract the first timestamp from the second; this is the benchmark time.
+
+==== Results ====
+
+The test system is a Dell Latitude D830, Intel Core 2 Duo 1800MHz, 3GB RAM, VT extensions enabled, running `kvm -m 512`.
+
+The baseline was Ubuntu desktop i386, 2009-12-14; this is what I had handy, but unfortunately this is a daily build so will not be available for long. However, Lucid Alpha 1 or even Ubuntu 9.10 should be pretty close for comparison purposes.
+
+Baseline: 74.7 seconds
+
+`debconf_select` optimisation (`partman-base` <nowiki>[[http://bazaar.launchpad.net/~ubuntu-core-dev/partman-base/ubuntu/revision/175|r175]]</nowiki> and <nowiki>[[http://bazaar.launchpad.net/~ubuntu-core-dev/partman-base/ubuntu/revision/176|r176]]</nowiki>): 52.6 seconds
+
+Above plus caching output of `partition_tree_choices` (`partman-base` <nowiki>[[http://bazaar.launchpad.net/~ubuntu-core-dev/partman-base/ubuntu/revision/177|r177]]</nowiki>): 47.0 seconds
+
+Above plus gathering information from `parted_server` a disk at a time rather than a partition at a time (`ubiquity` <nowiki>[[http://bazaar.launchpad.net/~ubuntu-installer/ubiquity/trunk/revision/3624|r3624]]</nowiki>): 46.8 seconds
+
+Above plus suppressing unnecessary recalculation of menu choices (`partman-base` <nowiki>[[http://bazaar.launchpad.net/~ubuntu-core-dev/partman-base/ubuntu/revision/179|r179]]</nowiki> and `ubiquity` <nowiki>[[http://bazaar.launchpad.net/~ubuntu-installer/ubiquity/trunk/revision/3631|r3631]]</nowiki>): 26.2 seconds
+
+Ubiquity 2.1.16 plus question type caching, `method_choices` inlining, and `mountpoint_choices` inlining: 16.0 seconds
+
+Above plus avoiding descending into `partman/free_space`: 14.6 seconds
+
+----
+CategorySpec

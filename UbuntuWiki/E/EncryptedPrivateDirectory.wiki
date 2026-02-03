@@ -1,0 +1,275 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+=== Usage ===
+This specification was implemented in Ubuntu Intrepid Ibex.  For usage information, see:
+* https://help.ubuntu.com/community/EncryptedPrivateDirectory
+
+=== Overview ===
+
+* '''Launchpad Entry''': https://blueprints.edge.launchpad.net/ubuntu/+spec/encrypted-private-directories
+* '''Created''': 2008-05-30
+* '''Contributors''': DustinKirkland
+* '''Packages affected''': ecryptfs-utils, libecryptfs0, adduser
+
+=== Summary ===
+
+Provide a default location for users to securely store sensitive data using filesystem encryption.
+* ~/Private for each human user, permission 700 and an ecryptfs mountpoint
+
+Improve the user experience of filesystem encryption.
+* Hook PAM to use login password to unwrap an ecryptfs mount passphrase and automatically mount on login
+
+=== Rationale ===
+
+Ubuntu has supported LVM+LUKS encryption of entire partitions--an encompassing method of encrypting an entire disk.  However, there are several drawbacks:
+* performance penalties for encrypting/decrypting all data, even non-sensitive data, such as /lib and /usr
+** painful for systems with intense i/o to such data (e.g. compilations of open source code)
+* a passphrase must be entered at every system restart, thereby disabling unattended boots
+** painful for server users
+* all content is encrypted using a single passphrase
+** per-user encrypted content would be nice
+* incremental backups of encrypted data is basically impossible with LVM+LUKS encryption
+** would be nice to sync encrypted changes on a per-file basis to untrusted remote backup systems
+* sensitive data should not be saved on remote storage (samba, cifs, nfs, etc)
+** would be more secure to encrypt all sensitive data written to remote storage
+
+Powerful <nowiki>[[http://en.wikipedia.org/wiki/Cryptographic_filesystems|filesystem-level encryption]]</nowiki> technology has been present in the Linux kernel since 2.6.19, including the ecryptfs filesystem and the kernel keyring.  Userspace components, such as ecryptfs-utils, have been present in Ubuntu ''universe'' since Gutsy.  Encrypted filesystems can now leverage advanced key management technologies (e.g. openssl, tpm, pkcs#11). to The tools exist for users to cobble together encrypted filesystems.
+
+This specification defines the remaining tooling and missing pieces required to provide a cryptographic storage location for each user on an Ubuntu system automatically and by default.
+
+=== Use Cases ===
+# Lindsy uses her SSH keys for authentication, but does not lock them with passphrases since she uses them for a number of automatic operations (backups and such).  Lindsy wants a simple location where she can securely store her private SSH key without using an ssh-passphrase, protected cryptographically in case her laptop is stolen.
+# Leigh frequently uses her system to compile non-sensitive open source code.  While she has data on the system that she would like to cryptographically protect, she does not want to pay the encryption performance penalty on highly intensive i/o operations such as her kernel compiles.  She would like to only encrypt some of her documents she stores in /home/leigh, rather than all of /.
+# Donna administers a small office server where several users have shell accounts.  She would like to provide a simple mechanism whereby each of them have their own private directories where they can store their own sensitive files, which are readable to them when logged in, but encrypted on the disk and unreadable once they log out.
+# Donna also administers a desktop system similar to the office server, where several users have their own account and unique desktop environment.  She would like to provide a simple mechanism whereby each of them have their own private directories where they can store their own sensitive files, which are readable to them when logged in, but encrypted on the disk and unreadable once they log out.
+# Kim uses Linux on her corporate desktop/laptop workstation, and mounts Samba/CIFS/NFS/(other-network-storage) for performance/redundancy/replication/data-integrity.  She would like to ensure that all data written to the remote storage is encrypted, but available in clear-text on her workstation.
+# Steph is very diligent about incrementally rsync-ing her home directory to her remote co-lo backup system.  Since other people have physical access to her co-lo, she would very much like to incrementally sync encrypted copies of each file to her remote backup system.
+# Gerri has an ecryptfs ~/Private mountpoint, but now wants to remove the ecryptfs-utils package and eliminate the filesystem-level encryption on ~/Private (she's a huge fan of DAC, apparently).  She wants a way to undo the crytographic mountpoint.
+
+In all use cases, the proposed functionality provides cryptographic protection (beyond normal UNIX <nowiki>[[http://en.wikipedia.org/wiki/Discretionary_Access_Control|discretionary access controls]]</nowiki>) for each user not-currently-logged-in, but would protect the confidentiality of the ~/Private data in the event of physical theft of the system.
+
+=== Scope ===
+
+The current scope is to create a per-user encrypted mountpoint at ~/Private (which contrasts nicely with a ~/Public directory).
+
+<nowiki>[[https://wiki.ubuntu.com/UDS-Intrepid/Report/Server#head-9c87f7689e8500581dd5999d2dcd3510fa5ff90c|As demonstrated within the sessions at UDS Prague]]</nowiki>, encryption within Ubuntu is a somewhat charged topic.  The goal is to scope this specification to something realistically achievable within the Intrepid development cycle.
+
+Additional items outside of the current scope include:
+* Encrypted swap
+* Other encrypted mountpoints (/root, /etc, /var, /home/*)
+* UI tools for creating/managing/automounting encrypted mountpoints (e.g., Nautilus integration)
+
+=== Design ===
+
+Provide a location for users to securely store sensitive data using filesystem encryption.
+* Create ~/Private for each human user
+** Maintain permissions of 700
+** Mount cryptographically (ecryptfs) on top of ~/.Private (also permission 700)
+
+Improve the user experience of filesystem encryption.
+* Hook PAM to use login password to unwrap a mount passphrase
+* Automatically mount ~/Private on login (console, ssh, desktop, etc)
+* Automatically unmount ~/Private logout
+
+In the Intrepid time frame, no information will be automatically written to ~/Private.  Users may be encouraged to move a few selected, sensitive files/directories to ~/Private and symlink to their traditional locations.  Some candidates might be:
+** ~/.ssh/
+** ~/.gnupg/
+** ~/.mozilla/
+
+'''Do NOT move ~/.ecryptfs into ~/Private!!!'''  The ~/.ecryptfs directory contains a key signature required to mount ~/Private, and the only valuable data (your key) is already encrypted in that directory.  Should you do something silly like this, to recover your data, you will need to manually mount ~/Private as root, and using the unwrapped passphrase.
+* sudo mount -t ecryptfs /home/USER/.Private /mnt
+** key type: passphrase
+** passphrase: whatever you recorded when you ran <code>ecryptfs-setup-private</code>
+** key cipher: aes
+** key bytes: 16
+** plaintext passthrough: no
+** mount: yes
+** avoid warning in the future: no
+* sudo mv /mnt/.ecryptfs /home/USER/
+* sudo umount /mnt
+
+In a future release of Ubuntu (beyond Intrepid), we can consider automatically writing such sensitive date to ~/Private, or perhaps encrypting all of a user's $HOME.
+
+=== Implementation ===
+
+Scripts used to configure, mount, and unmount these ~/Private cryptographic mountpoints are under development in cooperation with the upstream ecryptfs-utils project.  The project is active, and the Debian package maintainer closely tracks upstream releases.
+
+Currently, the following scripts in the ecryptfs-utils package (Ubuntu ''universe'') can be used to setup a ~/Private ecryptfs mountpoint:
+* <nowiki>[[http://git.kernel.org/?p=linux/kernel/git/mhalcrow/ecryptfs-utils.git;a=blob_plain;f=src/utils/ecryptfs-setup-private;hb=HEAD|ecryptfs-setup-private]]</nowiki>
+
+The following C program produces a binary that, when setuid root, allows a non-privileged user to mount/unmount their ~/.Private directory onto ~/Private, using the AES algorithm, and their 16-byte passphrase in the keyring.
+* <nowiki>[[http://git.kernel.org/?p=linux/kernel/git/mhalcrow/ecryptfs-utils.git;a=blob;f=src/utils/mount.ecryptfs_private.c;h=108fd3f4686c9e44aa62df37aca55665dfc2f112;hb=HEAD|mount.ecryptfs_private.c]]</nowiki>
+
+The pam_ecryptfs module captures the user's login password and uses that to unwrap their encrypted ~/Private mount passphrase.  It also executes mount.ecryptfs_private on login, and umount.ecryptfs_private on logout.
+* <nowiki>[[http://git.kernel.org/?p=linux/kernel/git/mhalcrow/ecryptfs-utils.git;a=blob;f=src/pam_ecryptfs/pam_ecryptfs.c;h=a284989b8525fb9bb3177130c807ede86a80fc67;hb=HEAD|pam_ecryptfs.c]]</nowiki>
+
+A complete set of manpages are now package with ecryptfs-utils 53-1.
+
+MIRs have been approved and all necessary packages are in main.
+* MainInclusionReportEcryptfsUtils, MainInclusionReportPkcs11Helper, MainInclusionReportTrousers, MainInclusionReportOpencryptoki
+
+The pam_ecryptfs.so module handles rewrapping of mount passphrases on password change.
+
+=== Outstanding Issues ===
+
+==== Necessary for Intrepid ====
+ 1. MIRs:
+** MainInclusionKeyutils
+** keyutils would be a very useful package to have in main
+
+==== Hopefully by Intrepid ====
+ 1. Translation of "Private" (xdg-user-dirs?)?
+** See: bug:247421
+ 1. The ''adduser'' utility should be hooked to optionally call '''ecryptfs-setup-private'''
+** As a related item, the ''adduser'' configuration files should be documented better, showing how admins can set home dirs to 700 by default.  Along these lines, we could probably document how an admin could expand ecryptfs usage beyond ~/Private (perhaps to all of ~).
+ 1. ecryptfs-setup-private could perhaps use an --undo mechanism.
+** This is '''much''' harder than it seems.
+
+Outside of the scope of this spec, but hopefully in Intrepid:
+* Encrypted swap space would make this feature more secure, as keys and passphrases stored in memory could be swapped to disk.
+** For now, it's recommended that the user either installs with LVM+LUKS+encryption, or manually sets up encrypted swap, perhaps as described in:
+** http://ubuntumagnet.com/2007/11/creating-encrypted-swap-file-ubuntu-using-cryptsetup
+
+==== For a Future Release ====
+Although all ''contents'' of files below <code>~/Private</code> are encrypted, ''filenames'' are not.  This is a known feature request in eCryptfs upstream.  See:
+* https://bugs.launchpad.net/ubuntu/+source/ecryptfs-utils/+bug/264977
+* http://sourceforge.net/support/tracker.php?aid=1618003
+
+=== Getting Involved ===
+
+If you are interested in helping with this Blueprint, here are the things you can do to help.
+
+# <nowiki>[[https://wiki.ubuntu.com/EncryptedPrivateDirectory?action=subscribe|Subscribe to changes of this page]]</nowiki>
+# Join the Server Team's IRC channel and mailing lists, as described in ServerTeam/GettingInvolved.
+# Make sure you are aware of the IntrepidReleaseSchedule.
+# At the very least, install '''ecryptfs-utils''' and run '''ecryptfs-setup-confidential''' and make use of your ~/Private directory, <nowiki>[[https://bugs.launchpad.net/ubuntu/intrepid/+source/ecryptfs-utils|filing bugs]]</nowiki> as you see them.
+
+==== Testing ====
+
+The most important thing you can do to help develop this item is to use the scripts that create and maintain your Encrypted Private Directory, and <nowiki>[[https://bugs.launchpad.net/ubuntu/intrepid/+source/ecryptfs-utils|file bugs]]</nowiki> against ecryptfs-utils.
+
+Here are step-by-step instructions for setting up an Encrypted Private Directory:
+* These instructions are current as of version 53-1ubuntu8 (2008-09-02)
+* You should have a completely updated/upgraded Ubuntu Intrepid system (KVM's usually work well)
+* '''sudo apt-get install ecryptfs-utils'''
+** The ''sudo auth-client-config ...'' command is '''NO LONGER NEEDED''', this is solved on the package installation/upgraded of ecryptfs-utils, with slangasek's pam-config utility
+* '''ecryptfs-setup-private'''
+** note that "sudo" should not be used for this operation
+** '''Enter your login passphrase'''
+** ''the password you use to login to the system''
+** '''Enter your login passphrase (again)'''
+** '''Enter your mount passphrase [leave blank to generate one]:'''
+** ''a different passphrase used to encrypt the mount; you should only need this if you ever have to manually recover your data; you should record this in a safe location; this passphrase will be decrypted using your login passphrase by PAM each time you login; I think we're going to randomly generate this by default''
+** The script will now create the directories and test the encrypted mount
+* You should now logout, and log back in as user1
+* Run '''mount''' and see if you have an ecryptfs mounted directory
+* Check the permissions on the mounted /home/user1/Private directory (should be 700)
+* Put some data in /home/user1/Private and ensure that you can read/write cleanly
+* Open another tty or ssh and login as a different, non-root user while the first is logged in.  Make sure the second user cannot read/write /home/user1/Private or /home/user1/.Private
+* Logout all instances of user1, and run '''mount''' as the second user.  Check to make sure /home/user1/Private was unmounted.  Ensure that user2 still cannot read/write /home/user1/Private or /home/user1/.Private
+* Log back in as user1, and make sure that Private is mounted again, and the data is readable.
+* As user1, force an unmount of Private with '''umount.ecryptfs_private'''.  Now cd to that directory and make sure you cannot inadvertently write to it.  Listing that directory should show a single file with an informative name:
+** ''THIS DIRECTORY HAS BEEN UNMOUNTED TO PROTECT YOUR DATA --  Run mount.ecryptfs_private to mount again'' or ''Access-Your-Private-Data.desktop''
+** Try running (or double-clicking) on the desktop file
+** Or if you're on a command line, just run ''ecryptfs-mount-private''
+* As user1, with ~/Private not mounted, try reading ~/.Private.  Contents should be encrypted.  This is what a malicious user should see if they stole your hard drive and booted a rescue cd.
+* For that matter, boot a rescue cd, and ensure that your encrypted data is encrypted
+* Try logging in as a desktop user into Gnome/KDE/XFCE.  PAM should automatically handle the mounting like login and ssh.
+
+==== Development ====
+
+DustinKirkland of the ServerTeam is handling most of the development.  If you're interested in assisting:
+
+* Upstream development is being handled through the maintainer's git repository:
+** http://git.kernel.org/?p=linux/kernel/git/mhalcrow/ecryptfs-utils.git;a=summary
+* Upstream Debian packaging is being handled at:
+** http://packages.qa.debian.org/e/ecryptfs-utils.html
+* File and Fix bugs against ecryptfs-utils
+** https://bugs.launchpad.net/ubuntu/intrepid/+source/ecryptfs-utils
+
+=== Discussion, Questions, Answers ===
+''Please leave questions and discussion points below, sign your comments with your wiki-name, and [https://wiki.ubuntu.com/EncryptedPrivateDirectory?action=subscribe subscribe to this page].''
+* Is it possible to reset the passphrase for encryptfs after one sets an initial passphrase? -- Pollywog
+* I like the idea of moving selected sensitive user data to ~/Private and symlinking to traditional locations in order to ensure sensitive data is kept encrypted. But what happens if the user decides they don't want this new 'Private' directory which appears when they install / upgrade to Intrepid? -- MarkRowan
+** My intention for Intrepid is to promote the utilities from Universe to Main, and develop the key pieces of infrastructure required to make an Encrypted Private Directory possible, simple, and relatively transparent to Ubuntu users.  That is, I'd like to provide an encrypted private directory in each user's home directory which is mounted at login and any data written below that directory is cryptographically written to disk.  I don't intend on moving any of the user's data to ~/Private--that will be entirely their decision in the Intrepid release.  Based on the relative success and feedback, we can discuss what data could/should be written to ~/Private by default.  Personally, my .ssh/, .gnupg/, and .mozilla/ directories are in my ~/Private, and symlinked to their traditional locations.  -- DustinKirkland
+** Surely if automatically encrypting things is implemented later, it can be achieved with a separate hidden encrypted directory?
+
+* To the user, it doesn't usually matter if they delete or alter the default structure (e.g. by removing 'Music' or any of the other default directories which are created by xdg-user-dirs after each upgrade), but by removing ~/Private they will find themselves inadvertently deleting their sensitive data. This is made worse by the fact that the sensitive data in ~/Private is all contained in dot files or dot dirs, and so ~/Private will appear to be empty, unused, and therefore unimportant, even when it is not.
+** I respectfully disagree with this.  As I said in response to the previous question, no data will automatically be written to ~/Private.  A user would need to consciously write or move files/directories to ~/Private.  -- DustinKirkland
+** Thank you for clarifying this. To me, it seemed that the specification implies that data will be moved without user knowledge during upgrade to Intrepid (at least, this is what I assumed from reading the Design section above). I just wanted to be sure that user data wasn't being moved into ~/Private without the knowledge or permission of the user. On the other hand, some upgrading users will need assistance in moving this data to ~/Private if they can be persuaded that it's a Good Thing. Could this be prompted during a post-Intrepid upgrade, perhaps?  -- MarkRowan
+
+* I'd like to know whether you've thought about a way of translating the name of this directory? It would be good if this 'Private' dir was included in the XDG User Dirs specification, since it is a common use case. But waiting for this, you may need something like a patch for xdg-user-dirs update to achieve this. -- Milan71
+** Good idea.  See: Bug:247421 -- DustinKirkland
+
+* While some data (encryption keys, etc.) are clearly private, I suspect that many users will find that many of the files they keep in their home directories are also private.  In some cases (e.g. local mail repositories, etc.) moving this information to ~/Private/ is time consuming, as either each application must be modified to do that by detault, or hooks for every application must be installed for all users with ~/Private.  Encrypting each of /home/user/ separately avoids this, and saves further configuration of applications that may have private data. -- EmmetHikory
+** Good comments, Emmet.  At UDS, I advocated encryption of all of each user's $HOME directory for these reasons.  That was deemed a bit too ambitious for Intrepid, and this work was scaled back to a single directory, ~/Private.  It is surgical work, but it's not difficult to move particular directories into ~/Private and symlink them to their traditional locations.  I would like to build on the technology we've implemented and tested in Intrepid, and revisit encrypting /home/* in Intrepid+1.  -- DustinKirkland
+** One issue with encrypting /home/user/ is collision with bind-mounting with schroot: if this becomes a common option, it may be worth investigating schroot (and possibly sbuild as well) to try to reduce requirements for additional passphrase entry for the encrypted /home/user.  -- EmmetHikory
+*** Agreed, that's one of several issues that we would need to work through.  -- DustinKirkland
+
+* It does not seem currently possible to use this solution in combination with a fingerprint reader, since the pam module has to intercept the login password. Is this going to be a possibility in the future? -- woutersj
+** Good idea, I added a wishlist bug for it, wiki:Bug:255799.  Unfortunately, I do not have a fingerprint reader on my Thinkpad, so it might be a bit difficult for me personally to implement.  -- DustinKirkland
+
+* I hope there will also be an option for the ~/Private directory to ''not'' be mounted at login, together with a user-friendly mechanism to (un)mount it explicitly when needed... -- markc-qsiuk
+** Solved by wiki:Bug:wiki:Bug:256154 -- Dustin Kirkland
+
+* Ideally I'd like both Nautilus and the Gnome fileselector to know about the ~/Private directory and prompt me to mount it (requesting my password) when I try to open it... -- markc-qsiuk
+* I will be happy to make a basic user interface in python-gtk2, if someone can give me the basic requirements of it. -- MikeRooney
+** This discussion has been moved to wiki:Bug:257901, please continue it there.  Thanks! -- DustinKirkland
+
+* Having tested this on Intrepid in a virtual machine, I have a few comments (but no real solutions, I'm afraid):
+** It works as described
+** The ~/Private directory appears to be like any other directory (with the normal directory icon), however because it is actually a mount point, files that are drag-dropped into it are ''copied'' rather than ''moved'' as they would be with a normal directory. This could lead to people thinking that their data have been moved to a secure directory whilst there's still an unencrypted copy sitting in the original location. Perhaps the ~/Private directory could have a special icon in Nautilus to at least make it look less like the other directories. Ideally a drag-drop to this directory would default to a ''move'' operation, but this may require special-case code in Nautilus.
+** The ~/Private directory gets listed alongside the other mount points in the Places panel in Nautilus. This means that it also gets an "eject" icon (much like mount points do on the Mac, but a new addition with Intrepid, I believe), but clicking the eject icon results in an error (unable to unmount because it's not in fstab, and you're not root).
+** Similarly it gets an "Unmount" option in the context menu, which produces the same error.
+** The name of the link that appears when the directory is unmounted is a bit unwieldy, and probably too technical for many users. In line with the discussions taking place in the UI Bug:257901 perhaps it should be worded as "The contents of this directory have been encrypted to protect your privacy", and I would suggest no mention of mount.ecryptfs_private.
+** If a Nautilus window is open pointing at the content of ~/Private, it is updated as soon as the directory is mounted. It does ''not'' automatically refresh when the directory is unmounted, however, which could lead to confusion as to whether or not the directory is mounted.
+ Much of this is Nautilus related (presumably similar issues apply for Konqueror, Dolphin, Thunar...), so perhaps there's some liaison with the Canonical Nautilus people (if they have any) needed here. -- markc-qsiuk
+** Please bear in mind that this work item was approved and implemented by the Ubuntu Server Team, noting that the Ubuntu Server does not include a graphical desktop of any kind.  The initial phase of this work, slated for Intrepid, really only included dedicated resources for the command-line (server) implementation.  In as much as the community or others have time to polish off the rough spots for the Desktop, we're totally in favor of it (Please open bugs to track this items.)  Specifically to the issues you mention, it certainly sounds like there's a stack of Nautilus (and perhaps Konqueror/Dolphin/Thunar...) issues.  These programs would need to be "taught" about a whole new "class" of mounts--those involving encryption.  -- DustinKirkland
+** Understood, but regardless of the background of this feature it's likely to have broader appeal and therefore be used by desktop users (I would argue that it's actually of more use on a desktop than a server). I just want to raise awareness of the sort of issues they will face in case there are any obvious alternatives or workarounds that can be suggested. I've filed an RFE in Ubuntu Nautilus as Bug:259799 -- markc-qsiuk
+
+* Will there be an option of not storing you encryption passphrase? Even if it's encrypted with my login password, anyone getting my login password one way or another will have my "Private" stuff as well. It would be cool if this encryption could be an extra layer of security instead.  --lynoure
+** That has long been available with eCryptfs.  This specification is about making this easier to use by leveraging PAM to unwrap the mount passphrase with the login passphrase.  You have several options...  You can remove pam_ecryptfs from the PAM stack, in which case you will need to mount and unmount your Private dir manually.  You can rewrap your mount passphrase (with ecryptfs-rewrap-passphrase) to use yet another passphrase (different from your login passphrase).  -- DustinKirkland
+
+* I use SSH to remotely log into my machine, using public key authentication. According to the blueprints, the intent is to move the .ssh directory into ~/Private. If I understand SSH properly, sshd needs access to your private key ''before'' log-in. Wouldn't an encrypted .ssh prevent that ? is there a workaround for that ?
+** First of all, we will ''not'' be moving any data automatically into ~/Private.  That will be done on a per-user, and case-by-case basis.  We can make some recommendations (.ssh, .mozilla, .gnupg, ...) and so forth, but the advantages/disadvantages of those should be documented well.  The problem you mentioned is a known issue, I'll open a bug up about it tomorrow.  -- DustinKirkland
+** Clearly, one cannot move their ~/.ssh directory into ~/Private, then be able to ssh in with access to authorized_keys. Primarily what is needed is simply to have the private keys put into ~/Private, then symlink from ~/Private/.../*.id_[dr]sa to ~/.ssh/*.id_[dr]sa.  -- JamieStrandboge
+
+* Have encfs been considered for this? i'm currently using it for the same purpose, and have yet to run into trouble. it does not need to be suid root to work. --dev-falk-petersen
+** Please see http://ecryptfs.sourceforge.net/ecryptfs-faq.html#compare .  Ecryptfs is a kernel filesystem, whereas encfs is a userspace filesystem.  The frequent context switching can impact performance. In addition, EncFS uses FUSE, which suffers from the fact that shared writable memory mappings must be entirely disabled in order to avoid deadlock on some page swap events. -- Dustin Kirkland
+** I think kernel >= 2.6.26 has support for shared writable memory mappings with fuse. Encfs has encryption of filenames, too. -- fx5
+** Two critical security problems with eCryptFS that are solved in EncFS - encryption of filenames and multiple valid passwords allowing plausible deniability and multiple independant data stores. FUSE is becoming the standart way of making added filesystems in Linux and is perfectly adequate in terms of speed. Choosing a non-standart implementation for this feature is rather troubling.
+* I've tested this according to instructions, and after "You should now logout, and log back in as user1", I ran mount and found that ecryptfs did not automatically mount ~/Private. Should I report this as a bug, or did I misread the instructions? Running mount.ecryptfs_private gives me this error: "keyctl_search: Required key not available". -- David D Lowe (Flimm)
+** Did you log out and log back in?  That step is ''essential'', as the logging in process (PAM) is what will take your passphrase, decrypt your mount passphrase, add that key to your keyring, and perform the mount.  -- DustinKirkland
+* Please have a look at bug Bug:264977 and look at my comment. I think it should be very clear that filenames are not encrypted. -- Thomas Novin  (thnov)
+** I have added a note to the Outstanding Issues section of this wiki page, and linked that bug to the upstream feature request. -- Dustin Kirkland
+* What will happen when a user changes his login password (via GUI or passwd command)? Are we still able to decrypt the key needed for mounting ~/Private? If so... how? (steven3000)
+** See section ''7 Implementation'' of this page where it says, "The pam_ecryptfs.so module handles rewrapping of mount passphrases on password change." See also <nowiki>[[http://manpages.ubuntu.com/manpages/intrepid/man1/ecryptfs-rewrap-passphrase.html|ecryptfs-rewrap-passphrase]]</nowiki>-- DustinKirkland
+* DustinKirkland and I have had some usability discussions regarding moving forward with items in ~/Private by default. This is mostly centered around unmounting ~/Private on pam logout, which is problematic when Sue logs into her desktop, then calls Joe to login via ssh to fix something, and when Joe logs out, the directory is unmounted. This is a very real problem with Firefox (and likely other browsers) that fail to start with no error messages when ~/.mozilla exists, but is a dangling symlink. There are of course other cases as well. Unmounting on logout is clearly useful, but either there needs to be a mechanism to toggle this for only Xsession logouts (or similar), or provide another mechanism for unmounting.  -- JamieStrandboge
+** There is a community effort to provide a GUI for toggling various Encrypted Private options.  See Bug:257901.  I hope to make this bug will be a high priority in Jaunty development cycle.  I'd like to see something under System->Preferences->EncryptedDirectory or some such.  -- DustinKirkland
+* Is this going to work with concurrent access to the same files from multiple logins using NFS home dirs? -- Sam Liddicott
+** There is a bug in the nfs code in the Linux kernel which breaks certain operations by layered filesystems.  See Bug:277578.  This is a high priority to fix.  -- DustinKirkland
+* The bug that the filenames are not encrypted is a major security blunder, but there is another one - there is no option of plausible deniability. For the encryption to be usable in real life, there must be an option of having multiple passwords where each of them decrypts only part of the encrypted files. This way if you are forced to give a decryption key, you can give a secondary key that will work without any errors, but will only reveal a decoy data set. Encfs has this feature. -- Aigars Mahinovs.
+** Slightly offtopic, but how does Encfs support plausible deniability?  While it does encrypt the file names, I have not seen anything which allows you to decrypt those files to a different plaintext using a different password.  In fact, the pages I have seen list this as a disadvantage to it - that there is no plausible deniability.  --Wyatt
+* What happens if you perform some reads and writes in ~/Private, then immediately, forcibly power down your system? Or if the kernel panics or the system otherwise crashes? Assume ~/Private is properly mounted and encrypting files as described in this wiki page. I'll be happy to try this in an Intrepid VM once I get one set up. --AdamMonsen
+** The same thing that happens to other filesystems when you forcibly shut down--there can be pages that don't get written to disk.  Honestly though, there's no additional risk introduced by an ecryptfs filesystem. -- DustinKirkland
+* A minor bug with ecryptfs-setup-private is that it does not check whether your login password is correct or not; all it does is verify that the two passwords you enter are the same.  This means that if you mistype your password it will go ahead and set up the encrypted volume, but it will not auto mount at logon.  Probably nothing to worry about, but may be worth noting at least. --Wyatt
+** Thanks.  See Bug:287906, which has been fixed.  In the future, please report such issues in Launchpad, not the wiki.  -- DustinKirkland
+* According to <nowiki>[[https://launchpad.net/ecryptfs/trunk/69|release 69]]</nowiki>, filename encryption is now included in ecryptfs.  Is there any estimate as to when this functionality will make it into ecryptfs-setup-private, or is it already available in some form I am unaware of? -- PessimistByNature
+** Filename encryption "on" is currently the default in Jaunty.  This feature will not be backported to Intrepid, as it requires kernel support which is not present in Intrepid.  -- DustinKirkland
+* I installed Intrepid with encrypted private directories.  Files deleted from ~/Private in Nautilus go into their own .Trash, which can only be revealed and cleared manually.  Since encrypted data is often sensitive, failing to delete it is a problem.  Ideally, when ~/Private is mounted, its trash files should appear in the user's wastebasket.  Other, simpler (to implement) solutions would be possible. -- Sagitta
+
+=== References ===
+
+* http://ecryptfs.sourceforge.net/
+* http://ecryptfs.sourceforge.net/ecryptfs-pam-doc.txt
+* http://sourceforge.net/mailarchive/forum.php?thread_name=1212012941.7936.65.camel%40t61p.dustinkirkland.com&forum_name=ecryptfs-devel
+* http://sourceforge.net/mailarchive/forum.php?thread_name=1210126643.8868.30.camel%40t61p.dustinkirkland.com&forum_name=ecryptfs-devel

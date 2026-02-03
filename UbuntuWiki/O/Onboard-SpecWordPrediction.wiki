@@ -1,0 +1,161 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+* '''Launchpad entry''': https://blueprints.launchpad.net/onboard/+spec/onboard-word-prediction
+* '''Created''': <nowiki>[[https://www.launchpad.net/~marmuta|marmuta]]</nowiki>
+* '''Contributors''': <nowiki>[[https://www.launchpad.net/~marmuta|marmuta]]</nowiki>
+* '''Packages affected''': <nowiki>[[https://launchpad.net/onboard|Onboard]]</nowiki>
+
+=== Summary ===
+
+Onboard should support word completion and word prediction.<<BR>>
+More generally, Onboard should assist users in typing text more efficiently and with higher accuracy. The means to this end will be word completion and prediction, as well as auto-inserting word separators and spell checking.
+
+=== Rationale ===
+
+Compared to typing on physical keyboards, using an on-screen keyboard can be slow and cumbersome. For anything but the most trivial text entry tasks, saving keystrokes quickly becomes a desirable goal. This is especially true in keyboard scanning mode, where navigating to individual keys may take seconds.
+
+Onboard already has support for inserting text snippets, however snippets have a number of limitations:
+
+*** limited in number, there are currently 16 snippet buttons
+*** have to be set up manually
+*** static, are unaware of context. 
+
+This spec proposes to add dynamic, context-aware word suggestions in addition to the existing snippets.
+
+=== Scope ===
+
+Word suggestions are a major user-visible feature. The implementation requires changes and rewrites of Onboard's core parts. Thorough regression test will be mandatory.
+
+=== Design ===
+
+Various parts of the UI design have been discussed over time, often controversially. The following aims to be a summary of already implemented and still to be fleshed out features.
+
+The general goal for the user facing portions shall be to keep the design as simple and clean as possible, without sacrificing major features.
+
+==== Word List ====
+
+A list of word choices, currently in a row at the very top of Onboard's layouts. Their content updates with every typed character or caret movement. Clicking a word inserts it into the user's document.
+
+Current planning has the list show completion/prediction choices and spelling suggestions, however the concept may be extended to other text sources at a later point.
+
+===== Prediction Choices =====
+
+Words deemed most likely to be inserted next by the user. The selection of words is updated based on the position of the system's text caret:
+
+*** Caret between words, i.e. on whitespace:
+      All known words are considered and ordered by descending probability
+*** Caret on a word: 
+      Only words starting with the fragment before the caret are considered and ordered by descending probability.
+
+<nowiki>[[File:onboard_prediction_choices.png|Prediction choices in the top row]]</nowiki>
+
+The number of visible choices depends on individual word lengths, the number of remaining words after completion and a certain fixed minimum width for easy activation on touch devices.
+If there are too few words to fill the available space, the remaining ones will expand to fill the whole area.
+
+Interacting with word choices:<<BR>>
+*** clicking with the primary button inserts the word into the user's document and appends an auto-separator, e.g. space.
+*** clicking with the secondary button inserts the word into the user's document without auto-separator
+*** long press with any button opens up a popup menu
+
+Popup Menu:
+
+Opens on long press on any prediction choice.<<BR>>
+Current candidates are:
+[Remove Word]  - removes a user added word from all active writable language models
+
+===== Spelling Suggestions =====
+Spelling suggestions pop up to the left of the word list. They are drawn in attention-grabbing highlighted colors, but are safe to ignore at all times. The colors are part of the active color scheme.<<BR>>
+Spelling suggestions are updated on every key stroke and caret movement. Only the single word at or before the caret is tested.
+<nowiki>[[File:onboard_spelling_suggestions.png|Spelling suggestion for the word at the caret]]</nowiki>
+
+Initially, there is only a single visible suggestion. Clicking the right-pointing arrow expands the list to show more spellings alternatives.
+
+<nowiki>[[File:onboard_spelling_suggestions_expanded.png|Expanded spelling suggestions]]</nowiki>
+
+Interacting with spelling suggestions:<<BR>>
+*** clicking with any button replaces the source word in the user's document
+*** long press with any button opens up a popup menu
+
+Popup Menu:
+
+Current candidates are:<<BR>>
+[Add Word]  - add uncorrected word to a user dictionary, stop showing it as misspelled
+
+==== Context Display ====
+Keeping track of text while typing with a pointer requires frequent eye travel between the user's document and Onboard's virtual keys. In order to reduce the eye travel distance, Onboard should display the currently edited line(s) in close proximity to the keys.
+
+Problem: adding a dedicated row to the layout increases UI complexity and keys would shrink in size.<<BR>>
+Possible solution: place the context display on top of infrequently used keys and auto-hide it suitably.
+
+The context display should contain:<<BR>>
+*** raw text of the currently edited line(s) 
+*** the text caret
+*** highlights for possible spelling errors, e.g. red wiggly underlines
+*** highlights for words unknown to the word prediction
+
+==== Language Menu ====
+Onboard currently supports a wide variety of keyboard layouts and interface languages. Word suggestions should be available in multiple languages as well. In order to facilitate working on multiple languages in parallel, there should be a way to switch between languages, either manually or automatically.
+
+<nowiki>[[File:onboard_language_menu.png|Popup menu with language choices]]</nowiki>
+
+The menu choice would affect:<<BR>>
+*** the set of language models used for word prediction
+*** the active spell checker dictionary
+*** possibly the choice of spell checking backend (hunspell, aspell, ...)
+
+=== Implementation ===
+
+Target language will be Python 3. Compatibility with Python 2 will be maintained for a limited transition time.
+Supported desktop environments shall be unity, unity-2d, gnome-shell and gnome-classic.
+
+AT-SPI will be required for word suggestions. Suggestions will only be available in widgets that fully support the AT-SPI Text interface. Non-AT-SPI fall-backs with reduced functionality may be added at a later time. Basic typing should stay fully functional without AT-SPI.
+
+==== Prediction ====
+Word completion and prediction utilize the custom n-gram based prediction engine ''pypredict'', running as D-BUS service ''onboard-predictiond''. The service is part of Onboard's package and only started on demand.
+
+===== Language Models =====
+
+Multiple languages should be supported, but n-grams recorded in one language should still be available for completion/prediction in all others. This will require keeping two user models active for learning at all times, a language specific one and a language independent one. The latter would be queried with lowest priority at prediction time.
+
+Learning late improves the quality of recorded text snippets, but leaves the word prediction oblivious to new words between learning checkpoints. Adding short term memory, updated continuously and discarded when learning occurs, should bridge that gap. 
+
+Stack of interpolated language models, from highest to lowest priority:<<BR>>
+### memory model, temporary short term memory, not persistent
+### user model, language specific, writable
+### system model, language specific, read-only
+### user model, catch all model with lowest priority, writable
+
+Writable user models are saved to ''~/.onboard/models''.<<BR>>
+Read-only system models are expected in ''/usr/share/onboard/models''.
+
+Naming convention for most language models will be:<<BR>>
+ ''ll_CC.lm''<<BR>>
+{| class="wikitable"
+|-
+| ''ll''
+| two.letter ISO 936 language code
+|-
+| ''CC''
+| two-letter ISO 3166 country code, if available
+|}
+
+==== Learning ====
+
+Continous learning will be enabled by default, but may be turned off in preferences and/or overridden in ''onboard-defaults.conf''. Recorded are n-grams of edited words, n-gram frequency and recency. The continuous edited text itself must not be recorded.
+
+Special care has to be taken to prevent sensitive information like passwords from entering the unencrypted language models. Therefore, learning has to be blocked for accessibles with role ATSPI_ROLE_PASSWORD_TEXT.
+
+=== Unresolved issues ===
+TBD
+
+----
+CategorySpec

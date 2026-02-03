@@ -1,0 +1,413 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+
+* '''Launchpad Entry''': https://launchpad.net/distros/ubuntu/+spec/replacement-init
+* '''Created''':  by ScottJamesRemnant
+* '''Contributors''': ScottJamesRemnant, ErikTroan, ThomasHood
+* '''Packages affected''': `upstart`, `sysvinit`, `initscripts`
+
+=== Summary ===
+
+Replace the init daemon from the `sysvinit` package with a modern ''event-based'' system that is better able to guarantee a robust boot process and deal with the events from the modern kernel and removable hardware.
+
+You may want to look at <nowiki>[[UbuntuBootupHowto]]</nowiki> for a practical look on how to use Upstart in ubuntu.
+
+=== Rationale ===
+
+The move to the 2.6 kernel and all the "hotplug" goodness that it provides has left us with several problems in dapper.  Because the kernel can support hardware coming and going, and due to the increase in removable hardware, it's no longer possible to guarantee that particular devices are available at a particular point in the boot process.
+
+The usual example is that dapper cannot mount USB disks in `/etc/fstab` because it is not guaranteed that the block device exists at the point in the mount process where that happens.
+
+Another example is that of a network-mounted `/usr`; the network device needs to be detected, firmware loaded if necessary, any security layer on the connection negotiated and an IP address arranged before the NFS mount can occur.  There are work-arounds to this, such as dapper which sleeps in the boot process until `/usr` is mounted, but they are hacky and an elegant solution is desired.
+
+There are many other reasons to replace the init system, described in the use cases below.  The specified design is intended to be able to fulfil the most important ones for edgy and be extended to support the rest during future release cycles.
+
+==== Why NIH our own? ====
+
+Before writing this specification, a comprehensive review of the existing replacement init systems was performed and each one tested to discover whether it was able to solve our problems.  Most of them by far were not fit, in fact only four passed the most basic test of being maintained by their author and suitable for production use.
+
+The four candidates were <nowiki>[[http://opensolaris.org/os/community/smf/|Solaris SMF]]</nowiki>, <nowiki>[[http://developer.apple.com/macosx/launchd.html|Apple's launchd]]</nowiki>, the LSB `initserv`/`chkconfig` tools and <nowiki>[[http://www.initng.org/|initNG]]</nowiki>.
+
+The first two of these suffer from inescapable licence problems, which is relatively unfortunate as both have features that are somewhat appealing though neither quite fix our problems.  Having whichever system we use being adopted as a Linux-wide standard would not be possible if we chose either of these two systems.
+
+The LSB standard tools sadly do not come anywhere near the use cases we have, and certainly do not solve the problems we have experienced.  They are tools for automatically choosing the order of the boot sequence and possibly introducing the ability to run multiple scripts simultaneously at a given point.  They do not even begin to tackle the problem of running scripts due to events occurring externally to the init system, such as hardware insertion.
+
+Finally there's initNG which sadly also does not tackle the problems we have been facing; again it is a system for ordering a pre-determined boot sequence rather than being able to handle a boot sequence that is determined as we go.  The code base was also evaluated for suitability for modification to suit our purposes, unfortunately the cost of doing that would be greater than the cost of beginning from scratch, and fundamentally changing an existing system is more likely to introduce bugs than extending something else.
+
+Arguably, any new init system should start with the code of the `init` daemon in `sysvinit` that has been maturing steadily for years and has already solved the interesting cases of being spawned by the kernel and spawning new processes.  This seems the best base to start from, adding our own features and workflow; it's still better to refer to it as a new system, as the finished code will almost certainly not resemble the original, but it will at least have lineage.
+
+=== Use cases ===
+
+* Jean is a power user who wishes to use a USB disk for part of her filesystem.  This currently frequently fails because the USB disk sometimes takes longer to initialise than the boot process takes to get to the point where it mounts the filesystem.  She would rather the boot process was robust, and the disk was mounted when initialised.
+
+* Corey is the administrator of a number of servers, and has problems with certain daemons that frequently crash.  He would prefer the daemons to be automatically restarted if this happens, to avoid loss of service.
+
+* Orla owns an iPod and uses a popular piece of software to download podcasts onto it.  She currently has to start the software when she plugs her iPod in, and remember to stop it afterwards.  She would rather the system started and stopped the software automatically based on the presence of her iPod.  (maybe edgy+1)
+
+* Ethan is a software developer.  He has a script that he wishes to run hourly, provided that the script is not still running from before.  He would rather the task scheduler could take care of that for him, than have to reinvent a lock around the task.  (edgy+1)
+
+* Katie is a database administrator.  She wishes the database to be automatically backed up whenever the server is shutdown, whether for upgrade or system reboot.  There is currently no way for her to set a task to be run when a service is stopped.
+
+* Justin is an ordinary user with a low-end system.  He would rather services and hardware handlers were started only when needed, rather than on all systems.
+
+* Carla is a system administrator.  She needs to be able to tell which services failed to start on boot, examine why, and see which services are currently running.
+
+* Thomas is a system administrator.  He frequently gets frustrated that there is no consistency to how tasks are added to the system. A script to perform a task at shutdown must be written and activated completely differently to one performed when the system is started.  (edgy+1)
+
+* Marie is a security consultant.  She has discovered several problems with processes that run task scripts not providing a consistent environment, including potential problems such as leaving file descriptors open.  (edgy+1)
+
+* Hugo is an ordinary user and has to frequently reboot his computer.  He would prefer that shutting down and booting up took as little time as possible.
+
+* Helen is an experienced UNIX user, with multiple years of experience.  She does not wish to have to relearn that which she has learned already, and would rather continue using the tools that she is used to and only learn the newer ones when necessary.
+
+* Matthieu is a distribution developer who maintains several packages that provide services or perform tasks.  He does not want to have to update his packages until he is ready to take advantage of new features or abilities, his existing scripts should continue to work unmodified in their original locations.
+
+=== Scope ===
+
+While this specification proposes a new init system, it is not expected that any other services need to be modified immediately; backwards compatibility should be ensured.  This limits the affected parts of the distribution to just a replacement for `sysvinit` and, if there is time, `initscripts`.
+
+Also, while the eventual design includes the potential for replacing `cron`, `at`, `inetd`, etc. with the single daemon, this is not a goal for the edgy release.
+
+This limitation of scope should make the goal attainable in the necessary time frame.
+
+=== Other Distributions ===
+
+It is hoped that other distributions will see the benefit in the design outlined here, and will also choose to adopt the same system as their replacement for init.  They have already been approached and the feedback has been largely positive and waiting on an implementation to test.  It is also hoped that this could form the basis for a new LSB standard to replace the under-implemented `chkconfig`.
+
+=== Design ===
+
+As the primary focus of this specification is dealing with modern hardware and its "coming and going" nature, neither of the two traditional designs of init systems are appropriate.  The linear execution model fails because it becomes necessary to sleep and wait during the process for hardware to be available and the dependency-based model fails because jobs cause their dependencies to be started, rather than get started because their dependencies have been.
+
+This design is best described as an ''event-based'' init system; jobs are started and stopped because an event they were listening for occurs.  Jobs waiting for `/usr` to be mounted are started once that event has occurred and are stopped when there's a need to unmount `/usr` again.  The event that causes `/usr` to be mounted would be the necessary block device appearing, or generated when the root-filesystem is mounted read-write (another event) if there is no separate partition.
+
+==== Overview ====
+* `static part` (initV)<<BR>>
+  fstab (... defaults 0 1)<<BR>>
+  init.d<<BR>>
+
+* `dynamic part`
+  The kernel does all dynamic parts, f.e. hotplugging, etc/hotplug -> /proc, includeding firmware<<BR>>
+  So there is only need of an `event handler` that decides with user interaction what to do with the event.<<BR>>
+  But user arrangement can only be done dynamic with an interface to user software and so the user. This interface should be standardiced for Linux. So that Software can mount it link it or extend itself, whatever, in a secure way. 
+  
+=== Events ===
+
+In order to allow for the maximum flexibility, the init daemon does not restrict the set of events that can be triggered; external processes are permitted to trigger events that the daemon was not previously aware of.  Three types of event are defined; edge (simple) events, level (value) events and temporal events.
+
+Edge events are just a string that describes them, e.g. "`startup`", and form the backbone of the set that jobs will be waiting for.  Jobs contain a list of events they are waiting for to be started and stopped, so the `udev` job may contain "`start on startup`" and "`stop on shutdown`" as typical requests.
+
+Level events are just like edge events, except that they also have a string value associated with them, e.g. "`up`" and "`down`".  Any change in the value triggers the level event with that value associated, and an edge event of the same name (without any value).  A typical usage of this would be the "`default-route`" event which is "`up`" whenever there is a default route or "`down`" when there is not one, the initial value being set by an early job.  Jobs can then indicate conditions such as "`start when default-route is up`", "`stop when default-route is down`", "`while default-route is up`" (combination of both), etc.
+
+Having the initial values being set by an early job may not prove the best solution, it may be more appropriate for the initial value to be set by a configuration file, for negative conditions to be allowed, e.g. "`while default-route is not up`" or for the values to be more restricted.  For the initial scope of this specification, only edge events and the most trivial level events are required, so this would be investigated and specified in more detail for edgy+1.
+
+Temporal events are used to perform activities such "`15 minutes after startup`", "`daily`", "`at half past two`", etc.  However this is out of scope for edgy and will be discussed in a later specification for edgy+1 or further.
+
+Most events are externally received, the `init` daemon simply listens on a socket and a companion tool can be used by any ordinary process to trigger a named event.  Events can also include environment variables to allow additional information about the event to be passed to the handling process (but see ''Security Concerns'' below).  A "`mount`" edge event would be triggered whenever any filesystem is mounted, and contain environment that allows jobs to find out which filesystem was mounted and where.
+
+This way there is no need for a complex event language, instead the system is optimised for being able to receive and dispatch events as quickly as possible.  An example case of being able to run jobs when the complete filesystem is mounted read/write would be handled by the following chain:
+
+* A job waiting for hardware insertion begins a filesystem check, on completion triggers the "`filesystem-checked`" event.
+
+* A job waiting for filesystems to be checked would mount them if mentioned in `/etc/fstab`.
+
+* A job waiting for filesystems to be mounted would compare the list of mounted filesystems against `/etc/fstab` and if everything is ready, trigger the "`writable-filesystem`" event.
+
+* The same job as above would also be waiting for the event that indicates the root filesystem has been mounted read-write, so systems without an interesting `/etc/fstab` would still have the "`writable-filesystem`" event generated.
+
+By breaking the jobs up into small tasks, this increases reliability because there are fewer assumptions.  In fact, given the above separation, it does not matter how the filesystem is mounted; should the check fail, and the user is given a console to repair the system, if they mount the filesystem afterwards the boot process would continue automatically.  This also means the configuration as to exactly what constitutes "`writable-filesystem`" is in one place, and distinct from the parts that check and mount block devices.
+
+The language for specifying a triggering event is therefore simply three values; "start" or "stop", the name of the event and optionally, the value one is waiting for.  Syntactic sugar is given so that the user can select "`on event`", "`when event is value`" or "`while event is value`" but these are just alternate ways of saying the same thing.  A "human" configuration file format could read:
+ <pre>
+while default-route is up
+</pre>
+
+While an XML configuration file for the same thing might look like:
+ <pre>
+<start>
+  <event>default-route</event>
+  <value>up</value>
+</start>
+<stop>
+  <event>default-route</event>
+  <value>down</value>
+</stop>
+</pre>
+
+The native configuration format is expected to look like the former, however it would be expected that parsers for many configuration formats would be devised as add-on tools so that SMF, launchd and even initNG service files could be read for compatibility with other vendors.
+
+==== Tasks ====
+
+The kinds of job that can be registered with the init daemon fall into two general categories, ''tasks'' and ''services''.  The distinction between the two is purely semantic, they would both be configured and registered in the same way, however is useful for the purposes of this specification.
+
+Tasks are executables or shell scripts that perform their work and return back to the waiting state when finished, analogous to most of the existing `/etc/rcS.d` scripts, cron scripts, etc.  Normally only one instance of a task may be running at one time, however this is a configuration option for the task and they can choose to remove this restriction.
+
+They are run in the environment that is configured for them, including rlimit restrictions, with any environment from the triggering event added.  By default a task can only be triggered by the user that registered it, normally the root user, and runs as that user with the session configured through the usual PAM mechanism.  The configuration of a task may indicate that the task may be performed by any user, and if so, it is always run as the triggering user and not the registering user.  It is never possible for a non-root user to ask the init daemon to run a task as any other user, including root; instead a tool such as `sudo` should be used.  Also see ''Security Concerns'' below.
+
+It is intended that the set of tasks that may be registered is not restricted by the init daemon, and that external processes may communicate with the daemon to register their own jobs.  This allows for future compatibility with other init systems by having a small utility to parse their configuration files and register the events with the daemon with the same semantics.  Jobs registered by ordinary users are namespace-prefixed to indicate the registering user, to prevent clashes with system tasks.  This is not intended to be implemented for edgy, but in a later release.
+
+==== Services ====
+
+The second kind of job are services, these are configured in the same way as tasks and have the same semantics, except that the executable is not normally expected to terminate by itself.  Instead the process is supervised by the init daemon, restarted if it should fail, and killed by signal when the service is due to be stopped either by event or manual intervention.
+
+Because the init daemon is treated specially by the kernel, there is no need for a separate supervisor process per service.  If the daemon being supervised remains in the foreground, when it exits, the `init` daemon receives the `SIGCHLD` signal and can act accordingly.  If the daemon does not remain in the foreground, the init daemon will still receive the `SIGCHLD` signal when the background process terminates because of the special attributes of PID #1.  All that is necessary is for the signal to be recognised as coming from a supervised service, this can be done by reading a named PID file or simply checking the executable that terminated.
+
+==== Dependencies ====
+
+All jobs waiting on a particular event are normally started at the same time when that event occurs.  This may not always be desirable, especially for the startup sequence there needs to be a strict ordering of certain operations.  This ordering can be accomplished in two ways:
+
+The first is that jobs themselves cause events, and whenever a particular job is started or stopped an event occurs.  For basic tasks such as those performed during startup, this is more than sufficient and a task need to only wait for a different event; perhaps "`when readahead is stopped`" instead of "`on startup`".
+
+For services which don't normally stop, and for certain tasks, the dependency may need to be more explicit.  For these, init will permit a service to exist in a limbo state between having been triggered by its event and actually having started.  In this state, it's waiting for named tasks (rather than events) to have started.  A typical example would be having the Apache daemon wait for MySQL to have started, because it uses the database, and this would be accomplished with both "`on multi-user`" and "`needs mysql`" in the configuration.
+
+When a job waits on another, it causes a special "`depended`" event to be triggered that only the service being waited for would receive.  This allows a form of dependency-init style behaviour, where the MySQL service above could be configured to have "`on depended`" rather than (or in addition to) "`on startup`" so that it is started whenever a service needs it, rather than explicitly.
+
+More complex dependency requirements would be fulfilled by having the job's shell script itself run tools described below.
+
+==== Communication ====
+
+All of the above means that the init daemon's job is therefore simply to hold a list of services and their state and adjust their state depending on the events that are received.  The state machine is described in a little more detail under ''Implementation'' below.
+
+Full-duplex communication with the rest of userspace is maintained, this means that any other process can:
+
+* Trigger an edge event.
+
+* Set the value of a level event.
+
+* Query whether an edge event has occurred.
+
+* Query the value of a level event.
+
+* Query the state of a service.
+
+* Manually start or stop a service.
+
+* Receive notification about events as they are triggered.
+
+* Receive notification about services as they change state.
+
+* Register or unregister a service.
+
+Communication would be across a UNIX domain socket, or similar, so that local security is assured and the identity of the communicating user known.  The socket protocol would be internal, much like the current `telinit` protocol, and a shared library provided along with the companion tools to send and receive the messages.
+
+As noted above, services may need complex dependency requirements that the simple state machine in the daemon cannot provide.  Instead they would use tiny companion tools to be able to communicate with the daemon to make a decision.  Here's an entirely fictitious example:
+ <pre>
+if upstart-query mysql running; then
+### If MySQL is running, wait for the dbsuper service
+    upstart-wait dbsuper start
+fi
+</pre>
+
+The first example tool queries the state of a service, and the second receives the notifications about service state changes until it sees `dbsuper` being started.  The full set of these tools is not yet specified, and they will be created as need arises, rather than specified in advance until the exact problems are encountered.
+
+=== Implementation ===
+
+==== State Machine ====
+
+The implementation of the init daemon, other than the usual process of spawning processes correctly and the communication with external processes, is basically one large state machine.  Jobs exist in one of the following states:
+
+* '''Stopped''': in this state the job is dormant with no associated process.  When events occur, the list of start events of jobs in this state are checked and the state moved to '''Waiting''' or '''Starting''' if one matches.
+
+* '''Waiting''': jobs are placed in this sate if they have dependencies.  When jobs are moved into the '''Running''' state, the list of dependencies of jobs in this state are checked and the state moved to '''Starting''' if one matches.  When events occur, the list of stop events of jobs in this state are checked and if they occur, the job moved back into the '''Stopped''' state.
+
+* '''Starting''': the job's startup script, if any, is running and on successful completion (or lack of startup script) the job is moved into the '''Running''' state.  A failed startup script would move the job into the '''Stopping''' state.  When events occur, the list of stop events of jobs in this state are checked and if they occur, the job moved into the '''Stopping''' state.
+
+* '''Running''': the job's associated process is now running.  For services, when this process terminates, the job is moved into the '''Restarting''' phase.  For tasks, when the process terminates, the job is moved into the '''Stopping''' phase.  When events occur, the list of stop events of jobs in this state are checked and if they occur, the job moved into the '''Stopping''' state.
+
+* '''Restarting''': the job's restart script, if any, is running and on successful completion (or lack of restart script) the job is moved into the '''Running''' state again.  A failed restart script would move the job into the '''Stopping''' state.  When events occur, the list of stop events of jobs in this state are checked and if they occur, the job moved into the '''Stopping''' state.
+
+* '''Stopping'''': the job's stop script, if any, is running and on successful completion (or lack of stop script) the job is moved into the '''Stopped''' state.
+
+This gives us the following state transitions:
+
+* '''Waiting ''to'' Starting''' and '''Stopped ''to'' Starting''': run the job's start script in a shell.
+
+* '''Starting ''to'' Running''' and '''Restarting ''to'' Running''': spawn the job's process.
+
+* '''Running ''to'' Restarting''': run the job's restart script in a shell.
+
+* '''Starting ''to'' Stopping''', '''Running ''to'' Stopping''' and '''Restarting ''to'' Stopping''': send signals to the running process; run the job's stop script in a shell.
+
+A manual start or stop of a service is treated as if a start or stop event had come in; thus it is not possible (or necessary) to stop a job that is already stopping.
+
+==== Plan ====
+
+Obviously this is a potentially invasive change to the system that needs to be undertaken carefully so that no regressions occur; therefore the following implementation plan will be followed:
+
+ 1: Development of the new `init` binary's core functionality, and testing locally and for other interested parties.
+
+ 2: Development of core companion tools such as `shutdown`.
+
+ 3: Replacement of the `sysvinit` binary package with the new package, configured to run `/etc/init.d/rc` at appropriate times so that no existing init scripts need be modified.
+
+''This point must be reached before FeatureFreeze with no regressions, or the change will be reverted and deferred to edgy+1.''
+
+ 4: Replacement of the `initscripts` binary package and the scripts therein with new scripts that take advantage of the new system.  The existing init scripts from other packages will still be run by keeping `/etc/init.d/rc`.
+
+Further plans will wait until edgy+1, and any spare time will be spent on testing and bug fixes rather than attempting to implement additional things that may not be as mature.
+
+==== Code ====
+
+The core init daemon and companion tools are to be written in C and be as safe as is humanly possible.  It is suggested that the code be reviewed by multiple people such as MartinPitt to ensure security and the general advantage of new eyes on the code.
+
+==== Data preservation and migration ====
+
+No other packages need to be modified because the existing `/etc/init.d/rc` script will be retained; the new daemon will be configured to call this with the appropriate arguments at startup, shutdown and reboot.  Run levels will be maintained through compatibility configuration such that `init 3` would issue an event causing `/etc/init.d/rc 3` to be run.
+
+Packages for which there is an advantage to using the features of the new system may be modified, though that is not part of this specification.
+
+==== Security Concerns ====
+
+As is appropriate for a change this low down in the system, security should not be taken lightly.  The following valid security concerns are noted and discussed:
+
+'''Non-root user events''': it is important that it is not possible for an ordinary user to be able to gain permissions beyond their powers from the init daemon.  Use of local communication ensures that we know the origin of user messages, and the system would only allow that user to cause services to be started that they have registered; or that other people have registered for all users.  Services are only ever started as the user who caused the event.  The security model here is that of `cron`, if you want one user to be able to run a service as another, you use a tool such as `sudo` to let them edit your crontab.
+
+As this functionality is not required until later phases of the implementation, it may be appropriate for it to be disabled or not implemented for edgy, and only the root user permitted to trigger events and registered services.  Features that cross user barriers can be implemented once the code has been thoroughly security audited.
+
+'''Passing of Environment''': one potential concern may be that events may carry environment given by the triggering user.  First it's worth noting that the particular variables would be explicitly given to the trigger tool, rather than picked up from their environment, and that such environment cannot override that set in the job's configuration or by PAM (it's set first).  Other than that, because the init daemon will run things as the triggering user, and never an alternate user, it is not permitting the user to do anything they could not already do themselves.
+
+Again, this code may wait for edgy+1.
+
+==== Configuration Format ====
+
+This part is slightly non-normative, and just represents my current thoughts on exactly what a native configuration file for the new system would look like.  As packages are not going to be modified within the edgy timeframe, there is plenty of time to change this before later releases when the adoption may be encouraged more widely.
+
+`/etc/service.d/udev`
+ <pre>
+description "Kernel event manager"
+
+on virtual-filesystems
+
+respawn /sbin/udevd
+
+start script
+##### We need the uevent support introduced in 2.6.15, bail out if we
+##### don't have it and fall back to a static /dev
+        if [ ! -f /sys/class/mem/null/uevent ]; then
+            if mountpoint -q /dev; then
+######### uh-oh, initramfs made some kind of /dev, get rid of it
+                umount -l /dev/.static/dev || true
+                umount -l /dev
+            fi
+            exit 1
+        fi
+
+        if ! mountpoint -q /dev; then
+####### initramfs didn't mount /dev, so we'll need to do that
+            mount -n --bind /dev /etc/udev
+            mount -n -t tmpfs -o mode=0755 udev /dev
+            mkdir -m 0700 -p /dev/.static/dev
+            mount -n --move /etc/udev /dev/.static/dev
+        fi
+
+##### Copy over default device tree
+        cp -a -f /lib/udev/devices/* /dev
+
+##### It's all over netlink now
+        echo "" > /proc/sys/kernel/hotplug
+end script
+
+stop script
+        umount -l /dev/.static/dev || true
+        umount -l /dev
+end script
+</pre>
+
+`/etc/service.d/udevtrigger`
+ <pre>
+description "Load hardware drivers"
+
+when udev is running
+
+require /sbin/udevmonitor
+
+script
+##### Log things that udev does
+        /sbin/udevmonitor -e >/dev/.udev.log &
+        UDEV_MONITOR_PID=$!
+
+        /sbin/udevtrigger
+        /sbin/udevsettle
+
+##### Kill the udevmonitor again
+        if [ -n "$UDEV_MONITOR_PID" ]; then
+            kill $UDEV_MONITOR_PID
+        fi
+end script
+</pre>
+
+=== Comments ===
+
+JohnNilsson: Why the need for the a job abstraction with'start' and 'stop' handlers and the state tracking outlined below? Can't that be entierly implementation specific with regards to the client? That is the clients just register event-listeners, whether theese handlers semanticly means 'start' or 'stop shouldn't be important.
+
+ ScottJamesRemnant: this puts a lot of the "bone" work into the job; you now need to keep track of things like process ids, service management, etc. yourself rather than have the init system do it for you.  The abstraction doesn't add much more complexity to the init system, and makes jobs MUCH easier to write.
+
+JohnNilsson: Why is `default-route up/down` better than `default-route-up` and `default-route-down`? What can `while` possibly mean, besides polling, that an edge event can't convey?
+
+ ScottJamesRemnant: `while EVENT is VALUE` is a shorthand for `start on EVENT VALUE` and `stop on EVENT`; having the edge event triggered when the level changes means that one doesn't need to know every possible "exit" state for an event.  Your example would not work for a more complex set of states, you'd have to start on `-up` but stop on `-down`, `-unconfigured`, `-sleep`, etc.
+
+JohnNilsson: Is there really a need for a special implementation for this? "sleep 15m && ''command'' on `startup`". Otherwise temporal events seems just like edge events to me.
+
+ JohnDietrick: Might work for short timeframes or if the system is never stopped, but it's not practical to do "sleep 24h && ''command'' on `startup`" when a shutdown of the system (likely for typical users over a 24 hour period) would disrupt this event. It'd be better to have something that runs at 14:00 ''every day'' (if the machine is on), ''regardless'' of the system's various states over the past day.
+
+ ScottJamesRemnant: Indeed, temporal events are largely intended for `cron`/`at`/`anacron` replacement in the next cycle.
+
+SebastienEstienne: Have you review the use of <nowiki>[[http://www.yaml.org/|Yaml]]</nowiki> instead of Xml?
+
+ ScottJamesRemnant: note that the use of XML in this specification was for example only.
+
+DiegoCG: It'd be interesting to look at the design of <nowiki>[[http://msdn.microsoft.com/library/default.asp?url=/library/en-us/dllproc/base/services.asp|windows services]]</nowiki>, they may have interesting ideas. Windows services for example can do "if this services is restarted N times, and it still dies, shutdown the system" (it's dangerous however, a famous windows worm actually killed the RPC service remotely and after three times the system would shutdown automatically after a 1 minute timeout)
+
+ ScottJamesRemnant: I think you pretty much answered your own question ;)
+
+ Mildred: It could be "if this service is restarted N times, then send an email to the administrator once" instead of jest shutting down the system. I think it is an interresting feature even if it comes from Microsoft.
+  JanClaeys: Windows allows you to customize what should happen after it fails for X times, e.g. run a program.  That sounds like a reasonable feature to me, as it allows the admin (or the package maintainer?) to specify a specific, appropriate action for every "service" (it might be useless to send a mail if postfix fails to start ;-) ).
+
+RussellLeighton: Would this framework also replace cron?
+
+ ScottJamesRemnant: yes, in future releases
+
+JamesClarkThailand: Why not build this on top of D-Bus as with <nowiki>[[http://fedoraproject.org/wiki/FCNewInit|Fedora's (now defunct?) ServiceManager proposal]]</nowiki>?
+
+ ScottJamesRemnant: "to d-bus people, everything looks like a d-bus problem";  the idea of ServiceManager is that it uses d-bus activation to start services, which then don't communicate with d-bus.  This is really abuse of d-bus's intent; it's better for d-bus to do the one job it does really well (message passing) and leave service management to another daemon.
+
+ It's worth pointing out though that a d-bus proxy has always been intended, so the init daemon can be commanded using d-bus.
+
+NabLa: <nowiki>[[http://launchd.macosforge.org/|Apple's launchd]]</nowiki> has been <nowiki>[[http://lists.apple.com/archives/Darwin-dev/2006/Aug/msg00067.html|released recently under the Apache license]]</nowiki>. Would that resolve those "inescapable licence problems"? Looks like a very interesting possibility now.
+
+ ScottJamesRemnant: it still doesn't meet our requirements, so would be only a base for our own work.  We've already implemented enough that it'd be a backwards step to start again based on launchd.  Also the new launchd licence may not be GPL compatible, so it would still not be ideal
+
+ jec : I think that the licence (apache 2.0) is GPL compatible. But if work is already advanced on your own solution, then great! Just hope that Redhat/SuSE/Debian will adopt it...
+
+   ThomMay: it's not - <nowiki>[[http://www.fsf.org/licensing/licenses/index_html#GPLIncompatibleLicenses|the FSF mark it as incompatible]]</nowiki>.
+
+   Schaaf: According to the FSF page,
+
+Apache License, Version 2.0
+This is a free software license, compatible with version 3 of the GPL.
+Please note that this license is not compatible with GPL version 2, because [...patent issues...]
+
+Alessandro Felici: I wish that my words were useful. I think that you have to use an header in init script, to hold the same interface of sysviinit. It should appeare like this:
+{{{
+So, in this case, you just add an header in an existing script, you have not to change anything. You could use keyword like require, user, runlevel and so on. With this system, you can have checking script (if eth0 is yet down or up etc.) and on exit status succesful init will load the script that use require. Also you can find a simple method to parallelize script loading, like initng.
+
+ThosBDavis: I hope that string representations of events will be UTF-8 compatible, and more importantly will utilize namespaces of some form. For instance, <code>.net.routed is up</code> or <code>org.postgresql.postmaster is running</code>, with a suitable reserved space (leading '.' or such). Even if it is customary rather than enforced it is probably a good idea to start with this rather than try to fit it in later.
+
+WaynePollock:  To be useful on Fedora (and other systems) this needs a real boot log file that can be reviewed.
+SMF doesn't provide a log AFAIK but has replacements for one.  I don't know about the other comparable systems,
+but I know Fedora ripped out the logging code in Fedora 2 (I guess in preparation for an init replacement), and
+still has no log features.  I see this is one of the use cases ("Carla") but it isn't clear from this document
+how the output of service startup (scripts) is captured and logged.  I'd like to see that clarified please.
+
+Grey: How about incorporating the work set forth by Pardus?  They have a working replacement written in Python w/some C that does a lot of what I read here as goals: http://www.pardus.org.tr/eng/projects/comar/SpeedingUpLinuxWithPardus.html
+
+----
+CategorySpec

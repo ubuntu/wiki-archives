@@ -1,0 +1,234 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== Introduction ==
+
+Automount is the modern way to mount directories over a network. It is far easier to manage and is more economic in bandwidth.
+
+In this howto, autofs will be configured through an LDAP directory: in that way, we have a centralised configuration and make maximum use of the LDAP that has been setup. Great, isn't it?
+
+== Installation ==
+
+First of all, automount is composed of two parts: a kernel module and user land utilities. Kernels in modern GNU/Linux distributions are compiled with support for automount. You just have to install the user land utilities: install the following packages <code>autofs-ldap ldap-utils</code> (see InstallingSoftware).
+
+If you plan to only use flat files configuration, you do not need to install the <code>autofs-ldap </code> package: installation is described in <nowiki>[[Autofs]]</nowiki> howto.
+
+== Configuration ==
+
+Configuring LDAP automount consists of several parts:
+* configure openldap server to load the autofs-ldap schema
+* entering LDAP entries for defining mountpoints
+* entering LDAP entries for defining directories
+* defining on the client to use LDAP for automount configuration
+
+This guide presumes you've already set up an LDAP server and are familiar with ldap-utils (ldapmodify, ldapadd, etc).
+
+=== On the server ===
+
+When you install autofs-ldap, it puts a copy of the schema in <code>/etc/ldap/schema/autofs-ldap.schema</code>.  Copy the file to the same directory on your server.  Your next step will depend on whether your LDAP server is configured with slapd.conf (older LDAP versions) or with <code>cn=config</code> database entries (the newer, "correct" way).
+
+Note: Autofs actually supports three different schemas for LDAP.  This walk-through assumes the one that ships with the Ubuntu distribution of autofs-ldap.  The steps are the same but your LDAP entries will depend on which you use.  The three different schemas are covered in some detail on <nowiki>[[http://sadiquepp.blogspot.com/2009/02/how-to-configure-autofs-maps-in-ldap.html|this blog]]</nowiki>.
+
+==== With slapd.conf ====
+
+Add the following to your <code>/etc/ldap/slapd.conf</code> file:
+
+<pre>
+include /etc/ldap/schema/autofs.schema
+</pre>
+
+The <code>autofs.schema</code> line must be inserted after <code>core.schema</code> and <code>cosine.schema</code>
+
+Now restart the slapd service:
+
+<pre>
+sudo /etc/init.d/slapd restart
+</pre>
+
+Or with <nowiki>[[Upstart]]</nowiki>:
+
+<pre>
+sudo service slapd restart
+</pre>
+
+==== With cn=config ====
+
+The autofs-ldap.schema file needs to be converted to LDIF format.  You can do this with the '''slapcat''' utility as described in the <nowiki>[[OpenLDAPServer]]</nowiki> guide, or you can just visit https://launchpadlibrarian.net/55451730/autofs.ldif and grab this one that's already been converted (rename it autofs-ldap.ldif and put it in /etc/ldap/schema for consistency's sake).
+
+Use '''ldapadd''' to import it into the database.
+
+<pre>
+sudo ldapadd -Y EXTERNAL -H ldapi:/// -f /etc/ldap/schema/autofs-ldap.ldif
+</pre>
+
+(The -Y EXTERNAL option tells the server to authenticate you external to the server, as the user performing the command...in this case, root.)
+
+=== Populating LDAP ===
+
+In the LDAP directory, you have to enter two kinds of entries:
+* entry that defines the mountpoint
+* entry that defines the directory under a mountpoint
+
+Here is an example of LDAP entries based on the <nowiki>[[OpenLDAPServer]]</nowiki> installation. 
+
+<pre>
+dn: ou=admin,dc=example,dc=com
+ou: admin
+objectClass: top
+objectClass: organizationalUnit
+
+dn: ou=automount,ou=admin,dc=example,dc=com
+ou: automount
+objectClass: top
+objectClass: organizationalUnit
+
+dn: ou=auto.master,ou=automount,ou=admin,dc=example,dc=com
+ou: auto.master
+objectClass: top
+objectClass: automountMap
+  
+dn: cn=/home,ou=auto.master,ou=automount,ou=admin,dc=example,dc=com
+cn: /home
+objectClass: top
+objectClass: automount
+automountInformation: ldap:ou=auto.home,ou=automount,ou=admin,dc=example,dc=com --timeout=60 --ghost
+
+dn: ou=auto.home,ou=automount,ou=admin,dc=example,dc=com
+ou: auto.home
+objectClass: top
+objectClass: automountMap
+
+dn: cn=lionel,ou=auto.home,ou=automount,ou=admin,dc=example,dc=com
+cn: lionel
+objectClass: top
+objectClass: automount
+automountInformation: -fstype=nfs,rw,hard,intr,nodev,exec,nosuid,rsize=8192,wsize=8192 nfs.example.com:/export/home/lionel
+</pre>
+
+Save your map to a .ldif file and add it with '''ldapadd''' (depending on your database's ACL you might have to authenticate as your admin user instead of using the external option).
+
+<pre>
+sudo ldapadd -D cn=admin,dc=example,dc=com -W -f automounttree.ldif
+</pre>
+
+Some notes:
+* You need <code>ObjectClass: automountMap</code> in every ou: auto.x entry.  This was always required, but autofs version 4 let you get away with having the objectClass of maps be organizationalUnit.  Autofs5 does not.  If you upgraded from v4 to v5 and your LDAP mappings stop working, this might be one reason why.  You'll have to delete your old entries and their children and replace them with the corrected ones.
+* The <code>ou: admin</code> group is optional, and could be named anything else (something you may wish to do if you want to avoid confusion with, say, the LDAP admin user).
+
+=== On the client ===
+
+There are three files you need to concern yourself with:
+* /etc/default/autofs
+* /etc/autofs_ldap_auth.conf
+* /etc/nsswitch.conf
+
+==== /etc/default/autofs ====
+
+Open up <code>/etc/default/autofs</code> and read it though.  Some of the entries are explained in more detail in <code>man auto.master</code>. What follows are the minimal settings to get autofs talking to your LDAP tree.
+
+<pre>
+MASTER_MAP_NAME="ou=auto.master,ou=automount,ou=admin,dc=example,dc=com"
+</pre>
+
+You could write this in the form <code>//servername/ou=auto.master</code>... instead; without it autofs will check nsswitch for the server location, which is fine.
+
+<pre>
+LOGGING="verbose"
+</pre>
+
+Be sure to uncomment it.  Log output goes to <code>var/log/syslog</code> You can set it back to its default later but for now you really want it on.  Use "debug" instead for even more detailed output.
+
+<pre>
+LDAP_URI="ldap://192.168.x.x"
+</pre>
+
+The address of your LDAP server.  Use ldaps:// if your setup calls for it, though you may wish to test that everything else works before adding encryption into the mix.
+
+<pre>
+SEARCH_BASE="ou=automount,ou=admin,dc=example,dc=com"
+</pre>
+
+Where in the tree autofs should look for auto.master
+
+<pre>
+MAP_OBJECT_CLASS="automountMap"
+ENTRY_OBJECT_CLASS="automount"
+MAP_ATTRIBUTE="ou"
+ENTRY_ATTRIBUTE="cn"
+VALUE_ATTRIBUTE="automountInformation"
+</pre>
+
+If using a different schema, uncomment the one that applies to you.
+
+==== autofs_ldap_auth.conf ====
+
+The contents of this file will vary greatly depending on your LDAP and NFS setup.  You should read <code>man autofs_ldap_auth.conf</code> for a full description.  The default config looks like this:
+
+<pre>
+<autofs_ldap_sasl_conf
+        usetls="no"
+        tlsrequired="no"
+        authrequired="no"
+/>
+</pre>
+
+This is sufficient for many "basic" configurations, allowing reads without any extra authentication.  TLS users will want to change the <code>usetls</code> and (if applicable) the <code>tlsrequired</code> entries to "yes".  If you are using your own Certificate Authority to sign your certs, you need the CA certificate installed on the client machine and it's location defined in ldap.conf (see below).
+
+If your NFS setup relies on Kerebos authentication, you need to add/change the following lines:
+
+<pre>
+authrequired="yes"
+authtype="GSSAPI"
+clientprinc="user1@EXAMPLE.COM"
+credentialcache="/tmp/krb5cc_0"
+</pre>
+
+Change the values of clientprinc and credentialcache to match your setup.
+
+==== nsswitch.conf ====
+
+Lastly, you have to add the LDAP map to the automount entry of <code>/etc/nsswitch.conf</code>. Edit your <code>/etc/nsswitch.conf</code> and add the line:
+
+<pre>
+automount:      files ldap
+</pre>
+
+If you haven't already (and you may have for other purposes), you should also edit <code>/etc/ldap/ldap.conf</code> with the appropriate values for your LDAP server:
+<pre>
+BASE    dc=example,dc=com
+URI     ldap://ldap.example.com
+
+TLS_CACERT /usr/share/ca-certificates/example.com/cacert.pem
+</pre>
+
+== Launch ==
+Start or restart <code>autofs</code>:
+
+<pre>
+sudo /etc/init.d/autofs restart
+</pre>
+
+or
+
+<pre>
+sudo service autofs restart
+</pre>
+
+Have a look in /var/log/syslog:
+
+<pre>
+Apr  7 12:54:44 vm-sandbox1 automount[7951]: Starting automounter version 5.0.5, master map ou=auto.master,ou=automount,ou=sysconfig,dc=tempe,dc=grindwork,dc=com
+Apr  7 12:54:44 vm-sandbox1 automount[7951]: using kernel protocol version 5.01
+Apr  7 12:54:44 vm-sandbox1 automount[7951]: ignoring duplicate indirect mount /common
+Apr  7 12:54:44 vm-sandbox1 automount[7951]: mounted indirect on /common with timeout 60, freq 15 seconds
+Apr  7 12:54:44 vm-sandbox1 automount[7951]: ghosting enabled
+</pre>
+
+So far, so good - it found auto.master.  Try to ls or cd to your subdirectories and make sure they mount properly.  If the mount is failing at any point, check the log again and see what it's complaining about.  Restart autofs again after making configuration changes.

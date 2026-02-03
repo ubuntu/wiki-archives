@@ -1,0 +1,355 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+
+== Introduction ==
+'''Active Directory''' from Microsoft is a directory service that uses some open protocols, like
+Kerberos, LDAP and SSL.
+
+There are several ways to use AD for authentication, you can use <nowiki>[[http://help.ubuntu.com/community/DirectControl|Centrify Express]]</nowiki>, <nowiki>[[http://www.likewise.com/products/likewise_open/|Likewise Open]]</nowiki>, pam_krb5, LDAP or winbind. For Centrify Express see [DirectControl]. Centrify Express can be used to integrate servers or desktops with Active Directory. Likewise Open is also a solution for Linux workstations to authenticate to an Active Directory domain. For Likewise Open see [LikewiseOpen] or <nowiki>[[https://help.ubuntu.com/8.04/serverguide/C/likewise-open.html|Likewise Open]]</nowiki>. For Winbind see [ActiveDirectoryWinbindHowto].
+
+The purpose of this document is to provide a guide to configuring Samba on Ubuntu to act as a file server in a Windows environment integrated into Active Directory. The goal is to create a file server that is as close to a one to one replacement for a Microsoft Windows file server as possible from the client's perspective.
+
+=== Background ===
+
+It is important to keep in mind that the Samba developers have to play detective to try to basically reverse engineer the Microsoft implementation of the SMB protocol. The end result is that there are occasional issues that must be worked around if a bug fix does not exist. With the instructions below, expected behavior should be acceptable in most corporate environments.
+
+Samba allows for a great deal of flexibility in how shares behave on a per-share basis. It is outside the scope of this document to cover each configuration setting and how they behave. It would be very beneficial to first read the smb.conf documentation found at the Samba web page. There are quite a few settings in the documentation, but getting a general feel of what they are and what they do will help in understanding this document and how you can take a step beyond by changing settings for your own tastes and environment. 
+
+=== Prerequisites ===
+
+Security updates need to be enabled for not only the main repository, but for the universe repository as well (as now documented below). If this is not done, any security updates for the main (supported) packages create failed dependencies for the relevant universe packages.
+
+Here is the list of prerequisites specific to this document:
+
+*** Ubuntu Server Edition default installation.
+*** Windows 2003 Native Domain (mixed-mode not tested, but may work)
+*** Ample hard drive space to accommodate packages and shares.
+*** Proper IP DNS settings configured so that internal names can be resolved.
+
+== Installation ==
+
+Install the '''samba''', '''acl''', and '''attr''' packages if you wish to enable extended attributes which enable a greater level of control for file Access Control Lists.  See InstallingSoftware for information regarding Package Managers and installing packages.
+
+You can edit <code>/etc/fstab</code> similar to the following to enable extended attributes on boot:
+
+<pre>
+<main file system> / ext3 defaults,acl,user_xattr,errors=remount-ro 0 1
+</pre>
+
+Then remount the filesystem:
+<pre>
+mount -o remount /
+</pre>
+
+== Kerberos ==
+
+The first step in joining an Active Directory domain is to install and configure Kerberos. See <nowiki>[[Samba-Kerberos]]</nowiki> for details. 
+
+== Pam ==
+
+After '''Kerberos''' has been installed and configured, the authentication system (PAM) needs to be configured to use Active Directory. Edit <code>/etc/pam.d/common-auth</code> and add:
+
+<pre>
+auth    sufficient      pam_krb5.so ccache=/tmp/krb5cc_%u
+auth    sufficient      pam_unix.so likeauth nullok use_first_pass
+auth    required        pam_deny.so
+</pre>
+
+Then edit <code>/etc/pam.d/common-session</code>:
+
+<pre>
+session required        pam_unix.so
+session required        pam_mkhomedir.so skel=/etc/skel/ umask=0077
+</pre>
+
+<nowiki>[[File:IconsPage/note.png]]</nowiki> kpasswd for password changing works, but note that AD by default disallows users from changing passwords more than once a day.
+
+<nowiki>[[File:IconsPage/note.png]]</nowiki> The users from AD have to exist in <code>/etc/passwd</code> on the Ubuntu workstation, you can also use libnss-ldap to get the account info from AD. 
+
+== LDAP ==
+
+=== TestQuery: Windows ===
+Assuming you '''do not''' maintain the Active Directory you will want to determine the structure of AD before trying to connect to it from Linux. From a windows PC connected to AD you should perform a query using Microsoft's Active Directory Application Mode (ADAM).  '''ADAM''' is a package of tools that includes '''CSVDE''', which we will be using to perform our queries.  
+
+''NB ADAM is not supported on Windows 7, and has been replaced by AD LDS.''
+
+Type this into Google, the download page should be the second hit.
+<pre>
+adam microsoft
+</pre>
+
+Install.
+Open the command prompt.
+Start > RUN and type 'cmd'
+Navigate to the installation directory, default is c:\windows\ADAM
+
+Example Queries:
+Query a user entry
+<pre>
+CSVDE -f export.csv -r "(&(objectClass=user)(sn=lastname))"
+</pre>
+
+wildcards work as well
+<pre>
+CSVDE -f export.csv -r "(&(objectClass=user)(sn=last*))"
+</pre>
+Query a computer entry
+<pre>
+CSVDE -f export.csv -r "(&(objectClass=computer)(cn=computername))"
+</pre>
+
+Return everything in the following AD folder
+<pre>
+CSVDE -d "OU=Pathology,OU=Departmental OUs,OU=Medcenter,DC=Med,DC=University,DC=edu" -f export.csv
+</pre>
+
+The output of these queries would be placed within export.csv inside c:\windows\ADAM.  Which can then be viewed as a spreadsheet editor.
+
+For more on querying with ADAM's CSVDE
+[www.computerperformance.co.uk/Logon/Logon_CSVDE.htm]
+
+== Configure AD ==
+
+In Windows Server versions prior to WS03 R2, it is necessary to extend the LDAP schema from AD with the UNIX attributes.  Install "Windows Services for UNIX" from Microsoft (I used version 3.5).
+SFU: http://www.microsoft.com/windows/sfu/
+
+<nowiki>[[File:IconsPage/note.png]]</nowiki> Installing SFU 3.5 on Windows Server 2003 (non R2) does not appear to add the necessary LDAP schema extensions. 
+
+In order to extend the LDAP schema, it is necessary to install the "Server for NIS" component.  The installation needs to be performed using an account that has Enterprise Admin privileges in order for the schema to be extended successfully (indeed, Enterprise Admin privileges are required even if the schema has already been extended).  In Active Directory, schema extensions are non-reversible, so if the NIS Server is not required, it can be removed once the schema extension is complete.  If the SFU Server for NIS is installed however, it will extend the Active Directory Users and Computers tool with a UNIX Attributes tab which allows GUI editing of the UNIX attributes for users, groups and computers.  
+
+In Windows Server 2003 R2, the Active Directory schema is already extended with an RFC2307-compliant schema. This differs from the schema extensions used in SFU3.5, requiring a different libnss-ldap configuration. It is still necessary to install Server for NIS to extend the Active Directory Users and Computers tool with the UNIX Attributes tab to allow GUI editing of UNIX attributes for users, groups and computers.  
+
+=== TestQuery: Linux ===
+We will want to perform a testquery in Linux before we attempt to configure AD.  It is much simpler to determine how to connect on the command line and then configure rather than reconfigure a file repeatedly.
+
+We will need at least these two packages to perform test queries on Active Directory.
+
+<pre>
+sudo apt-get install libnss-ldap ldap-utils
+</pre>
+
+We perform queries with 'ldapsearch'
+We must specify these minimum parameters:
+
+We need to specify the LDAP Server (Domain Controller)
+<pre>
+ldapsearch -h medcenterdc01
+</pre>
+
+and the authentication type: simple or SASL
+
+<nowiki>[[File:IconsPage/note.png]]</nowiki> If we have an active directory account and proper libraries installed, you can also authenticate using SASL-GSSAPI, and you will not need -D or -W options
+<pre>
+sudo apt-get install libsasl2-modules-gssapi-mit
+kinit ADuser
+ldapwhoami -h medcenterdc01 -Y EXTERNAL
+</pre>
+
+SASL authentication off, simple on
+<pre>
+ldapsearch -h medcenterdc01 -x
+</pre>
+
+and the folder we want to search in
+<pre>
+ldapsearch -h medcenterdc01 -x -b "OU=Pathology,OU=Departmental OUs,OU=medcenter,DC=mc,DC=university,DC=edu"  
+</pre>
+
+and who to authenticate as
+<pre>
+ldapsearch -h medcenterdc01 -x -b "OU=Pathology,OU=Departmental OUs,OU=medcenter,DC=mc,DC=university,DC=edu" -D "CN=last name\\, firstname,OU=Users,OU=Pathology,OU=Departmental OUs,OU=medcenter,DC=mc,DC=university,DC=edu"  
+</pre>
+
+we'll have it prompt for the password, instead of specifying it in the command
+<pre>
+ldapsearch -h medcenterdc01 -x -b "OU=Pathology,OU=Departmental OUs,OU=medcenter,DC=mc,DC=university,DC=edu" -D "CN=last name\\, firstname,OU=Users,OU=Pathology,OU=Departmental OUs,OU=medcenter,DC=mc,DC=university,DC=edu" -W  
+</pre>
+
+and lets search for sammy's account
+<pre>
+ldapsearch -h medcenterdc01 -x -b "OU=Pathology,OU=Departmental OUs,OU=medcenter,DC=mc,DC=university,DC=edu" -D "CN=last name\\, firstname,OU=Users,OU=Pathology,OU=Departmental OUs,OU=medcenter,DC=mc,DC=university,DC=edu" -W "sAMAccountName=sammy"  
+</pre>
+
+<nowiki>[[File:IconsPage/note.png]]</nowiki> One doesn't need to worry about spaces, but to specify a comma as part of the path we need to prefix the comma with '\\'
+<pre>
+CN=last name\\, firstname
+</pre>
+
+== libnss-ldap ==
+
+You can install '''libnss-ldap''' and '''nscd''' from the '''Universe''' Repository.
+
+Now you need to set up /etc/nsswitch.conf for ldap.
+
+<pre>
+    passwd:         compat
+    group:          compat
+    shadow:         compat
+    passwd_compat:  ldap
+    group_compat:   ldap
+    shadow_compat:  ldap
+
+    hosts:       files dns
+    networks:    files dns
+
+    services:    db files
+    protocols:   db files
+    rpc:         db files
+    ethers:      db files
+    netmasks:    files
+    netgroup:    files
+    bootparams:  files
+
+    automount:   files
+    aliases:     files
+</pre>
+
+<nowiki>[[File:IconsPage/note.png]]</nowiki> If you have trouble when you attempt to ping and your network has a wins server you will want to append 'wins' to the hosts line of nsswitch.conf - you may only notice this only when you try to ping a static IP Linux PC from another Linux PC - I believe WINS is a part of the samba package and the IP addresses for WINS servers are stored in /etc/samba/dhcp.conf, the static IP machine also needs to specify its NetBIOS name within /etc/samba/smb.conf
+
+<nowiki>[[File:IconsPage/note.png]]</nowiki> When fiddling with /etc/nsswitch.conf, it is best to turn the Name Services Caching Daemon off - ''/etc/init.d/nscd stop'' or you will be confused by cached results. Turn it on afterwards.
+
+Then you need to set up /etc/libnss-ldap.conf. 
+AKA: /etc/ldap.conf
+
+<pre>
+### Replace windc.example.com with your Windows DC
+    uri ldap://windc.example.com/
+
+    base dc=example,dc=com
+    ldap_version 3
+
+### Add a user to AD, that can read the container
+### with the users, that you want use.
+    binddn cn=ldapreader,cn=Users,dc=example,dc=com
+    bindpw cvfd123
+
+    scope sub
+    timelimit 30
+
+    pam_filter objectclass=User
+
+    pam_login_attribute sAMAccountName
+    pam_lookup_policy yes
+
+### Modify cn=User,dc=e... to your container with your users.
+    nss_base_passwd cn=User,dc=example,dc=com?sub
+    nss_base_shadow cn=User,dc=example,dc=com?sub
+    nss_base_group  cn=User,dc=example,dc=com?sub
+
+### For MSSFU:
+    nss_map_objectclass posixAccount User
+    nss_map_objectclass shadowAccount User
+    nss_map_attribute uid sAMAccountName
+    nss_map_attribute uniqueMember member
+    nss_map_attribute uidNumber msSFU30UidNumber
+    nss_map_attribute gidNumber msSFU30GidNumber
+    nss_map_attribute userPassword msSFU30Password
+    nss_map_attribute homeDirectory msSFU30HomeDirectory
+    nss_map_attribute loginShell msSFU30LoginShell
+    nss_map_attribute gecos name
+    nss_map_attribute cn sAMAccountName
+</pre>
+
+''I think it only needs rootbinddn, no binddn, with the bindpw in /etc/libnss-ldap.secret, not here.
+I have also successfully combined /etc/ldap/ldap.conf, /etc/libnss-ldap.conf, and /etc/pam_ldap.conf, symlinking them all to /etc/ldap/ldap.conf - AndyRabagliati''
+
+<nowiki>[[File:IconsPage/warning.png]]</nowiki> Incorrect nss_map settings will prevent one from authenticating and reading AD in general.  These settings are dependent on the column names within your AD database.  In older systems the database (schema) needs to be extended as described in the 'Configure AD' section.  Once these *NIX attributes are part of the schema they can be modified with the MMC snap-in Active Directory Users and Groups, as long as idmu.exe has been installed from the Windows Server 2003 R2 Administration Tools Pack. If *NIX group membership has been administered by modifying the list in the UNIX attributes tab of AD Users and Computers (which is REQUIRED in a NIS environment), then 'uniqueMember' should be mapped to 'msSFU30PosixMember' (or 'posixMember' for WS03R2) as 'member' only includes the membership listed in the Windows group. 
+For Windows Server 2003 R2, the schema extensions are RFC2307 compliant - no longer prefixed 'msSFU30' and with the next letter in lower case (e.g. msSFU30UidNumber is now uidNumber). 
+
+If you are in a complex environment with multiple domains or multiple trees and want people from all your domains to login specify the Global Catalog port for your LDAP queries instead of the default port. If you do this is essential all LDAP servers specified in the ldap.conf be Global Catalogs. If you can create a DNS entry for your Global Catalogs of "ldap.company.com" then your URI becomes ldap://ldap.company.com:3268/. Using a DNS entry creates a dependancy on DNS but also allows you to add or remove Global Catalog servers with out having to edit the ldap.conf on each client. Taking this step also requires making all of the attributes you are using accessible via the Global Catalog LDAP service, many of the UNIX attributes are local to a specific domain. You can do this with the schema managment MMC. If you are using these attributes to authenticate your users (like UID) you may want to index them in Active Directory as well. Using the sAMAccountName gets around this since it's already replicated to all Global Catalogs and indexed. If you have a large environment it's very important to add proper filtering for your NSS lookups as shown below.
+
+<nowiki>[[File:IconsPage/note.png]]</nowiki> Further optimizations of the queries can be made for the nss_base properties:
+<pre>
+nss_base_passwd		dc=mydomain,dc=com?sub?&(objectClass=user)(!(objectClass=computer))(uidNumber>=2000)(unixHomeDirectory=*)
+nss_base_shadow		dc=mydomain,dc=com?sub?&(objectClass=user)(!(objectClass=computer))(uidNumber>=2000)(unixHomeDirectory=*)
+nss_base_group          dc=mydomain,dc=com?sub?&(objectClass=group)(gidNumber=*)
+</pre>
+
+These filters may be required if not all of your AD users and groups have had their Unix Attributes (UID, GID, etc) configured.  Specifiying uidNumber=* will exclude AD objects that have not had this attribute set from the search. .  If running "id -Gn <user>" hangs (but getent passwd and getent group work correctly), then you should make these changes.The filters above will sort for users that are not computers (AD stores computers as User objects with a "$" at the end) and have a UID greater than or equal to 2000 and a Unix home directory specified. If you are not seeing what you expect work with out filters and using the default LDAP port and add complexity one step at a time.
+
+The ampersand in the queries above merely specifies AND logic
+<pre>
+AND (&(filter)(filter))
+OR  (|(filter)(filter))
+NOT (!(filter))
+</pre>
+
+== Troubleshooting ==
+
+<nowiki>[[File:IconsPage/info.png]]</nowiki> To debug LDAP queries one should make sure nscd is off and use the getent command
+<pre>
+sudo /etc/init.d/nscd stop
+
+getent passwd
+getent shadow
+getent group
+</pre>
+
+To follow the actions of the command use strace
+<pre>
+strace getent passwd
+</pre>
+
+If thats not enough you can place a line in the configuration file for output:
+<pre>
+debug 10
+</pre>
+This can be a value anywhere from 1 to 10, 10 being the most verbose.
+
+<nowiki>[[File:IconsPage/note.png]]</nowiki> With this config is the LDAP Traffic unencrypted and someone can sniff it. To make it secure use SSL
+
+Now you need to set up /etc/pam.d/common-auth and
+
+<pre>
+### 
+### /etc/pam.d/common-auth - authentication settings common to all services
+### 
+### This file is included from other service-specific PAM config files,
+### and should contain a list of the authentication modules that define
+### the central authentication scheme for use on the system
+### (e.g., /etc/shadow, LDAP, Kerberos, etc.).  The default is to use the
+### traditional Unix authentication mechanisms.
+### 
+    auth    sufficient      pam_ldap.so
+    auth    required        pam_unix.so nullok_secure use_first_pass
+</pre>
+
+set up /etc/pam.d/common-account.
+
+<pre>
+### 
+### /etc/pam.d/common-account - authorization settings common to all services
+### 
+### This file is included from other service-specific PAM config files,
+### and should contain a list of the authorization modules that define
+### the central access policy for use on the system.  The default is to
+### only deny service to users whose accounts are expired in /etc/shadow.
+### 
+    account sufficient      pam_ldap.so
+    account required        pam_unix.so
+</pre>
+
+<nowiki>[[File:IconsPage/note.png]]</nowiki> We are still using Kerberos for authentication, but now we are storing the information that would normally be stored in /etc/passwd using Active Directory.
+    
+Here are some other useful config files:
+** login.defs
+
+** nscd.conf
+   
+** /var/log/auth.log
+
+Here is an alternative configuration example:
+<nowiki>[[https://help.ubuntu.com/community/Alternate_Pam_Krb5LDAP_Authentication|Patched pam_krb5]]</nowiki> to include support for directory service users]
+
+/* Should this page be cleaned up? I think that it's got a lot of older references in it (libnss-ldap.conf, SFU3.5, adam, older pam configs that are not required anymore, lots of ldapsearch stuff that really is more for troubleshooting than anything else and certainly not required. Maybe more of a cookbook way */
+----
+ CategorySecurity

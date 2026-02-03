@@ -1,0 +1,351 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== LiveCDInternetKiosk ==
+
+This page describes how to create a LiveCD that is useful for providing internet web surfing in to anonymous users while still providing a degree of web filtering to avoid access to unsuitable sites.  
+
+=== Disclaimer ===
+
+The resulting LiveCD should not be considered fool proof and may not provide enough web filtering for your situation.  There are no guarantees and the author cannot be held responsible for you use or misuse of the information here in.  It is presented in the hopes that it will be useful.  If it is not, that is your responsibility and you are free to further refine the instructions to meet you needs.
+
+=== Starting ===
+
+You should have some understanding of how to modify a LiveCD already.  Please review <nowiki>[[LiveCDCustomization]]</nowiki>.  These instructions will use that as a base but if you have read and understand those instructions, then these instructions will essentially replace the Customization section of that document.
+
+== Obtain the base system ==
+* Download an official Desktop CD from http://releases.ubuntu.com/
+
+Note: the example shown here uses the ubuntu-14.04.2-desktop-amd64.iso Desktop CD. Replace it with the name of your iso. 
+
+* Move or copy it into an empty directory
+<pre>
+mkdir ~/livecdtmp
+mv ubuntu-14.04.2-desktop-amd64.iso ~/livecdtmp
+cd ~/livecdtmp
+</pre>
+
+=== Extract the CD .iso contents ===
+
+Mount the Desktop .iso
+<pre>
+mkdir mnt
+sudo mount -o loop ubuntu-14.04.2-desktop-amd64.iso mnt
+</pre>
+
+Extract .iso contents into dir 'extract-cd'
+<pre>
+mkdir extract-cd
+sudo rsync --exclude=/casper/filesystem.squashfs -a mnt/ extract-cd
+</pre>
+
+=== Extract the Desktop system ===
+
+Extract the SquashFS filesystem
+<pre>
+sudo unsquashfs mnt/casper/filesystem.squashfs
+sudo mv squashfs-root edit
+</pre>
+
+=== Prepare and chroot ===
+
+'''WARNING: If you do this in 14.04 LTS, you will lose network connectivity (name resolving part of it). /etc/resolv.conf is and should remain a symlink to /run/resolvconf/resolv.conf nowadays. To enable name resolving, temporarily edit that file instead.''' If you need the network connection within chroot
+<pre>
+sudo cp /etc/resolv.conf edit/etc/
+</pre>
+
+'''NOTE: Recommended that you do not do this unless you know what you're doing''' Depending on your configuration, you ''may'' also need to copy the '''hosts''' file
+<pre>
+sudo cp /etc/hosts edit/etc/
+</pre>
+
+The remaining steps are good, unlike the ones above:
+
+<pre>
+sudo mount --bind /dev/ edit/dev
+sudo chroot edit
+mount -t proc none /proc
+mount -t sysfs none /sys
+mount -t devpts none /dev/pts
+</pre>
+
+(these mount important directories of your host system - if you later decide to delete the edit/ directory, then make sure to unmount before doing so, otherwise your host system will become unusable at least temporarily until reboot)
+
+To avoid locale issues and in order to import GPG keys
+<pre>
+export HOME=/root
+export LC_ALL=C
+</pre>
+== Configure the LiveCD for Internet Kiosk use ==
+=== Install and Configure Dansguardian ===
+
+==== Enable The Universe Repository ====
+<pre>
+sed -i 's/ main / main universe /g' /etc/apt/sources.list
+</pre>
+
+Create temporary Proxy settings (if necessary)
+<pre>
+export http_proxy=http://proxy.domain.com:8080
+export https_proxy=http://proxy.domain.com:8080
+</pre>
+
+Temporarily set the DNS servers
+<pre>
+cat << EOF_TMPDNS > /run/resolvconf/resolv.conf
+nameserver 208.67.222.222
+nameserver 208.67.220.220
+EOF_TMPDNS
+</pre>
+
+Update the package list
+{{{ 
+apt-get update
+}}}
+
+==== Install Dansguardian ====
+<pre>
+apt-get -y install dansguardian squid
+</pre>
+
+==== Configure Dansguardian ====
+<pre>
+sed -i '/UNCONFIGURED.*/d' /etc/dansguardian/dansguardian.conf
+
+echo opendns.com >> /etc/dansguardian/lists/exceptionsitelist
+echo opendns.net >> /etc/dansguardian/lists/exceptionsitelist
+echo opendns.org >> /etc/dansguardian/lists/exceptionsitelist
+
+</pre>
+
+==== Disable FreshClam updates ====
+Dansguardian install ClamAV but there is no reason to update signatures on the live CD:
+<pre>
+sed -i 's/Checks 24/Checks 0/g' /etc/clamav/freshclam.conf
+</pre>
+
+==== Download and configure the blacklists ====
+{{{ 
+wget -q -O /root/bigblacklist.tar.gz 'http://urlblacklist.com/cgi-bin/commercialdownload.pl?type=download&file=bigblacklist'
+cd /etc/dansguardian/lists/
+sudo tar xvfz /root/bigblacklist.tar.gz
+}}}
+Enable the list that  you want to block by uncomenting lines that match:
+<pre>
+sed -i -r '/artnudes|porn|violence|hacking|proxy|virusinfected|warez/ s/^#.I/.I/' /etc/dansguardian/lists/bannedsitelist
+sed -i -r '/artnudes|porn|violence|hacking|proxy|virusinfected|warez/ s/^#.I/.I/' /etc/dansguardian/lists/bannedurllist
+</pre>
+=== Install and Configure OpenDNS Updater ===
+==== Pre-requisities ====
+This section assumes that you have an account setup with OpenDNS to configure ddclient.  The ddclient will update your IP address in your OpenDNS account so that the LiveCD will make use of the web site filtering that you have setup in your account.
+
+==== Install and configure ddclient ====
+<pre>
+apt-get -y install ddclient
+
+cat << EOF_DDCLIENT > /etc/ddclient.conf 
+use=web, web=myip.dnsomatic.com
+ssl=yes
+server=updates.opendns.com
+protocol=dyndns2
+login=account@email.addr
+password=''
+Home
+EOF_DDCLIENT
+</pre>
+=== Set DNS Servers to OpenDNS Servers ===
+This section assumes that you are on a network that allows you to specify your own DNS server.  If you are preparing the LivCD in an environment where only corporate DNS is allowed you will need to leave this step out or only enable it before you are ready to create the final CD.
+
+Set the OpenDNS servers as the DNS servers
+<pre>
+cat << EOF_DNS > /etc/resolvconf/resolv.conf.d/base
+nameserver 208.67.222.222
+nameserver 208.67.220.220
+EOF_DNS
+</pre>
+
+Prevent the DHCP Server from overriding your hard coded DNS server settings.
+
+<pre>
+sed -i 's/#prepend domain-name-servers .*$/prepend domain-name-servers 208.67.222.222, 208.67.220.220/' /etc/dhcp/dhclient.conf
+sed -i 's/domain-name-servers, //' /etc/dhcp/dhclient.conf 
+</pre>
+=== Configure the Timezone ===
+If you want to set the TimeZone that your CD will be used in you can do the following:
+<pre>
+dpkg-reconfigure tzdata
+</pre>
+
+=== Remove the Live CD installer ===
+For this use, there is no reason to have the installer.  Removing it will allow you to boot directly into the desktop.
+<pre>
+apt-get -y purge ubiquity
+</pre>
+
+=== Install Google Chrome ===
+==== Installation ====
+Since Google Chrome has the ability to play Flash it is a good idea to install it:
+<pre>
+echo "deb http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list
+wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
+apt-get update
+apt-get -y install google-chrome-stable
+</pre>
+==== Create Desktop Short Cut ====
+<pre>
+cat << ENDCHROME > /etc/profile.d/google-chrome.sh
+cp /usr/share/applications/google-chrome.desktop /home/ubuntu/Desktop/
+chmod +x  /home/ubuntu/Desktop/google-chrome.desktop
+ENDCHROME
+</pre>
+
+==== Lock Preferences ====
+<pre>
+mkdir -p /etc/opt/chrome/policies/managed
+mkdir -p /etc/opt/chrome/policies/recommended
+cat << END_CHROMEPREFS > /etc/opt/chrome/policies/managed/test_policy.json
+{
+  "DefaultBrowserSettingEnabled": false,
+  "MetricsReportingEnabled": false,
+  "BuiltInDnsClientEnabled": false,
+  "RestoreOnStartup": 4,
+  "RestoreOnStartupURLs": ["www.google.com"],
+  "ProxyMode": "fixed_servers",
+  "ProxyServer": "127.0.0.1:8080",
+  "ForceSafeSearch": true,
+  }
+END_CHROMEPREFS
+</pre>
+
+=== Firefox Preferences Configuration ===
+Lock Firefox preferences to set the proxy and home page
+<pre>
+cat << EOF_FIREPREFS > /usr/lib/firefox/defaults/pref/all.corp.js
+lockPref("browser.startup.homepage","http://www.google.com");
+lockPref("browser.tabs.autoHide", false);
+lockPref("network.proxy.type",1);
+lockPref("network.proxy.share_proxy_settings", true);
+lockPref("network.proxy.ftp","127.0.0.1");
+lockPref("network.proxy.ftp_port",8080);
+lockPref("network.proxy.http","127.0.0.1");
+lockPref("network.proxy.http_port",8080);
+lockPref("network.proxy.ssl","127.0.0.1");
+lockPref("network.proxy.ssl_port",8080);
+lockPref("network.proxy.gopher","127.0.0.1");
+lockPref("network.proxy.gopher_port",8080);
+lockPref("network.proxy.no_proxies_on", "localhost, 127.0.0.1");
+lockPref("browser.shell.checkDefaultBrowser", false);
+lockPref("browser.defaultbrowser.notificationbar", false);
+EOF_FIREPREFS
+</pre>
+Prevent Firefox from prompting to import settings from Chome
+<pre>
+cat << EOF_FIREMIG > /usr/lib/firefox/browser/override.ini
+[XRE]
+EnableProfileMigrator=false
+EOF_FIREMIG
+</pre>
+=== System wide Proxy settings - experimental ===
+<pre>
+cat << EOF_PROXIES > /etc/init/proxy.conf
+
+description     "set system proxy settings"
+
+start on started dbus
+
+task
+
+script
+HTTP_PROXY_HOST=127.0.0.1
+HTTP_PROXY_PORT=8080
+HTTPS_PROXY_HOST=127.0.0.1
+HTTPS_PROXY_PORT=8080
+
+gsettings set org.gnome.system.proxy mode manual
+gsettings set org.gnome.system.proxy.http host "\$HTTP_PROXY_HOST"
+gsettings set org.gnome.system.proxy.http port "\$HTTP_PROXY_PORT"
+gsettings set org.gnome.system.proxy.https host "\$HTTPS_PROXY_HOST"
+gsettings set org.gnome.system.proxy.https port "\$HTTPS_PROXY_PORT"
+
+sed -i.bak '/http[s]::proxy/Id' /etc/apt/apt.conf
+tee -a /etc/apt/apt.conf <<EOF
+Acquire::http::proxy "http://\$HTTP_PROXY_HOST:\$HTTP_PROXY_PORT";
+Acquire::https::proxy "http://\$HTTPS_PROXY_HOST:\$HTTPS_PROXY_PORT";
+EOF
+
+sed -i.bak '/http[s]_proxy/Id' /etc/environment
+tee -a /etc/environment <<EOF
+http_proxy="http://\$HTTP_PROXY_HOST:\$HTTP_PROXY_PORT"
+https_proxy="http://\$HTTPS_PROXY_HOST:\$HTTPS_PROXY_PORT"
+EOF
+end script
+EOF_PROXIES
+</pre>
+=== Miscellaneous LiveCD Changes ===
+==== Disable the Keyboard Shortcuts Overlay ====
+<pre>
+cat << EOF_OVERLAY > /etc/profile.d/overlay.sh
+gsettings set org.compiz.unityshell:/org/compiz/profiles/unity/plugins/unityshell/ shortcut-overlay false
+EOF_OVERLAY
+</pre>
+==== Remove the ubuntu user from sudo ====
+To further protect the system from modification you need to remove the ability to sudo
+<pre>
+rm -fr /etc/sudoers.d
+
+sed -r -i '/%admin|%sudo/ s/^/#/' /etc/sudoers
+</pre>
+
+==== Disable the builtin webbrowser-app ====
+There is a web browser built in to Ubuntu that I did not realize was there. It may support proxy options but sine there were better options available I simply disabled it.
+
+<pre>
+chmod a-x /usr/bin/webbrowser-app
+</pre>
+
+==== Remove some unnecessary packages ====
+<pre>
+apt-get -y purge usb-creator-common usb-creator-gtk thunderbird-gnome-support thunderbird remmina-common remmina remmina-plugin-rdp remmina-plugin-vnc
+apt-get -y autoremove
+
+</pre>
+== Create the LiveCD iso ==
+=== Clean Up ===
+<pre>
+apt-get clean
+umount /proc || umount -lf /proc
+umount /sys
+umount /dev/pts
+exit
+</pre>
+<pre>
+sudo chmod a+w extract-cd/casper/filesystem.manifest
+sudo chroot edit dpkg-query -W --showformat='${Package} ${Version}\n' > extract-cd/casper/filesystem.manifest
+sudo cp extract-cd/casper/filesystem.manifest extract-cd/casper/filesystem.manifest-desktop
+sudo sed -i '/ubiquity/d' extract-cd/casper/filesystem.manifest-desktop
+sudo sed -i '/casper/d' extract-cd/casper/filesystem.manifest-desktop
+</pre>
+=== Compress the file system ===
+<pre>
+sudo rm extract-cd/casper/filesystem.squashfs
+sudo mksquashfs edit extract-cd/casper/filesystem.squashfs
+</pre>
+<pre>
+sudo chmod a+w extract-cd/casper/filesystem.size
+printf $(sudo du -sx --block-size=1 edit | cut -f1) > extract-cd/casper/filesystem.size
+</pre>
+
+=== Create the CD/DVD ===
+<pre>
+cd extract-cd
+sudo rm md5sum.txt
+find -type f -print0 | sudo xargs -0 md5sum | grep -v isolinux/boot.cat | sudo tee md5sum.txt
+sudo mkisofs -D -r -V "$IMAGE_NAME" -cache-inodes -J -l -b isolinux/isolinux.bin -c isolinux/boot.cat -no-emul-boot -boot-load-size 4 -boot-info-table -o ../ubuntu-14.04.2-desktop-amd64-custom.iso .
+</pre>

@@ -1,0 +1,235 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+* '''Launchpad Entry''': UbuntuSpec:maven-packaging-support
+* '''Created''': Jul 18th, 2008
+* '''Contributors''': ThierryCarrez, LuisArias, LudovicClaude
+* '''Packages affected''': none (only new packages)
+
+=== Summary ===
+
+A lot of Java applications use Maven (and associated maven plugins) as their build system. In order to package this software as appropriate Debian packages, a lot of changes need to be applied to the usual Maven process, in particular to avoid the online dependency resolving feature of Maven. This document presents a solution to this problem and details the minimal work needed before we can start packaging a minimal Maven project.
+
+=== Release Note ===
+
+The infrastructure making it possible to package Maven-based Java applications like Geronimo or Glassfish in main or universe is now in place.
+
+=== Rationale ===
+
+Most recent complex Java applications leverage ASF's Maven system and artifact repository to ease the dependency resolving and building of their software. Unfortunately the usual Maven process downloads/updates needed artifacts (JARs), Maven plugins and build/runtime dependency information (.pom files) from the Maven repositories on the Internet into a local repository cache and works from there. This is incompatible with the way our buildd system works, and with the idea of repeatable builds in general. Given the power of the Maven plugins-based build system, working around Maven to build those complex packages without it is almost impossible.
+
+=== Use Cases ===
+
+* Alan in an Ubuntu developer. He wants to package Geronimo in universe, but Geronimo uses Maven. He is able to use the Maven packaging method and the already-packaged Java libraries and Maven plugins to write a fully-offline and repeatable package, compatible with our buildd system.
+* Betty is a Java developer. She wants to use Maven to build her own Java software. Fortunately, this method doesn't modify Maven in any way so it doesn't prevent her from using Maven the usual way, setting up a local repository that downloads and updates files from the online Maven repositories.
+
+=== Assumptions ===
+
+Software using Maven to build is usually very large and requires lots of dependencies. Even once the basic blocks described in this document are in place, packaging any large Java software will require lots of external packaging work to have all the required Java libraries available as proper Debian packages to build-depend from. So keep in mind that this might just be the visible tip of the iceberg.
+
+=== Design ===
+
+==== Why we can't just call maven in debian/rules ====
+
+* Online dependency download/update: Maven downloads needed build/runtime dependency information (.pom files) and resulting artifacts (Java libraries and Maven plugins) from Maven repositories on the Internet. For each item already present in the local repository, it checks if the version is up to date. We need to provide all those dependencies as part of the source or as packaged build dependencies, and disable Maven freshness check.
+* Use of a specific repository: Maven doesn't use the libraries installed in /usr/share/java, it only uses its own local repository. Since the required Java libraries build dependencies will be pulled as packages, Maven needs to make use of those.
+
+==== Solution ====
+
+The proposed method is based on two principles:
+* Reconstruct at build-time a complete Maven local repository in debian/mvn_repo by recreating dynamically all required POM files and replacing every JAR with a symbolic link to the corresponding system-installed library
+* Call mvn in offline mode to avoid any superfluous online freshness check and use the "-s" option to make it use the mvn_repo directory as its repository.
+
+==== Helper tools ====
+
+Helper tools can be used to ease the process. They are separated in two sets, one used by the packager and one used at build-time.
+
+===== maven-packaging-support =====
+
+Maven packaging support is a set of tools that help the packager to build the repository description file. Two tools would be provided:
+
+* mvn-go-offline: downloads all necessary dependencies in a local Maven repository
+* mvn-debianize: walks through the repository built by mvn-go-offline, asks questions on where to find the corresponding system libraries, and builds the repository description file
+
+The resulting repository description file is then shipped as part of the debian/ directory in the source package.
+
+===== maven-helper =====
+
+Maven helper is a set of tools that are used at build time to reconstruct the repository and call Maven with the relevant options. It is used as a build dependency of the package, and provides three helpers for debian/rules:
+
+* mh_clean: used in the clean rule, cleans potential intermediary files
+* mh_prepare_repo: used in a configure rule, reconstructs POM files and system links in the local Maven repository from the repository description file
+* mh_mvn: used in the build rule, calls mvn with the right options to prevent offline downloading and force usage of the rebuilt repository
+
+==== Potential issues ====
+
+* Maven relies on specific versions of libraries: in the .pom files, each artifact can depend on a very specific version of a given JAR, which is usually different from the one in the Ubuntu repositories. Extra care in testing is needed to double-check that using a slightly different JAR version doesn't make it break at build or at runtime.
+
+=== Implementation ===
+
+==== maven-packaging-support ====
+
+This set of tools needs a few yet-unpackaged Java libraries before it can be delivered as a proper Debian package.
+
+See work in progress: https://launchpad.net/maven-packaging-support
+
+==== maven-helper ====
+
+This set of tools is already packaged as a Debian package.
+
+See work in progress: https://code.launchpad.net/~ludovicc/maven-debhelper/main
+
+PPA: https://launchpad.net/~ludovicc/+archive
+
+==== Packaging of basic Maven project dependencies ====
+
+Simply calling the classic Maven targets (clean, build, package...) requires some dependencies to be present, so to demonstrate Maven packaging we need to provide at least the mimimal build dependencies required by even the simplest helloWorld maven project.
+
+===== Maven dependencies for a helloWorld project =====
+
+(in bold, non-existing packages)
+
+{| class="wikitable"
+|-
+| <rowbgcolor="#cccccc"> '''Target'''
+| '''Artifacts'''
+|-
+| clean
+| '''maven-clean-plugin''' '''maven-file-management''' maven-shared-io plexus-utils
+|-
+| compile
+| '''maven-resources-plugin''' '''maven-compiler-plugin''' plexus-compiler-api plexus-compiler-javac plexus-utils plexus-compiler-manager
+|-
+| test
+| junit '''surefire-junit''' '''surefire-api''' '''surefire-booter''' '''maven-surefire-plugin''' plexus-utils
+|-
+| package
+| commons-lang '''maven-archiver''' '''maven-jar-plugin''' '''plexus-archiver''' plexus-utils plexus-io
+|}
+
+===== Bootstrapping =====
+
+Fortunately we don't really need maven to build those missing basic blocks. They can be built using ant with minimal effort. Here is a breakdown of the order in which the new packages can be created. maven-plugin-testing-harness.jar is optional, needed only to enable testing in the maven plugins build.
+
+{| class="wikitable"
+|-
+| <rowbgcolor="#cccccc"> '''JAR'''
+| '''Runtime & Compile depends'''
+| '''Testing depends'''
+|-
+| <-3 #eeeeee> Level 0 (can be done using current archive)
+|-
+| surefire-api.jar
+| commons-lang plexus-utils
+| jmock
+|-
+| plexus-archiver.jar
+| plexus-component-api plexus-container-default plexus-utils
+| junit
+|-
+| plexus-io.jar
+| plexus-component-api plexus-container-default
+| junit
+|-
+| maven-shared-io.jar
+| classworlds junit maven wagon-provider-api plexus-utils plexus-container-default
+| easymock
+|-
+| <#FFEBBB> maven-plugin-testing-harness.jar
+| maven junit
+| 
+|-
+| <-3 #eeeeee> Level 1 (needs level 0)
+|-
+| surefire-booter.jar
+| surefire-api plexus-utils
+| jmock
+|-
+| surefire-junit.jar
+| surefire-api
+| jmock
+|-
+| file-management.jar
+| classworlds maven maven-shared-io wagon-provider-api plexus-container-default plexus-utils
+| junit
+|-
+| maven-archiver.jar
+| maven plexus-archiver plexus-utils
+| 
+|-
+| maven-resources-plugin.jar
+| maven
+| maven-plugin-testing-harness
+|-
+| maven-compiler-plugin.jar
+| classworlds junit maven plexus-compiler-api plexus-compiler-manager plexus-container-default plexus-utils plexus-compiler-javac
+| jsch commons-cli doxia-sink-api maven-plugin-testing-harness wagon-file wagon-http-lightweight wagon-provider-api wagon-ssh plexus-interactivity-api
+|-
+| <-3 #eeeeee> Level 2 (needs level 1)
+|-
+| maven-surefire-plugin.jar
+| maven surefire-booter
+| jmock
+|-
+| maven-jar-plugin.jar
+| commons-lang maven-archiver plexus-io plexus-utils
+| maven-plugin-testing-harness
+|-
+| maven-clean-plugin.jar
+| classworlds junit file-management maven-shared-io maven wagon-provider-api plexus-container-default plexus-utils
+| jsch commons-cli doxia-sink-api maven-plugin-testing-harness wagon-file wagon-http-lightweight wagon-ssh plexus-archiver plexus-interactivity-api
+|}
+
+If this spec is accepted, packaging-needed bugs would be filed (first Level 0 ones, then Level 1...)
+
+===== Directions for packagers =====
+
+Lots of dependencies are Maven-specific, in particular the Maven plugins. It might make sense not to ship those libraries into /usr/share/java but rather in /usr/share/maven2/plugins. Since we use links from mvn_repo, from our point of view the location doesn't matter, and it would avoid crowding the /usr/share/java directory with JARs that can only be called by Maven.
+
+=== Test/Demo Plan ===
+
+We should provide Debian packaging for a minimal helloWorld Maven project.
+
+=== Outstanding Issues ===
+
+None.
+
+=== Discussion ===
+
+I noticed the following tools which may be of some use too ? :
+* mvn-pkg-plugin : http://wiki.evolvis.org/mvn-pkg-plugin
+* jdeb : http://vafer.org/projects/jdeb
+Hope this helps -- OlivierBerger
+
+afaict those tools make installable debian binary packages but cannot be used to create packaging compliant with the buildd rules (no access to the Internet, all must be built from source and existing dependencies, no binaries in source) and therefore probably can't be used -- ThierryCarrez
+
+==== Alternative solutions (for reference) ====
+
+===== JPackage patchset to Maven =====
+
+The JPackage patchset is implemented in Fedora. It patches maven so that, when called with specific options, it supports using JARs installed in /usr/share/java directly. The POM files are shipped together with the Java libraries. A depmap.xml file converts Maven artifact names to system file locations. It is built from depmap fragments shipped with each Java library.
+
+The advantage of this solution is to ship Maven-related information inside the Java library packages themselves, and rely on that system to automatically find the required JARs. However, it requires a heavy patch on Maven that must be maintained, a basic infrastructure that is very costly to put in place (refresh every JAR), and the system might be brittle because it doesn't freeze the POM information in a state that is necessarily compatible with the build you are trying to make (debugging of dependency issues is more complicated).
+
+===== Packaging Aware Maven Proxy =====
+
+In this approach, we would run a Maven proxy that would solve all dependency mapping and let Maven build a repository at build-time that downloads artifacts from the system itself. Maven would be run with a settings file that point to the local proxy, and the maven proxy would be launched prior to launching a maven build process.
+
+The proxy would need to have the following features:
+
+* Generate pom.xml files upon request according to debian packaging dependencies
+* Map request artifact versions to existing artifact versions
+* Serve jar files from /usr/share/java
+* Block access to the internet
+
+The advantages of this approach is that it doesn't require any Maven patching. However, building the maven proxy is complex, and starting a localhost daemon in parallel to a build might not be the best solution for buildds.
+
+----
+CategorySpec

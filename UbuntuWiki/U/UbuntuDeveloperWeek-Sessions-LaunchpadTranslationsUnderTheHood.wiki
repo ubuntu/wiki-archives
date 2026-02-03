@@ -1,0 +1,227 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== UbuntuDeveloperWeek session ==
+by AdiRoiban and HenningEggers on <nowiki>[[http://www.timeanddate.com/worldclock/fixedtime.html?day=27&month=1&year=2010&hour=17&min=0&sec=0&p1=0|Wednesday, 27 Jan 2010, 17.00 UTC]]</nowiki>
+
+=== Introduction ===
+'''''Henning'''''
+
+Today we want to help you understand the inner workings of the Launchpad Translations application (Rosetta) and take you for a walk through the source code. We hope that this will enable you to scratch your own itches you have about Rosetta and to contribute to its source.
+
+==== Intended audience ====
+
+* Developers wanting to contribute to Launchpad Translations but are not yet familiar with the internal structure of the application.
+* Interested maintainers of translations in Launchpad and translators that want to have a better understanding of how and why Launchpad Translations does what it does.
+
+==== Required knowledge ====
+
+* GNU gettext system for internationalization of software
+* Python coding
+* A general understanding of how a web application works
+* A general understanding of SQL databases
+* Knowledge of zope is not required but a bonus
+ 
+==== Goals of the session ====
+
+Session attendees have a good overview of
+
+* how translation data is stored in LP translation (db schema)
+* how the source code is organized
+* what to expect when diving into the source code
+* where to start when trying to hack on Launchpad Translations.
+
+It is ''not'' the goal of this session to introduce the attendees to Launchpad development in general. That will be covered in a different session by Karl Fogel.
+
+The session text will be used as developer documentation on the Launchpad development wiki so this is a change for us to gather input from the community.
+
+This session does not use slides for Lernid but will have some references to sourceode on Launchpad that should still pop up in Lernid. The source code for Launchpad is found here:
+http://bazaar.launchpad.net/~launchpad-pqm/launchpad/devel/files
+
+=== Gettext basics ===
+'''''Adi'''''
+
+You need to understand how gettext ist used to internationalize computer software. You should be familiar <nowiki>[[http://www.gnu.org/software/gettext/manual/gettext.html|gettext documenation]]</nowiki> but we will give you a short run-through of those parts that are important for Rosetta.
+
+==== PO files ====
+
+Gettext stores translations in so-called ''portable object'' files, abbriviated as PO files. They contain data sets of ''msgid'' and ''msgstr'', the former containing the English orignal string, the latter containing the translation of that string. They may be prepended by special comments that convey information about the string that is being translated, like in which source file it was found. Here is an example:
+
+<pre>
+msgid "Thank you"
+msgstr "Merci"
+</pre>
+
+Gettext states that ''msgid'' could be anything to indentify the string in the source code and not necessarily the English original string. Using the full English original string as the msgid, though, has proven to be the most convenient way to work on translations and is the only form that is fully supported by Rosetta.
+
+The first ''msgid'' in a PO file is empty and its ''msgstr'' contains meta information about the file. The minimum information here is the MIME Content-type of the file but usually a lot of other information is included, too.
+
+<pre>
+msgid ""
+msgstr ""
+"Project-Id-Version: PACKAGE VERSION\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2009-01-26 12:28+0000\n"
+"PO-Revision-Date: 2009-01-26 12:28+0000\n"
+"Last-Translator: Foo Bar <foo.bar@canonical.com>\n"
+"Language-Team: French <fr@li.org>\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+</pre>
+
+The standard naming convention for PO files is to use the language code, so in this case ''fr.po''.
+
+==== Translation templates ====
+
+When translatable strings are extracted from source code using xgettext or intltool, they are put into a file which is commonly referred to as the translation template. Its format is identical to that of a PO file but all the ''msgstr'' lines do not contain any translations. These files are intended to be be used to create new PO files, so they also contain the header information but with most fields left with empty or generic values.
+
+Since a PO template is not really a separate file format it does not find much mention in the gettext documentation. Also, because its content can be generated from source any time (like during a build), most projects don't include it in their repository. Only PO files contain valuable information for a project, the translations themselves, and are therefore included in the source code repository.
+
+The standard naming convention for PO templates is to use the translation domain with the extension ''.pot'', for example ''myproject.pot''.
+
+==== Gettext workflow ====
+
+To start a translation into a new language for a project, the following steps are necessary.
+# Either the project maintainer or the translater creates a template from source code.
+# The translator fills out the template with the translations for each ''msgid''.
+# The translator saves the file in the source tree as ''ll.po'' (see above), ususally in a directory called ''po''.
+# The translator or somebody with commit rights commits the file to the repository.
+# Whenever the package is built, the translations are processed so that they are available at run-time (out of scope here).
+
+To change translations, the steps are simpler.
+# The translator checks out the PO file from the repositry.
+# The translator changes whatever translations they find necessary.
+# The translator or somebody with commit rights commits the file to the repository.
+# ... (see above)
+
+When ever the source code changes, a special command from the gettext suite is used to merge any new English strings into all PO files (i.e. all existing translations) or remove those that where removed. Translators can then check out the files and translate the new strings.
+
+==== Launchpad workflow ====
+
+When using Launchpad to translate a project, the steps are slightly different because the PO files are kept in Launchpad for the translators to work with. From Launchpad they are mirrored into the source tree to be used at build time.
+
+# The project maintainer uploads the PO template file to Launchpad.
+# Translators go to Launchpad to translate the English strings that now appear in the web interface.
+# The project maintainer downloads all PO files whenever they want to, usually to prepare a release of the software.
+
+Nowadays the upload and download should happen automatically from and to Bazaar branches in Launchpad so that the maintainer always has a mirror of the latest translations in the branch, while changes to the PO template are automatically propagated to Launchpad. The next step will be automatic generation of PO templates from the source code in a Bazaar branch.
+
+=== Mapping gettext in the Launchpad database ===
+'''''Henning'''''
+
+The gettext structure of PO templates and PO files has been mapped into the Launchpad database with the following goals in mind:
+
+* String sharing: Each string of text is only stored once in the database.
+* Message sharing: If identical English strings appear in different series of the same project or distribution, these should only be stored once for the project and share their translations accross all series.
+
+Message sharing has been introduced over the last year or so and is a huge benefit for the users but makes the database schema and its handling a lot more complex. Because of the vast amount of data some of it is still being migrated to conform to message sharing.
+
+<nowiki>[[File:TranslationsSchema.png|Database schema of Launchpad Translations|align="right"]]</nowiki>
+
+You can see the main tables used for Launchpad Translations in the digram. PO templates are mapped into the database using four tables.
+
+* '''POMsgID''' is a look-up table for all the English strings that are being translated.
+* '''POTMsgSet''' holds all the data related to an original English string as found in a PO template, one database entry per ''msgid'' entry in the file. It refers to the actual English strings only by their IDs in POMsgID. This represent one paragraph/entry from a PO template (msgid, msgid_plural, context, comments).
+* '''POTemplate''' holds the meta data related to a PO template as it has been imported, most notably the original path name, the translation domain, the original header and a flag if this template is active or not.
+* '''!TranslationTemplateItem''' is a linking table because of the n:m realtionship between POTMsgSet and POTemplate which message sharing introduces. Not only does a PO template file contain multiple ''msgid'' entries, the same ''msgid'' may also appear in multiple PO template files, if the same template is used accross different series of a a project.
+
+The other four tables are used to store the actual translations and are therefore a mapping of PO files.
+
+* '''POTranslation''' is a simple look-up table and holds the actual translated strings.
+* '''!TranslationMessage''' holds all the information about a translation to a specific language, like when it was done and by whom, if it was translated in Launchpad or imported from elsewhere, if it is currently used or just a suggestion, etc. For each POTMsgSet there may be multiple entries in this table, even for the same language, because any translation ever made is stored in the database, even if only the latest is actually used. The actual translation strings are referred to by their id in POTranslation.
+* '''Language''' is the set of all languages known in Launchpad. This table is not specific to Launchpad Translations as it is used in other parts of Launchpad, too.
+* '''POFile''' represents the set of translations into a certain language for a POTemplate. If it was created by importing a PO file, it also holds some information about that file. It is not linked directly to any translation but this relationship can be derived through the Language table.
+
+To export a PO file from Launchapd, all tables in the diagram have to be queried to find out, which !TranslationMessage entries belong into that file and to extract the actual strings that will be stored in the file.
+
+=== Code structure ===
+'''''Adi'''''
+
+The source code for the Rosetta application is found in the Launchpad source tree at lib/lp/translations. The layout follows that of all Launchpad applications.
+
+==== Model ====
+* '''interfaces''' contains the Zope interface definitions and schema for the objects used by the application. You will find interfaces for each of the database tables described earlier. For example, potemplate.py contains ''IPOTemplate''.
+* '''doc''' contains function tests for code from ''model''. Written as doctests.
+* '''model''' contains objects mapping to relational database using storm.
+* '''tests''' contains unit tests for code from ''model''.
+
+==== View ====
+* '''browser''' contains classes dealing with presentation logic and user interaction.
+* '''browser/tests''' contains unit tests for code from ''browser''.
+* '''emailtemplates''' contains templates for various emails issued by Rosetta.
+* '''help''' contains documentation and help pages integrated with Rosetta.
+* '''stories''' constains functional tests for code from ''browser''. Written as doctests.
+* '''templates''' contains Zope Page Templates use by the objects from ''browser''.
+* '''windmill''' contains tests for javascript code using Windmill Python API.
+* '''lib/canonical/launchpad/javascript/translations/''' conatins YUI 3 javascript code.
+
+==== Utilities ====
+* '''scripts''' contains various helping scripts used in cronjobs or doing other utility and integration jobs.
+* '''scripts/tests''' contains tests for code from ''scripts''.
+* '''utilities''' contains utility classes used in model and browser code, mostly data conversion related.
+
+=== Tour of the code ===
+'''''Henning'''''
+
+Now we'll look around at some exemplary places in the code to see how things work together.
+
+==== Implementation notes ====
+
+Some things to note to not get confused when reading the source code. These show that the code and the terms it uses have evolved.
+
+* What is called ''projects'' in the UI is called a ''product (IProduct)'' in the code, while a ''projects group'' is called a ''project (IProject). 
+* The term of a ''packaged'' translation from the UI is called ''imported'' or ''published'' in the code. We plan to go back to ''imported'' in the UI.
+* A term like ''current'' may sometimes be dubbed ''active'' or ''not obsolete'' in the code. It's all the same.
+* While interfaces and model objects describe database rows (i.e. a database record), the content of the whole table can be accessed through a ''Set''. For example, all ''IPOTemplate'' objects are found in the ''POTemplateSet'', all ''IPerson'' objects are found in the ''PersonSet''. The only exception here is the ''POTMsgSet'' mentioned earlier. Sorry.
+* Sets (database tables) are registered as global Zope utilities and can be retrieved anywhere in the code. You will see that a lot.
+* The main objects from Rosetta are ''IPOFile'' and ''IPOTemplate'' objects. The latter usually retrieved from an ''IPOTemplateSubset'' which is a filtered view of ''POTemplateSet''.  ''IPOFile'' objects are retrieved from their ''IPOTemplate'' objects by the language.
+
+==== IPOTemplate ====
+
+We take a look at one of the key interfaces, ''IPOTemplate'' which is found here:
+http://bazaar.launchpad.net/%7Elaunchpad-pqm/launchpad/devel/annotate/head%3A/lib/lp/translations/interfaces/potemplate.py#L121
+
+You see a number of attributes defined, most of which relate to a database column but not all. Pleae note these three attributes: productseries, distroseries, sourcepackagename. An ''IPOTemplate'' is always related to either a productseries (e.g. "Evolution trunk") or a combination of distroseries and source packagename (e.g. "Ubuntu lucid, evolution").
+http://bazaar.launchpad.net/%7Elaunchpad-pqm/launchpad/devel/annotate/head%3A/lib/lp/translations/interfaces/potemplate.py#L175
+
+Further down you'll find methods to retrieve the ''IPOTMsgSet'' objects that this template contains.
+http://bazaar.launchpad.net/%7Elaunchpad-pqm/launchpad/devel/annotate/head%3A/lib/lp/translations/interfaces/potemplate.py#L335
+
+Finally, methods to access the ''IPOFile'' objects that hold translations for this templates.
+http://bazaar.launchpad.net/%7Elaunchpad-pqm/launchpad/devel/annotate/head%3A/lib/lp/translations/interfaces/potemplate.py#L397
+
+In the same file is ''IPOTemplateSet'' which gives access to ''IPOTemplateSubset'' objects. Note how ''getSubset'' takes the three filtering parameters for the subset, as mentioned earlier.
+http://bazaar.launchpad.net/%7Elaunchpad-pqm/launchpad/devel/annotate/head%3A/lib/lp/translations/interfaces/potemplate.py#L620
+
+=== Translation groups and permission ===
+
+For quality assurance, in Rosetta, we have translation groups and translation permission.
+
+A translation group and permission is attached to each Project, Product and Distribution object.
+
+Distributions and projects can only have one translation group and permission.
+Products can have their on translation group and permission, but they also inherit them from the project containing the product.
+
+You can read more about <nowiki>[[https://help.launchpad.net/Translations/YourProject/ChoosingAGroup|translation groups]]</nowiki> and <nowiki>[[https://help.launchpad.net/Translations/YourProject/PermissionPolicies|translation permission]]</nowiki> implementation and usage on <nowiki>[[https://help.launchpad.net/Translations|Launchpad Help wiki]]</nowiki>.
+
+=== Hands on session ===
+
+First you need to have Launchpad running on your computer.
+
+Getting and running Launchpad on your computer is pretty straightforward and well documented on the <nowiki>[[https://dev.launchpad.net/ | Launchpad Development Wiki]]</nowiki>
+
+* Get the code and dependencies https://dev.launchpad.net/Getting
+* Initialize the database and running https://dev.launchpad.net/Running
+* That's all
+
+You can also use a Virtual Box harddisk image for a <nowiki>[[http://adi.roiban.ro/misc/lp/|fully functional Launchpad instance]]</nowiki>. Extract all 7zip files and you will have the HDD image. Create a Virtual Box machine based on this HDD image. User: developer , password: d3v3l0p3r 
+
+To get started with Launchpad development, take a look at the <nowiki>[[https://bugs.edge.launchpad.net/rosetta/+bugs?field.tag=trivial | ''trivial'' bugs from Rosetta]]</nowiki>. They are a good opportunity to discover Rosetta and Launchpad development process.

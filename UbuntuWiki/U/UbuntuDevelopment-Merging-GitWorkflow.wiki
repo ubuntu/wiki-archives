@@ -1,0 +1,354 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+The Ubuntu Server Team has devised a git-based workflow for package maintenance. It relies on a set of tools written to assist in the process, but the underlying driver is a basic git-rebase process. This page will attempt to describe the tools used, and the general workflow, with an example or two. Finally, there will be some notes about corner-cases or caveats to the process that might need special-handling.
+
+There are two aspects to the workflow: on the one hand is the importer logic, which relates to the construction of the repository(ies) in Launchpad for source package, and is documented in brief <nowiki>[[#importer|here]]</nowiki> mostly for transparency and documentation; on the other hand are tools for using the git repositories in Launchpad to do bugfixes and merges, which is most likely the section of interest to developers.
+
+NB: this page is a work in progress and no guarantees are asserted as to its correctness while it is being fleshed out.
+
+== Introductory blog posts ==
+There is a series of blog posts covering the `git ubuntu` tool and this Git Workflow:
+* <nowiki>[[https://insights.ubuntu.com/2017/07/24/developing-ubuntu-using-git/|Developing Ubuntu Using Git]]</nowiki>
+* <nowiki>[[https://naccblog.wordpress.com/2017/08/01/git-ubuntu-clone/|git ubuntu clone]]</nowiki>
+
+== Git configuration ==
+
+Since this workflow obviously uses `git`, you should have at least this basic config in `~/.gitconfig`:
+<pre>
+[user]
+	email = youremail@example.com
+	name = Your Name
+</pre>
+
+== Git workflow for merging ==
+
+=== Algorithm outline ===
+
+# Obtain git tree.
+# Split current Ubuntu delta into logical commits.
+# Rebase delta onto latest Debian release.
+# Build/test.
+# Reconstruct debian/changelog for new version.
+# Update metadata for new version.
+# Upload.
+
+=== Detailed workflow ===
+
+This guide assumes we are attempting to merge the version of <source package name> in the latest Ubuntu series with the latest Debian unstable version. If that is not the case, you might need to pass different commitishes to `git ubuntu merge` and/or specify the onto. See below for details.
+
+# Obtain git tree.
+## See if there is already an imported tree at https://code.launchpad.net/~usd-import-team/+git.
+## If there is, check if it is current. This usually means checking `rmadison` and ensuring that both 'debian/sid' and 'ubuntu/devel' are consistent with it. This eventually should not be necessary as we will run the importer in a cronjob.
+### If it is, proceed to the next step.
+### If it is not, send an e-mail to <nowiki>[[mailto:ubuntu-server@lists.ubuntu.com|the Ubuntu Server list]]</nowiki> asking for it to be updated or import it locally (see the `git ubuntu import` section). You should eventually get a reply with a reference to the imported tree.
+## If there is not, send an e-mail to <nowiki>[[mailto:ubuntu-server@lists.ubuntu.com|the Ubuntu Server list]]</nowiki> asking for it to be imported or import it locally (see the `git ubuntu import` section). You should eventually get a reply with a reference to the imported tree.
+## `git ubuntu clone <source package name>`
+## Feel free to use `git` directly with other git configuration flags, etc. as desired, but this guide will only cover the use of the `git ubuntu clone` tool. Similar results can be achieve throughout this guide with appropriate git subcommands, but YMMV.
+# Split current Ubuntu delta into logical commits.
+## cd into the just created dir `cd <source package name>`
+## `git ubuntu merge start ubuntu/devel`
+** This will create a local 'debian/sid' branch that tracks 'importer/debian/sid'.
+** This will create 3 tags (you might need to pass '-f' if the tags already exist).
+### 'old/ubuntu': will point to the same commit as ubuntu/devel tip and represents the current state of Ubuntu for this source package. In other words, this tag points to a commit corresponding to the latest Ubuntu version and containing the complete Ubuntu delta.
+### 'old/debian': will point to the commit that is a common ancestor of both ubuntu/devel tip and debian/sid tip, in other words the commit corresponding to the version last merged with in Debian.
+### 'new/debian': will point to debian/sid tip, in other words the commit corresponding to the version to be merged with and the latest version in Debian unstable.
+** You may want to verify the tags (with `git show <tag>`) are pointing to the expected commits/versions.
+*** especially if you are re-merging something formerly done with this process you will need "-f" on `git ubuntu merge` otherwise the tags will still point to the last merge revisions.
+** This will replay the git-merged delta into a sequence of linear non-merge commits.
+*** In the importer algorithm, explained later, each imported version is possibly a git merge. If you were to directly rebase 'old/ubuntu' onto 'debian/sid', the merges would be replayed, which will typically fail.
+*** Instead, this will replay the current ubuntu delta back onto 'old/debian', but dropping the merge commits as artifacts of the `git ubuntu import` algorithm.
+*** The end result, which will be the checked-out if successful, is a sequence of `git-cherry-pick`s of published Ubuntu versions after the 'old/debian' version that are not merges (but are otherwise identical to the sequence of commits in 'old/ubuntu'.
+*** In this process, there might be some empty commits cherry-picked over. This is the result of, e.g., copy-forwards between series (Y -> Z) or pockets (proposed -> release). To maximize the information retained, these empty commits are retained in the reconstruct, but will be dropped in the split phase.
+*** This might be dropped from a future release.
+** If development occurred in the git tree previously, and that work was uploaded and tagged (e.g., upload/<version>), it's possible that some of the following steps can be skipped. This reflects the fact that the imported version is logically already split in the git tree.
+** This commit is tagged as 'reconstruct/<ubuntu version>'.
+*** Please note that our convention is to use '{reconstruct,split,logical}/<version>' (with standard <nowiki>[[http://dep.debian.net/deps/dep14/|dep14]]</nowiki> substitutions). This allows us to store multiple tags associated with multiple versions for archival purposes.
+** You can pass --bug to `git ubuntu merge` and it will prefix all of the following names with `lp<bug>`, e.g. 'lp<bug>/old/ubuntu'. This allows you to have multiple merges in the same local repository without having to pass -f and overriding tags.
+*** If you do pass --bug, all the tags referred to below will be under lp<bug>, please adjust your commands accordingly.
+## `git rebase -i old/debian`
+## Interactively rebase the reconstructed Ubuntu delta and edit ('e' in the rebase options) each cherry-picked commit into its components.
+### While we will try to cover as many cases as possible in this document (when final), the `man git-rebase` "INTERACTIVE MODE" section is probably still worth reviewing.
+### In the editor provided by `git-rebase`, there are three cases to consider:
+### For commits of imports to the git tree (typically with messages like 'Import version <version> to <distribution>/<series>[-<pocket>]'), modify the 'p'/'pick' line to 'e'/'edit'.
+### For commits that are already logical changes (typically this is the result of a prior merge using this process, or active development in the ubuntu-server-dev git tree), the line can be left unmodified ('p'/'pick').
+### For copies of the same version between pockets/releases, the line will be commented out (reflecting an empty commit) and can be left commented out. This is mentioned above as an artifact of our rebasing process.
+### As the `git-rebase` process stops at each commit, run `git reset HEAD^`, which will unstage each commit.
+### See what was previously in the commit at this point with `git-diff`. In particular, we are interested in what is indicated by 'debian/changelog' as being contained in this published Ubuntu version.
+### For each logical change listed in `git diff -- debian/changelog`:
+### Run `git add -i` (interactive add) to stage a commit for the change.
+### Run `git commit` to commit the staged changes, using the corresponding 'debian/changelog' entry as the commit message.
+### Sometimes, there will be changes in a published release that are not mentioned in 'debian/changelog'. It is recommended to commit each of these as a new commit after those that are listed in 'debian/changelog', with an appropriate commit message, appending '[previously undocumented]'.
+### The remaining changes should only be to 'debian/changelog' (the actual changelog entries) and 'debian/control' (VCS/maintainer modifications). This is verifiable by examining `git diff -p` and `git diff`.
+### Commit all the 'debian/changelog' entries for this step with commit message 'changelog'.
+### Commit any debian/control metadata (VCS, Maintainer) for this step with commit message 'update-metadata'.
+### The result at the end of each rebase step is no modifications are lost/gained relative to the old commit (which no longer applies in the current state).
+### At this point, `git diff` should report no unstaged changes. Run `git rebase --continue` and repeat the previous steps for the next published Ubuntu version.
+## The end result of the above loop will be a sequence of smaller commits, one per 'debian/changelog' entry (with potentially additional commits for previously undocumented changes).
+### The final commit will represent a broken-out history (viewable with `git-log`) for the latest Ubuntu version and no contentful differences to that Ubuntu version.
+### This can be verified with `git diff -p old/ubuntu`.
+## `git ubuntu tag --split`
+## Tag the final commit for easy reference and review.
+## `git rebase -i old/debian`
+## Interactively rebase the split Ubuntu delta and drop 'changelog' and 'update-metadata' changes, by simply dropping those lines from the rebase todo file.
+## An additional goal in this step is to consolidate the delta, e.g. sometimes a change is added in one Ubuntu release and then removed in a subsequent Ubuntu release. The changes, in this case, should simply be dropped.
+## These changes will be easily reproducible from this process and will lead to merge conflicts with the final rebase.
+## The final commit will represent a consolidated broken-out history (viewable with `git-log`) for the latest Ubuntu version, without changes to 'debian/changelog' or to the metadata in 'debian/control'.
+### This can be verified with `git diff -p old/ubuntu` which should indicate the only changes are in 'debian/changelog' and 'debian/control'.
+## `git ubuntu tag --logical`
+## Tag this commit for easy reference and review.
+## This command uses 'old/ubuntu' as a reference for the version to use in the tag-name, so it must exist <nowiki>[[https://bugs.launchpad.net/usd-importer/+bug/1651113|LP: #165113]]</nowiki>.
+# Rebase delta onto latest Debian release.
+## `git rebase --onto new/debian old/debian HEAD`
+### Replay the logical delta (changes between old/debian and HEAD) onto the latest Debian release.
+### It is possible individual logical changes no longer apply. A few common reasons and solutions are:
+### The context for the patch has changed, so a manual edit of the commit is necessary.
+### The change has been integrated in the new Debian version. In this case, there is no logical change in the new delta. However, for the purposes of reconstructing the changelog later, it is important to document what parts of the old delta have been dropped and why. It is recommended, therefore, to use `git status --ignored` to verify the current rebase progress before issuing `git rebase --continue` and if a logical commit becomes empty, to use `git commit --allow-empty` to specify that a given change is now 'Dropped' and ideally why, e.g., 'Fixed in Debian <version>'.
+# Build/test.
+## Explain sbuild / point to it.
+## you can benefit from the importer being able to restore orig tarballs, for a merge all you need to do to create tarball, sign and upload with new tarball would be `git ubuntu build -S -v --sign --for-merge`
+# Run `git ubuntu merge finish ubuntu/devel`. This effectively wraps all of the following steps. From git those can be run manually instead, if desired - in the snap not all subcommands might be exposed.
+## Verify we started a merge from either new/debian or lp#/new/debian as ancestor of HEAD
+## Reconstruct debian/changelog for new version.
+## `dpkg-mergechangelogs old/debian old/ubuntu new/debian`
+### This rebuilds the changelog for published versions from old/debian to new/debian, inserting Ubuntu releases as appropriate.
+## `git commit -m 'merge-changelogs' debian/changelog`
+## `git reconstruct-changelog new/debian`
+### This replays the commit messages for all commits since new/debian on the current branch into debian/changelog in a new entry.
+### Note that the new entry is 'UNRELEASED' and should be updated, and it's possible you will need to reorganized the replayed entries.
+     1.1. Using `git ubuntu merge finish` will target the current development release or `--release` if specified. 
+## `git commit -m 'reconstruct-changelog' debian/changelog`
+### It is appropriate to either commit the reconstruct-changelog result and then make changes, followed by a second commit with the final changelog; or to not commit reconstruct-changelog and then make changes, followed by a commit with the final changelog. In either case, the result of this step should be a changelog entry which fully covers all the delta, and explains any dropped or added changes.
+## Update metadata for new version.
+## `update-maintainer`
+### This updates the maintainer entry in the control file appropriately for Ubuntu source packages.
+## `git commit -m 'update-maintainer' debian/control`
+# While doing the former the Changelog is constructed out of the commit messages you had in your branch. Please check debian/changelog if they are sufficient for an upload.
+# Consider some Cleanup and check open Bugs
+## Go to https://bugs.launchpad.net/ubuntu/+source/<source package name>. There check if any open bugs are either:
+## closed already but not updated yet => close them
+## likely closed, but need verification => notify reporter
+## would be reasonable to add on top of the merge now that the package is touched anyway => implement
+## Check all you have listed as "Remaining changes" in your changelog and consider pushing as much as possible to Debian.
+# Make Ready for Push and review.
+## `git checkout -b merge`
+## if you happened to have a merge branch for this source already, recommended branch names to avoid conflicts are 'merge-<release>' and if multiple merges happen in one release 'merge-<release>-<version>'
+## The MR will be based off this branch, feel free to name it something else.
+## You will see those commits again next time this is merged. Please see the <nowiki>[[#workflowcommentary|Workflow commentary]]</nowiki> for details on squashing changes (optional on the merge, but required on creating logical).
+## `git ubuntu lint`
+## You will get an automated check on your merge proposal anyway, but you could do so and clean up before uploading by calling the linter which checks for common issues. This feature is still new, please report bugs if you think a check is a false positive.
+# Push and review 
+## Pushing via `git ubuntu` is still WIP but was nicely outlined including the following review process which is specific to the Server Team and therefore in their Knowledge Base as "<nowiki>[[https://wiki.ubuntu.com/ServerTeam/KnowledgeBase#Merge_Proposals_and_Reviewing|Merge Proposals and Reviewing]]</nowiki>"
+## You can also push an MP via git and Launchpad by
+     `git push <launchpad user> merge old/debian new/debian old/ubuntu reconstruct/<ubuntu version> \`
+   `split/<ubuntu version> logical/<ubuntu version>`
+## The remote name here, <launchpad user>, is an artifact of `git ubuntu clone`. If you used git directly, you might push to git+ssh://yourusername@git.launchpad.net/~yourusername/ubuntu/+source/<source package name>
+## Then go to the Launchpad page of your just uploaded merge branch and propose for merging into the USD git project: `~<yourusername>/ubuntu/+source/<yourpackage>/+git/<yourpackage>/+ref/merge`
+### usually you just search for the package you want to upload and will find the related usd importer tree. For example ``~usd-import-team/ubuntu/+source/<yourpackage>`
+### As target use `debian/sid` or whatever you used to rebase on
+### Discussions, new revisions and so on will be handled on that merges launchpad page. It is typical to file merges as Launchpad bugs as well, so ensure that the appropriate bug is mentioned in debian/changelog (e.g., 'Merge with Debian unstable (LP: #...). Remaining changes:') and Launchpad will automatically refer to your MR in the bug.
+# Upload (Eventually that step won't be needed as it will be picked up from approved Merge Proposals)
+## tag the propsed merge as the upload that you'll sponsor (or be uploaded by other sponsors)
+  `$ git ubuntu tag --upload`
+  1. Upload this tag to USDI, the remotes are all set up already
+  `$ git push pkg upload/<version>`
+
+  `pkg` is the remote provided by `git ubuntu` already and maps to `ssh://<LPuser>@git.launchpad.net/~usd-import-team/ubuntu/+source/<packagename>` (Presumes you have write rights to the USDI git repository.)
+  1. After this when the importer picks up the new version it will map the rich history provided by the upload tag to the new import it does.
+
+=== Workflow commentary ===
+During the review of a merge, sometimes changes are needed and these
+usually will get added on to the end rather than being squashed in. We
+think this approach is easier. We don't object to the merge being redone,
+and everything squashed in, if desired or if it is decided it is worth
+it in a particular case, but in the general case we don't think it is
+necessary.
+
+But that means that the merge branch will often not be squashed. And on
+a re-merge, there may be extra uploads that were done after the merge
+upload.
+
+So we think it makes sense to always do the squashing before doing the
+logical tag at the start of a merge. The previous merge should help
+significantly with this, but will not be sufficient in the general case.
+
+This would also have the advantage that the logical tag has a strict
+definition: a logical tag must always consist of squashed commits. In
+other words, it a logical tag should never have commits that can be
+squashed. Of course, what can be squashed is subjective, so different
+developers won't necessarily produce identical logical commits.
+
+The reason why one might suddenly be able to squash more than on logical is that due to Debian or Upstream changing there might be new opportunities to do so. But it turned out to be most useful to not squash (everything) on the merge branch.
+
+After the merge or next time on reworking logical things can be re-squashed/separated, also it might be worth to rewrite commit messages at that time to make up a much better reconstructed changelog eventually.
+
+It can in general be quite useful to store any sort of knowledge that one handling a merge or complex bug had along. But rather often the extra insight is not suitable for the main commit message. So if there is anything reasonable to save we recommend to use `git notes` to add those along the commits of the merge branch.
+
+== Tools: their usage, and where to get them ==
+
+=== git ubuntu ===
+
+Available from <nowiki>[[https://code.launchpad.net/~usd-import-team/usd-importer/+git/usd-importer|Launchpad git repository]]</nowiki>.
+
+It is also available as as snap: `sudo snap install git-ubuntu --classic` and then it should be available as a `git-ubuntu`.
+
+NOTE: we are still working on issues related to argcomplete with the recent rename from `usd` -> `git-ubuntu`.
+
+Top-level command to all the Ubuntu git repository-manipulating tools. To see all available subcommands, type:
+<pre>
+git ubuntu
+</pre>
+Each subcommand has its own help page. For example:
+<pre>
+git ubuntu clone --help
+</pre>
+
+==== git ubuntu import ====
+
+The primary problem we are trying to solve is how to make merges consistent across the server team, and, ideally easy to review for sponsors/uploaders.
+
+Robie Basak and others came up with a git-based workflow (documented broadly <nowiki>[[https://git.launchpad.net/usd-importer/tree/README.workflow|here]]</nowiki> and hopefully clarified on this page). This workflow 'just' uses git (the
+only addition to 'stock' git are a few commands (git-dsc-commit,
+git-merge-changelogs, git-reconstruct-changelog) from <nowiki>[[https://code.launchpad.net/~usd-import-team/usd-importer/+git/usd-importer|Launchpad git repository]]</nowiki>.)) to effectively rebase the
+ubuntu tip onto the latest debian tip. That presumes you spent the time
+yourself to create a repository with commits representing the current states of debian unstable and the ubuntu development release.
+
+The goal for the importer is to have canonical (little c) location for
+such commits to live, per-package. Everyone can refer to commits and tags in that tree, and they will have well-defined semantics and share SHA1s.
+
+A secondary problem was obtaining the 'complete' history for a given source package. This would allow a user to `git-blame` a give file and get useful
+data. So we extended the algorithm (that Robie designed) to be more
+flexible. After hitting many corner-cases during implementation, we
+scrapped our complicated algorithm that produced clean trees for a clean
+algorithm that produces complicated trees.
+
+Feel free to skip the next section if you're not interested in the implementation.
+
+===== Algorithmic discussion =====
+
+In essence, the algorithm looks at Launchpad's publishing history for
+versions it hasn't seen before (which if an empty or no local repository
+is specified and you aren't cloning an existing repository will be all
+of them). For each such version, it uses
+`pull-lp-source`/`pull-debian-source` equivalents and `git-dsc-commit`
+to import them into the git repository. Technically it uses a
+lower-level command then a proper commit (`git write-tree` and `git
+commit-tree`), so that we can get the imported tree, examine it and find
+its parents and then commit it. The parents for an imported tree are at
+most 2:
+
+ 1. The last version imported into the same series/pocket, with some knowledge of how to establish a new series/pocket.
+ 2. The last debian/changelog entry (using debian/changelog from the just-imported tree) that was successfully imported.
+
+We call these the 'publishing parent' and 'changelog parent'
+respectively. Now, if we can't find either of these, we will orphan the
+import and if we only find one, we'll use what we have. But the
+resulting tree looks like many git-merges, even where there are not
+ubuntu-merges. This is correct by the algorithm but can be confusing to
+the original `git-rebase` workflow, because rebase will try to replay
+the git-merges and that doesn't work. More on this later.
+
+===== Local usage =====
+
+While the intention is to use the `~usd-import-team/ubuntu/+source` repositories as the remotes for merge requests, it is also possible to run the importer fully locally and not push to a remote.
+
+`git ubuntu import --no-push <srcpkgname> -d /path/to/repository/`
+
+This will run the import algorithm locally, which can take some time, leaving the repository in `/path/to/repository`, but not pushing to any remotes. By the nature of the importing algorithm, the SHAs of the commits in your local tree will match the commits of the `~usd-import-team/ubuntu` trees.  '''Note that the -d path should not exist and it must be provided as an absolute path.'''
+
+Now that you have a local import, it's probably best to perform the merge steps in a separate clone, e.g.
+
+<pre>
+$ git clone -n /path/to/repository/git mergewd
+</pre>
+
+Now you can do all the merge steps described above in `mergewd`.  That way if you mess up and need to start again, your import directory is still pristine.
+
+Also, because you'll likely need the `orig.tar.gz` for the new (Debian) version, you will find that in `/path/to/repository`.  Copy that or symlink it to the parent directory of `mergewd` so `debuild` or whatever you use can find it.
+
+==== git ubuntu clone ====
+
+Clone a source package git repository to a directory with appropriate remotes and tracking branches.
+
+Examples:
+** clone to open-iscsi/: `git-ubuntu clone open-iscsi`
+** clone to ubuntu.git: `git-ubuntu clone open-iscsi ubuntu.git`
+** use https rather than git protocol for read-only remotes: `git-ubuntu clone --https open-iscsi`
+
+==== git ubuntu merge ====
+
+Given a git-ubuntu merge import'd tree, assist with an Ubuntu merge.
+
+Creates old/ubuntu, old/debian and new/debian tags for the specified Ubuntu merge.
+Breaks the specified Ubuntu merge into a sequence of non-git-merge-commits suitable for rebasing.
+Working tree must be clean.
+
+This subcommand takes a `git ubuntu clone`'d tree and a
+commitish and attempts to give you a reconstructed sequence of linear
+commits that represent the same state as the commitish. It does this
+by using merge-base to figure out the common ancestor (it assumes
+onto is debian/sid but it also accepts a parameter) and then playing
+back the git history for commits between the merge-base and commitish.
+It then cherry-picks those tags from oldest to newest against the
+merge-base and does a quick sanity check that the resulting commit
+does not differ from the original commitish.
+
+It tags that as reconstruct/<version> which may conflict with the
+git-based workflow some have been using previously. In that workflow,
+reconstruct/<version> is the broken-down sequence of changes including
+changelog and metadata, where each commit is a single change from the
+changelog. I have taken to now calling that pointer
+split/<version> because it's clever.
+
+So you would break down reconstruct/<version> into its constituent
+changes (per debian/changelog for each version) and tag the resulting
+end-commit as split/<version>.
+
+That can then be broken up by our workflow into a logical/<version> tag
+and then rebased onto debian/sid (or the specified onto).
+
+==== git ubuntu tag ====
+
+Given a git-ubuntu tag import'd tree, tag a commit respecting DEP14
+
+By default, an upload tag is created. Working tree must be clean.
+
+This subcommand tags the given commitish with the specified format, following the DEP14 requirements. The base version is read from debian/changelog at that commitish, except for logical tags, which reads from 'old/ubuntu'.
+
+If no format is specified, an upload tag is created, suitable for pushing to the importer's repository.
+
+== Example(s) ==
+
+Already imported trees live, currently, at: https://code.launchpad.net/~usd-import-team/+git.
+
+Currently, because once we feel confident in the utility and
+correctness of the importer, we'll move them to
+https://code.launchpad.net/~ubuntu-server-dev/+git.
+
+== Caveats ==
+
+All of this tooling is not meant to replace or reproduce any prior tools or works. And it is definitely not meant to replace a basic understanding of what a merge is and why they are necessary. The tooling is meant to make merges easier, but they are still not foolproof and require care and thought.
+
+== Reviewing Merges ==
+
+Some notes to checking for correctness. The goal is to come up with a step-by-step process that, if done correctly, guarantees that the merge is correct.
+
+ 1. Mechnical checks: see wip/review
+ 2. Account for every change in the previous logical delta. You can use `git range-diff old/debian..logical/<old ubuntu version> new/debian..<merge branch>` to help with this (requires Git >= 2.19).
+   1. Is transferred exactly, transferred modified, or dropped.
+   2. Is noted correctly in changelog (twice if modified).
+   3. The changelog note still accurately reflects the changes.
+ 3. Account for any new commits.
+   1. Check that the changelog matches the commits.
+   2. All commits in the new delta should now be accounted for.
+ 4. Check new delta:
+   1. Anything dropped was appropriately dropped.
+   2. All previous delta still kept is still correct, appropriate to keep, and any non-Ubuntu-specific changes have upstreaming in progress.
+   3. Anything new or changed is appropriate to add or change.

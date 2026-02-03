@@ -1,0 +1,87 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+This page details the process of debugging the behavior of hotkeys/media keys in Ubuntu. See <nowiki>[[Hotkeys-Architecture]]</nowiki> for an overview of the architecture used for handling hotkey events.
+
+== Involved Components ==
+
+Hotkey and ACPI events cross a lot of different layers, and determining the component that is handling them can take quite a bit of digging. Below is a non-comprehensive list of components which have been known to handle hotkey events:
+
+Packages involved in acting on hotkey events:
+* gnome-settings-daemon (handles media, brightness, and power keys and visual feedback, display toggling)
+* gnome-control-center (gnome-sound-properties, gnome-keybinding-properties)
+* acpi-support (deprecated, being phased out)
+
+Packages involved in propagating hotkey events to where they belong:
+* linux kernel
+* udev (model specific keycode to key symbol mapping)
+* xserver-xorg-input-evdev
+* xkeyboard-config
+* acpi-support (deprecated, being phased out)
+
+Note that the 'acpi' source package is *not* involved in any of this, although many acpi/hotkey issues get (incorrectly) filed against it. 'acpi' is just a command line tool for listing info about acpi devices.
+
+== Step-by-step Troubleshooting ==
+
+# First, upgrade your BIOS to the newest version available. If still reproducible, continue troubleshooting.
+# If `gnome-settings-daemon` is running, stop it first with `killall gnome-settings-daemon`; these daemons grab some X events exclusively and prevent them from being seen with `xev`.
+# run `xev` to test whether a keypress event is seen: <pre>
+xev | sed -n 's/^.*state \([0-9].*\), keycode *\([0-9]\+\) *\(.*\), .*$/keycode \2 = \3, state = \1/p'
+</pre>
+ 1. if there's a keypress event:
+  a. if the keycode is right, it's a desktop issue; see the list of packages that act on hotkey events for further diagnosis (`gnome-settings-daemon`, `gnome-power-manager`, ...)
+** in some cases the keybindings may be wrong, perhaps due to a legacy (i.e., pre-evdev) keymap. You can check your keymap using `gconf-editor` and looking under `/apps/gnome_settings_daemon/keybindings`. Bindings without sensible key names are probably bugs.
+** for audio volume control hotkeys, gnome-sound-properties may be misconfigured. You can either examine with gconf-editor '/desktop/gnome/sound' or do 'gconftool --recursive-list /desktop/gnome/sound' to get the current settings; the particular configuration items are 'default_mixer_tracks' and 'default_mixer_device'.
+  a. if there are too many keypress events then you need to determine where they are being duplicated.
+ 1. if the key code is wrong, or there is no keypress event, or the key only works once and then the desktop gets "stuck", install the "evtest" package, run `sudo evtest`, select your keyboard device, press the broken keys, and note down their scan code (MSC_SCAN), current keycode (KEY_*), and intended meaning.
+  a. If that was successful, file a bug against udev ("ubuntu-bug udev") and add the scan code → meaning map.
+  a. If evtest shows a correct key symbol, look up the symbolic name in /usr/include/linux/input.h. If it is mapped to a code over 255 (over 0x0ff), then it is outside X's range see <nowiki>[[https://bugs.launchpad.net/ubuntu/+source/xorg-server/+bug/313514|bug 313514]]</nowiki>. In this case, if it is important to have the key mapped, the key should be remapped to an appropriate value < 256.
+# If the events are reported by more than one input device then report a kernel bug (Ubuntu `linux` package) because it should only send the event on one device.
+# if not found with `keymap`, use `acpi_listen` to determine whether the key is coming through as an ACPI event instead of a keypress.
+  a. if there is an ACPI event but no keypress, this is a bug in the kernel (ubuntu-bug linux) for not translating the ACPI event to an input event.
+  a. if there is neither an ACPI event nor an input event, this is probably also a kernel bug, though probably harder to diagnose (WMI, perhaps?).
+
+== Useful Information to Collect in Reports ==
+
+/!\ Open a terminal, run each command below, and attache the output of each file separately, uncompressed, and untarred to your report:
+* `udevadm info --export-db > udev-db.txt`
+* `dmesg > dmesg.log`
+* `sudo lsinput > lsinput.log`
+** Please note, you need to install the package input-utils to run this command.
+* `xkbcomp -xkb :0 - > xkbcomp.txt`
+* `setxkbmap -print > xkbmap.txt`
+
+== Troubleshooting Tricks and Tips ==
+
+* Testing: Before making changes, make a list of all your keys and hit each of them in turn, and record how they work. Repeat this after every change, so you'll know if a change fixed one thing but broke something else.
+
+* Run gnome-power-manager in verbose mode (`gnome-power-manager --no-daemon --verbose`) to get detailed debug information.
+
+* In some cases, hotkeys are communicated correctly to X but applications are listening for them as dbus events generated by hal. Use `lshal -m` to monitor which hotkey events are being produced by hal.
+
+* Experiment with the scripts in /etc/acpi/. These come into play only for *some* hardware and are being phased out, so may not be relevant for your case.
+
+* To test sleep modes directly, `echo S3 > /proc/acpi/sleep`
+
+* Switch to a virtual terminal and back (e.g. ctrl+alt+F1 ; ctrl+alt+f7) and see if that resets things.
+
+* Switch to the Guest Account and see if the issue can be reproduced.
+
+* Boot a Live environment and try reproducing it there. If you can't, it suggests either a modification to your system or a software update not present on the Live environment.
+
+* Create a test user account, log out of all sessions and into that one. If you can't reproduce the issue there, then suspect some stored gconf or other settings in your dot files (this is less likely if you've recently done a fresh install, vs. upgraded from past versions of Ubuntu).
+
+* If the key used to work properly at one time, and you've narrowed the problem to a specific component, then try testing different past versions of that package to try to bracket where the regression first started. This can help narrow down what patch might have caused the problem.
+
+* Check if a proper keyboard shortcut is mapped to the action in gnome-keybinding-properties. A working shortcut looks like ''XF86AudioMute'' or ''Ctrl+Alt+Tab''. An unknown key mapping looks like ''0xed''.
+
+* For audio hotkey problems see which mixer device and which mixer tracks are set as default in gnome-audio-properties. The volume step can be changed in /apps/gnome_settings_daemon/volume_step with gconf-editor.
+----
+CategoryDebugging

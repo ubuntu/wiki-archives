@@ -1,0 +1,70 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+This is a brain-dump of the work done to improve the RAID experience in Ubuntu.
+
+Language for this document:
+* component: a single block device node used to make up a part of an array.  e.g. "block device" for md (`/dev/sda1`), "physical volume" for LVM (also `/dev/sda1`). Note that this can be anything -- loopback devices on sparse files, disk partitions, whole disks, etc. It is a component only if the array software understands it as a component (usually via some form of superblock, etc).
+* array: a single logical unit made up of components. e.g. "RAID device" for md (`/dev/md1`), "volume group" for LVM (`/dev/vg-name/`).
+* logical device: a block device made available from an array. e.g. "RAID device" for md (`/dev/md1`), "logical volume" for LVM (`/dev/vg-name/lv-name` or `/dev/mapper/vg--name-lv--name`; yes, "-" is escaped with "--" for mapper names).
+
+Notes about array superblocks:
+* md components have their superblock at the '''end''' of the block device by default<<FootNote(By default, Ubuntu used md superblock version 0.9, which lives at the end of the block device; the newer (and now default in 12.04) 1.2 version has the superblock in the beginning of the block device. See <nowiki>[[https://raid.wiki.kernel.org/index.php/RAID_superblock_formats#The_version-0.90_Superblock_Format]]</nowiki> for more details.<<BR>> xnox saw bugs reported that certain things don't work when two super blocks are present )>>, so that they can, potentially, be used without md running on it.
+* LVM components have their superblock at the beginning of the block device, and AFAIK, cannot be used without LVM running on it.
+
+Ubuntu uses an event-based start up system, and expects to have udev bring up devices as they appear. For RAID and LVM, this poses an interesting challenge, since it isn't possible to bring up an array until all the components of the array are available. md arrays now support an "incremental" construction, as seen in `/lib/udev/rules.d/85-mdadm.rules` (`/sbin/mdadm --incremental $env{DEVNAME}`). AFAIK, LVM does not yet, so we must cheat. When an LVM component is seen, LVM is triggered to scan for all known LVM components and construct what it can, via `/lib/udev/rules.d/85-lvm2.rules` (`watershed sh -c '/sbin/lvm vgscan; /sbin/lvm vgchange -a y'`).
+
+Note: the incremental building of md devices has been attempted in Debian to be disabled, but this does not happen in Ubuntu. Lots of changes were made to keep the event-based initialization working in Ubuntu:
+  <pre>
+$ dpkg-deb -x /var/cache/mirrors/ubuntu/pool/main/m/mdadm/mdadm_3.2.3-2ubuntu1_amd64.deb .
+$ cat lib/udev/rules.d/85-mdadm.rules 
+
+SUBSYSTEM=="block", ACTION=="add|change", ENV{ID_FS_TYPE}=="linux_raid*", \
+        RUN+="/sbin/mdadm --incremental $env{DEVNAME}"
+</pre>
+
+The result of this event-driven system is that arrays will appear as their components initialize and are reported to udev by the kernel. To use a logical device as the root filesystem, the system must wait for it to appear. During the initramfs, the `init` script chooses the basic type of root filesystem (either "local" or "nfs"). The "local" script is for mounting local devices. The common function `init` calls is `mountroot`, defined in `scripts/local` or `scripts/nfs` (where the root directory of the initramfs is built from `/usr/share/initramfs-tools/`). This function, in turn, calls the `-top` and `-premount` scripts, before the root fs mount, and then the `-bottom` script.
+
+In 12.04, for the "local" case:
+* `/init` runs and does various setup tasks, eventually calling `mountroot` defined in `/scripts/local`
+* `/scripts/local` will:
+** run all scripts in the `/scripts/local-top/` directory (e.g. `cryptroot`)
+** wait for the root filesystem to appear (in the `pre_mountroot()` function)
+** using `/bin/wait-for-root`, wait for udev to bring rootfs online
+** if this fails, provide helpful diagnostics, and drop to a shell for the user to attempt to fix
+** run all scripts in the `/scripts/local-premount/` directory (e.g. `mdadm`, `resume`)
+** mount the root filesystem
+** run all scripts in the `/scripts/local-bottom/` directory
+
+Unfortunately, 12.04's handling of things has regressed from the perspective of the earlier versions of Ubuntu (10.04 through ...?) that correctly handled array failures. The initramfs-tools used to '''source''' scripts rather than running them. This allowed things like mdadm and lvm to register `mountroot_fail` handlers, which could each perform actions or report diagnostics during the "provide helpful diagnostics" step above. The "wait-for-root" tool didn't exist, and this was handled by a shell loop that, if it timed out, would call the `mountroot_fail` handlers. If their return values indicated that it had corrected the situation (e.g. starting a degraded array), the loop would restart, attempting to continue the boot. If not, the diagnostics would be reported, and the user would be dropped to a shell.
+
+The goal of the 10.04 failure handling was to give a specific subsystem the chance to fix problems on its own, based on stored preferences. A huge thread on what the "correct" handling of a degraded RAID event should be is what prompted this work. There were legitimate reasons for both "attempt to bring the system up in an operational but degraded state" (e.g. server in co-location facility where console access is difficult) and "never start up in a degraded state" (e.g. server with critical data that if a drive goes missing must get immediate human intervention to avoid any chance of data loss). Ultimately the decision was made to default to "do not boot degraded" with the option to select "boot degraded". The `mountroot_fail` handlers took care of this logic. See `/scripts/mdadm-functions` for its `mountroot_fail()` function, noting the `return 0` (RAID brought online) and `return 1` (nothing fixed, diagnostics reported) paths. (As currently implemented in 12.04, the `panic` at the end of `pre_mountroot()` causes none of the `mountroot_fail()` handlers to run at all, much less get tests for exit codes to restart the wait loop.)
+
+Freaky stuff to keep in mind:
+* By default, mdadm will not bring an array online in an "unexpected" state. This means that if the configuration of components has changed since the last time the array was running, external force must be applied (e.g. the mdadm `mountroot_fail()` handler) to bring the array online. This is '''different''' from the array being "degraded". If the array is brought online in a degraded mode, this configuration now becomes "expected", and mdadm will start the array in that mode again in the future without external intervention. This mean, for example, that if a user selecting "never boot in degraded mode" starts the array manually at the initramfs shell prompt and then reboots, the system will boot without intervention (i.e. root filesystem becomes available via `mdadm --incremental`), even though the raid is degraded.
+* md's superblock being at the end of the block device has worrisome implications during device detection
+** LVM could find a component on the block device rather than on the md logical device, which could trigger a breakage of a potential md mirror '''without md knowing''', and blocking md from starting the array that uses the given component, leading later to data loss since md thinks the component that LVM didn't touch is the "more recent" component from md's perspective, even though LVM was using the component directly. Recovering from this situation is extremely tricky (must convince mdadm to only use the component that was under LVM's control after shutting down the VG, without triggering an md reconstruction, etc). It is critical that LVM utterly refuse to touch a block device that as an md superblock on it.
+** Consider a system with `rootlv` LV in `systemvg` VG on a `/dev/md1` RAID1 made up of `/dev/sda1` and `/dev/sdb1`. Now imagine a race condition with the following steps:
+*** `/dev/sda1` comes online
+*** `mdadm --incremental` runs and defines but does not start `/dev/md1` with `/dev/sda1` present
+*** `watershed sh -c '/sbin/lvm vgscan; /sbin/lvm vgchange -a y'` starts
+*** `/dev/sdb1` comes online
+*** `vgchange -a y` is now running from earlier, cannot read `/dev/sda1` since it is in use by md, cannot read `/dev/md1` because it has not be started, but DOES see `/dev/sdb1`, which has everything LVM needs to start the `systemvg` VG, and does so.
+*** `mdadm --incremental` runs, cannot read `/dev/sdb1` since the LVM has started on it.
+*** rootfs on `rootlv` in `systemvg` is available, system boots
+*** md hasn't finished bringing up `/dev/md1`, and on next boot, since `/dev/sda1` has a more recent md timestamp in the superblock than `/dev/sdb1`. In the best case, the RAID is now degraded, and if it comes up on the "more recent disk", the system goes back in time. In the worst case, md doesn't notice the RAID is out of sync (maybe it didn't bump the timestamp on a partially onlined array component?) and brings up the array without reconstruction and destroys the filesystem.
+*** The bug here is that the `vgchange` is not limited to the device that triggered the call (`/dev/sda1` above), which means the udev rule for `ENV{ID_FS_TYPE}=="lvm*|LVM*"` may not apply. LVM needs a proper "incremental" mode.
+** When the last partition on a block device has an md superblock (e.g. on `/dev/sda2`), md can think the entire device is an md component (e.g. `/dev/sda`), leading to all kinds of insanity.
+* Some block drivers just fail at detecting disk errors. This isn't md or LVM's fault but can lead to catastrophic data loss as md happily performs reconstruction from a failing disk onto a good disk. Related to the next thing...
+* It may also be possible to confuse md into a destructive reconstruction by kicking a device out of an array without first '''failing''' the device -- e.g. having a disk become unplugging on a running system, having the drivers not notice or not cause md to fail the disk, manually removing the component from the array (`mdadm /dev/md0 --remove /dev/sdb1`), plugging the disk back in (and possibly having it show up at a new location, depending on drivers again), and then adding the component back (`mdadm /dev/md0 --add /dev/sdb1`) -- md may decide to write from the removed disk to the up-to-date disk, causing sudden disconnect between the VFS layer and the block layer. Ironically, it may not be possible to mark the disk as "failed" once it has been removed from the array.
+
+----
+
+Footnotes & comments:

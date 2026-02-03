@@ -1,0 +1,90 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+'''Symptoms:'''
+* With compiz enabled, some animations such as desktop switching or compiz cube view are not smooth and take longer to complete than previously.
+* Scrolling in firefox is laggy
+* Switching to UXA or XAA makes performance issues go away
+* Switching to UXA makes performance issues worse
+* Switching compiz off makes performance significantly better
+* 3D video game FPS measures are significantly lower than previously
+
+'''Non-Symptoms:'''
+* glxgears FPS drops.  glxgears is not a benchmark, don't use it!
+* CPU usage is high.  Rather, see <nowiki>[[X-Troubleshooting-HighCPU]]</nowiki> instead.
+
+=== How It Works ===
+
+Historically, a distinction has been made between 2D and 3D acceleration.  2D acceleration was provided by the venerable XFree86 Acceleration Architecture (XAA), which makes the video card's 2D hardware acceleration available to the X server.  In cases where this was broken or unavailable, one could fall back to software rendering (e.g. the NoAccel option).
+
+3D acceleration was provided via the Direct Rendering Manager, which worked by mapping 3D rendered pictures on top of the 2D picture.
+
+This had some buggy corner cases, but more or less worked... until compositing (compiz, kwin) entered the picture.  This blurs the distinction between 2D things and 3D, as it adds 3D effects into what was once exclusively 2D.  Thus the distinction has become the source of a lot of brittleness, bugs, and performance problems.
+
+A better solution is to move to 100% hardware accelerated OpenGL 3D support, with 2D becoming just a subset of 3D rendering.  Unfortunately, switching entirely over is not so simple, and not without some major pitfalls.
+
+EXA was introduced as a stopgap measure, to provide better integration with XRender than XAA did.  In practice, while this proved quite advantageous in some respects, it also exhibited a number of corner cases and regressions.
+
+The next stage of development, UXA, reimplements the EXA api using the new Graphics Execution Manager (GEM), a memory manager that better leverages the Linux kernel.  EXA also now uses GEM (they share the same render acceleration code now).
+
+==== Current/Ongoing Development ====
+
+Upstream, Intel is in the midst of a long re-architecture effort.  The end goal of this work is to solve a myriad number of long standing issues relating to multi-head, dynamic configuration, 3D support, and performance.
+
+Part of this architecture work includes moving functionality from its traditional location to places where it will be more optimally able to support new capabilities.  For example, graphics mode/resolution setting is moving out of the 2d video driver into the kernel.  These changes are pretty significant, and can either uncover or generate bugs that regress previously working behavior; these bugs either emerge directly (bugs in the code) or indirectly from irregularities in how they're integrated together in the overall operating system.
+
+Another part of the work involves introducing more efficient algorithms, experiment with bypassing low-performance legacy code, and timing events to occur more optimally, with the hope that this will net huge performance benefits.  In some cases, this can be akin to balancing on a pin; and when the optimization fails, it can make performance much worse than if it hadn't been done to begin with.  Sadly, the corner cases often don't appear until the code is deployed into the wild in real-world situations.
+
+A third factor is hardware variability.  In general, recent model chips (945, 965, etc.) are thoroughly tested, whereas older cards (8xx) are less widely tested and thus problems aren't found until the driver ships.  More particularly, even with common models like 945 and 965, there are myriad little variations within the families that aren't always accounted for in testing.
+
+All these things together conspire to make a witch's brew of performance regressions... 
+
+A comparison of some different performance options has been published on Phoronix:
+* <nowiki>[[http://www.phoronix.com/vr.php?view=13700|Does A Greedy Intel Driver Improve Performance?]]</nowiki>
+* <nowiki>[[http://www.phoronix.com/scan.php?page=news_item&px=NzIwOA|Linux 2.6.30-rc2 Improves Intel Performance Some]]</nowiki>
+
+=== Problem:  Huge performance drop with UXA due to tiled rendering disabled ===
+
+On some pre-965 platforms, tiled rendering got disabled when using dri2 instead of dri1.  DRI2 gets enabled when UXA is used (it can't be used with EXA).
+
+This is fixed in the 2.6.29 kernel and the 2.7 driver.  Since we are not shipping UXA enabled by default due to stability concerns, those changes are not backported, but if you wish to use UXA you may find it better to upgrade to the upstream versions.  (We will probably pull these in Karmic, assuming the stability issues get resolved.)
+
+See <nowiki>[[http://lists.freedesktop.org/archives/intel-gfx/2009-January/001172.html|jbarnes' message]]</nowiki> to intel-gfx, subject "[RFC] support tiled rendering on pre-965 chips"
+
+Also see the recently fixed kernel bug #349314 <nowiki>[[https://bugs.edge.launchpad.net/ubuntu/+source/linux/+bug/349314|allocate MCHBAR space and enable if necessary]]</nowiki> which fixes performance issues due to tiling support.
+
+=== Problem: EXA and UXA (some applications) slow due to "a17 swizzling" bug ===
+
+Upstream has been working on a fix for a dual channel memory problem, the so-called "a17 swizzle" bug, which results in a performance slowdown.
+
+A17 ("address bit 17") refers to a memory addressing mode.  The Intel GPU and memory controller are on the same chip, and there are some intricate addressing modes used in combination with the CPU to increase performance.  A17 is one of the bits that gets set or cleared in certain dual channel configs.  Normally that's transparent to the user, but if a page of graphics memory gets swapped out and then back in at a different address, the a17 setting for the new page might be different.
+
+Previously, this swap is not tracked, so tiling had to be disabled altogether.
+
+See http://www.mail-archive.com/dri-devel@lists.sourceforge.net/msg39203.html for a first draft of a patch to enable tiling on A17-affected machines, at the expense of glReadPixels.  Also see <nowiki>[[https://bugs.freedesktop.org/show_bug.cgi?id=16835|fdo #16835]]</nowiki>.
+
+=== Problem: Sync to VBlank ===
+
+VBlank synchronization is an optimization technique that balances the output rate of your graphics card with the rate that your monitor displays images on the screen.  Your monitor's refresh rate -- also called the <nowiki>[[http://en.wikipedia.org/wiki/Vertical_blanking_interval|vertical blanking interval]]</nowiki> (VBlank) -- is the maximum speed your monitor can present images.  If your graphics card renders faster than this rate, the extra images are rendered for naught, as you'll never actually see them.  So if your monitor's VBlank is 60 Hz, and your graphics card is rendering 1000 frames-per-second, then 940 frames are getting drawn for no purpose.  So theory synchronizing the two makes a lot of sense.
+
+'''HOWEVER''', things are not so simple, and vblank syncing can actually make performance worse.  For a deeper discussion, see http://www.tweakguides.com/Graphics_9.html
+
+To turn off vblank sync, use any of the three methods:
+
+1.  Setting vblank using <code>compizconfig-settings-manager</code>: Go to System->Preferences-> Compiz config settings manager -> general options -> Display settings-> Sync to VBlank.  Turn it to 'off'.
+
+2.  From the compiz <code>gconf</code> configuration:
+
+<pre>
+    sync_to_vblank = false
+</pre>
+
+3.  Via <code>driconf</code>:  'Synchronization with vertical refresh (swap intervals)' -> set to 'Never synchronize with vertical refresh'.

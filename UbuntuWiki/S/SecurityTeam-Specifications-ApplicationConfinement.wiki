@@ -1,0 +1,317 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+* '''Launchpad Entry''': UbuntuSpec:topic-security-application-isolation
+* '''Created''': 2013-03-08
+* '''Created''': <nowiki>[[LaunchpadHome:jdstrand|Jamie Strandboge]]</nowiki>
+* '''Contributors''': <nowiki>[[LaunchpadHome:jdstrand|Jamie Strandboge]]</nowiki>, <nowiki>[[LaunchpadHome:mdeslaur|Marc Deslauriers]]</nowiki>, <nowiki>[[LaunchpadHome:jjohansen|John Johansen]]</nowiki>, <nowiki>[[LaunchpadHome:sbeattie|Steve Beattie]]</nowiki>, <nowiki>[[LaunchpadHome:tyhicks|Tyler Hicks]]</nowiki>
+* '''Packages affected''': apparmor, dbus, linux, mir, signon, etc
+* '''Status''': Production
+
+== Introduction ==
+Ubuntu plans to support an app store model where <nowiki>[[https://wiki.ubuntu.com/AppDevUploadProcess|software is made available that has not gone through the traditional Ubuntu archive process]]</nowiki>. While this greatly expands the quantity of quality software available to Ubuntu users, it also introduces new security risks. The simplified process used may:
+* facilitate the introduction of malware
+* prolong the risk exposure window since security maintenance is up to application authors
+* allow applications to collect private user data for monetary purposes.
+
+Therefore we must confine applications in a secure way to limit their scope. This is a technique currently being used on phones and tablets, and is becoming more prevalent on desktop systems. The strategy must be usable with Ubuntu's <nowiki>[[http://www.ubuntu.com/devices/phone/app-ecosystem|App Ecosystem]]</nowiki>.
+
+AppArmor is a security module for the Linux kernel that enables mandatory access-control (MAC). This enables a system to limit what applications can do beyond traditional Unix user permissions. AppArmor is very similar to XNU Sandbox<<FootNote(XNU Sandbox (previously called seatbelt) is a MAC system for the TrustedBSD frame work)>> used by Apple to successfully confine applications downloaded from the App Store on millions of iOS devices, such as the iPhone. Now it is also required that OS X applications available in the Mac App Store run under this sandbox.
+
+AppArmor is mature technology, is root-safe, and has been used to confine applications on every Ubuntu default installation since Ubuntu Gutsy Gibbon (7.10). It is the ideal technology to be used for widespread application confinement in Ubuntu.
+
+Please see http://developer.ubuntu.com/apps/platform/guides/app-confinement/ for developing confined applications on Ubuntu Touch.
+
+=== Requirements ===
+==== General Purpose ====
+The technology selected should be able to work under the converged device strategy: phone, tablet, desktop and TV. It should not require a substantially different API for app developers, and existing apps not developed specifically for Ubuntu should be able to be trivially modified to use the new confinement.
+
+==== Data and Internet access ====
+An application that is confined should only be allowed to read and write data from locations that have been approved in advance by the App Store owner. It should only be able to access the Internet if permitted.
+
+It should be possible for the device owner to adjust permissions (presenting this graphically is not a requirement).
+
+Additional capabilities may be added to the restrictions, such as the ability to launch the phone dialer (but not initiate calls) if being used on a mobile phone device.
+
+==== Security ====
+The implemented solution should be secure. A rogue application should not be able to break out of confinement. There are three scenarios where this would be an attack vector:
+# Jailbreaking. A device owner may want to obtain privileges on his device to install his own applications, to customize it, or to replace the firmware with a custom built one. This would be a common scenario with locked-down mobile phones and tablets. Even in cases where a special "developer" mode is offered by the manufacturer to unlock the device in a simple way, this often invalidates warranty, imposes DRM restrictions on downloaded media, or is disabled by the service provider. A user may still attempt to jailbreak a device that is unlockable in order to maintain warranty and functionality.
+# Malicious applications will attempt to break out of their sandbox in order to access personal data, such as passwords, access the Internet, dial the phone to cause phone billing, etc.
+# Security researchers will attempt to circumvent, and will publish deficiencies in any security technology that will be used to isolate applications. Once they have published a recipe for doing so, the recipe will be used to jailbreak devices, and will be used by malicious applications.
+
+The technology that is used to confine applications must be of a design that is sound security wise, and can be fixed in the event that a weakness is discovered. "Good enough" is unacceptable once millions of devices have been deployed, a weakness is found, and a recipe for exploiting it has been published.
+
+Applications should be able to be launched from the user's context without requiring special privileges or root-running helpers.
+
+The technology used should be able to log failure events for debugging and review purposes.
+
+==== Reliability ====
+The technology used should be reliable and should not leave the device in an unknown state upon application failure.
+
+==== Performance ====
+The technology used should not have a impact on the startup time of an application. If application startup is delayed for sandbox preparation, devices may feel sluggish.
+
+==== Simplicity ====
+Application rights should be simple to understand by developers. It should be easy for them to place check boxes next to different rights their application needs before submitting it for review. The App Store reviewers should be able to easily understand the rights the application developer has requested, and should be able to easily understand log entries from failures to comply with those rights.
+
+=== Confinement challenges ===
+Most of the technologies that are being used on the traditional desktop today assume that whatever is running under the user's privileges has the same level of security. Desktop application technologies don't confine or restrict what a user's applications can do. AppArmor already capably mediates the following:
+* system files and user data
+* networking
+* library loading
+* execution of applications
+* capabilities
+* privileged operations, such as mount
+
+Confining applications on the converged device (phone, tablet, desktop, TV) can present difficulties. Here are a few technologies that can be problematic:
+
+==== D-Bus ====
+D-Bus is a simple IPC mechanism for applications to communicate. Typically, there are different buses available:
+* "system bus" - a D-Bus service running privileged
+* "session bus" - a D-Bus service running as the login user (each user has his/her own session bus)
+* Optional other buses, such as the accessibility bus (a D-Bus service which runs as the login user)
+
+Although there are access rights associated with communicating with the system bus, the session bus enforces no control between applications. Any application can use the session bus to communicate with another.
+
+Typically, applications communicate with the system bus through a well-known socket in the /var/run/dbus directory. For the session bus, applications use the DBUS_SESSION_BUS_ADDRESS environment variable to determine the name of an abstract unix socket.
+
+Any application gaining access to the abstract unix socket can send D-Bus messages to other applications, and trivially impersonate other applications. This may lead to escaping the application confinement restrictions or obtaining sensitive information.
+
+==== GConf ====
+GConf is a system for storing application configuration settings. Typically, a daemon is run under the user's context and stores settings in the ~/.gconf directory. Applications use a GConf library that communicates with the daemon using CORBA in older versions, and D-Bus in newer versions.
+
+Any application that can communicate with the gconf daemon, or can access the database directly in the ~/.gconf directory is able to modify settings for other applications. This may include adding arbitrary plugins that are executed on application load, or modifying command lines. This can lead to escaping the application confinement restrictions. Even simply obtaining read access to other application's settings may expose sensitive information, and may result in privacy issues.
+
+As of Gnome 3, use of GConf is deprecated and has been replaced by GSettings. Although applications should now all be using GSettings, a number of existing applications have not migrated yet.
+
+==== GSettings/dconf ====
+GSettings is a system for storing application configuration settings. It has replaced GConf as of Gnome 3. GSettings uses a backend plugin to actually store the configuration settings. In Ubuntu, this is typically dconf, but an application may specify which backend to use via the API, or with the GSETTINGS_BACKEND environment variable.
+
+dconf has two parts: a plugin for GIO which implements reading settings by directly accessing the database files, and a dconf daemon which is communicated with over D-Bus for writing settings.
+
+The default dconf database files can be overridden with a profile file in a system location, or specified with an environment variable.
+
+Any application that can access the database files can read and modify settings for other applications. Any application that can communicate with the dconf daemon may modify settings for other applications. This may include adding arbitrary plugins that are executed on application load, or modifying command lines, and results in being able to escape application confinement restrictions. Even simply obtaining read access to other application's settings may expose sensitive information, and may result in privacy issues.
+
+==== Display Manager ====
+While Ubuntu will use <nowiki>[[https://wiki.ubuntu.com/MirSpec|Mir]]</nowiki> for the converged experience (phone, tablet, desktop and TV), it is worth noting that the traditional X server has a number of characteristics that make it difficult to confine:
+
+===== Keyboard and mouse sniffing =====
+Since applications running in the same X server are running in the same security context by default, they can perform certain operations such as capturing key press and mouse events. This allows a confined application to capture passwords and data that is entered into other applications.
+
+The design of <nowiki>[[https://wiki.ubuntu.com/MirSpec|Mir]]</nowiki> prevents these actions (a regular application will not be able to provide a virtual keyboard or sniff events).
+
+===== Screenshots =====
+In X, Any application can take screenshots of windows on the screen. This allows confined applications to capture sensitive data being displayed in other applications.
+
+The design of <nowiki>[[https://wiki.ubuntu.com/MirSpec|Mir]]</nowiki> prevents these actions (a regular application is only able to screen grab its own window).
+
+===== Clipboard =====
+With X, any application can obtain access to the display server clipboard. This allows confined applications to capture and modify sensitive data that is being copied and pasted between other applications.
+
+===== Drag and drop =====
+With X, any application can perform drag and drop operations. This allows confined applications to possibly capture and modify sensitive data that is being dragged between other applications, or to possibly cause other applications to open arbitrary data.
+
+===== XSETTINGS =====
+The XSETTINGS protocol provides a mechanism for applications running different toolkits to share common settings, such as double-click timeout, and interface colours. The currently running settings manager maintains an unmapped window on which all settings are stored. Applications that access X can modify XSETTINGS. Some toolkits, such as GTK, permit loading arbitrary modules specified with XSETTINGS. This may lead to escaping the application confinement restrictions.
+
+The design of <nowiki>[[https://wiki.ubuntu.com/MirSpec|Mir]]</nowiki> will not support XSETTINGS.
+
+==== Environment Variables ====
+A lot of libraries allow changing behaviour by setting certain environment variables before starting them. For example, GTK allows specifying arbitrary modules to be loaded by setting the GTK_MODULES environment variable. Environment variables must be inspected and possibly stripped for processes that are spawned by confined applications in order to prevent this being used to escape confinement.
+
+==== GNOME Keyring ====
+GNOME Keyring is a daemon running in the user's process space designed to store secrets and credentials for applications, such as usernames and passwords. Data that is stored in GNOME Keyring is encrypted and stored in a file in the user's home directory. A pam module takes care of unlocking the default GNOME Keyring database with the user's password upon login.
+
+The GNOME Keyring daemon is accessible over D-Bus and via a unix socket. Any application running as the user can access any secret stored in the keyring database, even if the secret was intended to be used by another application. Any application running as the user has access to the encrypted database file. Although the database is encrypted with the user's login password, an offline attack could possibly result in exposing its contents.
+
+Confined applications should be prevented from accessing other application credentials, and should be prevented from reading the encrypted database file.
+
+==== Ubuntu Online Accounts ====
+Ubuntu Online Accounts is a central location for storing web account credentials and was originally based on libaccounts and libsignon from Meego. Any application running as the user can access any account information stored in Online Accounts, and can directly access the accounts database file. Ubuntu Online Accounts is accessible over D-Bus. Confined applications should not be granted access to account information that they don't require for proper operation.
+
+==== Signals ====
+Any application running within the user's context can send a signal to any other running application, such as the TERM signal with would cause the process to terminate. A confined application may attempt to send signals to other processes in order to perform a denial of service, to terminate processes that enforce security, or to replace a running process with itself.
+
+==== /proc information disclosure ====
+A confined application may attempt to read information about other processes directly from the /proc directory. For example, it may attempt to perform data collection on which apps are used by the user, the name of documents and websites that are currently open, etc.
+
+==== Installing applications ====
+Other platforms support the concept of clicking on a URI to install applications from an app store. Ubuntu should support this model in a safe manner.
+
+==== Data and file access ====
+One of the challenges in confining an application is giving it access to some of the user's data without the application being able to maliciously access it all. For example, allowing the application to open a picture should not allow it to access the whole pictures directory, and allowing an application to send an email to a contact shouldn't give the application access to the whole address book.
+
+=== Overcoming challenges with AppArmor and application isolation ===
+This section gives specific information on how we are able to use AppArmor to overcome the challenges presented when attempting to confine applications.
+
+==== D-Bus ====
+D-Bus will gain AppArmor mediation capabilities. The AppArmor profile for a confined application will define what D-Bus communications are allowed, and only the required access will be authorized. This is already implemented and available in a PPA. Typically an application will be allowed to use the !AppMenu and HUD APIs to integrate with Ubuntu Unity and other DBus APIs such as !GeoLocation will be available to the application developer.
+
+==== GConf ====
+Access to GConf will be blocked by default. Since GConf is deprecated, no solution is currently being worked on for fine-grained access to GConf for confined applications. If the need to support GConf for confined applications is determined to be a requirement, a private GConf service can be spawned for each confined application which will allow them to read and write their own settings.
+
+==== GSettings/dconf ====
+In 13.10, apps will not have access to GSettings. While coarse-grained boolean access to GSettings/dconf is a possibility, it does not provide enough protection. Future versions of Ubuntu may allow applications to store their settings in GSettings, which would require fine-grained mediation. If supporting fine-grained access to GSettings/dconf becomes a requirement, a new dconf agent and dconf backend will be written. The confined application will come with a list of GSettings paths and permissions that are authorized. The confined application will be launched with an appropriate environment variable so the special backend is used. The special backend will then send read and write requests to the new dconf agent over D-Bus. The D-Bus AppArmor mediation will prevent the confined application from directly communicating with the dconf daemon. The dconf agent will read the application's permissions from the config file, will read settings directly from the dconf database in the user's home directory, and will write to the database over D-Bus using the dconf daemon.
+
+==== Display Manager ====
+<nowiki>[[https://wiki.ubuntu.com/MirSpec|Mir]]</nowiki> will be the supported display manager for Ubuntu and its design should by default address keyboard/mouse sniffing, taking screenshots, and XSETTINGS. Clipboard, drag and drop and special cases such as 3rd-party on screen keyboards may need to be handled via a security hook in Mir that AppArmor will plug in to. This will allow Mir to, for example, query if an application should have access to the clipboard. Since Mir will also provide an X compatibility layer, AppArmor integration at this level may also be required.
+
+'''Note:''' As of 2014/09/23, apps by default have access to the Mir clipboard (Bug:1372579) however, but non-user facing processes like scopes, push notification helpers, etc are not allowed to access the clipboard. Further work is needed to address all privacy issues (Bug:1371170).
+
+XSETTINGS will not be supported in native Mir, at least at the application level. In other words, the shell may honor settings in some fashion, but apps won't be able to access/modify them or trigger module loading.
+
+The converged strategy will require running X applications (ie, from the Ubuntu archive) intially within a shared rootless X session on top of Mir. Future versions may use a different rootless X session per X app. Any applications running in the shared session will be exposed to the traditional X design flaws, but they will not be accessible by native Mir applications and they will not be able to access native Mir applications. XSETTINGS limiting needs to be investigated in this context, although a workaround for now could be to audit toolkit libraries and limit configuration options to render them useless as a confinement escape mechanism. For example, Qt should be modified to only load arbitrary modules from system directories, or from a specific user directory that can be easily confined with an AppArmor profile.
+
+Creating a fully-functional Xace plugin for X is not within scope for this specification. If it becomes a requirement, we will implement an Xace plugin to address these concerns. We may provide isolation within this rootless X session at some point in the future.
+
+==== Environment Variables ====
+The confined application's AppArmor profile will contain a list of authorized environment variables for processes that are allowed to be spawned. AppArmor will either deny the process from being spawned if the environment contains an unwanted environment variable, or it will scrub the environment before the application is started. Environment variable filtering is important on the converged device and should be provided in Ubuntu 14.04.
+
+==== GNOME Keyring ====
+Coarse-grained boolean access to GNOME Keyring will be provided, and blocked by default. GNOME Keyring will not be available to applications directly, but may be used by other services, such as Online Accounts.
+
+If fine-grained access to GNOME Keyring is a requirement, GNOME Keyring will gain AppArmor integration. When an application attempts to store or retrieve a credential, GNOME Keyring will determine if it is confined by an AppArmor profile. If it is, the application will only be allowed to retrieve credentials it stored itself.
+
+In the future, we may extend the AppArmor integration to allow confined applications to access credentials belonging to other applications, either by permitting it in the AppArmor profile, or by prompting the user for confirmation.
+
+==== Ubuntu Online Accounts ====
+Ubuntu Online Accounts will gain AppArmor integration. For 13.10, access will be in two parts: 1) boolean access for the application to access Online Accounts at all and 2) fine-grained access within Online Accounts itself such that when an application attempts to access an online account credential, Ubuntu Online Accounts will determine if the application is confined with an AppArmor profile. If it is, Online Accounts will provide a contextual runtime prompt so the application will only be able to access credentials for which is has authorization.
+
+==== Signals ====
+The AppArmor profile will determine which signals a confined application can send to other processes.
+
+==== /proc information disclosure ====
+In Ubuntu 14.04, AppArmor will gain support for using a "PID" variable in profile rules, which will allow writing rules that will prevent a confined application from reading information out of /proc that belong to other processes.
+
+==== Installing applications ====
+An application install helper will be developed that provides a D-Bus API so that !AppArmor can mediate access to it. The URI must specify a URL into the app store. When the user clicks on a link to install an app, the browser will give the application install helper the URI and it will launch the app installer so the user can install the app like normal. In this manner, the user then has a contextual prompt (the app installer). The application install helper must not allow applications to be installed without user confirmation.
+
+==== Data and file access ====
+The big challenge with confining an application is access to the user's data. Presenting a file chooser to the user to open and save arbitrary files outside of the application's confined directory is desired behaviour in certain circumstances. For example, a game may ask the user for a picture to attach to their online profile. This would require access to a single file in the user's pictures directory, but not access to all of them.
+
+The simple solution to this problem is to offer an API that would present a chooser dialog to the user on behalf of the confined application. When a user specifically selects an item, such as a picture, or a contact, the confined application would gain access to it. Since the chooser dialog is not displayed by the confined application itself, the user is automatically granting permission on the file when selecting it. This allows files and other data to be read and written outside of the application's sandbox without granting access to the complete contents of the user's directories.
+
+A more complex solution allows for applications to provide views on their supported data types such that one application can use another application's view for selecting content. For example, if a user were using an app and choose to upload a photo, the app could ask the gallery app to display available photos to upload.
+
+Allowing the application access to the data is specific to the type of data that is requested. In the case of a contact, for example, it could simply be returned by the helper daemon over D-Bus. Granting access to a file is slightly more complex. Once a file is authorized, it could be dynamically loaded into the AppArmor profile by the daemon. This functionality doesn't currently exist in AppArmor, and a detailed analysis would need to be made to determine if this could be done in a secure fashion. If it is determined that there is no secure way to allow dynamically modifying a profile, an alternative would be to simply use hard links. The helper daemon would simply hard link the file into the confined application directory. A list of hard linked files would be maintained and a helper daemon would remove them upon application clean-up. An API can be made available to applications to allow them to preserve access to authorized data. This will allow applications to maintain a list of recently-used items, and preserve access rights to them without prompting the user once again.
+
+In all cases, the final solution will require a <nowiki>[[https://blueprints.launchpad.net/ubuntu/+spec/client-1305-content-mgmt-picking|helper daemon]]</nowiki> that is a separate process from the app(s) to mediate access] to the data and this will likely happen over D-Bus. When the application has a need to access data outside of its confinement, it will ask the helper daemon. Ideally, the helper daemon would allow the application to access a large variety of different types of data. The helper daemon can also perform content filtering on the files and data that are read and saved in order to sanitize them from security issues.
+
+==== Ubuntu SDK ====
+Applications developed with the Ubuntu SDK will be mediated by AppArmor in the ways described above. Per-application configuration and keystores shall not be shared between applications. In the future, we may provide methods for applications to share this information. The SDK will allow for developers to specify access rights in the following manner:
+* A <nowiki>[[https://wiki.ubuntu.com/SecurityTeam/Specifications/ApplicationConfinement/Manifest|high-level manifest file]]</nowiki> will be used to define the security profile for the application (see below for more information). The SDK will allow developers to create and edit this file
+* The manifest file will contain (among other things):
+** The name of the application
+** The name of the desktop file/binary
+** The version of the application
+** Optionally, the name of the template profile to use (defaults to 'ubuntu-sdk')
+** Any AppArmor policy groups to use (eg, networking, location, acounts, etc)
+* Once the manifest file is created, the SDK can be used to generate an installable package where upon install creates an !AppArmor profile that is generated from the manifest file
+* The developer can install the package and test the application under confinement
+
+==== Helpers and trusted helpers ====
+In addition to the above, apps may want want access to various other data or services, such as Contacts, Calendar, Location, Sensors, etc. This access should happen via an out of process helper and the preferred communication mechanism with out of process helpers is DBus. In this manner, AppArmor policy groups can be defined for these helpers using standard AppArmor DBus rules, etc. These type of helpers do not need any modification-- apps are either allowed to use them or not, and this is decided by AppArmor.
+
+Some helpers will help with mediation in some manner. The canonical example is online accounts-- the 'accounts' AppArmor policy group will allow an app to talk to online accounts, but online accounts will be modified to enforce user choice on if an app can use facebook or use twitter. For online accounts, this is done by providing meaningful contextual prompts (eg, "Allow app A to access facebook?") and online accounts will be able to cache the results for this app (using the libapparmor API to get an unspoofable id for the app). For pragmatic reasons we are currently mixing policy between AppArmor and the trusted helper here (ie, online accounts is effectually dynamically creating/modifying policy when it is caching its results), but that is something we may change in the future.
+
+=== App confinement with AppArmor ===
+In order to confine applications with AppArmor, the following are required:
+* An AppArmor profile for each application
+* A method to launch applications in a predictable way that is run with user privileges
+
+==== AppArmor profile ====
+An AppArmor profile consists of a text file containing a set of rules describing the resources an application is allowed to access. Rather than specifying the profile in the appliaction packaging, a high-level manifest is use to declare the permissions required by the application. Upon installation of the application, an AppArmor profile is generated such that a unique profile is generated for each application version. The resulting AppArmor profile is similar to Apple's App Sandbox .sb files.
+
+To simplify application development, the AppArmor aa-easyprof tool will be used to support a predetermined list of access rights which can get automatically turned into an AppArmor profile directly via the SDK (via the <nowiki>[[https://wiki.ubuntu.com/SecurityTeam/Specifications/ApplicationConfinement/Manifest|manifest file]]</nowiki>). Access rights include:
+* accounts - Can use Online Accounts
+* audio - Can play audio
+* camera - Can access the camera(s)
+* connectivity - Can access coarse network connectivity information
+* content_exchange - Can request/import data from other applications
+* content_exchange_source - Can provide/export data to other applications
+* location - Can access Location
+* microphone - Can access the microphone
+* networking - Can access the network
+* sensors - Can access the sensors
+* video - Can play video
+
+Other access rights will exist such as for reading or writing music, picture or video files. Trusted helpers like the content picker will be provided for things like Contacts, the Calendar, the Gallery, etc.
+
+The list of access rights required for an application to function normally is submitted by the application developer which allows for easy reviewing. When the package is built, the installation hooks will transform the list of access rights in the manifest file into an appropriate AppArmor profile such that the developer does not need to be aware of the underlying confinement implementation details.
+
+==== Launching applications ====
+!AppArmor policy normally attaches to the executable with the kernel examining the path to the binary. For example, when /usr/bin/foo is executed on the system, the kernel sees if there is policy defined for it, then enforces the policy. !AppArmor also provides the aa-exec utility to execute a program under a specific profile and the aa_change_profile() API to change into another profile during program execution (typically used prior to exec() after fork()). Many applications in the Ubuntu app-ecosystem are not executables in the traditional sense. They may be a QML script to be run in a QML shell (eg, qmlscene) or and html file to be rendered in a webview. Launching applications must take this into account. The !AppArmor policy will also enforce that files that are executed from the install paths (ie, in /opt/.../!AppName) will inherit the policy of the parent.
+
+By <nowiki>[[http://gould.cx/ted/blog/Application_Centric_User_Experience|utilizing Upstart to start apps]]</nowiki>, we can specify the policy attachment in the Upstart job. Applications are launched using the `application` upstart job which is passed an <nowiki>[[https://wiki.ubuntu.com/AppStore/Interfaces/ApplicationId|APP_ID]]</nowiki> (eg, `start application APP_ID=foo`). This upstart job will handle starting the app appropriately. Traditional .desktop files will also be provided and have the `Exec=` line prepended to use 'Exec=aa-exec-click -p APP_ID -- foo ...' instead specifying the path to the executable (`aa-exec-click` uses `aa-exec`).
+
+The upstart job will at a minimum do the following:
+* Set up sandbox environment variables:
+** UBUNTU_APPLICATION_ISOLATION=1 (see <nowiki>[[https://bugs.launchpad.net/ubuntu/+source/glib2.0/+bug/1176127|LP: #1176127]]</nowiki> for one reason why)
+** APP_ID (not generally needed by the app, but available for convenience)
+** Explicitly set XDG_CACHE_HOME, XDG_RUNTIME_DIR, XDG_DATA_HOME and XDG_CONFIG_HOME to system values (ie, not app specific values).
+** TMPDIR will be set to `TMPDIR=$XDG_RUNTIME_DIR/confined/$APP_PKGNAME`
+** `__GL_SHADER_DISK_CACHE_PATH` will be set to `__GL_SHADER_DISK_CACHE_PATH=$XDG_CACHE_HOME/$APP_PKGNAME` (to account for <nowiki>[[http://us.download.nvidia.com/XFree86/Linux-x86_64/319.23/README/openglenvvariables.html|GLCache]]</nowiki>)
+** (any other variables that are worthwhile)
+* Specify the !AppArmor profile to change to on application launch
+* Spawn the application
+
+By using Upstart jobs, there is great flexibility for preparing the environment as well as clean up if it is needed. Ubuntu derivatives or desktops that are not started in an Upstart user session will need to have another method to start applications safely.
+
+===== Application environment =====
+A main environment variable should always be set to indicate to the application that it is running in a sandbox. This may allow an application to dynamically adjust its behavior, and have a single source tree that would work in both a sandboxed environment, and as a regular desktop application.
+
+Applications will always have read access to their install directory and have write access to directories they own as determined by the XDG base directory specification. Specifically: XDG_CACHE_HOME/<APP_PKGNAME>, XDG_RUNTIME_DIR/<APP_PKGNAME>, XDG_RUNTIME_DIR/confined/<APP_PKGNAME> (for TMPDIR), XDG_DATA_HOME/<APP_PKGNAME> and XDG_CONFIG_HOME/<APP_PKGNAME>. Apps can discover these paths using standard APIs and appending the package name as defined by the 'name' field of the manifest. Note that <APP_PKGNAME> is not the APP_ID. In order to easily handle upgrades and sharing data between executables in the same app, we use the unversioned app package name for the writable directories. Eg, if the APP_ID is `com.ubuntu.developer.user.foo_bar_0.1`, the APP_PKGNAME is simply `com.ubuntu.developer.user.foo` (you can determine APP_PKGNAME by obtaining the "name" field in the click manifest file or by examining the APP_ID and performing something like APP_PKGNAME = APP_ID.split('_')[0]).
+
+--(Appropriate environment variables also need to be set to indicate to the application that it needs to store its data and settings in the special sandbox directory. For backwards compatibility, and to minimize modifications needing to be applied to applications to be sandbox compatible, it is suggested to simply set the XDG_* variables, as defined in the XDG Base Directory Specification. Applications that don't adhere to those variables will need to be modified, but should remain compatible with standard desktop usage.)--
+
+--(By setting appropriate environment variables for XDG_DATA_HOME, XDG_CONFIG_HOME, XDG_RUNTIME_DIR and XDG_CACHE_HOME, a well behaved application will work correctly. These will correspond with the paths in the !AppArmor profile. Applications will should use the XDG directories. Install paths (ie, read-only) will be in /opt/.../AppName and their writable data directories will be in ~/.config/AppName, ~/.cache/AppName and ~/.local/share/AppName.)-- '''Note:''' ''modifying XDG_* variables was abandoned because this technique cannot generally be used without breaking access to read-only shared data like mimetypes, xdg-user-dirs, per-app gsettings (future), etc. Most traditional applications adhere to the XDG specification without modification, but the Ubuntu SDK will need to be adjusted to ensure these XDG paths are used without modifying the environment.''
+
+Upstart by default will provide the same environment that was setup upon the user's initial session start. In this manner, the environment is always consistent and cannot be modified by a malicious app to trigger different behavior in another app or the parent environment. The upstart job may optionally clean the environment such that only the environment variables required for execution by the application are present.
+
+===== Spawning the application =====
+Because Upstart is spawning the application it is in a position to monitor it and some portions of the application lifecycle are free by using Upstart. For example, if the application dies, Upstart can restart it and Upstart won't launch the application more than once.
+
+Optionally, before spawning the application, Upstart could validate the signature on the application binary to make sure it is authorized and has not been tampered with, and validate licensing. Upon failure, a message would need to be presented to the user offering to purchase the app, or download it again to fix it, as appropriate.
+
+===== Monitoring the application =====
+Application monitoring is different than, but somewhat related to application isolation. The application lifecycle of an application will take into account various aspects of the system: CPU usage for power draw, memory usage for performance, etc. Controls could also be put in place to control/monitor its CPU usage, memory consumption, AppArmor failure events, disk use, and other parameters. If the application is failing, and consuming more resources than allowed (either static limits, dynamically calculated based on resource availability, based on application usage trends, or determined by a configuration file supplied with the application itself), Upstart can gracefully shutdown, or forcibly terminate the application. A friendly dialog could be presented to the user, log events, submit a crash report, and offer to respawn the application automatically.
+
+Upstart has cgroups support which could be used for this, but it should be noted that while the use of cgroups to perform resource limiting is ideal in certain environments (such as setting resource limits on a predetermined number of virtual machines running in a controlled environment), attempting to use cgroups for limiting confined applications is difficult. Since total memory and number of running applications varies, a userspace helper is most certainly needed to dynamically balance the limits configured for each application. It is also difficult to protect against rogue applications simply by setting hard limits, as applications may need bursts of CPU time or memory to perform certain operations, in which case a hard limit would impact the user experience. Simply limiting resources isn't the solution to handling a rogue application. It should be monitored, and gracefully shutdown with an appropriate message to the user. Resource limits will be investigated as part of the <nowiki>[[https://blueprints.launchpad.net/ubuntu/+spec/client-1303-add-app-model-and-lifecycle-to-platform-api|application lifecycle work]]</nowiki>.
+
+==== Launching other applications ====
+For applications designed for Ubuntu, an URL handler helper will be developed that provides a D-Bus API so that !AppArmor can mediate access to it. The URI must specify a URL such that when the user clicks on it, the URL handler helper will launch the application on behalf of the app (eg, launching the web browser when clicking on an http:// URL). When using an application not designed for Ubuntu on the converged device, a safe method of launching other applications will be provided (eg, using AppArmor execute transitions with environment filtering).
+
+=== Questions ===
+* Why not use use another MAC system such as SELinux, Smack, or Tomoyo?
+** While there are other MAC systems available, AppArmor is a mature, proven and established technology within Ubuntu that is easy to use. By choosing AppArmor, we have a jump start on our confinement implementation and we can continue to protect the core OS while at the same time confining app store applications. Its ease of use allows for us to more easily define reusable policy and its flexibility allows for very fine-grained access controls.
+* Why not use container technologies such as Docker or LXC?
+** Container technologies like Docker and LXC are interesting and useful for many things by providing a lightweight alternative to virtualization for environments where it is appropriate. In their current form, they are not the right choice for application confinement because they don't provide significant benefits over AppArmor, but have several drawbacks:
+** Non-user namespaces require privileges to start/stop applications (for bind mounting, cgroups, etc)
+** User namespaces can solve the privilege issue, but is a new technology that isn't proven for application security (though things are improving in this area)
+** In the short term, Ubuntu Touch devices use Android kernels and backporting user namespaces to them would be very intrusive (this goes away with time when Android kernels are new enough and/or Ubuntu Touch uses an Ubuntu kernel)
+** Containers typically use coarse allowlisting (eg, bind mount /home to make it available in the container) and then rely on denylisting to go more fine-grained (deny /home/*/.gnupg). AppArmor as used with application confinement starts with everything is denied, and uses allowlisting. This allows us to easily say the application can only access ~/.local/share/<appname> and nothing else in ~/.local/share. Furthermore, we don't have to maintain the denylist for new, dangerous files to deny.
+** Containers are fast, but they can require a lot of bind mounts which is overly complicated for application confinement. The use of different bind mounts per application can make it difficult for developers and users to find predictable paths (based on freedesktop.org standards) for their files and may complicate backups. With application confinement as designed with AppArmor, files are in predictable locations which is more inline with our long term vision of a converged device.
+** Containers technologies alone face challenges with DBus services, clipboard or individual keys within a keyring. There is a lot of interesting work to address some of these challenges (eg, the use of so-called desktop containers, etc) but this work is incomplete.
+  AppArmor is mature and provides a jump start on application confinement (it was specifically designed for this purpose). It is lightweight, provides a simpler implementation that is easy to extend and allows us to unify the application confinement pieces in an elegant manner. That said, the design of application confinement on Ubuntu does not preclude using container technologies in combination with AppArmor (indeed, Docker and LXC already have preliminary AppArmor support) if/when the benefits of these tecnologies outweigh the drawbacks.
+ '''Update''': <nowiki>[[https://developer.ubuntu.com/en/snappy/|Snappy for Ubuntu Core]]</nowiki> is incorporating some container techniques (eg, cgroups, private /tmp, etc) and these will be incorporated into Ubuntu Personal
+* Why not use seccomp?
+** seccomp is an interesting and effective technology that restricts which syscalls a process can use. Seccomp is a process/task level technology that is well-suited for when an application is specifically written with internal sandboxing and privilege separation in mind. While it is possible to launch an application in a seccomp enforced jail, it is difficult for seccomp to enforce a system level policy on tasks, applications, and objects (files, sockets) and it doesn't handle interactions between applications. While seccomp support may be integrated into AppArmor as part of its backend policy enforcement, at this time developers are encouraged to use seccomp in their applications to leverage further internal restrictions/separation beyond the system level sandbox. In the future, the Ubuntu SDK may use seccomp and/or make it easier to use when writing an application. '''Update''': <nowiki>[[https://developer.ubuntu.com/en/snappy/|Snappy for Ubuntu Core]]</nowiki> uses <nowiki>[[https://developer.ubuntu.com/en/snappy/guides/security-policy/|seccomp]]</nowiki> and this will be used by on Ubuntu Personal as well
+* Why not use virtualization?
+** Virtualization provides very strong separation between processes, but it far too heavyweight and inflexible for this purpose (each application would ideally need its own VM which requires significant CPU, disk space and RAM. Sharing VMs to reduce this cost allows for attacks between applications within the shared VM).
+* Why not use separate users, like with Android?
+** This is effective but does not provide enough flexibility and ultimately doesn't meet our requirements without having to start a new security sandbox from scratch. '''Update''': Android has since incorporated an LSM in its sandboxing model
+
+=== Conclusion ===
+AppArmor is the ideal technology to confine applications on all types of Ubuntu devices. It is similar technology to what is being used in competitor's products, and is mature and proven. When completed, Ubuntu will have a modern, lightweight and comprehensive sandboxing solution.
+
+----
+CategorySpec

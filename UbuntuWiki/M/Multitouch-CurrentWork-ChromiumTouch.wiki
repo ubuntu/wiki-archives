@@ -1,0 +1,295 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== Chromium Integration ==
+
+=== Introduction ===
+
+This page describes the integration of frame and grail with Chromium to enable sophisticated gesture recognition within Chromium (and Chrome). Both the architectural and technical aspects of the patch (appended to this page) are explored. The summary concludes with a list of open issues/work items.
+
+=== Chromium Architecture ===
+
+Chromium is a cross-platform web browser built on top of !WebKit and serves as a basis for Google Chrome. Moreover, it serves as the basis of ChromeOS. From an architectural point of view, the overall system can be divided up into two components:
+
+* The UI component
+* The !WebKit component
+
+In the UI component, different platforms and/or GUI toolkits are abstracted in terms of so called modules. Within every module, platform specific bits and pieces are defined and implemented in files that are named in a platform specific manner (e.g., by appending _x11 to the filename). 
+
+Crossing the boundary between the UI component and the components glueing !WebKit functionality to Chromium-specific bits and pieces is realized by an IPC mechanism.
+
+==== MultiTouch & Gesture Recognition Architecture ====
+
+Both !WebKit and !WebKit Chromium define interfaces and types related to processing input from multi-touch devices and carrying out gesture recognition tasks. Only recently, these interfaces and types have been moved to the UI component of Chromium, more specifically to the Aura subcomponent. Aura is a GUI Toolkit abstraction that works on top of OpenGL ES 2.0 and will eventually become the basis for implementing both Chromium's and ChromeOS's user interface across all major platforms. 
+
+In Aura, handling of multi-touch devices is carried out by the singleton !TouchFactory (ui/base/touch/touch_factory.h). Currently, its implementation (ui/base/touch/touch_factory.cc) relies on X11 and XI2.x. In general, the class takes care of:
+
+* Maintaining a list of currently connected direct-touch devices
+* Setting up event processing for these devices
+
+The patch accompanying this document extends the functionality of the class by associating a frame instance with every instance of the class. Every XI2.x event is passed through frame (relying on its default X11/XI2.1 backend). Moreover, the frame instance is exposed to other classes for gesture recognition purposes. Finally, we altered the class !TouchFactory to provide support for dependent touch devices like the Apple Magic Trackpad. 
+
+Gesture recognition tasks are abstracted by the interface !GestureRecognizer (ui/aura/gestures/GestureRecognizer.h). Our modifications introduce an implementation of this interface in terms of grail and provide recognition of:
+
+** Two-finger drag gestures
+** Two-finger pinch gestures
+** One- and two-finger tap gestures
+
+both on direct and dependent touch devices (thanks to the modifications to !TouchFactory). Every instance of an implementation of the interface !GestureRecognizer is associated with an Aura !RootWindow (ui/aura/root_window.h and ui/aura/root_window_host_linux.cc) and the recognizer instance is only invoked for touch events that "belong" to the respective root window. That is, we dispatch hit-testing and window identification tasks to Chromium in general and Aura in particular. Whenever the grail instance recognizes a gesture, we provide the surrounding framework with an instance of class aura::!GestureEvent (see ui/aura/event.h). Please note that we modified the class to support pinch-gesture specific parameters, i.e., providing the current scale factor in x and y direction.
+
+Please find a video demonstrating pixel perfect scrolling within Chromium Aura <nowiki>[[attachment:video2.mkv|here]]</nowiki> and 
+
+<nowiki>[[File:ChromiumTouch.webm]]</nowiki>
+
+. The screen cast has been recorded on the following setup:
+
+** Precise Alpha
+** frame and grail trunk versions
+** Apple magic trackpad
+
+And here is an overview of the architecture:
+
+<nowiki>[[File:ChromiumTouchArchitecture.png||width=90%]]</nowiki>
+=== Summary & Open Issues ===
+
+The patch accompanying this document introduces gesture recognition functionality to Chromium Aura based on frame and grail. To this end, we introduce a frame instance relying on its default X11 backend to the class ui::!TouchFactory and provide an implementation of the interface aura::!GestureRecognizer (see ui/aura/gestures/gesture_recognizer.h) in terms of grail (see ui/aura/gestures/gesture_recognizer_grail.h and .cc).
+
+==== Abstracting Touch & Gesture Handling in Chromium ====
+
+In the future, we might want to abstract the multi-touch event processing even more and move the frame instance away from class ui::!TouchFactory to our implementation of interface aura::!GestureRecognizer. To this end, we would need to provide a Chromium-specific backend to frame and alter the class aura::!TouchEvent to provide all relevant information to frame. Moreover, we would need to introduce an event type to Chromium that models the addition and removal of multi-touch devices. We started with these additions recently and they are not finished yet. Despite that, we provide our current state here for the sake of reference and discussion. We started over by abstracting a touch device in the class ui::!MultiTouchDevice (defined in ui/base/touch/multi_touch_device.h):
+
+<nowiki>[[File:multi_touch_device.h]]</nowiki>
+
+That is, every device is uniquely identified by an id, it provides a human-readable name, information on its type (direct vs. dependent touch devices) and a look-up table of its supported axes. An axis is abstracted by class ui::!Axis (defined in ui/base/touch/axis.h):
+
+<nowiki>[[File:axis.h]]</nowiki>
+
+Platform/toolkit-specific initialization tasks are implemented in terms of free functions. For X11, an example can be found in ui/base/touch/multi_touch_device_x11.h and .cc:
+
+<nowiki>[[File:multi_touch_device_x11.h]]</nowiki>
+<nowiki>[[File:multi_touch_device_x11.cc]]</nowiki>
+
+Given an X11-specific description of a multi-touch device, an instance of the Chromium-specific abstraction ui::MultiTouchDevice is initialized with device-specific information. Dispatching platform/toolkit-specific events is carried out by the singleton ui::TouchFactory. Reporting the results to the console, the following output is obtained when starting up Chromium Aura on our test setup (see before):
+
+<pre>
+MultiTouchDevice: Virtual core pointer
+	id: 2
+	type: 4
+	max_num_touches: 0
+    Axis: Abs MT Position X
+	  type: 0
+	  min: -1
+	  max: -1
+	  resolution: 1
+	  value: 0
+
+    Axis: Abs MT Position Y
+	     type: 1
+	     min: -1
+	     max: -1
+	     resolution: 1
+	     value: 0
+
+	 window_resolution_x: 0
+	 window_resolution_y: 0
+
+MultiTouchDevice: Virtual core keyboard
+	 id: 3
+	 type: 4
+	 max_num_touches: 0
+	 window_resolution_x: 0
+	 window_resolution_y: 0
+
+MultiTouchDevice: Virtual core XTEST pointer
+	id: 4
+	type: 4
+	max_num_touches: 0
+  Axis: Abs MT Position X
+	   type: 0
+	   min: -1
+	   max: -1
+	   resolution: 0
+	   value: 0
+
+  Axis: Abs MT Position Y
+	   type: 1
+	   min: -1
+	   max: -1
+	   resolution: 0
+	   value: 0
+
+	 window_resolution_x: 0
+	 window_resolution_y: 0
+
+MultiTouchDevice: Virtual core XTEST keyboard
+	 id: 5
+	 type: 4
+	 max_num_touches: 0
+	 window_resolution_x: 0
+	 window_resolution_y: 0
+
+MultiTouchDevice: Power Button
+	 id: 6
+	 type: 4
+	 max_num_touches: 0
+	 window_resolution_x: 0
+	 window_resolution_y: 0
+
+MultiTouchDevice: Video Bus
+	 id: 7
+	 type: 4
+	 max_num_touches: 0
+	 window_resolution_x: 0
+	 window_resolution_y: 0
+
+MultiTouchDevice: Sleep Button
+	 id: 8
+	 type: 4
+	 max_num_touches: 0
+	 window_resolution_x: 0
+	 window_resolution_y: 0
+
+MultiTouchDevice: Integrated Camera
+	 id: 9
+	 type: 4
+	 max_num_touches: 0
+	 window_resolution_x: 0
+	 window_resolution_y: 0
+
+MultiTouchDevice: AT Translated Set 2 keyboard
+	 id: 10
+	 type: 4
+	 max_num_touches: 0
+	 window_resolution_x: 0
+	 window_resolution_y: 0
+
+MultiTouchDevice: SynPS/2 Synaptics TouchPad
+	id: 11
+	type: 4
+	max_num_touches: 0
+  Axis: Abs MT Position X
+     type: 0
+     min: 1472
+     max: 5472
+     resolution: 73000
+     value: 0
+
+  Axis: Abs MT Position Y
+     type: 1
+     min: 1408
+     max: 4448
+     resolution: 75000
+     value: 0
+
+  Axis: Abs MT Pressure
+     type: 10
+     min: -1
+     max: -1
+     resolution: 0
+     value: 0
+
+	 window_resolution_x: 0
+	 window_resolution_y: 0
+
+MultiTouchDevice: ThinkPad Extra Buttons
+	 id: 12
+	 type: 4
+	 max_num_touches: 0
+	 window_resolution_x: 0
+	 window_resolution_y: 0
+
+MultiTouchDevice: TPPS/2 IBM TrackPoint
+	id: 13
+	type: 4
+	max_num_touches: 0
+  Axis: Abs MT Position X
+	   type: 0
+	   min: -1
+	   max: -1
+	   resolution: 1
+	   value: 0
+
+  Axis: Abs MT Position Y
+	   type: 1
+	   min: -1
+	   max: -1
+	   resolution: 1
+	   value: 0
+
+	   window_resolution_x: 0
+	   window_resolution_y: 0
+
+MultiTouchDevice: ThinkPad Bluetooth Laser Mouse
+	id: 14 
+	type: 4
+	max_num_touches: 0
+  Axis: Abs MT Position X
+	   type: 0
+	   min: -1
+	   max: -1
+	   resolution: 1
+	   value: 0
+
+  Axis: Abs MT Position Y
+	   type: 1
+	   min: -1
+	   max: -1
+	   resolution: 1
+	   value: 0
+
+	 window_resolution_x: 0
+	 window_resolution_y: 0
+
+MultiTouchDevice: Apple Wireless Trackpad
+	id: 15
+	type: 1
+	max_num_touches: 5
+  Axis: Abs MT Position X
+	   type: 0
+	   min: -2909
+	   max: 3167
+	   resolution: 46000
+	   value: 0
+
+  Axis: Abs MT Position Y
+	   type: 1
+	   min: -2456
+	   max: 2565
+	   resolution: 45000
+	   value: 0
+
+  Axis: Abs MT Touch Major
+	   type: 2
+	   min: 0
+	   max: 255
+	   resolution: 0
+	   value: 0
+
+  Axis: Abs MT Touch Minor
+	   type: 3
+	   min: 0
+	   max: 255
+	   resolution: 0
+	   value: 0
+
+  Axis: Abs MT Orientation
+	   type: 6
+	   min: -31
+	   max: 32
+	   resolution: 0
+	   value: 0
+
+	 window_resolution_x: 0
+	 window_resolution_y: 0
+</pre>
+
+Nevertheless, by abstracting touch-event handling on top of chromium, we do not need to take care of platform specific issues in frame but dispatch the platform-specific tasks to Chromium.
+
+Please see the <nowiki>[[https://blueprints.launchpad.net/ubuntu/+spec/desktop-p-chromium-touch|Chromium gesture blueprint]]</nowiki> for work item details.

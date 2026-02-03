@@ -1,0 +1,153 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+* '''Launchpad Entry''': UbuntuSpec:server-lucid-ec2-boothooks
+* '''Created''': 2009-11-24
+* '''Contributors''': Scott Moser
+* '''Packages affected''': ec2init upstart
+
+=== Summary ===
+
+Images booted in the cloud (ec2 and other cloud providers) are typically generic disk images that are then customized for a user or workload first boot.  In previous releases, the ubuntu images have allowed customization to occur by running a user provided script very late in the startup sequence (S99 in sysvinit).
+
+The previous solution was generally functional.  However, due to the fact that the customization hook took place very late in boot, there were some things that were difficult or impossible to change without a reboot.
+
+=== Release Note ===
+
+UEC Images are now much more customizable at boot time.  By passing correctly formed user-data to an image, the user can affect all but the most earliest portions of the boot sequence.  This includes customizing services before they have started or inserting upstart jobs.
+
+=== Rationale ===
+
+Cloud images are customized 2 ways:
+* boot time configuration/customization via user-data
+* re-bundling of an existing image to include customization
+
+There is a large cost to re-bundling of an image.  It is essentially a fork of its parent, and as such maintenance becomes the burden of the new owner.  With boot time configuration, the customization is much more detached from the image itself and can easily be moved from one image to another to pick up updates.
+
+As such, we want to make the ubuntu images as usable as possible, addressing the advantages of re-bundling.  Those primary advantages are:
+* faster first boot
+* unlimited customization can be done
+
+It is unlikely that we can remove the faster boot time of a rebundled boot image, but by exposing earlier portions of the boot sequence to influence by a user on first-boot, we can allow the user customize on first boot whatever they would have done in a re-bundling phase.
+
+=== User stories ===
+* As a developer, I want to run my application using the vanilla Ubuntu Server Edition AMI on EC2. I start an instance using a custom user data script which downloads and installs my application while the instance starts. When a new version of the official AMI is released, I simply start using that one in order to bring in the latest Ubuntu updates.
+* As a service provider who runs services in the cloud, I want to tailor the image on first boot and have all needed services up, running, and configured in proper order.
+
+=== Assumptions ===
+
+=== Design ===
+
+An upstart job will be installed by the ec2-init package that runs as early as possible in the boot sequence.   This job will look for user-data (more generically "user input") in a number of places.  Upon finding it, it will save the data off, and possibly act on the data.
+
+=== Implementation ===
+
+* ec2-init provides an upstart job that indicates "start on (mount MOUNTPOINT=/ and net-device-up IFACE=eth0)"
+* this job will:
+** search for user-data provided to it in a series of places (ec2 meta-data service, rackspace filesystem location, local disk).
+** upon finding user data, determine if it is single-file format or archive format.  If archive format, extract the parts of the archive and operate on each part in order order.  If single-file format, operate on the data itself as a part.
+*** if one of the parts is of 'include' type, then obtain the referenced data and recursively consume it.  user-data in ec2 is limited to 16k.  The idea here is to allow the user to specify a 'include' part that references in uri format the location of additional data.
+*** if part is 'plugin' type, register the plugin such that the newly registered plugin could operate on subsequent parts.
+** save the data off to a well known location (/var/run) so that it can be accessed by other jobs in a more generic manner.
+** Act on the data if it is intended to be consumed by this script. This 'action' will include at least: 
+*** ability to execute content via an interpreter (/bin/sh, /usr/bin/python ...)
+*** ability to install upstart jobs
+*** ability to install pre-generated ssh keys
+
+* supported archive formats will include at least <nowiki>[[http://docs.python.org/library/email.message.html#email.message.Message.is_multipart|multi part mime]]</nowiki>
+* user-data or 'include'ed data that is compressed via gzip will be transparently uncompressed
+* in single-file format (or possibly another format with no "type" metadata for the content), we are only concerned with supporting '#!' and 'config' format.  We will check these two types, erring on the side of ignoring for 'config' format.
+
+==== Development Branch ====
+Development is taking place at <nowiki>[[https://code.launchpad.net/~smoser/ec2-init/ec2-init.devel|lp:~smoser/ec2-init/ec2-init.devel|]]</nowiki>
+
+==== Files / Directories ====
+* <code>/var/lib/cloud/data/user-data.txt</code> : after initial upstart job is run, this file will contain the expanded user-data.  By expanded, this means any 'include' has been resolved, uncompressed ...
+* <code>/var/lib/cloud/data/user-data.raw</code> : the "raw" user data, prior to any operations
+* <code>/var/lib/cloud/data/user-config.txt</code> : the processed user config (UbuntuSpec:server-lucid-ec2-config)
+* <code>/var/lib/cloud/data/<provider></code> : example 'ec2', location for cloud specific cache data
+
+==== Migration ====
+
+The usage of user-data will be backwards compatible with previous ubuntu EC2 images.  Primarily, that means the following:
+* user data that begins with '#!' will be executed by the appropriate interpreter at S99 level (rc.local)
+* user data that is not of the appropriate format will be ignored.
+
+=== Test/Demo Plan ===
+
+''' TODO '''
+This need not be added or completed until the specification is nearing beta.
+
+=== Unresolved issues ===
+
+This should highlight any issues that should be addressed in further specifications, and not problems with the specification itself; since any specification with problems cannot be approved.
+
+=== BoF agenda and discussion ===
+
+==== things would like to support ====
+* change /etc/fstab (not for root, but for other partitions)
+*** being able to mount /dev/sdb1 to somewhere else than /mnt
+*** create an lvm volume on boot
+*** using automount?
+* modify /etc/apt/sources.*: add new lines, import gpg keys?
+* write ssh keys (requiring running before ssh starts)
+<pre>
+ 
+  + init
+    |
+    udev
+      +- found eth0 +- ifup eth0 +------------------------------------ "net-device-up IFACE=eth0"
+      +- found sda1 +- mount sda1 +- "mount MOUNTPOINT=/" --------------+- X
+</pre>
+ 
+* support for upstart job on boot:  
+** start on (mount MOUNTPOINT=/ and net-device-up IFACE=eth0)
+      ^ this will block further mounting until the network device is up
+        
+
+<pre>
+      then you could do, e.g. exec initctl emit ec2-boot-hook
+      (after putting things in /etc/init)
+      
+      and:
+      
+      start on ec2-boot-hook
+      script
+        .. do lots of work ..
+      end script
+
+		start on (mount MOUNTPOINT=/
+		          and net-device-up IFACE=eth0)
+		task
+		script
+		  .. download data, write to /etc/init, etc.
+		  
+		  initctl emit ec2-boot-hook
+		end script
+</pre>
+
+==== Format ====
+* #! line => "run this at S99" (backward compatibility case)
+* gzip-compressed MIME multipart document
+** type text/x-upstart => "store this to /etc/init"
+** type application/x-sh => "execute this script immediately"?
+** type ubuntu-ec2-config => "larger granularity config things" (install-packages: a b c)
+  
+
+specify another place to get the mutlipart configuration
+
+===== Questions =====
+
+* Could we have define a mime type package/<name> which would pass the data in the part to the named package after installing it? If not, how do you pass date to a "pluugin" which is not already installed?  Or is this what the plugin type is supposed to be doing? [nijaba]
+** what does 'pass the data in the part to the named package' mean?  The goal is to be able to pass a 'plugin' part in, that would then register itself for previously un-known types.  Subsequent portions of the data that were that type would then be handled by the plugin.
+
+----
+CategorySpec

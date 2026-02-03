@@ -1,0 +1,173 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+=== Scaling shared-storage web apps in the cloud with Ubuntu & GlusterFS -- semiosis ===
+{{{#!IRC
+[17:00] <kim0> The next session is by semiosis
+[17:00] <kim0> o/
+=== cmagina-lunch is now known as cmagina
+[17:00] <kim0> Using gluster to scale .. very intersting stuff!
+[17:00] <kim0> I love scalable file systems :)
+[17:00] <semiosis> Thanks kim0
+[17:00] <semiosis> Hello everyone
+[17:01] <semiosis> This Ubuntu Cloud Days session is about scaling legacy web applications with shared-storage requirements in the cloud.
+[17:01] <semiosis> I should mention up front that I'm neither an official nor an expert, I don't work for Amazon/AWS, Canonical, Gluster, Puppet Labs, or any other software company.
+[17:01] <semiosis> I'm just a linux sysadmin who appreciates their work and wanted to give back to the community.
+=== ChanServ changed the topic of #ubuntu-classroom to: Welcome to the Ubuntu Classroom - https://wiki.ubuntu.com/Classroom || Support in #ubuntu || Upcoming Schedule: http://is.gd/8rtIi || Questions in #ubuntu-classroom-chat || Event: Ubuntu Cloud Days - Current Session: Scaling shared-storage web apps in the cloud with Ubuntu & GlusterFS - Instructors: semiosis
+[17:01] <ClassBot> Logs for this session will be available at http://irclogs.ubuntu.com/2011/03/23/%23ubuntu-classroom.html following the conclusion of the session.
+[17:01] <semiosis> My interest is in rapidly developing a custom application hosting platform in the cloud.  I'd like to avoid issues of application design by assuming that one is already running and can't be overhauled to take advantage of web storage services.
+[17:02] <semiosis> I'll follow the example of migrating a web site powered by several web servers and a common NFS server from a dedicated hosting environment to the cloud.  In fact this is something I've been working on lately, as I think others are as well.
+[17:02] <semiosis> I invite you to ask questions throughout the session.  I had a lot of questions when I began working on this problem, but finding answers was very time-consuming and sometimes impossible.
+[17:02] <semiosis> My background is in Linux system administration in dedicated servers & network appliances, and I just started using EC2 six months ago.  I'll try to keep my introduction at a high level, and assume some familiarity with standard Linux command line tools and basic shell scripting & networking concepts, and the AWS Console.
+[17:02] <semiosis> Some of the advanced operations will also require euca2ools or AWS command line tools (or the API) because they're not available in the AWS Console.
+[17:03] <semiosis> Cloud infrastructure and configuration automation are powerful tools, and recent developments have brought them within reach of a much wider audience.  It is easier than ever for Linux admins who are not software developers to get started running applications in the cloud.
+[17:03] <semiosis> I've standardized my platform on Ubuntu 10.10 in Amazon EC2, using GlusterFS to replace a dedicated NFS server, and CloudInit & Puppet to automate system provisioning and maintenance.
+[17:04] <semiosis> GlusterFS has been around for a few years, and its major recent development (released in 3.1) is the Elastic Volume Manager, a command-line management console for the storage cluster.  This utility controls the entire storage cluster, taking care of server setup and volume configuration management on servers & clients.
+[17:04] <semiosis> Before the EVM a sysadmin would need to tightly manage the inner details of configuration files on all nodes, now that burden has been lifted enabling management of large clusters without requiring complex configuration management tools.  Another noteworthy recent development in GlusterFS is the ability to add storage capacity and performance (independently if  necessary) while the cluster is online and in use.
+[17:04] <semiosis> I'll spend the rest of the session talking about providing reliable shared-storage service on EC2 with GlusterFS, and identifying key issues that I've encountered so far.  I'd also be happy to take questions generally about using Ubuntu, CloudInit, and Puppet in EC2.  Let's begin.
+[17:05] <semiosis> There are two types of storage in EC2, ephemeral (instance-store) and EBS.  There are many benefits to EBS: durability, portability (within an AZ), easy snapshot & restore, and 1TB volumes; the drawback of EBS is occasionally high latency.
+[17:05] <semiosis> Ephemeral storage doesn't have those features, but it does provide more consistent latency, so it's better suited to certain workloads.
+[17:05] <semiosis> I use EBS for archival and instance-store for temporary file storage.  And I can't recommend enough the importance of high-level application performance testing to determine which is best suited for your application.
+[17:05] <semiosis> GlusterFS is an open source scale-out filesystem.  It's developed primarily by Gluster and has a large and diverse user community.  I use GlusterFS on Ubuntu in EC2 to power a web service.
+[17:06] <semiosis> What I want to talk about today is my experience setting up and maintaining GlusterFS in this context.
+[17:06] <semiosis> First I'll introduce glusterfs architecture and terminology.  Second we'll go through some typical cloud deployments, using instance-store and EBS for backend storage, and considering performance and reliability characteristics along the way.
+[17:06] <semiosis> I'll end the discussion then with some details about performance and reliability testing and take your questions.
+[17:07] <semiosis> I think some platform details are in order before we begin.
+[17:07] <semiosis> I use the Ubuntu 10.10 EC2 AMIs for both 32-bit and 64-bit EC2 instances that were released in January 2011.  You can find these AMIs at the Ubuntu Cloud Portal AMI locator, http://cloud.ubuntu.com/ami/.
+[17:07] <semiosis> I configure my instances by providing user-data that cloud-init uses to bootstrap puppet, which handles the rest of the installation.  Puppet configures my whole software stack on every system except for the glusterfs server daemon, which I manage with the Elastic Volume Manager (gluster command.)
+[17:07] <semiosis> I've deployed and tested several iterations of my platform using this two-stage process and would be happy to take questions on any of these technologies.
+[17:07] <semiosis> Unfortunately the latest version of glusterfs, 3.1.3, is not available in the Ubuntu repositories.  There is a 3.0 series package but I would recommend against using it.
+[17:08] <semiosis> I use a custom package from my PPA which is derived from the Debian Sid source package, with some metadata changes that enable the new features in 3.1, my Launchpad PPA's location is ppa:semiosis/ppa.
+[17:08] <semiosis> Gluster also provides a binary deb package for Ubuntu, which has been more rigorously tested than mine.  You can find the official downloads here: http://download.gluster.com/pub/gluster/glusterfs/LATEST/
+[17:08] <semiosis> You can also download and compile the latest source code yourself from Github here:  https://github.com/gluster/glusterfs
+[17:08] <semiosis> Now I'd like to begin with a quick introduction to GlusterFS 3.1 architecture and terminology.
+[17:09] <ClassBot> EvilPhoenix asked: repost for marktma: any consideration for using Chef instead of Puppet?
+[17:09] <semiosis> i chose puppet because it seemed to be best integrated with cloud-init, it's mature, and has a large user community
+[17:10] <ClassBot> kim0 asked: Could you please mention a little intro about cloud-init
+[17:11] <semiosis> CloudInit bootstraps and can also configure cloud instances.  This enables a sysadmin to use the standard AMI for different purposes, without having to build a custom AMI or rebundle to make changes.
+[17:11] <semiosis> CloudInit takes care of setting the system hostname, installing the master SSH key and evaluating the userdata from EC2 metadata.  That last part, evaluating the userdata, is the most interesting.
+[17:11] <semiosis> It allows the sysadmin to supply a brief configuration file (called cloud-config), shell script, upstart job, python code, or a set of files or URLs containing those, which will be evaluated on first boot to customize the system.
+[17:12] <semiosis> CloudInit even has built-in support for bootstrapping Puppet agents, which as I mentioned was a major deciding factor for me
+[17:13] <semiosis> Now getting back to glusterfs terminology and architecture...
+[17:13] <semiosis> Of course there are servers and there are clients.  With version 3.1 there came the option to use NFS clients to connect to glusterfs servers in addition to the native glusterfs client based on FUSE.
+[17:13] <semiosis> Most of this discussion will be about using native glusterfs clients, but we'll revisit NFS clients briefly at the end if theres time.  I havent use the NFS capability myself because I think that the FUSE client's "client-side" replication is better suited to my application
+[17:13] <semiosis> Servers are setup in glusterfs 3.1 using the Elastic Volume Manager, or gluster command.  It offers an interactive shell as well as a single-executable command line interface.
+[17:14] <semiosis>  In glusterfs, servers are called peers, and peers are joined into (trusted storage) pools.  Peers have bricks, which are just directories local to the server.  Ideally each brick is its own dedicated filesystem, usually mounted under /bricks.
+[17:14] <ClassBot> natea asked: Given the occasional high latency of EBS, do you recommend it for storing database files, for instance PostgreSQL?
+[17:15] <semiosis> my focus is hosting files for web, not database backend storage.  people do use glusterfs for both, but I haven't evaluated it in the context of database-type workloads, YMMV.
+[17:15] <semiosis> as for performance, I'll try to get to that in the examples coming up
+[17:16] <ClassBot> natea asked: Can you briefly explain the differences between GlusterFS and NFS and why I would choose one over the other?
+[17:17] <semiosis> simply put, NFS is limited to single-server capacit, performance and reliability, while glusterfs is a scale out filesystem able to exceed the performance and/or capacity of a single server (independently) and also provides server-level redundancy
+[17:18] <semiosis> there are some advanced features NFS has that glusterfs does not yet support (UID mapping, quotas, etc.) so please consider that when evaluating your options
+[17:18] <semiosis> Glusterfs uses a modular architecture, in which â€œtranslatorsâ€ are stacked in the server to export bricks over the network, and in clients to connect the mount point to bricks over the network.  These translators are automatically stacked and configured by the Elastic Volume Manager when creating volumes (under /etc/glusterd/vols).
+[17:18] <semiosis> A client translator stack is also created and distributed to the peers which clients retrieve at mount-time.   These translator stacks, called Volume Files (volfile) are replicated between all peers in the pool.
+[17:19] <semiosis> A client can retrieve any volume file from any peer, which it then uses to connect to directly to that volume's bricks.  Every peer can manage its own and every other peer's volumes, it doesn't even need to export any bricks.
+[17:19] <semiosis> There are two translators of primary importance: Distribute and Replicate.  These are used to create distributed or replicated, or distributed-replicated volumes.
+[17:19] <semiosis> In the glusterfs 3.1 native architecture, servers export bricks to clients, and clients handle all file replication and distribution across the bricks.
+[17:19] <semiosis> All volumes can be considered distributed, even those with only one brick, because the distribution factor can be increased at any time without interrupting access (through the add-brick command).
+[17:19] <semiosis> The replication factor however can not be changed (data needs to be copied into a new volume).
+[17:19] <semiosis> In general, glusterfs volumes can be visualized as a table of bricks, with replication between columns, and distribution over rows.
+[17:20] <semiosis> So a volume with replication factor N would have N columns, and bricks must be added in sets (rows) of N at a time.
+[17:20] <semiosis> For example, when a file is written, the client first figures out which replication set the file should be distributed to (using the Elastic Hash Algorithm) then writes the file to all bricks in that set.
+[17:20] <semiosis> Some final introductory notes... First as a rule nothing should ever touch the bricks directly, all access should go through the client mount point.
+[17:20] <semiosis> Second, all bricks should be the same size, which is easy with using dedicated instance-store or EBS bricks.
+[17:20] <semiosis> Third, files are stored whole on a brick, so not only can't volumes store files larger than a brick, but bricks should be orders of magnitude larger than files in order to get good distribution.
+[17:21] <semiosis> Now I'd like to talk for a minute about compiling glusterfs from source on Ubuntu.  This is necessary if one wants to use glusterfs on a 32-bit system, since Gluster only provides official packages for 64-bit.
+[17:21] <semiosis> (as a side note, the packages in my PPA are built for 32-bit, but they are largely untested, i have only begun testing the 32 bit builds myself yesterday, and although it's going well so far, YMMV)
+[17:22] <semiosis> Compiling glusterfs is made very easy by the use of standard tools.
+[17:22] <semiosis>  First, some required packages need to be installed, these are: gnulib, flex, byacc, gawk, libattr1-dev, libreadline-dev, libfuse-dev, and libibverbs-dev.
+[17:22] <semiosis> After installing these packages you can untar the source tarball and run the usual â€œ./configure; make; make installâ€ sequence to build & install the program.
+[17:22] <semiosis> By default, this will install most of the files under /usr/local, with the notable exceptions of the initscript placed in /etc/init.d/glusterd, the client mount script placed in /sbin/mount.glusterfs, and the glusterd configuration file /etc/glusterfs/glusterd.vol.
+[17:23] <semiosis> (thats a static config file which you'll never need to edit, btw)
+[17:23] <semiosis> If you wish to install to another location (using for example ./configure â€“prefix=/opt/glusterfs) make sure those three files are in their required locations.
+[17:23] <semiosis> Once installed, either from source or from a binary package, the server can be started with â€œserver glusterd startâ€.  This starts the glusterd management daemon, which is controlled by the gluster command.
+[17:23] <semiosis>  The glusterd management daemon takes care of associating servers, generating volume configurations (for servers & clients,) and managing the brick export daemon (glusterfsd) processes.  Clients that only want to mount glusterfs volumes do not need the glusterd service running.
+[17:24] <semiosis> Another packaging note... the official deb package from Gluster is a single binary package that installs the full client & server, but the packages in my PPA are derived from the Debian Sid packages, which provide separate binary pkgs for server, client, libs, devel, etc allowing for a client-only installation
+[17:25] <semiosis> Now, getting back to glusterfs architecture, and setting up a trusted storage pool...
+[17:25] <semiosis> Setting up a trusted storage pool is also very straightforward.  I recommend using hostnames or FQDNs, rather than IP addresses, to identify the servers.
+[17:26] <semiosis> FQDNs are probably the best choice, since they can be updated in one place (the zone authority) and DNS takes care of distributing the update to all servers & clients in the cluster, whereas with hostnames, /etc/hosts would need to be updated on all machines
+[17:26] <semiosis> Servers are added to pools using the 'gluster peer probe <hostname>' command.  A server can only be a member of one pool, so attempting to probe a server that is already in a pool will result in an error.
+[17:26] <semiosis> To add a server to a pool the probe must be sent from an existing server to the new server, not the other way.  When initially creating a trusted storage pool, it's easiest to use one server to send out probes to all of the others.
+[17:26] <ClassBot> remib asked: Would you recommend using separate glusterfs servers or use the webservers both as glusterfs server/client?
+[17:28] <semiosis> excellent question!  there are benefits to both approaches.  Without going into too much detail, read-only can be done locally but there are some reasons to do writes from seperate clients if those clients are going to be writing to the same file (or locking on the same file)
+[17:30] <semiosis> there's a slight chance for coherency problems if the client-servers lose connectivity to each other, and writes go to the same file on both... that file will probably not be automatically repaired, but that's an edge case that may never happen in yoru application.  testing is very important
+[17:30] <semiosis> thats called a split-brain in glusterfs terminology
+[17:31] <semiosis> writes can go to different files under that partition condition just fine, it's only an issue if the two server-clients update the same file and they're not synchronized
+[17:31] <semiosis> and i dont even know if network partitions are likely in EC2, it's just a theoretical concern for me at this point, so go forth an experiment!
+[17:32] <semiosis> When initially creating a trusted storage pool, it's easiest to use one server to send out probes to all of the others.
+[17:32] <semiosis> As each additional server joins the pool it's hostname (and other information) is propagated to all of the previously existing servers.
+[17:32] <semiosis> One cautionary note, when sending out the initial probes, the recipients of the probes will only know the sender by its IP address.
+[17:32] <semiosis> To correct this, send a probe from just one of the additional servers back to the initial server â€“ this will not change the structure of the pool but it will propagate an IP address to hostname update to all of the peers.
+[17:32] <semiosis> From that point on any new peers added to the pool will get the full hostname of every existing peer, including the peer sending the probe.
+[17:33] <ClassBot> kim0 asked: What's your overall impression of glusterfs robustness and ability to recover from split-brains or node failures
+[17:34] <semiosis> it depends heavily on your application's workload, for my application it's great, but Your Mileage May Vary.  this is the biggest concern with database-type workloads, where you would have multiple DB servers wanting to lock on a single file
+[17:34] <semiosis> but for regular file storage i've found it to be great
+[17:34] <semiosis> and of course it depends also a great deal on the cloud-provider's network, not just glusterfs...
+[17:35] <semiosis> resolving a split-brain issue is relatively painless... just determine which replica has the "correct" version of the file, and delete the "bad" version from the other replica(s) and glusterfs will replace the deleted bad copies with the good copy and all futhre access will be synchronized, so it's usually not a big deal
+[17:36] <ClassBot> natea asked: Is the performance of GlusterFS storage comparable to a local storage? What are the downsides?
+[17:37] <semiosis> that sounds like a low-level component performance question, and I recommend concentrating on high-level aggregate application throughput.
+[17:37] <semiosis> i'll get to that shortly talking about the different types of volumes
+[17:37] <semiosis> Once peers have been added to the pool volumes can be created.  But before creating the volumes it's important to have set up the backend filesystems that will be used for bricks.
+[17:38] <semiosis> In EC2 (and compatible) cloud environments this is done by attaching a block device to the instance, then formatting and mounting the block device filesystem.
+[17:38] <semiosis> Block devices can be added at instance creation time using the EC2 command ec2-run-instances with the -b option.
+[17:38] <semiosis> EBS volumes are specified for example with -b /dev/sdd=:20 where /dev/sdd is the device name to use, and :20 is the size (in GB) of the volume to create.
+[17:38] <semiosis>  Glusterfs recommends using ext4 filesystems for bricks since it has good performance and is well tested.
+[17:38] <semiosis> As I mentioned earlier, the two translators of primary importance are Distribute and Replicate.  All volumes are Distributed, and optionally also Replicated.
+[17:39] <semiosis> Since volumes can have many bricks, and servers can have bricks in different volumes, a common convention is to mount brick filesystems at /bricks/volumeN.  I'll follow that convention in a few common volume configurations to follow.
+[17:39] <semiosis> The first and most basic volume type is a distributed volume on one server.  This is essentially unifying the brick filesystems to make a larger filesystem.
+[17:39] <semiosis> Remember though that files are stored whole on bricks, so no file can exceed the size of a brick.  Also please remember that it is a best-practice to use bricks of equal size.  So, lets consider creating a volume of 3TB called â€œbigstorageâ€.
+[17:39] <semiosis> We could just as easily use 3 EBS bricks of 1TB each, 6 EBS bricks of 500GB each, or 10 EBS bricks of 300GB each.  Which layout to use depends on the specifics of your application, but in general spreading files out over more bricks will achieve better aggregate throughput.
+[17:40] <semiosis> so even though the performance of a single brick is not as good as a local filesystem, spreading over several bricks can achieve comparable aggreagate throughput
+[17:40] <semiosis> Assuming the server's hostname is 'fileserver', the volume creation command for this would be  simply â€œgluster volume create bigstorage fileserver:/bricks/bigstorage1 fileserver:/bricks/bigstorage2 â€¦ fileserver:/bricks/bigstorageNâ€.
+[17:40] <semiosis> This trivial volume which just unifies bricks on a single server has limited performance scalability.  In EC2 the network interface is usually the limiting factor, and although in theory a larger instance will have a chance at a larger slice of the network interface bandwidth, in practice I have found that this usually exceeds the bandwidth available on the network.
+[17:40] <semiosis> And by this I mean what I've found is that larger instances do not get much more bandwidth to EBS or other instances (going beyond Large instance anyway, i'm sure smaller instances could get worse but haven't really evaluated them.)
+[17:41] <semiosis> Glusterfs is known as a scale-out filesystem, and this means that performance and capacity can be scaled by adding more nodes to the cluster, rather than increasing the size of individual nodes.
+[17:41] <ClassBot> neti asked: Is GLusterFS using local caching in memory?
+[17:42] <semiosis> yes it does do read-caching and write-behind caching, but I leave their configuration at the default, please check out the docs at gluster.org for details, specifically http://www.gluster.com/community/documentation/index.php/Gluster_3.1:_Setting_Volume_Options
+[17:43] <semiosis> Glusterfs is known as a scale-out filesystem, and this means that performance and capacity can be scaled by adding more nodes to the cluster, rather than increasing the size of individual nodes.
+[17:43] <semiosis> So the next example volume after 'bigstorage' should be 'faststorage'.  With this volume we'll combine EBS bricks in the same way but using two servers.
+[17:43] <semiosis> First of course a trusted storage pool must be created by probing from one server (fileserver1) to the other (fileserver2) by running the command 'gluster peer probe fileserver2' on fileserver1, then updating the IP address of fileserver1 to its hostname by running 'gluster peer probe fileserver1' on fileserver2.
+[17:43] <semiosis> After that, the volume creation command can be run, 'gluster volume create faststorage fileserver1:/bricks/faststorage1 fileserver2:/bricks/faststorage2 fileserver1:/bricks/faststorage3 fileserver2:/bricks/faststorage4 ...â€ where fileserver1 gets the odd numbered bricks and fileserver2 gets the even numbered bricks.
+[17:43] <semiosis> In this example there can be an arbitrary number of bricks.  Because files are distributed evenly across bricks, this has the advantage of combining the network performance of the two servers.
+[17:44] <semiosis> (interleaving the brick names is just my convention, it's not required and you're free to use any convention you'd like)
+[17:44] <ClassBot> kim0 asked: Since you have redudancy through replication, why not use instance-store instead of ebs
+[17:46] <semiosis> ah I was just about to get into replication, great timing.  in short, you can, and I do!  instance-store has consistent latency going for it, but EBS volumes can be larger, can be snapshotted & restored, and can be moved between instances (within an availability zone) so that makes managing your data much easier
+[17:46] <semiosis> Now I'd like to shift gears and talk about reliability.
+[17:46] <semiosis>  In glusterfs clients connect directly to bricks, so if one brick goes away its files become inaccessible, but the rest of the bricks should still be available.  Similarly if one whole server goes down, only the files on the bricks it exports will be unavailable.
+[17:46] <semiosis> This is in contrast to RAID striping where if one device goes down, the whole array becomes unavailable.  This brings us to the next type of volume, distributed-replicated.  In a distributed- replicated volume as I mentioned earlier files are distributed over replica sets.
+[17:46] <semiosis> Since EBS volumes are already replicated in the EC2 infrastructure it should not be necessary to replicate bricks on the same server.
+[17:47] <semiosis>  In EC2 replication is best suited to guard against instance failure, so its best to replicate bricks between servers.
+[17:47] <semiosis> The most straightforward replicated volume would be one with two bricks on two servers.
+[17:47] <semiosis> By convention these bricks should be named the same, so for a volume called safestorage the volume create command would look like this, â€œgluster volume create safestorage replica 2 fileserver1:/bricks/safestorage1 fileserver2:/bricks/safestorage1 fileserver1:/bricks/safestorage2 fileserver2:/bricks/safestorage2 ...â€
+[17:47] <semiosis> Bricks must be added in sets of size equal to the replica count, so for replica 2, bricks must be added in pairs.
+[17:47] <semiosis> Scaling performance on a distributed-replicated volume is similarly straightforward, and similar to adding bricks, servers should also be added in sets of size equal to the replica count.
+[17:47] <semiosis> So, to add performance capacity to a replica 2 volume, two more server should be added to the pool, and the volume creation command would look like this, â€œgluster volume create safestorage replica 2 fileserver1:/bricks/safestorage1 fileserver2:/bricks/safestorage1 fileserver3:/bricks/safestorage2 fileserver4:/bricks/safestorage2 fileserver1:/bricks/safestorage3 fileserver2:/bricks/safestorage3 fileserver3:/bricks/
+[17:47] <semiosis> safestorage4 fileserver4:/bricks/safestorage4...â€
+[17:48] <semiosis> Up to this point all of the examples involve creating a volume, but volumes can also be expanded while online.  This is done with the add-brick command, which takes parameters just like the volume create command.
+[17:48] <semiosis> Bricks still need to be added in sets of size equal to the replica count though.
+[17:49] <semiosis> also note, the "add-brick" operation requires a "rebalance" to spread existing files out over the new bricks, this is a very costly operation in terms of CPU & network bandwidth so you should try to avoid it.
+[17:50] <semiosis> A similar but less costly operation is "replace-brick" which can be used to move an existing brick to a new server, for example to add performance with the addition of new servers without adding capacity
+[17:51] <ClassBot> There are 10 minutes remaining in the current session.
+[17:51] <semiosis> another scaling option is to use EBS bricks smaller than 1TB, and restore from snapshots to 1TB bricks.  this is an advanced technique requriring the ec2 command ec2-create-vol & ec2-attach-vol
+[17:52] <semiosis> Well looks like my time is running out, so I'll try to wrap things up.  please ask any questions you've been holding back!
+[17:53] <semiosis> Getting started with glusterfs is very easy, and with a bit of experimentation & performance testing you can have a large, high throguhput file storage service running in the cloud.  Best of all in my opinion is the ability to snapshot EBS bricks with the ec2-create-image API call/command which is also available in the AWS console
+[17:53] <ClassBot> kim0 asked: Did you evaluate ceph as well
+[17:54] <semiosis> I am keeping an eye on ceph, but it seemed to me that glusterfs is already well tested & used widely in production, even if not yet used widely in the cloud... it sure will be soon
+[17:54] <ClassBot> neti asked: Is GlusterFS Supporting File Locking?
+[17:55] <semiosis> yes glusterfs supports full POSIX semantics including file locking
+[17:56] <semiosis> one last note about snapshotting EBS bricks... since bricks are regular ext4 filesystems, they can be restored from snapshot & read just like any other EBS volume, no hassling with mdadm or lvm to reassemble volumes like with RAID
+[17:56] <ClassBot> remib asked: Does GlusterFS support quota's?
+[17:56] <ClassBot> There are 5 minutes remaining in the current session.
+[17:57] <semiosis> no quota support in 3.1
+[17:58] <semiosis> Thank you all so much for the great questions.  I hope you have fun experimenting with glusterfs, I think it's a very exciting technology.  One final note for those of you who may be interested in commercial support...
+[17:59] <semiosis> Gluster Inc. has recently released paid AMIs for Amazon EC2 and Vmware that are fully supported by the company.  I've not used these, but they are there for your consideration.
+[18:00] <semiosis> The glusterfs community is large and active.  I usually hang out in #gluster which is where I've learned the most about glusterfs.  There's a lot of friendly and knowledgeable people there, as well as on the mailing list, who enjoy helping out beginners
+[18:00] <semiosis> thanks again!
+}}}

@@ -1,0 +1,727 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+'''Skill:''' ''Advanced'', '''Complexity:''' ''Significant'', '''Est Time To Complete:''' ''~3 Hours'',
+'''Tested Ubuntu Versions:''' ''13.04 64bit Raring Ringtail (Desktop)''
+
+== Encrypted ZFS Ubuntu Installation ==
+
+You know all the goodness <nowiki>[[http://en.wikipedia.org/wiki/ZFS|ZFS]]</nowiki> provides. You know all the goodness <nowiki>[[http://www.ubuntu.com/desktop|Ubuntu]]</nowiki> provides. You know all the goodness <nowiki>[[https://code.google.com/p/cryptsetup/ttp://|LUKS]]</nowiki> whole disk encryption provides. That is why you are here.
+
+This 'howto' is primarily directed at laptop/desktop users but by extension is easily suited for Ubuntu server installations.
+
+Most of the heavy lifting was provided by Metal-Head at <nowiki>[[http://www.larsko.org/ZfsUbuntu|LarskoOrg]]</nowiki>. A great deal of insight and direction was gleened from the <nowiki>[[http://zfsonlinux.org/|ZFS on Linux]]</nowiki> community and the <nowiki>[[http://docs.oracle.com/cd/E19963-01/html/821-1448/toc.html|Oracle Solaris ZFS Administration Guide]]</nowiki>
+
+----
+=== Prerequisites ===
+
+* Ubuntu 64bit operating system (ZFS will NOT run with any reliability on 32bit systems)
+* CPU(s) with AES capabilities (`lshw` to show the cpu capabilities and confirm `aes`). You can utilize cpus without the AES capabilities but you will incur a performance penalty. Reports are ~20% decrease in throughput.
+* Adequate host RAM
+* Storage with ~20% or more free space after installation and data migration
+* <nowiki>[[https://www.grc.com/haystack.htm|Strong passphrases]]</nowiki>
+* 8GB USB flash drive (preferably USB 3.0 capable flash drive). You can substitute the flash drive for any other temporary storage device. e.g. ~8GB disk partition on target root disk that can be re-purposed, a secondary HDD/SSD, etc.
+* Internet connectivity
+* Ubuntu LiveCD on a bootable CD/DVD/USB device.
+
+----
+=== Caveats ===
+
+==== ZFS Integrity When Using LUKS ====
+
+There is some debate on the limitations of <nowiki>[[http://pthree.org/2012/08/21/encrypted-zfs-filesystems-on-linux/|ZFS on LUKS]]</nowiki> suggesting that to fully realize the benefits of ZFS, encrypted file systems should be layered on top of ZFS. From my research ZFS on LUKS has not demonstrated any problems with ZFS integrity. Additionaly, LUKS block device encryption is purported to have better performance metrics over stacked filesystem encryption like <nowiki>[[https://wiki.archlinux.org/index.php/Disk_Encryption|eCryptfs]]</nowiki>.
+
+==== Hibernation ====
+
+I have not documented a mechanism to support hibernation. This configuration will support suspend. Supporting hibernation would require a seperate partition equal to or greater than physical RAM. It could be a LUKS container or LUKS container with a <nowiki>[[http://docs.oracle.com/cd/E19963-01/html/821-1448/gaypf.html|ZFS Volume]]</nowiki>.
+
+==== UEFI Booting ====
+
+This guide will need to be adjusted to support <nowiki>[[https://help.ubuntu.com/community/UEFI|UEFI]]</nowiki> booting. Most notable would be creating an unencrypted `/boot/efi` 1MB partition (which will be vfat), unencrypted `/boot` 512MB partition and then encrypted `/` partition.
+
+----
+=== Tested Environment ===
+
+* (1) SSD 256GB, `msdos` disk label, 2 partitions
+** [1] `/boot` with `boot` flag set, 512MB
+** [2] for ZFS on LUKS `/`
+* (3) HDD +1TB, `gpt` disk label, 1 partition per disk
+** [1] LUKS container (to be member of RAIDZ additional storage pool)
+* Intel i7 CPU with AES capabilities
+* 16GB RAM
+* Swap added as a ZFS VOL
+
+This was also tested with an Ubuntu virtual machine to experiment, test, stress and solidfy this installation procedure. I strongly suggest using spare equipment or a virtual machine instance if you are new to ZFS or LUKS encryption.
+
+----
+=== ZFS on LUKS Installation ===
+
+==== Boot LiveCD ====
+
+Boot to Ubuntu LiveCD, open a terminal and sudo to `root`. `ALT-F1`, `enter`, and search for 'terminal' or `Windows Start Key`, and search for 'terminal'. ''All command references assume you are `root` for this process''.
+<pre>
+sudo -i
+</pre>
+
+==== Configure Storage ====
+
+Zero out the storage devices, label and partition.
+
+===== SSD 256GB (/dev/sda) =====
+----
+<pre>
+dd if=/dev/zero of=/dev/sda bs=1M count=10
+</pre>
+
+<pre>
+parted -a optimal /dev/sda
+mklabel msdos
+unit MB
+mkpart primary 1 513
+mkpart primary 513 -1
+toggle 1 boot
+</pre>
+
+===== HDD(s) (/dev/sd?) =====
+----
+Repeat for each additional storage device, substituting sd? with your storage ID. e.g. `sdb, sdc, sdd, ...`
+
+<pre>
+dd if=/dev/zero of=/dev/sd? bs=1M count=10
+</pre>
+
+<pre>
+parted -a optimal /dev/sd?
+mklabel gpt
+unit MB
+mkpart vpool 1 -1
+</pre>
+
+==== Install Ubuntu ====
+
+Install Ubuntu onto the '''8GB USB storage or other temporary storage volume'''. You can skip providing a swap partition and my also install Ubuntu in its entirety to a single `/` partition. Select 'download updates during installation' and '3rd party applications' as desired.
+
+'''When installation is complete be sure to select "`CONTINUE TESTING`"'''.
+
+==== Install ZFS Packages ====
+
+While still in the live environment install the ZFS repository and `ubuntu-zfs` packages. This will take some time to install and compile the DKMS ZFS modules for the running kernel.
+
+<pre>
+apt-add-repository --yes ppa:zfs-native/stable
+apt-get update
+apt-get -y install ubuntu-zfs
+</pre>
+
+==== Create LUKS Containers ====
+
+Create the LUKS containers using best practices for robust encryption. The `aes-xts-plain64` is highly recommended as it supports volumes greater than 2TB and is very robust. Follow the prompts. '''Assure that you are using a strong passphrase'''. `sda2` is the `/` root partitiion. `sdb1, sdc1, sdd1` are for the additional RAIDZ storage volume. Repeat this step for any additional volumes `sd?`.
+
+If you are adventuresome, or have iterated through this process a number of times, you can open another terminal tab `CTRL-SHIFT-T`, `sudo -i` and create the LUKS containers while the `ubuntu-zfs` packages are installing and compiling. Otherwise wait until the previous step is completed.
+
+<pre>
+cryptsetup luksFormat -c aes-xts-plain64 -s 512 -h sha512 /dev/sda2
+cryptsetup luksFormat -c aes-xts-plain64 -s 512 -h sha512 /dev/sdb1
+cryptsetup luksFormat -c aes-xts-plain64 -s 512 -h sha512 /dev/sdc1
+cryptsetup luksFormat -c aes-xts-plain64 -s 512 -h sha512 /dev/sdd1
+(repeat for each additional luks container) ...
+</pre>
+
+==== Open LUKS Containers ====
+
+Once the LUKS containers have been created. Open them. Provide unique names. For other storage containers that will be used in a <nowiki>[[http://pthree.org/2012/12/05/zfs-administration-part-ii-raidz/|RAIDZ]]</nowiki> configuration a serialized set of `<unique_name>` is suggested. e.g. `s1_crypt`, `s2_crypt` ... etc.
+
+<pre>
+cryptsetup luksOpen /dev/sda2 root_crypt
+cryptsetup luksOpen /dev/sdb1 vault1_crypt
+cryptsetup luksOpen /dev/sdc1 vault2_crypt
+cryptsetup luksOpen /dev/sdd1 vault3_crypt
+(repeat for each additional luks container) ...
+</pre>
+
+Once complete, you can affirm the containers are opened with `ls /dev/mapper`. The LUKS container names that you provided should be listed.
+
+==== Add Derived LUKS Keys ====
+
+To avoid multiple passphrase prompts at boot time for unlocking all the LUKS containers, add the ''derived key'' for the `root_crypt` container to the other LUKS containers. This derived key will be generated from the `root_crypt` container in the `initramfs` at boot time. Obtaining the derived key from `root_crypt` at boot is covered in later sections. Using a derived key is relatively secure since it can only be generated ''after the root_crypt container has been opened with the proper passphrase''.
+
+<pre>
+/lib/cryptsetup/scripts/decrypt_derived root_crypt > /tmp/key
+</pre>
+
+<pre>
+cryptsetup luksAddKey /dev/sdb1 /tmp/key
+cryptsetup luksAddKey /dev/sdc1 /tmp/key
+cryptsetup luksAddKey /dev/sdd1 /tmp/key
+(repeat for each additional luks container) ...
+</pre>
+
+''If the `master key` for the LUKS container `root_crypt` ever changes you will need to add the new derived `master key` to the other LUKS containers'' again.
+
+===== Backup LUKS Headers (optional) =====
+----
+''' !! BACKUP EACH LUKS CONTAINERS HEADER FOR PROTECTION !! ''' While optional, this is '''highly''' recommended.
+
+Follow the procedure at <nowiki>[[https://wiki.archlinux.org/index.php/LUKS#Backup_the_cryptheader|ArchLinux-LUKS-Backup]]</nowiki>
+
+<pre>
+cryptsetup luksHeaderBackup /dev/sda2 --header-backup-file <pathToSave>/luks_sda2_header_backup
+cryptsetup luksHeaderBackup /dev/sdb1 --header-backup-file <pathToSave>/luks_sdb1_header_backup
+cryptsetup luksHeaderBackup /dev/sdc1 --header-backup-file <pathToSave>/luks_sdc1_header_backup
+cryptsetup luksHeaderBackup /dev/sdd1 --header-backup-file <pathToSave>/luks_sdd1_header_backup
+(repeat for each additional luks container) ...
+</pre>
+
+==== Create File Systems ====
+
+===== Create /boot File System =====
+----
+I chose ext4 with 0% reserved blocks. Use the filesystem of your choosing. This `/boot` partition must not be encrypted and will contain the boot images and grub configuration.
+
+<pre>
+mkfs.ext4 -m 0 -L /boot -j /dev/sda1
+</pre>
+
+===== Create ZFS Pools =====
+----
+`root_crypt` will service the `/` partition and `vault_crypt` is the 'other' storage pool for miscellaneous content.
+
+''' !! IT IS IMPERATIVE THAT THE `root` POOL BE NAMED `rpool` !! ''' Other naming conventions will not properly boot. (I know. I tried. It failed). Pool names for anything else are abitrary. Use `ashift=12` to support the newer storage devices with 4096K sectors. Use `ashift=9` for older storage devices using the smaller 512K sectors.
+
+<pre>
+zpool create -O mountpoint=none -o ashift=12 rpool /dev/mapper/root_crypt
+zpool create -O mountpoint=none -o ashift=12 vpool raidz /dev/mapper/vault1_crypt /dev/mapper/vault2_crypt /dev/mapper/vault3_crypt
+</pre>
+
+===== Create ZFS Datasets =====
+----
+I'm using compression. The lz4 compression is fast and clever. It will compress compressable content and skip uncompressable content. HDD read performance is increased and storage utilization is decreased (for compressable content). Compression '''MUST''' be set before you poplulate the dataset to assure ''all'' compressable content is compressed. You can enable compression later, but any prior content put into the dataset will remain ''uncompressed''. The dataset names are arbitrary and can be changed to suit your purposes.
+
+<pre>
+zfs create -o compression=lz4 rpool/ROOT
+zfs create -o compression=lz4 vpool/VAULT
+</pre>
+
+For an added performance tweak, disable `atime`; unless of course your applications rely on the access times.
+
+<pre>
+zfs set atime=off rpool/ROOT
+zfs set atime=off vpool/VAULT
+</pre>
+
+===== Create ZFS Volume for SWAP =====
+----
+I have not dedicated a specific storage partition for SWAP. Instead create a ZFS volume that will be used for SWAP. ''This configuration will not support hibernation''. (see caveat above). Replace `-V 1024M` with the sizing that is right for you. I use less swap space as the host has significant physical RAM capacity. This volume setting is courtesy of <nowiki>[[https://wiki.archlinux.org/index.php/ZFS#Swap_volume|ArchLinux-ZFS-SwapVolume]]</nowiki>. The `auto-snapshot=false` will prevent this dataset from being included in any automated snapshots. See `zfs-auto-snapshot` later in the guide.
+
+<pre>
+zfs create -V 1024M -b $(getconf PAGESIZE) \
+              -o compression=off \
+              -o primarycache=metadata \
+              -o secondarycache=none \
+              -o sync=always \
+              -o com.sun:auto-snapshot=false rpool/SWAP
+</pre>
+
+===== Prepare ZFS Mountpoints =====
+----
+This will set the ZFS dataset mountpoints. They ''do not'' get listed in /etc/fstab in the traditional sense. For datasets ''other'' than `rpool/ROOT` you can set the mountpoint to service your environment.
+
+<pre>
+zfs set mountpoint=/ rpool/ROOT
+zfs set mountpoint=/vault vpool/VAULT
+</pre>
+
+Importantly, this step identifies the `boot file system` in the ZFS pool.
+
+<pre>
+zpool set bootfs=rpool/ROOT rpool
+</pre>
+
+Export the pools so they can be re-imported to a temporary mount point.
+
+<pre>
+zpool export rpool
+zpool export vpool
+</pre>
+
+Re-import the ZFS pools to a temporary mount point in the Ubuntu LiveCD environment. The mountpoints `/mnt/zfs` are arbitrary. The temporary mount mounts will become the `chroot` target. This target will be populated with the previously installed Ubuntu 8GB volume contents.
+
+<pre>
+zpool import -d /dev/mapper -R /mnt/zfs rpool
+zpool import -d /dev/mapper -R /mnt/zfs vpool
+</pre>
+
+==== Mount Ubuntu Installation ====
+
+Mount the Ubuntu installation that was installed on the temporary 8GB storage volume. Replace `/dev/sd?` with the 8GB temporary storage label.
+
+<pre>
+mkdir /mnt/raring
+mount /dev/sd? /mnt/raring
+</pre>
+
+==== Copy Ubuntu Installation ====
+
+Create a `boot` directory in the previously mounted ZFS dataset and mount the real target `/dev/sd?` storage partition onto it. In my case `sda1`.
+
+<pre>
+mkdir /mnt/zfs/boot
+mount /dev/sda1 /mnt/zfs/boot
+</pre>
+
+Copy the Ubuntu installation from the temporary storage to the ZFS datasets.
+
+<pre>
+cd /mnt/raring
+tar cfp - . | ( cd /mnt/zfs/; tar xvfp -)
+</pre>
+
+You may likely need to copy the current live environment `resolv.conf` into the ZFS dataset so that networking will function once you `chroot` into the ZFS dataset. When you `chroot` into the ZFS dataset and you can't `host www.google.com` you'll need to perform this step.
+
+<pre>
+cp /etc/resolv.conf /mnt/zfs/etc/resolv.conf
+</pre>
+
+Once the TAR create/extract is complete, un-mount the temporary Ubuntu installation to keep on hand if this process needs to be repeated.
+
+<pre>
+umount /mnt/raring
+</pre>
+
+==== CHROOT Into Target ZFS Environment ====
+
+Mount the system references.
+
+<pre>
+mount -o bind /proc /mnt/zfs/proc
+mount -o bind /dev /mnt/zfs/dev
+mount -o bind /dev/pts /mnt/zfs/dev/pts
+mount -o bind /sys /mnt/zfs/sys
+</pre>
+
+Change root and pivot onto the ZFS environment which now contains a complete copy of the previous Ubuntu installation.
+
+<pre>
+chroot /mnt/zfs /bin/bash --login
+</pre>
+
+===== Setup ZFS in CHROOT Environment =====
+----
+Set the hostid (which doesn't exist). Without it the `ubuntu-zfs` installation and compile will error. You will be prompted later to overwrite it with the maintainers package version. You may choose to do so or not.
+
+<pre>
+hostid > /etc/hostid
+</pre>
+
+Preapre a symbolic link to the `root` LUKS container. Without this symbolic link `update-grub` will complain that is can't find the canonical path and error. (Replace `root_crypt` with your named root LUKS container).
+
+<pre>
+ln -s /dev/mapper/root_crypt /dev/root_crypt
+</pre>
+
+Assure that future kernel updates will succeed by always creating the symbolic link. (Replace `root_crypt` with your named root LUKS container).
+
+<pre>
+echo 'ENV{DM_NAME}=="root_crypt", SYMLINK+="root_crypt"' > /etc/udev/rules.d/99-local.rules
+</pre>
+
+Install the `ubuntu-zfs` packages. This will take some time to install and compile the DKMS ZFS modules for the current kernel. `cryptsetup` must be installed in the chroot environment has it was not installed previously. `zfs-initramfs` is ''required'' to put the ZFS utilities for managing ZFS file systems in the initramfs booting images. I intentionally ''did not'' install the `zfs-native/grub` packages.
+
+<pre>
+apt-add-repository --yes ppa:zfs-native/stable
+apt-get update
+apt-get -y install ubuntu-zfs zfs-initramfs cryptsetup
+</pre>
+
+===== Create FSTAB Entries =====
+----
+Delete or comment out the previous Ubuntu installations fstab references in `/etc/fstab`. Add the following new entries. It looks a bit odd at first but `/dev/mapper/root_crypt` (or whatever 'root' LUKS container name you used) must be listed in the `fstab` for `cryptsetup` and the zfs utilities to pivot to `rpool/ROOT` on boot.
+
+<pre>
+vi /etc/fstab
+</pre>
+
+<pre>
+/dev/sda1               /boot   auto    defaults        0 0
+/dev/mapper/root_crypt  /       zfs     defaults        0 0
+/dev/zvol/rpool/SWAP    none    swap    defaults        0 0
+</pre>
+
+===== Create `/etc/crypttab` Entries =====
+----
+Get the UUID of the block device that the `/dev/mapper/root_crypt` was created. (In this case `/dev/sda2`)
+
+<pre>
+blkid
+...
+/dev/sda2: UUID="94581034-2545-2c1e-93bf-f89ab32b9d8e" TYPE="crypto_LUKS" 
+...
+</pre>
+
+To allow `cryptsetup` to properly identify the `root` LUKS container during `update-initramfs` add this entry to `/etc/crypttab`. This file did not previously exist. Use the UUID you just retrieved without quotes. (You could use /dev/sd? naming conventions, but using UUID's will assure consistent behavior). `discard` is added here to pass the TRIM commands to the SSD.
+
+<pre>
+vi /etc/crypttab
+</pre>
+
+<pre>
+root_crypt UUID=<uuid-/dev/sd?-root_crypt-crypto_LUKS-no-quotes> none luks,discard
+</pre>
+
+===== Create `/etc/initramfs-tools/conf.d/cryptroot` Entries =====
+
+----
+For cryptsetup to properly identify the LUKS containers to unlock at boot time '''pick one''' of these entries; '''multiple''' or '''single''' passphrase prompts. Note that `vault_crypt` was not listed in `/etc/crypttab`. It is not necessary in that file. `/etc/crypttab` is largely referenced after the pivot from the initramfs to the 'real' root. ''All LUKS containers that need to be unlocked for ZFS '''MUST''' be listed in this file.'' Get the UUID for each `crypto_LUKS` container with `blkid` as before. The file '''MUST''' be named `cryptroot` as the cryptsetup routines reference that file explicitly. If named differently, `cryptsetup` will not identify the LUKS containers to unlock.
+
+----
+
+'''Single''': If you want a ''single'' passphrase prompt, use this configuration. This file did not previously exist.
+
+Get the derived master key. The `root_crypt` LUKS container must be open. Add the derived key to ''each'' LUKS container that you want to unlock at boot.
+
+<pre>
+/lib/cryptsetup/scripts/decrypt_derived root_crypt > /tmp/key
+cryptsetup luksAddKey /dev/sdb1 /tmp/key
+cryptsetup luksAddKey /dev/sdc1 /tmp/key
+cryptsetup luksAddKey /dev/sdd1 /tmp/key
+(repeat for each additional luks container) ...
+</pre>
+
+Copy the `decrypt_derived` shell script into the `initramfs-tools` so that it will be available in the initramfs boot environment.
+
+<pre>
+mkdir /etc/initramfs-tools/scripts/luks
+cp /lib/cryptsetup/scripts/decrypt_derived /etc/initramfs-tools/scripts/luks/get.root_crypt.decrypt_derived
+</pre>
+
+Adapt the `get.root_crypt.decrypt_derived` shell script to fetch the master key without arguments.
+
+<pre>
+vi /etc/initramfs-tools/scripts/luks/get.root_crypt.decrypt_derived
+</pre>
+
+Add to top of `/etc/initramfs-tools/scripts/luks/get.root_crypt.decrypt_derived`
+
+<pre>
+CRYPT_DEVICE=root_crypt
+</pre>
+
+Then replace `$1` with the new variable.
+
+<pre>
+:1,$s/\$1/\$CRYPT_DEVICE/gc
+</pre>
+
+Write out and quit.
+
+<pre>
+:wq
+</pre>
+
+Create cryptroot to be referenced in the boot image.
+
+<pre>
+vi /etc/initramfs-tools/conf.d/cryptroot
+</pre>
+
+'''Note''': I was unable to find a way to define `key=root_crypt,keyscript=/scripts/luks/decrypt_derived` for `vault#_crypt` and have the 'key' passed to the script as it does with `/etc/crypttab` behavior.
+
+<pre>
+target=root_crypt,source=UUID=<uuid-/dev/sd?-root_crypt-crypto_LUKS--no-quotes>,key=none,rootdev,discard
+target=vault_crypt,source=UUID=<uuid-/dev/sd?-vault1_crypt-crypt_LUKS-no-quotes>,keyscript=/scripts/luks/get.root_crypt.decrypt_derived
+target=vault_crypt,source=UUID=<uuid-/dev/sd?-vault2_crypt-crypto_LUKS-no-quotes>,keyscript=/scripts/luks/get.root_crypt.decrypt_derived
+target=vault_crypt,source=UUID=<uuid-/dev/sd?-vault3_crypt-crypto_LUKS-no-quotes>,keyscript=/scripts/luks/get.root_crypt.decrypt_derived
+(repeat for each additional luks container) ...
+</pre>
+
+----
+
+'''Multiple''': At boot you will be prompted for passphrases for each LUKS container.
+
+<pre>
+target=root_crypt,source=UUID=<uuid-/dev/sd?-root_crypt-crypt_LUKS-no-quotes>,key=none,rootdev,discard
+target=vault_crypt,source=UUID=<uuid-/dev/sd?-vault1_crypt-crypto_LUKS-no-quotes>,key=none
+target=vault_crypt,source=UUID=<uuid-/dev/sd?-vault2_crypt-crypto_LUKS-no-quotes>,key=none
+target=vault_crypt,source=UUID=<uuid-/dev/sd?-vault3_crypt-crypto_LUKS-no-quotes>,key=none
+(repeat for each additional luks container) ...
+</pre>
+
+===== Add `boot=zfs` to GRUB =====
+----
+Perhaps because I ''did not'' install the `zfs-native/grub` packages, you must add `boot=zfs` to the `grub.cfg` stanzas. ''You '''MUST''' have `boot=zfs` in the `linux` line. If it is absent Ubuntu will not boot.''
+
+<pre>
+vi /etc/default/grub
+</pre>
+
+Add `boot=zfs` to the default grub configuration file.
+
+<pre>
+GRUB_CMDLINE_LINUX_DEFAULT="boot=zfs quiet splash"
+</pre>
+
+Until certain that everything is working - remove `quiet splash`.
+
+<pre>
+GRUB_CMDLINE_LINUX_DEFAULT="boot=zfs"
+</pre>
+
+''If your Ubuntu system will '''not''' boot make sure `boot=zfs` is in the `linux` stanza line in `/boot/grub/grub.cfg`''
+
+===== Update the Initramfs Boot Images =====
+----
+Update the boot images which will now contain the ZFS utilities, cryptsetup, cryptroot definitions and custom decrypt_derived shell script (if you chose `single` passphrase prompting).
+
+<pre>
+update-initramfs -c -k all
+update-grub
+grub-install /dev/sda
+</pre>
+
+Check the /boot/grub/grub.cfg and make sure your menu stanzas look something like this.
+
+<pre>
+menuentry 'Ubuntu' --class ubuntu --class gnu-linux --class gnu --class os $menuentry_id_option 'gnulinux-simple-/dev/mapper/root_crypt' {
+recordfail
+	load_video
+	gfxmode $linux_gfx_mode
+	insmod gzio
+	insmod part_msdos
+	insmod ext2
+	set root='hd0,msdos1'
+	if [ x$feature_platform_search_hint = xy ]; then
+	  search --no-floppy --fs-uuid --set=root --hint-bios=hd0,msdos1 --hint-efi=hd0,msdos1 --hint-baremetal=ahci0,msdos1  <UUID#>
+	else
+	  search --no-floppy --fs-uuid --set=root <UUID#>
+	fi
+	linux	/vmlinuz-3.8.0-29-generic root=ZFS=/ROOT ro   boot=zfs quiet splash $vt_handoff
+	initrd	/initrd.img-3.8.0-29-generic
+}
+</pre>
+
+Especially the `linux` line which '''MUST''' have `root=ZFS=/ROOT` and `boot=zfs`.
+
+<pre>
+	linux	/vmlinuz-3.8.0-29-generic root=ZFS=/ROOT ro   boot=zfs quiet splash $vt_handoff
+</pre>
+
+===== Exit the CHROOT ZFS Environment =====
+----
+
+Exit the `chroot` environment and unmount the system references. Unmount in reverse order in which they were mounted.
+
+<pre>
+exit
+umount /mnt/zfs/boot
+umount /mnt/zfs/sys
+umount /mnt/zfs/dev/pts
+umount /mnt/zfs/proc
+umount /mnt/zfs/dev
+</pre>
+
+Export the ZFS pools (which will unmount `/mnt/zfs`).
+
+<pre>
+zpool export vpool
+zpool export rpool
+</pre>
+
+=== Reboot ===
+
+Remove the 8GB temporary Ubuntu installation storage and then reboot.
+
+<pre>
+reboot
+</pre>
+
+On reboot, you should be prompted for the passphrase to unlock the `root_crypt` LUKS container. If you set up with `single` prompting, the `vault_crypt` should be unlocked automatically for you with the derived master key. If set up with `multiple` prompting, you will be prompted again for the passphrase to unlock `vault_crypt` and each successive LUKS container defined in `cryptroot`.
+
+----
+== Followup ==
+
+=== Enable Timed Automatic Snapshots ===
+
+* Install and configure the `zfs-auto-snapshot` utility. It is the in the Ubuntu universe repository. On Git_Hub <nowiki>[[https://github.com/zfsonlinux/zfs-auto-snapshot|zfs-auto-snapshot]]</nowiki>. This provides Time_Machine like features for frequent, hourly, daily, weekly and monthly snapshots. `zfs-auto-snapshot` will skip datasets with the `com.sun:auto-snapshot` set to `false`. It does not currently support sending or receiving snapshots.
+* Enable `scrub` of your ZFS pools via cron. An example created in `/etc/cron.d/zfs-scrub`:
+<pre>
+PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+
+0 10 * * 3 root zpool scrub rpool
+0 12 * * 3 root zpool scrub vpool
+</pre>
+
+=== Enable Health Monitoring ===
+
+* Install and configure a cron entry for the excellent `zfs-health` utility from <nowiki>[[https://calomel.org/zfs_health_check_script.html|calomel.org-zfs-health]]</nowiki>. Copy/create in `/usr/local/bin/zfs_health.sh` or wherever suited. This provides email notifications of missed scrubs, file system utilization > 80% and other health checks.
+* Setup `zfs-health` of the ZFS pools via cron. An example created in `/etc/cron.d/zfs-health`:
+<pre>
+PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+
+0 14 * * 0-7 root /usr/local/bin/zfs_health.sh
+</pre>
+
+=== Enable S.M.A.R.T Monitoring ===
+
+* Setup `smartmontools` to keep a watchfull eye on your storage. See <nowiki>[[https://help.ubuntu.com/community/Smartmontools|Help-Ubuntu-Smartmontools]]</nowiki>.
+
+=== Setup Snapshots to Send and Receive for Backups (untested: YMMV) ===
+  ''This is somewhat complicated, and should be scripted--here be dragons ;)''
+
+==== Setup a local backup on a removable drive ====
+# Create a pool on your device, and in it, 1:1 filesystems to contain your backups (use your own hostname in lieu of zfsbox and rd-id-whatever..)
+## zpool create -o mountpoint=none -o ashift=12 rdbackup /dev/disk/by-id/rd-id-whatever-you-have
+## zfs create rdbackup/zfsbox/rpool/ROOT
+# use existing automatic snapshots to populate the backup container filesystems (use your own snapshotname)
+## zpool import rdbackup # ( if necessary )
+# create an initial backup
+## zfs send -R rpool/ROOT | zfs recv -F -d rdbackup/zfsbox/rpool/ROOT # For the first time
+# update the backup set with cumulative intermediate snapshots
+## last_snap=$(zfs list -H -t snapshot -ro name rdbackup/zfsbox/rpool/ROOT | tail -1 | cut -d@ -f2) 
+## zfs send -I -R rpool/ROOT@"${last_snap}" rpool/ROOT@snapshotname | zfs recv -F rdbackup/hostname/rpool/ROOT
+==== Setup a network backup over ssh on a remote server with ZFS pool for backups ====
+# set up public-key SSH authentication between zfsbox (your ZFS box) and deepfreeze (your remote backup host)
+# create a filesystem on your deepfreeze (referring to your remote backup host): zfsbox (referring to your ZFS box) to contain your backups
+## ssh zfs create -o mountpoint=none coldstorage/hostname/vpool # do this from your ZFS box "zfsbox"
+# Perform an initial full backup
+## zfs send -R vpool/VAULT | ssh deepfreeze zfs recv -F -d rdbackup/zfsbox/vpool/VAULT # For the first time
+# subsequently, send cumulative incremental snapshots to deepfreeze
+## last_snap=$(ssh deepfreeze zfs list -H -t snapshot -ro name rdbackup/zfsbox/vpool/VAULT | tail -1 | cut -d@ -f2)
+## zfs send -I -R vpool/VAULT@"${last_snap}" vpool/VAULT@snapshotname | ssh deepfreeze zfs recv -F rdbackup/hostname/rpool/ROOT
+
+=== Backup LUKS Headers (optional) ===
+
+Follow the procedure at <nowiki>[[https://wiki.archlinux.org/index.php/LUKS#Backup_the_cryptheader|ArchLinux-LUKS-Backup]]</nowiki>. There are security implications. Read this section of the wiki with deliberation.
+
+<pre>
+cryptsetup luksHeaderBackup /dev/sda2 --header-backup-file <pathToSave>/luks_sda2_header_backup
+cryptsetup luksHeaderBackup /dev/sdb1 --header-backup-file <pathToSave>/luks_sdb1_header_backup
+cryptsetup luksHeaderBackup /dev/sdc1 --header-backup-file <pathToSave>/luks_sdc1_header_backup
+cryptsetup luksHeaderBackup /dev/sdd1 --header-backup-file <pathToSave>/luks_sdd1_header_backup
+(repeat for each additional luks container) ...
+</pre>
+
+----
+
+== Troubleshooting ==
+
+* If you boot into the `recovery` mode Ubuntu will likely not boot as `boot=zfs` is likely not on the `linux` menu stanza line. Manually add `boot=zfs` as an edit during grub. (Hold `right-shift-key` during boot to enter and edit the recovery menu).
+* If troubles, check for typos. I often transposed `crypt` as `cyrpt` because I was typing to haphazardly.
+* If you enabled `splash` screen for plymouth, but don't see it and have to blindly type the passphrase, you may need to enable `FRAMEBUFFER=y` and change the screen geometry. See this `askubuntu` thread <nowiki>[[http://askubuntu.com/questions/280779/gnome-broken-splash-screen|GNOME-Broken-Splash]]</nowiki>. Boot without `splash` until you are certain the boot process is successful.
+* If on reboot you are dropped into the `initramfs busybox` menu, make sure the busybox has the ZFS utilities `zpool` and `zfs`, `cryptsetup` and the `cryptroot` files. The `cryptroot` should be in `/conf.d/...`. The custom key script in `/scripts/luks`. `zpool status` should return something.
+* The ZFS `root` pool '''MUST''' be named '''`rpool`'''.
+* `boot=zfs` '''MUST''' be on the `linux` `grub.cfg` menu stanza line.
+* `root=ZFS=/ROOT` '''MUST''' be on the `linux` `grub.cfg` menu stanza line. ''If you chose a different ZFS dataset name replace `ROOT` with your version.''
+* Reboot back to the Ubuntu LiveCD, re-install the `ubuntu-zfs` packages, re-open the LUKS containers, re-import the ZFS pools to `/mnt/zfs`, chroot to the ZFS environment, adjust whatever you need to adjust, exit chroot, un-mount file systems, reboot. Rinse and repeat.
+* If the additional storage is '''not''' mounting automatically on booting, once boot is complete `zpool import -d /dev/mapper vpool` to mount the additional storage. This will 'refresh' the `/etc/zfs/zpool.cache`. `df -mh` to confirm the mounted pool. Then `update-initramfs -c -k all` to recreate the boot images which will have a reference to the most recent `zpool.cache`. Reboot and the additional storage pool should mount.
+
+----
+== Distro Release Upgrade ==
+
+Here is an upgrade scenario that takes some of the pain away from doing a distro upgrade. It avoids the chicken and the egg problem with the zfs third party module. I attempted to do an upgrade of the system by selectively re-enabling the zfs third party repo after the release upgrade had disabled all third party repo's. While the zfs was updated, when it came to re-building the dkms modules the kernel panicked and the upgrade failed miserably. (Having ZFS snapshots to rollback to was a god send)! Below is a way to do a relatively painless release upgrade.
+
+* Make sure ZFS repo supports the distro release you are upgrading to <nowiki>[[https://launchpad.net/~zfs-native/+archive/stable|https://launchpad.net/~zfs-native/+archive/stable]]</nowiki>
+* Install the newer Ubuntu Desktop ##.## version you want to upgrade to on a bootable USB drive.
+* Boot from USB and 'Try Ubuntu' (If your system is using UEFI make sure to boot in that mode).
+* Open a terminal window; `sudo -i`
+
+ <pre>
+apt-add-repository --yes ppa:zfs-native/stable
+apt-get update
+apt-get -y install ubuntu-zfs zfs-initramfs cryptsetup
+</pre>
+
+* Then open the encrypted target media, import the zpool's, mount, chroot and upgrade.
+
+ <pre>
+cryptsetup luksOpen /dev/sda2 root_crypt
+cryptsetup luksOpen /dev/sdb1 vault1_crypt
+cryptsetup luksOpen /dev/sdc1 vault2_crypt
+cryptsetup luksOpen /dev/sdd1 vault3_crypt
+(repeat for each additional luks container) ...
+</pre>
+
+ <pre>
+zpool import -f -d /dev/mapper -R /mnt/zfs rpool
+zpool import -f -d /dev/mapper -R /mnt/zfs vpool
+</pre>
+
+* If using UEFI make sure to add `mount /dev/sda* /mnt/zfs/boot/efi` after mounting `/mnt/zfs/boot` sda* being the `boot_efi` labeled device.
+
+ <pre>
+mount /dev/sda1 /mnt/zfs/boot
+mount -o bind /proc /mnt/zfs/proc
+mount -o bind /dev /mnt/zfs/dev
+mount -o bind /dev/pts /mnt/zfs/dev/pts
+mount -o bind /sys /mnt/zfs/sys
+</pre>
+
+ <pre>
+chroot /mnt/zfs /bin/bash --login
+</pre>
+
+* (Optional) To reduce the upgrade time, I removed all previous and unused kernel versions to avoid delete/rebuild dmks for each kernel.
+* '''During the''' `do-release-upgrade` '''when prompted to confirm the disable of third party repo's, before continuing, open another terminal tab and''' `vi /etc/apt/sources.list.d/zfs-native-stable-raring.list` '''and un-comment the deb. (Make sure the deb entry has the name of the release you are upgrading to).'''
+
+ <pre>
+ln -s /dev/mapper/root_crypt /dev/root_crypt
+apt-get update
+apt-get dist-upgrade
+do-release-upgrade
+</pre>
+
+* If all goes well you can exit, unmount and export the pools. If all does not go well you can use `zfs rollback` to revert to a snapshot time before the upgrade and re-attempt with whatever things need to be tweaked.
+* Add umount /mnt/zfs/boot/efi if you are using UEFI boot.
+
+ <pre>
+exit
+umount /mnt/zfs/boot
+umount /mnt/zfs/sys
+umount /mnt/zfs/dev/pts
+umount /mnt/zfs/proc
+umount /mnt/zfs/dev
+</pre>
+
+ <pre>
+zpool export vpool
+zpool export rpool
+</pre>
+
+* Reboot, remove USB and enjoy your upgrade!
+
+== References ==
+
+ a. <nowiki>[[http://www.larsko.org/ZfsUbuntu|http://www.larsko.org/ZfsUbuntu]]</nowiki>
+ a. <nowiki>[[https://github.com/zfsonlinux/pkg-zfs/wiki/HOWTO-install-Ubuntu-to-a-Native-ZFS-Root-Filesystem|https://github.com/zfsonlinux/pkg-zfs/wiki/HOWTO-install-Ubuntu-to-a-Native-ZFS-Root-Filesystem]]</nowiki>
+ a. <nowiki>[[http://docs.oracle.com/cd/E19253-01/819-5461/gaynr/index.html|http://docs.oracle.com/cd/E19253-01/819-5461/gaynr/index.html]]</nowiki>
+ a. <nowiki>[[https://www.grc.com/haystack.htm|https://www.grc.com/haystack.htm]]</nowiki>
+ a. <nowiki>[[http://pthree.org/2012/08/21/encrypted-zfs-filesystems-on-linux/|http://pthree.org/2012/08/21/encrypted-zfs-filesystems-on-linux/]]</nowiki>
+ a. <nowiki>[[https://wiki.archlinux.org/index.php/Disk_Encryption|https://wiki.archlinux.org/index.php/Disk_Encryption]]</nowiki>
+ a. <nowiki>[[https://github.com/zfsonlinux/pkg-zfs/wiki/HOWTO-install-Ubuntu-to-a-Native-ZFS-Root-Filesystem|https://github.com/zfsonlinux/pkg-zfs/wiki/HOWTO-install-Ubuntu-to-a-Native-ZFS-Root-Filesystem]]</nowiki>
+ a. <nowiki>[[https://wiki.archlinux.org/index.php/LUKS#Backup_the_cryptheader|https://wiki.archlinux.org/index.php/LUKS#Backup_the_cryptheader]]</nowiki>
+ a. <nowiki>[[http://pthree.org/2012/12/05/zfs-administration-part-ii-raidz/|http://pthree.org/2012/12/05/zfs-administration-part-ii-raidz/]]</nowiki>
+ a. <nowiki>[[https://wiki.archlinux.org/index.php/ZFS#Swap_volume|https://wiki.archlinux.org/index.php/ZFS#Swap_volume]]</nowiki>
+ a. <nowiki>[[http://askubuntu.com/questions/280779/gnome-broken-splash-screen|http://askubuntu.com/questions/280779/gnome-broken-splash-screen]]</nowiki>
+ a. <nowiki>[[https://github.com/zfsonlinux/zfs-auto-snapshot|https://github.com/zfsonlinux/zfs-auto-snapshot]]</nowiki>
+ a. <nowiki>[[https://help.ubuntu.com/community/Smartmontools|https://help.ubuntu.com/community/Smartmontools]]</nowiki>
+ a. <nowiki>[[https://calomel.org/zfs_health_check_script.html|https://calomel.org/zfs_health_check_script.html]]</nowiki>
+
+== Creative Commons License ==
+
+Author: James B. Crocker
+
+EMail:  james@constantsc.net
+
+<nowiki>[[http://i.creativecommons.org/l/by-sa/3.0/88x31.png]]</nowiki>
+
+This work is licensed under a <nowiki>[[http://creativecommons.org/licenses/by-sa/3.0/|Creative Commons Attribution-Share Alike 3.0 License]]</nowiki>.
+
+----
+CategorySecurity CategoryInstallation CategoryBootAndPartition CategoryEnterprise CategoryAdministration

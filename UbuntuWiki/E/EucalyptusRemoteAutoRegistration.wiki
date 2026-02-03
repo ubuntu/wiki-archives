@@ -1,0 +1,271 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+* '''Launchpad Entry''': UbuntuSpec:server-lucid-euca-remote-autoregister
+* '''Created''': 2009-11-26
+* '''Contributors''': ThierryCarrez, MattZimmerman, ColinWatson, DanNurmi
+* '''Packages affected''': eucalyptus
+
+=== Summary ===
+
+Eucalyptus will support in 10.04 installation and automatic registration of complex topologies. Part of this work has to be done on the Installer side and will be tracked in UbuntuSpec:foundations-lucid-uec-installer-enhancement. This spec will focus on required post-installation actions.
+
+=== Release Note ===
+
+The 10.04 UEC installer on the Server ISO now supports installation and automatic registration of complex UEC topologies, including separate components and multiple clusters.
+
+=== Rationale ===
+
+As of 9.10 we only supported one topology in the UEC installer and autoregistration: One CLC+Walrus+CC+SC and multiple NCs. Furthermore, NCs were not automatically registered, requiring a manual euca_conf --discover-nodes run. We want to simplify installation by minimizing manual steps, while supporting any complex UEC topology.
+
+=== User stories ===
+
+As an UEC sysadmin, I want to deploy a complete UEC infrastructure with a topology optimized for my resources. I use the 10.04 UEC installer and everything can be installed easily and auto-registers correctly.
+
+As an existing UEC sysadmin, I want to upgrade to 10.04 when available without losing functionality. I upgrade my system and the new registration framework doesn't break my existing setup.
+
+=== Assumptions ===
+
+* Auto-registration will only be supported in the same broadcast domain. That means NC must be in the same broadcast domain as CCs, and CLC, Walrus, CC and SC must also be deployed inside the same broadcast domain. Manual registration will still be supported for registration of more remote components (for example a separate CC+SC in a remote location).
+
+=== Design ===
+
+==== Definitions ====
+* CLC - Cloud controller (unique), performs registration of Walrus, CCs, SCs
+* Walrus - S3 component (unique)
+* CC - Cluster controller (unique per cluster), performs registration of NCs
+* SC - Storage controller (unique per cluster) [TODO: confirm uniqueness]
+* NC - Node controller
+
+==== Dependencies on Installer work ====
+* CLC keys must be deployed to Walrus, CC, SC by the installer
+* CC keys must be deployed to NCs by the installer
+* CC, SC, NC know their cluster name after install
+
+==== CLC ====
+* Announces "I am the CLC" (necessary for installer discovery)
+* Runs a registration task reacting to:
+** Walrus announcing "I'm the Walrus"
+** Check that no other Walrus is already registered
+** Register the Walrus
+** CC announcing "I'm ready to be registered as FOO"
+** Check that no other CC is already registered with the same name
+** Register the CC
+** SC announcing "I'm an SC for cluster FOO"
+** Check that no other SC is already registered with cluster FOO [TODO: confirm uniqueness]
+** Check there is an active CC "I'm registered as FOO" announcement
+** Register SC
+* Registration service can be manually toggled off to lock down further Walrus/CC/SC auto-registration
+
+==== Walrus ====
+* Announces "I am the Walrus" when sshd is running and eucalyptus-walrus is installed
+
+==== CC ====
+* CC announces "I'm ready to be registered as FOO" when sshd runs and eucalyptus-cc is installed
+* CC announces (on all interfaces) "I'm registered as FOO" when registered (by polling for key presence) and running
+* Runs a registration task reacting to:
+** NC announcing "I'm an NC for cluster FOO"
+** Check that NC is not already registered
+** Check that me = FOO
+** Register NC
+* Registration service can be manually toggled off to lock down further NC auto-registration
+
+==== SC ====
+* SC announces "I'm an SC for cluster FOO" when sshd is running and eucalyptus-sc is installed
+
+==== NC ====
+* NC announces "I'm an NC for cluster FOO" when sshd is running and eucalyptus-nc installed
+
+==== Announcements ====
+* Use avahi for both unicast and multicast announcements
+* Publish preferred IP address as TXT record to avoid added addresses to conflict in avahi-resolve
+
+==== Registration task details ====
+
+* Core avahi browser will be implemented in C
+** Reduced footprint for this long-standing process
+** euca_find_cluster is already implemented in C, so it's coherent to use C here as well
+** Will be implemented using classic Avahi browse callbacks (called whenever a new service becomes available on the LAN, see <nowiki>[[http://avahi.org/download/doxygen/client-browse-services_8c-example.html|example]]</nowiki>)
+* Core registration-service will call registration scripts based on type (e.g. "walrus" to be called to register any newfound walrus)
+** Missing scripts are gracefully ignored
+** This allows both CLC and CC to share a common registration-service
+** Both eucalyptus-clc and eucalyptus-cc depend on registration-service package
+** eucalyptus-cc and eucalyptus-clc ship different registration scripts (cc ships the "node" script, clc ships the others)
+** This allows to supports both CLC+CC and separated CLC/CC scenarios
+** Using shell scripts for registration actions is easier to maintain
+* Must provide switch to disable CLC task, to lock down further Walrus/CC/SC auto-registration
+* Must provide switch to disable CC task, to lock down further NC auto-registration
+
+=== Implementation ===
+
+See work items in whiteboard for a detailed list.
+
+Implementation will be done in several parts:
+* CC registration service and NC announcement
+* Test with current ISOs topology (CLC+Walrus+CC+SC / NCs)
+* CLC registration service and Walrus announcement, phase out local walrus registration
+* Test local autoregistration with current ISOs topology (CLC+Walrus+CC+SC / NCs)
+* CC and SC announcements and CLC autoregistration support for them, phase out local CC/SC registration
+* Test local autoregistration with current ISOs topology (CLC+Walrus+CC+SC / NCs)
+* Test with separate components (CLC / Walrus / CC / SC / NC)
+
+Sync points with installer work:
+* Change euca_find_cluster to use TXT rather than IP resolution to get CLC/CC IP address <-> Modify CC announcement
+* Finalize installer bits <-> Test with separate components (CLC / Walrus / CC / SC / NC)
+
+=== Test/Demo Plan ===
+
+Test cases:
+* Installation of CLC+Walrus+CC+SC / NCs
+* Upgrade of existing 9.10 CLC+Walrus+CC+SC / NCs
+* Installation of CLC / Walrus / CC / SC / NCs
+* Installation of CLC+Walrus / CC1+SC1 / NC1 / CC2+SC2 / NC2 on single network
+* Installation of CLC+Walrus / CC1+SC1 / NC1 / CC2+SC2 / NC2 on three adjacent networks
+* Installation of CLC+Walrus+CC1+SC1 / NC1 / CC2+SC2 / NC2 on two remote networks (CC2+SC2 will be registered manually)
+
+=== Unresolved issues ===
+
+None.
+
+=== BoF agenda and discussion ===
+
+==== UDS discussion notes ====
+
+===== 9.10 =====
+
+* Automated registration runs at boot when services are up and running
+* Should this be run one time only?
+* All registration occurs on the "CLC + CC + SC + Walrus" system, so its easy to ensure components are running
+
+===== 10.04 =====
+* Expectation: minimize manual steps
+* Assumption: only one CLC is installed on the local avahi broadcast network (because otherwise they'll all hear advertisements and act on them)
+* upstart registration job: Switch to do it until it has successfully registered
+
+===== Dependencies =====
+
+* CC registration: CLC running, CC sshd running, eucalyptus-cc installed on CC
+* SC registration: CLC running, SC sshd running, CC registered on CLC
+* Walrus registration: CLC running, Walrus sshd running
+* NC registration: CC running, CC registered, NC sshd running, eucalyptus-nc installed on NC
+
+===== Sequence of events =====
+
+(Advertisements may be asynchronous (e.g. Avahi) or synchronous (e.g. an RPC method call to the next thing up) but in either case there is an explicit sync point before going beyond registration.)
+
+* CLC installed (via UEC installer) and brought up
+* CLC advertises "I am the CLC"
+
+* CC installed (via UEC installer)
+** Look for CLC Avahi advertisement
+** If unsuccessful, fall back to prompting for CLC hostname/IP
+* CC boots, starts sshd
+* Attempt Avahi auto-registration
+** CC advertises "I am ready to be registered as foo"
+** CC waits until it has been registered, by polling for key presence
+** Meanwhile, CLC hears advertisement, registers CC (ensuring this is done only once)
+* If unsuccessful, fall back to registration service
+** CC connects to CLC and requests registration synchronously
+* CC notices it has been registered
+* CC advertises "cluster foo is registered"
+
+* Walrus installed (via UEC installer)
+** Look for CLC Avahi advertisement
+** If unsuccessful, fall back to prompting for CLC hostname/IP
+* Walrus boots, starts sshd
+* Attempt Avahi auto-registration
+** Walrus advertises "I am ready to be registered as foo"
+** Walrus waits until it has been registered, by polling for key presence
+** Meanwhile, CLC hears advertisement, registers Walrus (ensuring this is done only once)
+* If unsuccessful, fall back to registration service
+** Walrus connects to CLC and requests registration synchronously
+
+* SC installed (via UEC installer)
+** Look for CLC Avahi advertisement
+** If unsuccessful, fall back to prompting for CLC hostname/IP
+* SC looks for clusters on the local network, offers the user a choice of which one this SC "belongs" in
+* SC boots, starts sshd
+* Attempt Avahi auto-registration
+** SC advertises "I am ready to be registered as foo"
+** SC waits until it has been registered, by polling for key presence
+* If unsuccessful, fall back to registration service
+** SC connects to CLC and requests registration synchronously
+* Meanwhile:
+** CLC hears SC advertisement
+** CLC queries to check that cluster foo is registered
+** CLC registers SC with cluster foo
+
+* NC installed (via UEC installer)
+** NC looks for clusters on the local network, offers the user a choice of which one this NC "belongs" in
+** Fall back to prompting for CC hostname/IP
+* NC boots, starts sshd
+* Avahi auto-registration
+** NC advertises "I am ready to be registered with cluster foo"
+** CC hears NC advertisement
+** CC checks that the cluster name matches its name
+* CC waits until it has been registered itself
+* CC registers NC (ensuring this is done only once)
+
+===== Alternative =====
+Single registration service on CLC/CC with three modes:
+* Autoregister local network things (CC, CLC)
+* Autoregister anything (CLC only)
+* Disable autoregister (CC, CLC)
+
+===== Advertisements =====
+
+====== "Upward" unicast messages ======
+
+* CC to CLC "I am ready to be registered as foo"
+* SC to CLC "I am ready to be registered with cluster foo"
+* NC to CC "I am ready to be registered with cluster foo"
+* Walrus to CLC "I am ready to be registered" (also "I am the walrus")
+
+====== "Downward" broadcast messages ======
+
+* CLC to CC, SC, Walrus "I am the CLC"
+* CC to NC "I am registered as foo"
+* CC to SC "I am registered as foo"
+
+===== Implementation =====
+
+Advertisement technology
+* Avahi
+** Pros: simple, no polling required
+** Cons: only works within a broadcast domain, or with a reflector proxy
+* Registration service running on the CLC (for Walrus, CC, SC) and CC (for NC)
+** e.g. CGI script accessible over HTTP
+** can store information rather than acting on it immediately, in the case that the CC is not yet registered but receives messages from SC/NC
+** requires explicit trust action by admin, since this constitutes the ability for anyone to register a cluster non-interactively
+
+Need to be able to:
+* Install new cloud (CLC, Walrus, CC, SC, NC)
+* Add new cluster (CC, SC, NC...) to existing cloud
+** on a different broadcast domain from the CLC?  
+* Add Node(s) to a cluster
+
+Some advertisements are critical (for the registration), some other are informative (for discovery in the installer)
+* Listening daemon on CLC / CC waiting on advertisements?
+
+Security concerns: autoregistration trusts any Walrus/CC/SC/NC that comes up
+* Use a shared secret?
+* Use "install mode"
+
+===== Package installation =====
+* could the public keys be published via avahi to be used (with fingerprint confirmation) for configuration?
+
+===== To do =====
+
+* State diagram for registration process
+* Decision on whether/how much to trust the network
+
+----
+CategorySpec

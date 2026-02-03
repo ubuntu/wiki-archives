@@ -1,0 +1,132 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+'''NOTE''': This page is part of the Ubuntu Specification process.  Please check the status and details in Launchpad before editing.  If the spec is Approved then you should contact the Assignee, or another knowledgeable person, before making changes.
+
+* '''Launchpad entry''': https://features.launchpad.net/distros/ubuntu/+spec/rapid-reboot
+* '''Contributors''':  JohnMoser, JeffSchroeder
+* '''Packages affected''': initscripts, kexec-tools
+
+=== Summary ===
+This spec defines the use of `kexec` where we know the user does not want to see the boot loader.
+
+=== Rationale ===
+There are a few cases where we can safely assume the user does not want to see the boot loader; in these cases, we should use `kexec` to avoid long reboots, BIOS POSTs, and boot loader time.  This can take 10 seconds in optimal situations; but with SCSI or RAID BIOS and network boot roms, the time can climb to 20, 30, or even over 60 seconds, even in cases where the time between loading the kernel and seeing the log-in screen is 30-60 seconds.
+
+=== Use cases ===
+
+* Bob has just upgraded his kernel; `update-notifier` informs him he must reboot for the changes to take effect, and the 'Restart' button uses `kexec` to make this faster.
+* Alice just upgraded `dbus`; `update-notifier` tells her to restart, and uses `kexec`.
+* Seveas has performed several updates in the past month, and now is under three times as much memory pressure due to different programs using different copies of shared libraries.  He decides to reboot to clear this up, and uses a "Quick Reboot" to make this faster.
+* Keybuk just installed Ubuntu Edgy and wants to boot into it.  The LiveCD loads the target kernel and initrd with `kexec`; `umounts` all disk-based file systems; `sync`; and then uses `kexec` to start the new system rather than rebooting.
+
+=== Scope ===
+We are concerned with `kexec` in three cases:
+
+* Reboots from `update-manager`.
+* Reboots from "Quick Reboot" in the Shutdown menu.
+* Reboots from the LiveCD into a newly installed Ubuntu system.
+
+=== Design ===
+The design will utilize `kexec` to facilitate fast rebooting.  `kexec` can load the initrd and the kernel image for Linux kernels and append a command line to the kernel.
+
+We will also have to decide on a method for producing a "Quick Reboot" in the Shutdown menu.  Possibilities are:
+
+* Add a fourth Shutdown button labeled "Quick Reboot."
+* Switch the buttons on modifier, such that holding `SHIFT` or `CTRL` will change the "Restart" button to say "Quick Restart" and function as such.
+
+The kernel will only be loaded by `kexec` when the user has made the decision to take a `kexec` action; this is because whenever we do a reboot, the `reboot` script init calls attempts to `kexec` any loaded kernel.
+
+=== Implementation ===
+We will need to modify `/etc/init.d/reboot` to call `kexec` before calling `reboot`.
+
+A script must be produced to determine the latest Ubuntu kernel and initrd from the currently running system.  We can derive this from `update-grub`.
+
+A script must be produced to extract the kernel command line as it would be in `/boot/grub/menu.lst` for the selected kernel.  We can also derive this from `update-grub`, or possibly read it from `menu.lst`. The command line for the current kernel can be found at /proc/cmdline.
+
+A script must be produced to derive the kernel and its command line using the above two scripts.  This script should then call the following:
+
+<pre>
+kexec -l --initrd=${INITRD} --append="${COMMAND_LINE}" ${KERNEL}
+</pre>
+
+Note: Gentoo have already made a script for this called kexec-load.
+
+The above script should be able to run whenever all of the following conditions are met.  These requirements will allow the LiveCD to `chroot /target` to prepare for `kexec` into the new system.
+* The `/boot` file system is readable
+* The `/usr` file system is readable
+* The `/` file system is readable
+* `/proc` is mounted and readable
+
+==== Code ====
+The below version of `do_stop()` should be used in `/etc/init.d/reboot`:
+
+<pre>
+do_stop () {
+##### End message in newline for kFreeBSD bug #323749
+        log_action_msg "Will now restart"
+##### Reboot normally if kexec isn't installed correctly
+        if [ -x /sbin/kexec ]; then
+            kexec -e
+        else
+            reboot -d -f -i
+        fi
+}
+</pre>
+--JeffSchroeder: Improved do_stop logic
+
+LucaFalavigna: If kexec finds a kernel to load, it never returns so you can modify the script this way:
+
+<pre>
+if [ -x /sbin/kexec ]; then
+        kexec -e
+fi
+reboot -d -f -i
+</pre>
+
+If none is found, kexec syscall returns with "Invalid argument" and system reboots normally.
+
+We need the other three scripts.
+
+==== Data preservation and migration ====
+None.
+
+=== Unresolved issues ===
+I've got absolutely no clue how to get scripts up to detect the kernel; and only a vague idea on a cheap and inaccurate hack to get a command line out of `grub.conf`.  Anyone want to take up the tab?  --JohnMoser
+
+For the default commandline minus the initrd or root volume:
+<pre>
+grep '^#.defoptions' /boot/grub/menu.lst | sed 's/^#.defoptions=//''
+</pre>
+For the currently running kernel, /proc/cmdline contains the full commandline. If a new default kernel is installed, try this:
+<pre>
+egrep '/vmlinuz.root' menu.lst | egrep -v '^#|single' | sed 's/^kernel.*z //'
+</pre>
+
+I like this spec enought that I'm going to work on implementing it. Now that upstart is in edgy replacing sysv init script, contacting Keybuk would be wise. --JeffSchroeder
+
+There's a <nowiki>[[http://fedoraproject.org/wiki/FC6KdumpKexecHowTo|HOWTO at Fedora's wiki]]</nowiki> suggesting using the following command line to quick reboot one's system:
+<pre>
+kexec -l /vmlinuz --initrd=/initrd.img --command-line="$(</proc/cmdline)"
+</pre>
+The interesting part is ''cat /proc/cmdline'' --P2k
+
+This won't work in all cases because some parameters might be used by initramfs and filtered (is this the case with Ubuntu?). One possible solution is to pass those options on to the kernel: IIRC the kernel ignores unknown options but they would be available under /proc/cmdline.
+=== Reboot into GRUB ===
+A terrible simple solution to all these problems would be to download Grub4dos and load it using kexec -l grub.exe. This loads GRUB stage2, witch then can load the current kernel as it does when you boots your computer normaly.
+=== BoF agenda and discussion ===
+LucaFalavigna: There's a big challenge to solve. kexec is unable to reload VESA framebuffer and no GUI or virtual console will be showed when the relocated kernel starts! I noticed this when I first tried kexec some months ago and I was able to fix it by applying <nowiki>[[http://dev.gentoo.org/~spock/projects/vesafb-tng/|VESA-tng patch]]</nowiki>. A lot of time elapsed since then and I didn't try again with newer releases, but I don't think any solution has been studied to fix this, so we should release a kernel package with that patch merged in order to enable the whole thing.
+
+JohnMoser:  Are you sure?  I tried it out on Dapper using Edgy's kernel, it worked for me.  I had `kexec` load a kernel AND its initrd; set the right command line; and rebooted with the proper init.d/reboot logic.
+
+LucaFalavigna: I tried kexec with Dapper and a fresh 2.6.18 kernel and I was able to run a X session, but bootup messages and virtual consoles aren't available at all. I tried passing --reset-vga and --console-vga parameters but none of them seems working properly (--reset-vga bothers my monitor with an "out of frame rate" message). I'm going to look at source code to see if it is possible to force a given frame rate (e.g. by using a brand new option such as --resolution or similar).
+----
+CategorySpec

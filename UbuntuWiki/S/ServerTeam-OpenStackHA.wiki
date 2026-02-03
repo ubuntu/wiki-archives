@@ -1,0 +1,544 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+'''Take note:  This is not intended to be a step-by-step guide for production deployments, but rather a guide for testing OpenStack HA scenarios on Ubuntu Server.'''
+
+== Overview ==
+
+The Ubuntu OpenStack HA reference architecture is a current, best practice deployment of OpenStack on Ubuntu 14.04 using a combination of tools and HA techniques to deliver high availability across an OpenStack deployment.
+
+== Deployment ==
+
+=== Before you start ===
+
+==== Juju + MAAS ====
+
+The majority of OpenStack deployments are implemented on physical hardware; <nowiki>[[http://juju.ubuntu.com|Juju]]</nowiki> uses <nowiki>[[http://maas.ubuntu.com|MAAS]]</nowiki> (Metal-as-a-Service) to deploy Charms onto physical service infrastructure.
+
+Its worth reading up on how to setup MAAS and Juju for your physical server environment prior to trying to deploy the Ubuntu OpenStack HA reference architecture using Juju.
+
+Please refer to the MAAS documentation for details on how to install and configure MAAS for your environment.
+
+==== How many servers? ====
+
+Well, for HA (N+1 resilience where possible) with all OpenStack services, you will need 28 service units.  Most OpenStack deployments happen on bare metal servers using Juju with the MAAS (Meta-as-a-Service) provider, under which its possible to host some services under LXC containers - see <nowiki>[[https://wiki.ubuntu.com/ServerTeam/OpenStackCharms/ProviderColocationSupport|Juju provider colocation support]]</nowiki> topic for details on which services can be deployed in this way.
+
+==== Configuration ====
+
+All configuration options should be placed in a file named 'local.yaml'.  A full version of this file can be found <nowiki>[[attachment:local.yaml|here]]</nowiki>
+
+=== Base Services ===
+
+==== Ceph ====
+
+===== Overview =====
+
+<nowiki>[[http://ceph.com|Ceph]]</nowiki> is a key infrastructure component of the Ubuntu OpenStack HA reference architecture; it provides a natively resilient and scalable back-end for block storage (through Cinder) and for image storage (through Glance).
+
+===== Configuration =====
+
+A Ceph deployment will typically consist of both Ceph Monitor (MON) Nodes (responsible for mapping the topology of a Ceph storage cluster and telling clients about it) and Ceph Object Storage Device (OSD) Nodes (responsible for storage data on devices).  Some basic configuration is required to support deployment of Ceph using the Juju Charms for Ceph:
+
+<pre>
+ceph:
+  fsid: '6547bd3e-1397-11e2-82e5-53567c8d32dc'
+  monitor-count: 3
+  monitor-secret: 'AQCXrnZQwI7KGBAAiPofmKEXKxu5bUzoYLVkbQ=='
+  osd-devices: '/dev/vdb'
+  osd-reformat: 'yes'
+ceph-osd:
+  osd-devices: '/dev/vdb'
+  osd-reformat: 'yes'
+</pre>
+
+In this example, Ceph is configured with the provided fsid and secret (these should be unique for your environment) and will use the '/dev/vdb' block device if found for object storage - note that this is a whitelist of block storage devices to detect and use so something like '/dev/sdb /dev/sdd /dev/sde /dev/sdf dev/sdg' is perfectly valid and probably more realistic for physical server deployments.
+
+The Ceph MON function is provided by the 'ceph' charm; as the monitor-count is set to '3' Ceph will not bootstrap itself and start responding to requests from clients until at least 3 service units have joined the ceph service.  In order to operate the Ceph MON service must remain quorate at all time; so you can take one service unit out and still keep running.  You can add more service-units to the ceph charm if you want - but 3 should provide enough for most Ceph storage clusters.
+
+Note that the ceph charm will also slurp up and run OSD's on any available storage; for large deployments you might not want to do this but for proof-of-concept work it's OK to just run with storage provided directly via the ceph service.
+
+Additional storage is provided by the 'ceph-osd' charm; this allows additional service units to be spun up which purely provide object storage.  Recommended for larger deployments.
+
+===== Deployment =====
+
+First, deploy the ceph charm with a unit count of 3 to build the Ceph MON cluster:
+
+<pre>
+juju deploy --config local.yaml -n 3 ceph
+</pre>
+
+and then deploy some additional object storage nodes using the ceph-osd charm and relate them to the cluster.
+
+<pre>
+juju deploy --config local.yaml -n 3 ceph-osd
+juju add-relation ceph ceph-osd
+</pre>
+
+All of the above commands can be run in series with no pauses; the charms are clever enough to figure things out in the correct order.
+
+===== Bootnotes =====
+
+By default, the CRUSH map (which tells Ceph where blocks should be stored for resilience etc..) is OSD centric; if you run multiple OSD's on a single server, Ceph will be device failure resilient but not server failure resilient as the default 3 replicas may be mapped onto OSD's on a single host.
+
+Read the <nowiki>[[http://ceph.com/docs/master/rados/operations/crush-map/|upstream documentation]]</nowiki> on how to tune the CRUSH map for your deployment requirements; this might land as a feature into the charm later but for now this bit requires manual tuning.
+
+==== MySQL (Percona XtraDB Cluster) ====
+
+===== Overview =====
+
+Percona XtraDB Cluster provides a pure-userspace Active/Active MySQL solution with no reliance on shared storage.  Writes are synchronously replicated across the cluster of MySQL servers, so it is not a scale-out solution.  Downtime in the event of servers dropping should be better.
+
+===== Configuration =====
+
+Some additional configuration is required by the Percona Cluster charm:
+
+<pre>
+mysql:
+  vip: '192.168.77.8'
+  root-password: agoodpassword
+  sst-password: agoodpassword
+mysql-hacluster:
+  corosync_transport: unicast
+</pre>
+
+===== Deployment =====
+
+The Percona Cluster charm is deployed in-conjunction with the HACluster subordinate charm:
+
+<pre>
+juju deploy --config local.yaml -n 3 percona-cluster mysql
+juju deploy --config local.yaml hacluster mysql-hacluster
+juju add-relation mysql mysql-hacluster
+</pre>
+
+After a period of time (it takes a while for all the relations to settle and for the cluster to configure and start), you should have a MySQL cluster listening on 192.168.77.8.
+
+==== RabbitMQ ====
+
+===== Overview =====
+
+RabbitMQ provides a centralized message broker which the majority of OpenStack components use to communicate control plane requests around an OpenStack deployment.  RabbitMQ does provides a native Active/Active architecture.
+
+===== Deployment =====
+
+The RabbitMQ charm is deployed standalone and will automatically form a native Active/Active cluster:
+
+<pre>
+juju deploy -n 3 rabbitmq-server
+</pre>
+
+===== BOOTNOTES =====
+
+Various other messaging options exist for OpenStack other than RabbitMQ (although this is currently seen as the reference choice).  Future versions of the HA reference architecture may provide alternative options utilizing ZeroMQ (for brokerless, scalable messaging) or Apache QPid.
+
+=== OpenStack Services ===
+
+==== Identity Service (Keystone) ====
+
+===== Overview =====
+
+Keystone provides central authentication and authorization services for all OpenStack services.  It also holds the service catalog for all services in an OpenStack deployment.  Keystone is generally stateless; in the reference architecture it can be scaled horizontally - requests are load balanced across all available service units.
+
+===== Configuration =====
+
+The keystone charm requires basic configuration to be deployed in HA mode:
+
+<pre>
+keystone:
+  admin-user: 'admin'
+  admin-password: 'openstack'
+  admin-token: 'ubuntutesting'
+  vip: '192.168.77.1'
+keystone-hacluster:
+  corosync_transport: unicast
+</pre>
+
+The user/password/token should be specific to your deployment and can be used as an initial bootstrap admin account to start seeding your OpenStack cloud with actual user accounts.
+
+The VIP and subnet mask are used to form the HA API endpoint for keystone requests.  Keystone API requests will be load balanced across all available service units.
+
+===== Deployment =====
+
+The Keystone charm is deployed in-conjunction with the HACluster subordinate charm:
+
+<pre>
+juju deploy --config local.yaml -n 3 keystone
+juju deploy --config local.yaml hacluster keystone-hacluster
+juju add-relation keystone keystone-hacluster
+</pre>
+
+Keystone uses MySQL for persistent storage of data:
+
+<pre>
+juju add-relation keystone mysql
+</pre>
+
+===== BOOTNOTES =====
+
+The keystone charm uses the Stateless API HA model (see below).  Some state is stored on local disk (specifically service usernames and passwords). These are synced between services units during hook execution using SSH + unison.
+
+==== Cloud Controller ====
+
+===== Overview =====
+
+The Cloud Controller provides the API endpoints for Nova (Compute) and Quantum (Networking) services;  The API's are stateless; in the reference architecture this service can be scaled horizontally with API requests load balanced across all available service units.
+
+===== Configuration =====
+
+The nova-cloud-controller charm has a large number of configuration options; in-line with other HA services, a VIP and subnet mask must be provided to host the HA API endpoints.  In addition, configuration options for Quantum networking are also provided.
+
+<pre>
+nova-cloud-controller:
+  vip: '192.168.77.2'
+  network-manager: 'Neutron'
+  quantum-security-groups: yes
+ncc-hacluster:
+  corosync_transport: unicast
+</pre>
+
+===== Deployment =====
+
+The nova-cloud-controller charm is deployed in-conjunction with the HACluster subordinate charm:
+
+<pre>
+juju deploy --config local.yaml -n 3 nova-cloud-controller
+juju deploy --config local.yaml hacluster ncc-hacluster
+juju add-relation nova-cloud-controller ncc-hacluster
+juju add-relation nova-cloud-controller mysql
+juju add-relation nova-cloud-controller keystone
+juju add-relation nova-cloud-controller rabbitmq-server
+</pre>
+
+===== BOOTNOTES =====
+
+The nova-cloud-controller charm uses the Stateless API HA model (see below).
+
+==== Image Storage (Glance) ====
+
+===== Overview =====
+
+Glance provides multi-tenant image storage services for an OpenStack deployment;  By default, Glance uses local storage to store uploaded images.  The HA reference architecture uses Ceph in-conjunction with Glance to provide highly-available object storage; the design relegates Glance to being a stateless API and image registry service.
+
+===== Configuration =====
+
+In-line with other OpenStack charms, Glance simply requires a VIP and subnet mask to host the Glance HA API endpoint:
+
+<pre>
+glance:
+  vip: '192.168.77.4'
+glance-hacluster:
+  corosync_transport: unicast
+</pre>
+
+===== Deployment =====
+
+<pre>
+juju deploy --config local.yaml -n 3 glance
+juju deploy --config local.yaml hacluster glance-hacluster
+juju add-relation glance glance-hacluster
+juju add-relation glance mysql
+juju add-relation glance nova-cloud-controller
+juju add-relation glance ceph
+juju add-relation glance keystone
+</pre>
+
+===== BOOTNOTES =====
+
+The glance charm uses the Stateless API HA model (see below).
+
+==== Block Storage (Cinder) ====
+
+===== Overview =====
+
+Cinder provides block storage to tenant instances running within an OpenStack cloud.  By default, Cinder uses local storage exposed via iSCSI which is inherently not highly-available.  The HA reference architecture uses Ceph in conjunction with Cinder to provide highly-available, massively scalable block storage for tenant instances.  Ceph block devices are accessed directly from compute nodes; this design relegates Cinder to being a stateless API and storage allocation service.
+
+===== Configuration =====
+
+In-line with other OpenStack charms, Cinder requires a VIP and subnet mask to host the HA API endpoint.  In addition, Cinder itself is explicitly configured not to use local block storage:
+
+<pre>
+cinder:
+  block-device: 'None'
+  vip: '192.168.77.3'
+cinder-hacluster:
+  corosync_transport: unicast
+</pre>
+
+===== Deployment =====
+
+<pre>
+juju deploy --config local.yaml -n 3 cinder
+juju deploy --config local.yaml hacluster cinder-hacluster
+juju add-relation cinder cinder-hacluster
+juju add-relation cinder mysql
+juju add-relation cinder keystone
+juju add-relation cinder nova-cloud-controller
+juju add-relation cinder rabbitmq-server
+juju add-relation cinder ceph
+juju add-relation cinder glance
+</pre>
+
+===== BOOTNOTES =====
+
+The cinder charm uses the stateless API HA model (see below).
+
+==== Networking (Neutron) ====
+
+===== Overview =====
+
+Neutron provides the virtualized network infrastructure within an OpenStack deployment. Currently it is provided as an alternative to Nova networking as Neutron does not have feature parity yet. Quantum in a HA mode is only supported in >= Grizzly due to the provision of an agent/scheduler infrastructure in this release.
+
+Some aspects of Neutron (the API server for example) are integrated into other OpenStack charms; to complete the networking topology a Neutron Gateway is required to provide Layer 3 network routing and DHCP services for Layer 2 networks.
+
+===== Configuration =====
+
+The neutron-gateway charm only requires configuration for the external network port that will be used for Layer 3 routing connectivity; This must '''not''' be the primary network interface on the server otherwise you will lose connectivity to the gateway server units!
+
+<pre>
+neutron-gateway:
+  ext-port: 'eth1'
+</pre>
+
+===== Deployment =====
+
+<pre>
+juju deploy --config local.yaml -n 2 quantum-gateway neutron-gateway
+juju add-relation neutron-gateway mysql
+juju add-relation neutron-gateway rabbitmq-server
+juju add-relation neutron-gateway nova-cloud-controller
+</pre>
+
+===== BOOTNOTES =====
+
+Neutron was due to have native HA support for Grizzly; however this feature did not land in full.  Currently HA is implemented by re-allocating network resources on a failed service unit to good service units; this is orchestrated using the cluster-relation-departed hook in the quantum-gateway charm.   Fail-over of services can take between 10-30 seconds.
+
+==== Compute (Nova) ====
+
+===== Overview =====
+
+Compute services are provided by Nova in an OpenStack deployment; specifically the nova-compute charm is used to deploy the required OpenStack services onto service units.
+
+Full HA is not possible on Nova Compute service units; however the nova-compute charm can be configured to support secure live migration of running instances between compute service units, supporting a managed, minimal disruption approach to maintenance of the underlying operating system.
+
+===== Configuration =====
+
+<pre>
+nova-compute:
+  enable-live-migration: 'True'
+  migration-auth-type: 'ssh'
+</pre>
+
+===== Deployment =====
+
+<pre>
+juju deploy --config local.yaml -n 3 nova-compute
+juju add-relation nova-compute nova-cloud-controller
+juju add-relation nova-compute rabbitmq-server
+juju add-relation nova-compute glance
+juju add-relation nova-compute ceph
+</pre>
+
+===== BOOTNOTES =====
+
+Live migration is facilitated using libvirt and qemu over a SSH connection. This includes live block migration. A shared filesystem provided by Ceph was considered; however this approach is not truly scalable and CephFS does not have 'stable' status yet.
+
+==== Object Storage (Swift) ====
+
+===== Overview =====
+
+The Swift service provides multi-tenant object storage within an OpenStack deployment. It is analogous with Amazons S3 service.  Objects are distributed across underlying Swift storage nodes for both resilience and scalability.
+
+===== Configuration =====
+
+Swift is actually split into two charms; swift-proxy and swift-storage.  For the HA reference architecture we configure Swift with three storage zones:
+
+<pre>
+swift-proxy:
+  zone-assignment: 'manual'
+  replicas: 3
+  swift-hash: 'fdfef9d4-8b06-11e2-8ac0-531c923c8fae'
+  vip: '192.168.77.12'
+swift-hacluster:
+  corosync_transport: unicast
+swift-storage-z1:
+  zone: 1
+  block-device: 'vdb'
+swift-storage-z2:
+  zone: 2
+  block-device: 'vdb'
+swift-storage-z3:
+  zone: 3
+  block-device: 'vdb'
+</pre>
+
+In-line with other OpenStack charms, a VIP and subnet mask is provided to host the Swift HA API endpoint.
+
+===== Deployment =====
+
+<pre>
+juju deploy --config local.yaml -n 3 swift-proxy
+juju deploy --config local.yaml hacluster swift-hacluster
+juju deploy --config local.yaml swift-storage swift-storage-z1
+juju deploy --config local.yaml swift-storage swift-storage-z2
+juju deploy --config local.yaml swift-storage swift-storage-z3
+juju add-relation swift-proxy swift-hacluster
+juju add-relation swift-proxy keystone
+juju add-relation swift-proxy swift-storage-z1
+juju add-relation swift-proxy swift-storage-z2
+juju add-relation swift-proxy swift-storage-z3
+</pre>
+
+===== BOOTNOTES =====
+
+TO-DO:  Need notes about ring rebalancing and how the swift-proxy charm builds the rings without replicating data between nodes.
+
+==== Dashboard (Horizon) ====
+
+===== Overview =====
+
+The Horizon service provides an end-user and administrator web portal with an OpenStack deployment.  This service is completely stateless and can be scaled horizontally, with requests being load-balanced across all available service units.
+
+===== Configuration =====
+
+<pre>
+openstack-dashboard:
+  vip: '192.168.77.5'
+</pre>
+
+===== Deployment =====
+
+<pre>
+juju deploy --config local.yaml -n 3 openstack-dashboard
+juju deploy hacluster dashboard-hacluster
+juju add-relation openstack-dashboard dashboard-hacluster
+juju add-relation openstack-dashboard keystone
+</pre>
+
+===== BOOTNOTES =====
+
+Although this service is not an API service, it uses the same model for HA.
+
+== Access ==
+
+=== Credentials ===
+
+Keystone will always be listening on its VIP; source the following:
+
+<pre>
+cat > novarc << EOF
+export OS_USERNAME=admin
+export OS_PASSWORD=openstack
+export OS_TENANT_NAME=admin
+export OS_AUTH_URL=http://192.168.77.1:5000/v2.0
+export OS_REGION_NAME=RegionOne
+alias nova="nova --no-cache"
+EOF
+</pre>
+
+=== Endpoints ===
+
+Assuming you have deployed all services, keystone should provide an endpoint listing as detailed below:
+
+<pre>
+keystone endpoint-list
++----------------------------------+-----------+--------------------------------------------------+--------------------------------------------------+---------------------------------------------+
+|                id                |   region  |                    publicurl                     |                   internalurl                    |                   adminurl                  |
++----------------------------------+-----------+--------------------------------------------------+--------------------------------------------------+---------------------------------------------+
+| 1ac5142878a34d0cb9e2290f23c916c6 | RegionOne |   http://192.168.77.2:8774/v1.1/$(tenant_id)s    |   http://192.168.77.2:8774/v1.1/$(tenant_id)s    | http://192.168.77.2:8774/v1.1/$(tenant_id)s |
+| 3836f45f29bb46b0a6709338f9dfc720 | RegionOne |             http://192.168.77.2:3333             |             http://192.168.77.2:3333             |           http://192.168.77.2:3333          |
+| 4526045cbada4a7fa388b5154c32a626 | RegionOne |    http://192.168.77.3:8776/v1/$(tenant_id)s     |    http://192.168.77.3:8776/v1/$(tenant_id)s     |  http://192.168.77.3:8776/v1/$(tenant_id)s  |
+| 4cdbfb34997646c9abb552f03221d5be | RegionOne |             http://192.168.77.4:9292             |             http://192.168.77.4:9292             |           http://192.168.77.4:9292          |
+| 6fef2877df7d4bc3a25ad04629c37abc | RegionOne |          http://192.168.77.1:5000/v2.0           |          http://192.168.77.1:5000/v2.0           |        http://192.168.77.1:35357/v2.0       |
+| 9a1bad74efee4e5abfb4bce76847defb | RegionOne |     http://192.168.77.2:8773/services/Cloud      |     http://192.168.77.2:8773/services/Cloud      |   http://192.168.77.2:8773/services/Cloud   |
+| b382813b93064c6796ba8d13e51d5902 | RegionOne |             http://192.168.77.2:9696             |             http://192.168.77.2:9696             |           http://192.168.77.2:9696          |
+| f21918422c664a399a25483d67078c6a | RegionOne | https://192.168.77.12:8080/v1/AUTH_$(tenant_id)s | https://192.168.77.12:8080/v1/AUTH_$(tenant_id)s |          https://192.168.77.12:8080         |
++----------------------------------+-----------+-------------------------------------------------+--------------------------------------------------+---------------------------------------------+
+</pre>
+
+== Scaling out/in services ==
+
+It's possible to scale out the majority of services in the OpenStack HA reference architecture by simply adding units (in this example glance):
+
+<pre>
+juju add-unit glance
+</pre>
+
+This makes alot of sense for stateless services where requests are load-balanced across all available service units.
+
+The counter applies if you need to reduce the size of a service:
+
+<pre>
+juju remove-unit glance/2
+juju terminate-machine 123
+</pre>
+
+Additional units can be added to stateful services; however right now this just provides additional resilience over and above N+1; this might be useful to retaining full HA when doing a rolling-upgrade of an OpenStack cloud using something like Landscape.
+
+== Juju Deployer ==
+
+Despite the fact that Juju is doing all of the heavy lifting, its still quite a bit of typing/copy paste to deploy OpenStack using charms.  Juju will grow support for 'stacks'; but for the time being use of <nowiki>[[http://launchpad.net/juju-deployer|juju-deployer]]</nowiki> provides a good stop-gap until this feature lands in Juju itself.  This tool is used by the Ubuntu Server Team in all of the automated testing activities that we undertake on OpenStack during its development cycle.
+
+<pre>
+sudo apt-get install juju-deployer
+</pre>
+
+The configuration detailed in this topic is included in <nowiki>[[http://bazaar.launchpad.net/~openstack-charmers/+junk/openstack-ha/view/head:/virtual-maas.cfg|here]]</nowiki>; this configuration file will need specializing for your own deployment environment as detailed above.
+
+To deploy:
+
+<pre>
+juju-deployer -c XXX
+</pre>
+
+Wait for all base services to start and for clusters of MySQL and RabbitMQ to startup completely, then:
+
+<pre>
+juju-deployer -c XXX
+</pre>
+
+== Technical Design ==
+
+=== HA Models ===
+
+==== Stateless API Services ====
+
+For stateless API services, the OpenStack service is reconfigured to listen on [default port - 10], haproxy is installed and configured to listen on the default service port and to load balancer across all service units with the service and a Virtual IP is floated onto of the primary service unit.
+
+This ensures that the full capacity of all service units in the service is used to service incoming API requests - an Active/Active model.
+
+==== Stateful Services ====
+
+For services where state must be stored, such as for MySQL or RabbitMQ, native clustering mechanisms are used to ensure that state is replicated between units within a service without the requirement for a shared block device.
+
+=== hacluster Charm ===
+
+The hacluster charm deals with installing and configuring Corosync and Pacemaker based on what relation data has been provided by the principle charm that its been related to.  This will include services to control from the cluster, shared block devices from ceph, filesystems on those block devices and VIP's.
+
+By default, the hacluster charm will use multicast UDP to perform discovery of cluster members; however this is not generally reliable so this guide use the unicast configuration option of this charm to explicitly configure the members of a cluster in /etc/corosync/corosync.conf.
+
+If you need to check the cluster status of any service that utilizes the hacluster charm (glance in this example):
+
+<pre>
+juju ssh glance/0
+sudo crm status
+</pre>
+
+This will output the current status of resources controlled by Corosync and Pacemaker.
+
+=== Leadership Election ===
+
+==== Pre-clustering ====
+
+Leaders are elected by selecting the older peer within a given service deployment.  This service unit will undertake activities such as creating underlying databases, issuing username and passwords and configuring HA services prior to full clustering.
+
+==== Post-clustering ====
+
+Once a set of service units have been clustered using Corosync and Pacemaker, leader election is determined by which service unit holds the VIP through which the service is accessed.  This service unit will then take ownership of singleton activity within the cluster.

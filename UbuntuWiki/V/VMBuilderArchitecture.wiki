@@ -1,0 +1,210 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== Motivation ==
+
+As Soren mentioned on the VMBuilder mailing list, VMBuilder is in a need for a restructuring. The purpose of this wiki page is to collect and present ideas for refining its architecture and to make it easier to discuss those ideas.
+
+== Design Ideas ==
+
+Here you can find some ideas that have already be proposed. Most of them are
+accompanied by some pseudo Python code.
+
+Feel free to add your own ideas here or to add suggestions to the existing
+ideas.
+
+=== Concurrency and Progress Events ===
+
+Currently VMBuilder is mainly a command-line program but it would we very
+important to loosen the coupling between frontend and backend as much as
+possible so that it becomes easy to write all kinds of frontends.
+
+One of my biggest problems with vmbuilder-gui so far was that with the current
+architecture of VMBuilder you call a method and after that VMBuilder builds your
+VM, for this it calls lots of tools which write status messages to stdout and at
+the end the method returns and the machine is created.
+
+The problem with this is that it doesn't allow for easy user feedback and it is
+incredibly hard to show some progress indicator and display the right
+information from all this output on stdout. This is why I decided to just call
+vmbuilder as a command-line program in a separate process and display its output
+in a textbox in a window.
+
+If we do a major refactoring of VMBuilder I think it might be a good idea to
+establish more flexible messaging between frontend and backend. A way to do this
+could be to put all the functionality needed for building VMs in a class
+VMBuilder. To build a VM you call a method build_vm() of this class which spawns
+a thread in which the actual VM building is done. The method returns immediately
+and the frontend can then call an event loop method that waits for events from
+the building thread or poll for events. The events provide detailed progress
+information. The frontend can then interpret these events and provide the user
+with output to stdout, a gtk UI, a web browser or whatever.
+
+<pre>
+class VMBuilder:
+    def build_vm():
+        start_separate_thread()
+        build_vm_and_fire_progress_events()
+
+    def cancel_build():
+        terminate_build_thread()
+
+    def vmbuilder_main(event_handler):
+        while not build_thread_finished or queue.has_events:
+            if queue.has_events:
+                event = queue.pop(0)
+                event_handler(event)
+
+    def poll_event():
+        if event in queue:
+            return queue.pop(0)
+        
+class Event(object):
+    """"""
+    topic = ''
+    message = ''
+
+class StartedEvent(Event):
+    """Indicates to all listeners that some "process" started"""
+    pass
+
+class FailedEvent(Event):
+    """Indicates to all listeners that some "process" failed"""
+    pass
+
+class FinishedEvent(Event):
+    """Indicates to all listeners that some "process" finished"""
+    pass
+
+class ProgressEvent(ProgressEvent):
+    pass
+
+class PulseProgressEvent(ProgressEvent):
+    """Indicates progress that cannot be quantified"""
+    pass
+
+class FractionProgressEvent(ProgressEvent):
+    """Indicates progress that can be quantified as the fraction of finished and
+    open work"""
+    pass
+
+class TimeProgressEvent(ProgressEvent):
+    """Indicates progress that can be quantified as the time already spent and
+    the time still needed to complete the task"""
+    pass
+</pre>
+
+=== Partial/Resumable Builds ===
+
+Each build should log it's progress (see Progress Events above) to some kind of journal. Subsequent builds with the same parameters should have a way to find the journal and continue the build that had been started. This way, created disks and installed packages can be done once.
+
+Two use cases spring to mind: the first would be so that you could test some logic that occurs at the end of a build over and over. The second would be if you wanted to create a number of VMs that differed only in some final config detail (user name or password or SSH key, etc.)
+
+=== Abstraction of the Build Host and its Capabilities ===
+
+Every VM is built on a host system. Host systems can differ in their
+architecture, their operating system and their build capabilites, which are
+definied by the build tools and to some degree by the drivers (e.g. for
+filesystems) they have installed.
+
+Because of this it might be very useful to create an own abstraction of the host
+system. This abstraction should then allow client code (a frontend) to find out
+about the hosts present and missing capabilities. In the case of missing
+capabilities it could also provide some means to find out what program/package
+needed to be installed to make a missing capability available on this host.
+
+Another important job of this Host class could be to encapsulate all or at least
+as many system operations needed to build a VM as necessary. Such operations are
+creating filesystems, partitioning, mounting images and everything else we call
+command-line programs for. If we could replace all direct calls to command-line
+programs and call Host methods instead we could make VMBuilder a great deal more
+portable.
+
+<pre>
+class Host(object):
+    """This class represents the host machine used to build a virtual machine
+    and provides an abstraction over all the capabilities and services of this
+    machine"""
+
+    bootmanagers = ('grub', 'grub2')
+    filesystems
+
+    def create_vm(self):
+        """Creates an empty VM that is used as the foundation for all the VMs
+        built with VMBuilder"""
+        pass
+
+    def create_filesystem(self, filesystem):
+        pass
+
+    def install_bootmanager(self):
+        pass
+
+    def create_swap_partition(self):
+        pass
+
+    def mount(self):
+        pass
+
+    def unmount(self):
+        pass
+
+    def sed(self):
+        pass
+
+    def run_cmd(self):
+        pass
+</pre>
+
+=== Suites and their Dependencies ===
+
+Each suite supports a set of filesystems, bootloaders, architectures, needs
+special program like apt for example and so on. To be able to actually create a
+VM from a suite the build host must also support at least one of each feature type.
+The more of those features from the suite are also supported on the build host the
+more variants of a suite can be built.
+
+Because of this the features of a suite and the build host that are relevant for
+the build process must be clearly definied and there must be a way to match the
+build dependencies so that the application code and ultimately the frontend can
+find out which configurations can be built and prevent the user from building
+configurations that would fail anyway.
+
+Additionally this would allow the frontend to give the user some hints why some
+configurations cannot be built on the current host maybe it could even try to
+present some solutions to the user.
+
+=== Configurations as Input of the Build Process ===
+
+One important consideration when refactoring VMBuilder is how a frontend
+interacts with the backend. By far the most important question of this
+interaction is how the frontend learns about the kinds of VMs it can build
+so that it can make those options available to the user and how it tells
+the backend to actually build a VM with a given valid configuration.
+
+To allow these interactions we could create a Configuration class that contains
+methods that allow the frontend to learn about its options and to select those
+options (e.g. hypervisor, distribution, suite, kernel flavour, filesystem etc.).
+
+If selecting a certain options rules some other options out (e.g. if you select
+Dapper you can't use ext4) this should also reflected by a Configuration object
+in that it no longer provides those options.
+
+An Configuration object should then be passed to VMBuilders build method which
+then builds a VM which reflects this configuration. The Configuration class
+could also provide a serialization method so that we could save a Configuration
+in a config file and read it back from there.
+
+The GuiModel class of vmbuilder-gui
+(https://code.launchpad.net/~aheck/vmbuilder/vmbuilder-gui) could serve as a
+first starting point for such a class. It implements a MVC model which
+represents first and foremost the configuration of a VM and its possible options.
+
+== Open Questions ==

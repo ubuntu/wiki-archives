@@ -1,0 +1,400 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== Setting Up A Diskless-boot Kerrighed 2.4.1 Cluster in Ubuntu 8.04 ==
+
+Created by BigJimJams on 26/02/2009.
+Updated/adapted by Alicia Mason (RINH) 22.09.09
+
+OK, here's the situation - you've got a number of old machines lying around and you're wondering what to do with them. Someone says 'Why don't you build a cluster?' and you think, not a bad idea, but it sounds difficult! Actually, it's not that bad! :-D After a little searching I came across <nowiki>[[http://www.kerrighed.org|Kerrighed]]</nowiki>, which will allow a number of machines to be seen as one large SMP machine. However, I couldn't find any documentation for an Ubuntu setup of Kerrighed, so I decided to piece together this guide from various other guides (<nowiki>[[http://www.kerrighed.org/wiki/index.php/Installing_Kerrighed_2.3.0|Kerrighed installation]]</nowiki>, <nowiki>[[http://www.kerrighed.org/wiki/index.php/Kerrighed_on_NFSROOT|Kerrighed On NFS]]</nowiki>, <nowiki>[[http://www.kerrighed.org/wiki/index.php/Kerrighed_on_NFSROOT_(contrib)|Alternative Kerrighed on NFS]]</nowiki>, <nowiki>[[http://trac.nchc.org.tw/grid/wiki/krg_DRBL|Kerrighed and DRBL]]</nowiki>, <nowiki>[[http://www.felipe-alfaro.org/blog/2007/12/09/configuring-a-diskless-ubuntu/|Ubuntu diskless configuration]]</nowiki>), which all seemed to do it slightly differently or missed out the occasional step.
+
+Here is the setup used in this guide. We're using seven machines: one is going to be setup as the server, which can run Ubuntu 8.04 with any kernel, as it doesn't necessarily use Kerrighed; the remaining six machines will use the Kerrighed kernel and diskless boot off the server. Our server has two network cards - one is set up for Internet access and the other is connected to a switch, which connects the four nodes. The server network card connected to the switch is manually configured with the IP address 192.168.1.1 and subnet mask 255.255.255.0.
+
+This guide is split into two parts: the first covers how to setup the server for diskless booting the nodes using the current kernel, the second part of the guide covers setting up Kerrighed 2.4.1 and incorporating it into the diskless boot configuration of part one.
+
+=== Preliminary check ===
+
+Before you start, make sure you're ready to start setting up the cluster: get your nodes and server built if necessary and make sure they have the correct hardware. Connect the cluster network up: each node is linked to a port on the switch, as is the server's secondary NIC. Its primary NIC is connected to your general LAN, home router, wall port or whatever you use to access the Net.
+
+The machine that will be your server needs an operating system, too. Any flavour of Ubuntu will do - at the RINH we've been using the NEBC's <nowiki>[[http://nebc.nox.ac.uk/nebc/tools/bio-linux/|Bio-Linux 5]]</nowiki>, but you could use whatever spin you want. If you're new it's best to stick with main Ubuntu releases. Set this machine up with your chosen *buntu and make sure it can connect to the Internet - if you're at an institution, you'll probably need information about the institution's DNS nameservers, domains etc. before you can connect properly.
+
+Once you're sure everything worked ''before'' you started messing with it, you're ready to start.
+
+=== Part 1: Setting up a diskless boot Ubuntu server ===
+
+This will be the basis of our cluster. In order to get a working diskless boot server, there are four main components you'll need to install: a DHCP server to assign IP addresses to each node, a TFTP server to boot the kernel for each node over the network, an NFS server to allow the nodes to share a filesystem, and a minimal Ubuntu 8.04 installation for them to share.
+
+These server components will all run on one box; this box will be your 'head node' or the controller for the cluster. Let's get started!
+
+==== 1.1: Setting up the DHCP server ====
+
+DHCP is what will allow the nodes to get IP addresses from the server. We want to set up and configure a DHCP daemon to run on the server and give IP addresses only to nodes it recognises, so we will tell the daemon their MAC addresses.
+
+** First install the DHCP server package with aptitude or apt-get, as root:
+<pre>
+}}}
+
+** Check that the DHCP server configuration file, `/etc/default/dhcp3-server`, contains the correct Ethernet card to listen to DHCP requests from the nodes: this will be the card that does not connect to the Internet. If you put the wrong card into this file, bad things will happen: your server will start listening to DHCP requests on the LAN and denying them all, since they don't come from nodes. Make sure you know which is the right card! =] In this case it is `eth0`, so make the configuration file look like this:
+{{{
+interfaces="eth0"
+</pre>
+
+** Now you need to configure the DHCP daemon to issue addresses only to nodes, and tell it which addresses to give them. Make sure you have the MAC addresses of your nodes' Ethernet cards handy - you can get them by issuing the command `ip addr` as root from a live DVD or USB stick, for instance, or they may be written on the nodes' casing or on stickers stuck to the cards. You can also just boot the cluster and watch the error messages, picking out the MACs from the denied requests. Edit `/etc/dhcp3/dhcpd.conf`, DHCP's daemon configuration file, so it looks like the following. (Don't worry that the file references certain things you haven't actually installed yet, like a PXE bootloader; you'll put these things in later.)
+<pre>
+option dhcp-max-message-size 2048;
+use-host-decl-names on;
+deny unknown-clients; # This will stop any non-node machines from appearing on the cluster network.
+deny bootp;
+
+option domain-name "kerrighed";          # Just an example name - call it whatever you want.
+option domain-name-servers 192.168.1.1;  # The server's IP address, manually configured earlier.
+
+subnet 192.168.1.0 netmask 255.255.255.0 {
+  option routers 192.168.1.1;              # Server IP as above.
+  option broadcast-address 192.168.1.255;  # Broadcast address for your network.
+}
+
+group {
+  filename "pxelinux.0";                 # PXE bootloader. Path is relative to /var/lib/tftpboot
+  option root-path "192.168.1.1:/nfsroot/kerrighed";  # Location of the bootable filesystem on NFS server
+
+  host kerrighednode1 {
+  	fixed-address 192.168.1.101;          # IP address for the first node, kerrighednode1 for example.
+  	hardware ethernet 01:2D:61:C7:17:86;  # MAC address of the node's ethernet adapter
+  }
+
+  host kerrighednode2 {
+  	fixed-address 192.168.1.102;
+  	hardware ethernet 01:2D:61:C7:17:87;
+  }
+
+  host kerrighednode3 {
+  	fixed-address 192.168.1.103;
+  	hardware ethernet 01:2D:61:C7:17:88;
+  }
+  host kerrighednode4 {
+  	fixed-address 192.168.1.104;
+  	hardware ethernet 01:2D:61:C7:17:89;
+  }
+  host kerrighednode5 {
+  	fixed-address 192.168.1.105;
+  	hardware ethernet 01:2D:61:C7:17:90;
+  }
+  host kerrighednode6 {
+  	fixed-address 192.168.1.106;
+  	hardware ethernet 01:2D:61:C7:17:91;
+  }
+
+  server-name "kerrighedserver"; # Name of the server. Call it whatever you like.
+  next-server 192.168.1.1;       # Server IP, as above.
+}
+</pre>
+
+Now you're done configuring DHCP, so your nodes will be able to get IPs. It's time to add the functionality that will allow the server to transfer a kernel to them afterwards.
+
+==== 1.2: Setting up the TFTP server and PXE bootloader ====
+
+TFTP is the fileserver that will be used by the bootloader to transfer the kernel to your nodes during a PXE boot. We need to install a TFTP server and get a PXE bootloader as part of the `syslinux` package, so that our nodes will be able to get their operating systems via the cluster server.
+
+** As root, install the TFTP server package, `tftp-hpa`, with aptitude or apt-get:
+<pre>
+}}}
+
+** Open its configuration file, `/etc/default/tftpd-hpa`, and make sure it uses the following settings. It can be run as a daemon, but it is normally started by the service daemon "inetd", and it uses the /var/lib/tftpboot directory to get files from:
+{{{
+RUN_DAEMON="NO"
+OPTIONS="-l -s /var/lib/tftpboot"
+</pre>
+
+** Now we need to configure inetd to run the tftp server. Open its configuration file, `/etc/inetd.conf`, and change the `tftp` line to the following. If there is no `tftp` line, add this:
+<pre>
+tftp           dgram   udp     wait    root  /usr/sbin/in.tftpd /usr/sbin/in.tftpd -s /var/lib/tftpboot
+</pre>
+
+** As root, install `syslinux`, which is the system required for you to be able to PXE boot the nodes, and copy the PXE bootloader code from it to the TFTP server directory. This is the bootloader you told the DHCP daemon about in its configuration file earlier.
+<pre>
+}}}
+
+** Still as root, create a directory to store the default configuration for all the nodes. They will search in this directory for configuration files during the PXE boot process.
+{{{
+</pre>
+
+** Still as root, copy your current kernel and initrd from `/boot` to `/var/lib/tftpboot/` in order to test the diskless-boot system. Replace <KERNEL_VERSION> with whatever you are using.
+<pre>
+}}}
+
+** Create the file `/var/lib/tftpboot/pxelinux.cfg/default`. This will be the fallback configuration file that the nodes use to PXE boot when they can't find a file specific to their own IP address. Make the file look like this:
+{{{
+LABEL linux
+KERNEL vmlinuz-<KERNEL_VERSION>
+APPEND console=tty1 root=/dev/nfs initrd=initrd.img-<KERNEL_VERSION> nfsroot=192.168.1.1:/nfsroot/kerrighed ip=dhcp rw
+</pre>
+
+You're done setting up the TFTP and PXE components of the cluster server! Your nodes will now be able to get a kernel and filesystem from the server after they're given IP addresses. Now you need to add NFS capability.
+
+==== 1.3: Setting up the NFS server ====
+
+This capability allows for the bootable filesystem that the nodes will download over TFTP to be accessed and shared over the network, so that the cluster uses one filesystem. First we'll install and set up the server that will do this. 
+
+** As root, install the packages `nfs-kernel-server` and `nfs-common`, which comprise the NFS server program. Keep your root authorisation until you're done working with the NFS server.
+<pre>
+}}}
+
+** Make a directory to store the bootable filesystem in:
+{{{
+</pre>
+
+** Edit `/etc/exports`, which configures NFS file transfers. Add the following in order to make NFS export the filesystem that will be stored in the directory you just made:
+<pre>
+/nfsroot/kerrighed 192.168.1.0/255.255.255.0(rw,no_subtree_check,async,no_root_squash)
+</pre>
+
+** Re-export the file systems, since you just changed how this is done:
+<pre>
+}}}
+
+Your NFS server should be up and running. Now you can add a filesystem for this server to work with.
+
+==== 1.4: Setting up the bootable filesystem ====
+
+** This isn't as simple as just copying the OS files into another directory - you'll need the `debootstrap` package to install the bootable filesystem, so install this first (you should still be root.) Once it's installed, use debootstrap to itself install a minimal Ubuntu Hardy system to the bootable filesystem directory:
+{{{
+</pre>
+
+** Change the current root of the file system to the bootable filesystem directory (stay chrooted until the guide tells you otherwise.) This is so that you can work with the bootable filesystem directly, as if it were a separate machine, while we make some adjustments to it.
+<pre>
+}}}
+
+** Set the root password for the bootable filesystem. You can use a program called apg, the automated password generator, to create a good one.
+{{{
+</pre>
+
+** Mount the `/proc` directory of the current machine as the bootable system's /proc directory, so you can use programs on the bootable FS:
+<pre>
+}}}
+
+** Edit `/etc/apt/sources.list`. We want to add access to some extra Ubuntu repositories in order to be able to download the necessary packages for the FS. Add these lines:
+{{{
+deb http://archive.canonical.com/ubuntu hardy partner
+deb http://archive.ubuntu.com/ubuntu/ hardy main universe restricted multiverse
+deb http://security.ubuntu.com/ubuntu/ hardy-security universe main multiverse restricted
+deb http://archive.ubuntu.com/ubuntu/ hardy-updates universe main multiverse restricted
+deb-src http://archive.ubuntu.com/ubuntu/ hardy main universe restricted multiverse
+deb-src http://security.ubuntu.com/ubuntu/ hardy-security universe main multiverse restricted
+deb-src http://archive.ubuntu.com/ubuntu/ hardy-updates universe main multiverse restricted
+</pre>
+
+** Update the current package listing from the repositories you just added so you'll be able to install things from them:
+<pre>
+]# aptitude update
+</pre>
+
+** Install some packages that our nodes need for using NFS and DHCP:
+<pre>
+$ apt-get install dhcp3-common nfs-common nfsbooted openssh-server
+</pre>
+
+** Now we need to make it work with NFS. Edit `/etc/fstab`, the filesystem index, of the bootable filesystem to look like this:
+<pre>
+proc            /proc         proc   defaults       0      0
+/dev/nfs        /             nfs    defaults       0      0
+</pre>
+
+** Edit `/etc/hosts`. This is so that the DHCP server will know which of the PXE-booted nodes get which IP and hostname. Add all your cluster nodes and the server to it. In our example case, it looks like this:
+<pre>
+127.0.0.1 localhost
+
+192.168.1.1    kerrighedserver
+192.168.1.101  kerrighednode1
+192.168.1.102  kerrighednode2
+192.168.1.103  kerrighednode3
+192.168.1.104  kerrighednode4
+192.168.1.105  kerrighednode5
+192.168.1.106  kerrighednode6
+</pre>
+
+** Do the following to create a symbolic link which will automount the bootable filesystem as /dev/nfs on the server, when it starts up. This should not collide with other existing services in the directory (e.g. anything that looks like /etc/rcS.d/S34xxxxxxx), so check carefully before you create the link. If there's a service with a similar name, disable it before you do anything else.
+<pre>
+$ ln -sf /etc/network/if-up.d/mountnfs /etc/rcS.d/S34mountnfs 
+</pre>
+
+** Edit `/etc/network/interfaces` and add a line to stop Network Manager from managing the nodes' Ethernet cards, as this can cause issues with NFS. Ours looks like the following:
+<pre>
+auto lo
+iface lo inet loopback
+
+iface eth0 inet manual
+</pre>
+
+** Create a user for the bootable system. Replace <username> with whatever you want to call her. `adduser` will ask you for her real name and other details, so play along.
+<pre>
+}}}
+
+** Ensure that the new user is in the `/etc/sudoers` file so she can run root commands on the cluster:
+{{{
+root ALL=(ALL) ALL
+<username> ALL=(ALL) ALL
+</pre>
+
+** Exit the root shell, and then exit from the chrooted bootable filesystem. You're done configuring the bootable FS and can now test it with your common-or-garden kernel.
+<pre>
+}}}
+
+==== 1.5: Testing the diskless boot system sans Kerrighed ====
+
+** Restart the servers on the head node, because you've been messing with them. You need to be root to do this:
+{{{
+</pre>
+
+** Configure the BIOS of each node to have the following boot order: your primary boot device should be PXE, which will usually be described as "network boot" or "LAN boot". In certain cases you may need to enable the network cards as boot devices in the BIOS, reboot, and then set the boot priority. Remember also to disable "halt on all errors", since this can mess up your PXE booting.
+
+** Boot each of the nodes to see if it works. If so, you should be presented with a login prompt, where you can log-in using the username you defined earlier. When it all works, you're ready to try with a Kerrighed kernel.
+
+=== Part 2: Setting up Kerrighed ===
+
+Now that we've got a diskless boot system setup to use as a server, we only need to build the Kerrighed kernel for the nodes to use, put it in the bootable FS, and configure the Kerrighed settings properly in order to have a working SSI (Single System Image) cluster.
+
+The first thing to do is build the new kernel itself.
+
+==== 2.1: Building the Kerrighed kernel ====
+
+** Shutdown the nodes. On the server, chroot back into the bootable filesystem, again as root:
+<pre>
+}}}
+
+** Install some basic necessary packages into the bootable filesystem. These are the dependencies that we'll need to have on the system in order to successfully compile Kerrighed.
+{{{
+$ apt-get install automake autoconf libtool pkg-config gawk rsync bzip2 gcc-3.3 libncurses5 libncurses5-dev wget lsb-release xmlto patchutils xutils-dev build-essential openssh-server ntp
+</pre>
+
+** Get the Kerrighed source ball from INRIA's GForge, and then get a copy of the vanilla 2.6 kernel. This is the kernel that we're going to be modifying into a Kerrighed one. 
+<pre>
+}}}
+
+** Change to the `/usr/src` directory, where the downloaded source tarballs are, and decompress them:
+{{{
+</pre>
+
+** Look inside the decompressed Kerrighed sources. There's a bug here (at time of writing) in the 'modules' directory Makefile: open it up with your favourite editor (we're using Vim here) and take a look. If the bug is present, it will use the `sh` shell as the value of SHELL, right at the top. Under Ubuntu and Debian, that won't work - it'll call `/bin/dash`, which isn't useful here. Change it to `/bin/bash`. The other Makefiles are fine. 
+<pre>
+}}}
+
+** Move back up to the kerrighed source directory, configure the sources to work with the kernel version we just downloaded and decompressed, then change to the "kernel" directory (which is your unpatched Linux kernel). Here, change the kernel configuration file with `make menuconfig`. This will seem like a mysterious process if you've never done it before: `menuconfig` is a pseudo-graphical menu that lets you adjust the capabilities of the kernel to a fine degree; it has control instructions at the top and looks a bit like an old-school DOS program. First, go to `Device Drivers` -> `Network device support` and check that the drivers for your cards have an asterisk * and not a module symbol M next to them. You don't want anything to have the M symbol right now, as we're not using a system that will support kernel modules. Next go back to the main `menuconfig` menu and make sure NFS is enabled by going to `File systems` -> `Network File Systems` and enabling `NFS file system support`, `NFS server support`, and `Root file system on NFS`. Make sure that the NFSv3 options are also enabled, and again, make sure they are part of the kernel and not loadable modules (asterisks and not Ms). Once this is done, exit by pressing Escape twice. 
+{{{
+</pre>
+
+** Now you can make and install the Kerrighed-enabled Linux kernel, and the Kerrighed tools. Then run `ldconfig` to link up the new Kerrighed library files just in case something breaks:
+<pre>
+}}}
+
+** If everything has been correctly installed, you should have the following in the bootable filesystem. Check for them with `cat` or `ls` (list from the Kerrighed 2.4 install guide):
+{{{
+/boot/vmlinuz-2.6.20-krg (Kerrighed kernel)
+/boot/System.map (Kernel symbol table)
+/lib/modules/2.6.20-krg (Kerrighed kernel module)
+/etc/init.d/kerrighed (Kerrighed service script)
+/etc/default/kerrighed (Kerrighed service configuration file)
+/usr/local/share/man/* (Look inside these subdirectories for Kerrighed man pages)
+/usr/local/bin/krgadm (The cluster administration tool)
+/usr/local/bin/krgcapset (Tool for setting capabilities of processes on the cluster)
+/usr/local/bin/krgcr-run (Tool for checkpointing processes)
+/usr/local/bin/migrate (Tool for migrating processes)
+/usr/local/lib/libkerrighed-* (Libraries needed by Kerrighed)
+/usr/local/include/kerrighed (Headers for Kerrighed libraries)
+</pre>
+
+** You're not quite done yet, though. Undocumented on the Kerrighed wiki itself is the fact that you need to add another file system, called configfs, for the cluster to work properly. Make a directory for it on the root of the chrooted filesystem:
+<pre>
+}}}
+
+** Edit /etc/fstab to enable the new configfs. Open it with your favourite editor and add this line:
+{{{
+configfs        /config         configfs        defaults        0 0
+</pre>
+
+** Lastly, add a static boot stanza to your GRUB configuration. The list is in `/boot/grub/menu.lst`. Add a stanza that looks like this:
+<pre>
+title           Ubuntu 8.04.3 LTS, kernel 2.6.20 + Kerrighed 2.4.1
+root            (hd0,0)
+kernel          /boot/vmlinuz-2.6.20-krg root=/dev/sda1 ro quiet splash session_id=1 node_id=1
+</pre>
+
+Whew. Now that Kerrighed is built and installed, you can configure it to work with your cluster.
+
+==== 2.2: Configuring Kerrighed ====
+
+** Edit the `/etc/kerrighed_nodes` file, which is the configuration file that determines how Kerrighed treats its nodes, to define the session ID for all nodes of the cluster, and the number of nodes that have to be available before the cluster autostarts. The session ID can be used to subdivide the cluster, but you don't want to be trying that before you've got your cluster working at all. The `nbmin` parameter should be set to the number of nodes in the cluster. The file should look like the following: 
+<pre>
+session=1  #Value can be 1 - 254 
+nbmin=6    #Number of nodes which load before kerrighed autostarts.
+</pre>
+
+** Check that `/etc/default/kerrighed`, the config file for the Kerrighed service, contains the following. This is to make sure the Kerrighed service is loaded and started: 
+<pre>
+ENABLE=true
+</pre>
+
+** Exit the chrooted bootable filesystem:
+<pre>
+}}}
+
+** Now we must reconfigure the TFTP server we set up earlier, so that it can use the new Kerrighed kernel; right now it is still using the server's main kernel. First, copy the Kerrighed kernel to the TFTP directory:
+{{{
+</pre>
+
+** Edit `/var/lib/pxelinux.cfg/default`, the default PXE boot configuration you modified earlier, so it boots the Kerrighed kernel. It should looks like:
+<pre>
+LABEL linux
+KERNEL vmlinuz-2.6.20-krg
+APPEND console=tty1 root=/dev/nfs nfsroot=192.168.1.1:/nfsroot/kerrighed ip=dhcp rw
+</pre>
+
+** OK, now all the configuring is done! It's time to restart the servers again.
+<pre>
+}}}
+
+** Time to see if it works! Once again, boot up all of the nodes, and if the login prompt appears on their screens, the new kernel has booted fine. Login to one of the nodes (either by ssh or on the node itself) so that you can test Kerrighed's functions on the cluster.
+
+==== 2.3: Starting Kerrighed ====
+
+** You need to be root for these commands, so use the cluster username and `sudo -i` to become root with the cluster root password. You can check if all nodes in the cluster are up and running by typing:
+{{{
+</pre>
+
+** You'll notice that the `krgadm` program administrates the cluster, and all the commands you can give to it are actually different functions of this one program. (An exception is `krgcapset` which deals with process capabilities on the cluster.) When you run the `nodes` command, you should see a list of all nodes in the format node_id:session. The node ID is assigned based on the last octet of the nodes' IP addresses; the session ID, you defined earlier when you configured Kerrighed. In our case we should see the following:
+<pre>
+101:1 102:1 103:1 104:1 105:1 106:1
+</pre>
+
+** To start the kerrighed cluster:
+<pre>
+}}}
+
+** To see if the cluster is running, use `cluster status`:
+{{{
+</pre>
+
+** To list the process capabilites for the kerrighed cluster type:
+<pre>
+}}}
+
+** To allow process migration to take place between nodes in the cluster (for ''one'' process), which doesn't happen by default, type the following:
+{{{
+</pre>
+
+** You can allow all processes launched from your own login shell to migrate like this, which is a lot more useful:
+{{{
+}}}
+
+** Hopefully, by this point your Kerrighed cluster is working nicely. To see if it is working properly and taking account of all its resources, try running `top` from the command line and pressing `1` to list all the CPUs in the cluster. Don't worry if the CPUs have strange IDs, as it's to do with the Kerrighed autonumbering implementation, which is weird. You can also check if the process migration is working from `top`, by starting a number of long running CPU-intensive processes like the Dhrystone benchmarker and seeing if all the CPUs listed reach 100% usage.
+
+I hope this guide has helped some of you, anyway. If you have any comments, suggestions or improvements I'd like to hear from you. If you add it to the Easy Ubuntu Clustering forum <nowiki>[[http://ubuntuforums.org/showthread.php?p=6495259]]</nowiki> it could be useful to other people too.
+
+(AM) I hope everyone has fun with their clusters - gute Chance!

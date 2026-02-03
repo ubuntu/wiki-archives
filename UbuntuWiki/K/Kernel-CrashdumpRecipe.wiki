@@ -1,0 +1,150 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+
+== Introduction ==
+
+The Ubuntu Kernel Crash Dump is a mechanism that enable enterprise style post-mortem crash analysis in Linux operating systems. It uses a special mode of kexec which allows to automatically boot a secondary kernel whenever a crash (Oops/panic) occurs. This secondary kernel will then save the state and memory of the primary kernel to a certain location of the filesystem (''/var/crash'' on newer releases). This file can then be used by '''crash''' to gather detailed information about the problem.
+
+== Installation ==
+
+For convenience, the kernel crash dump utility has been packaged in Ubuntu.  It can be installed with the following command: <pre>
+sudo apt-get install linux-crashdump }}}
+
+Newer versions of the package will automatically add an entry ''crashkernel=384M-2G:64M,2G-:128M'' to the kernel commandline in grub. However this may cause problems on systems with less than 2G of memory (see <nowiki>[[#Troubleshooting|troubleshooting]]</nowiki>).
+
+=== ppc64el installation ===
+For those running ppc64el please follow the crash kernel recommendations found on the <nowiki>[[ ppc64el-Recommendations#Crash_Kernel_recommendations | ppc64el Recommendations page]]</nowiki>.
+
+== Verifying linux-crashdump installation ==
+
+How to verify the linux-crashdump installation <nowiki>[[http://web.archive.org/web/20200326104137/https://help.ubuntu.com/lts/serverguide/kernel-crash-dump.html|was once documented for Ubuntu 14.04]]</nowiki>. This may or may not apply to later releases.
+
+== Inspecting the crash dump using crash ==
+
+In order to use the generated crash dump with '''crash''' one needs the ''vmlinux'' file which has the debugging information. This is part of the kernel ddeb package which can be found at:
+
+<nowiki>[[http://ddebs.ubuntu.com/pool/main/l/linux/]]</nowiki>
+
+{{{
+sudo tee /etc/apt/sources.list.d/ddebs.list << EOF
+deb http://ddebs.ubuntu.com/ $(lsb_release -cs)          main restricted universe multiverse
+deb http://ddebs.ubuntu.com/ $(lsb_release -cs)-security main restricted universe multiverse
+deb http://ddebs.ubuntu.com/ $(lsb_release -cs)-updates  main restricted universe multiverse
+deb http://ddebs.ubuntu.com/ $(lsb_release -cs)-proposed main restricted universe multiverse
+EOF
+
+sudo apt-key adv --keyserver keyserver.ubuntu.com --recv-keys ECDCAD72428D7C01
+sudo apt-get update
+sudo apt-get install linux-image-$(uname -r)-dbgsym
+</pre>
+
+/!\ Be aware that those packages are huge! (~600 MB)
+
+When installed, the debug kernel can be found under ''/usr/lib/debug/boot/'' and '''crash''' is started by: <pre>
+crash <debug kernel> <crash dump> }}}
+
+Unfortunately the tool does not allow to look at a 32bit dump on a 64bit system and the other way round. Also it tends to be quite picky about matching up kernel and dump.
+
+== Inspecting the crash dump using apport-retrace ==
+
+To get a local retrace, you need apport-retrace and then run: {{{
+apport-retrace --stdout --rebuild-package-info /var/crash/linux-image*.crash }}}
+
+/!\ Again, this can take a while because it needs to download the kernel debug package.
+
+=== Enabling various types of panics ===
+
+To make Linux kernel to panic on different situations please use:
+
+{{{
+echo 1 > /proc/sys/kernel/hung_task_panic          # panic when hung task is detected
+echo 1 > /proc/sys/kernel/panic_on_io_nmi          # panic on NMIs from I/O
+echo 1 > /proc/sys/kernel/panic_on_oops            # panic on oops or kernel bug detection
+echo 1 > /proc/sys/kernel/panic_on_unrecovered_nmi # panic on NMIs from memory or unknown
+echo 1 > /proc/sys/kernel/softlockup_panic         # panic when soft lockups are detected
+echo 1 > /proc/sys/vm/panic_on_oom                 # panic when out-of-memory happens
+</pre>
+
+== Troubleshooting ==
+
+=== Allocated memory for the crash kernel ===
+
+When testing crash dump sometimes the system just seems to lock up. The main issue there is how much memory was assigned for the crash kernel. When kexec starts the crash kernel it requires enough memory to fit the unpacked kernel, the compressed initrd and the uncompressed initrd (at least while unpacking). If there is not enough memory allocated, things usually go wrong without any hint. To solve this there are the following options:
+
+# Increase the allocation by changing ''crashkernel='' on the grub command line or in ''/boot/grub/grub.cfg'' (for grub2) or ''/boot/grub/menu.lst'' (for old grub). To avoid loosing the settings when running '''update-grub''' the change can be made in ''/etc/default/grub.d/kexec-tools.cfg''.
+# Reduce the size of the initrd. By default this is set to include all the modules and firmware ever needed. This allows using the same initrd on any system but increases its size a lot. In order to limit it to the modules really required to boot on the current hardware, change the following in ''/etc/initramfs-tools/initramfs.conf'': <pre>
+ ...
+ MODULES=dep
+ ... }}}
+
+=== Crash kernel fails to load: Hang ===
+
+This can be frustrating to debug, especially if you're unable to record the console messages from the new kexec kernel. A serial console attached to the system is best here to continue debugging. An easy troubleshooting step is to systematically eliminate the additional kernel parameters passed to the crash kernel and retrying. These arguments are kept in '''/etc/init.d/kdump''': {{{
+...
+##### Append kdump_needed for initramfs to know what to do, and add
+##### maxcpus=1 to keep things sane.
+        APPEND="$APPEND kdump_needed maxcpus=1 irqpoll reset_devices"
+
+##### --elf32-core-headers is needed for 32-bit systems (ok
+##### for 64-bit ones too).
+        log_action_begin_msg "Loading crashkernel"
+        kexec -p "$KERNEL_IMAGE" --initrd="$INITRD" --append="$APPEND"
+        log_action_end_msg $?
+... }}}
+
+Leave '''$APPEND''' and '''kdump_needed'''. Start by removing '''reset_devices''' and then
+install the new kexec crash kernel configuration: {{{
+sudo service kdump start }}}
+
+Then retest; if that doesn't work, remove the next argument, rinse and repeat.
+
+=== ACPI memory hotplug issues ===
+
+If you see the following call trace from your serial console after kexecing into the crash kernel you may need to append 'acpi_no_memhotplug' to the crashdump kernel cmdline.
+
+{{{
+Call Trace:
+ dump_stack+0x45/0x57
+ warn_alloc_failed+0xf2/0x140
+ __alloc_pages_nodemask+0x2e4/0xa10
+ vmemmap_alloc_block+0xb5/0xbf
+ vmemmap_alloc_block_buf+0x15/0x3b
+ vmemmap_populate+0xb3/0x20c
+ sparse_mem_map_populate+0x29/0x38
+ sparse_add_one_section+0x71/0x16e
+ __add_pages+0xb9/0x280
+ arch_add_memory+0x71/0xf0
+ add_memory+0xdf/0x210
+ acpi_memory_device_add+0x1ab/0x282
+ acpi_bus_attach+0xe3/0x196
+ acpi_bus_scan+0x70/0x8f
+ acpi_scan_init+0x89/0x1d3
+ acpi_init+0x272/0x28f
+ do_one_initcall+0xb3/0x200
+ kernel_init_freeable+0x17b/0x21a
+ kernel_init+0xe/0xe0
+ ret_from_fork+0x3f/0x70
+</pre>
+
+Edit KDUMP_CMDLINE_APPEND in /etc/default/kdump-tools such that it is un-commented and contains 'acpi_no_memhotplug' as well. Then restart the kdump service.
+
+== Release specific notes ==
+
+=== Ubuntu 12.04 "Precise Pangolin" ===
+
+* <nowiki>[[https://bugs.launchpad.net/ubuntu/+source/kexec-tools/+bug/785394|Bug 785394: Hard-coded crashkernel=... memory reservation in /etc/grub.d/10_linux is insufficient]]</nowiki><<BR>>
+ The default allocation for systems below 2G is not enough for the current initrd size. Manually adapting the size allows to use the crash kernel.
+* The current (1.3.7-2) version of makedumpfile reports to be incompatible with the 3.2 kernel. The dumps created seem to be ok.
+
+=== Ubuntu 15.10 "Wily Werewolf" and later ===
+* <nowiki>[[https://bugs.launchpad.net/ubuntu/+source/kexec-tools/+bug/1496317|Bug 1496317: kexec fails with OOM killer with the current crashkernel=128 value]]</nowiki><<BR>>
+The current allocation for the crashkernel value is too low to correctly load the default initrd.img. This means that the OOM killer will break the crash dump capture procedure.  While the bug is being worked on, you can increase the value of crashkernel to something more than 150Mb to work around the bug.

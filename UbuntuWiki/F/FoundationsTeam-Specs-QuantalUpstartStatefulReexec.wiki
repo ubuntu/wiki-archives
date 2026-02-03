@@ -1,0 +1,525 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+-----
+
+* '''Launchpad Entry''': UbuntuSpec:foundations-q-upstart-stateful-re-exec
+* '''Created''': 18 May 2012
+* '''Contributors''': JamesHunt
+* '''Packages affected''': upstart
+* '''Related blueprints''': UbuntuSpec:foundations-q-event-based-initramfs
+* '''Code''': <nowiki>[[https://code.launchpad.net/~upstart-devel/upstart/stateful-reexec|lp:~upstart-devel/upstart/stateful-reexec]]</nowiki>
+               <nowiki>[[https://code.launchpad.net/~jamesodhunt/dbus/create-connection-from-fd|lp:~jamesodhunt/dbus/create-connection-from-fd]]</nowiki>
+
+=== Summary ===
+
+This specification describes the plan to implement "stateful re-exec"
+support in Upstart.
+
+Stateful re-exec refers to being able to restart Upstart ''and''
+maintain the internal state across an <code>exec(2)</code> call.
+
+Upstart already has the ability to re-exec itself, but it loses all
+internal state when doing this since it is equivalent to simply
+restarting Upstart. This causes problems since after re-exec there may
+be processes running which Upstart ''had'' been managing, but post-exec
+it has no knowledge of them. As such, re-exec is only used on shutdown
+to minimise issues.
+
+=== Release Note ===
+
+The "stateful re-exec" feature makes no changes to the externals of Upstart, it simply means that "`telinit u`" is now safe to use and will restart Upstart with no loss of state. The man page for `telinit(8)` has been updated to state this. "`telinit u`" should be called when either Upstart itself or any of its dependent libraries are upgraded (`libc`, `libnih` and `libjson`) to ensure that the running instance of Upstart is at the same version as the on-disk version, and that it is using the latest versions of all on-disk dependent libraries.
+
+Note that now, Upstart relies on (and is therefore linked to) `libjson.so` to handle serialisation and deserialisation of state.
+
+=== Rationale ===
+
+By providing the ability to retain state, the following
+goals can be achieved:
+
+* Allow Upstart to be started in the initramfs and then be re-execed
+   such that state is passed through to the main system.
+
+   See:
+   https://blueprints.launchpad.net/ubuntu/+spec/foundations-q-event-based-initramfs
+
+* Allow Upstart to be upgraded and not require a reboot to take advantage of new features.
+* Allow clean upgrades to libc6 (eglibc) and NIH (being two libraries Upstart relies upon).
+
+   Currently, upgrading either of these libraries is problematic since because Upstart cannot perform stateful re-exec, it will still be holding open the original versions of these files causing shutdown issues. For full details, see bug Bug:985755.
+
+=== Use Cases ===
+
+* Clio is a sysadmin. She wants to be able to upgrade any userland package on her 10,000 servers without having to schedule down-time.
+
+* Mnemosyne is an experienced Ubuntu user who lives has her life on her laptop. She hardly ever reboots, preferring instead to suspend where possible. However, she'd still like to know she's running the latest and greatest version of all the (non-kernel) packages.
+
+* Morpheus is a very cautious server owner. He only runs LTS releases and want to be assured that upgrading to a new LTS will be 100% reliable. He always reboots after an upgrade, but expects services he left running before the upgrade to continue to be running after upgrade (bug Bug:985755).
+
+=== Requirements ===
+
+* Ability to serialise Upstarts internal state.
+
+* Ability to deserialise previously serialised state back into Upstart.
+
+* Ability to upgrade from a version not supporting stateful re-exec to a version that does support it.
+
+* Ability to handle ''downgrade'' from a version supporting stateful re-exec to a version that does.
+
+* Ability to upgrade from a version supporting stateful re-exec to a newer version that also supports it but whose serialisation format may have changed.
+
+* Ability to ''downgrade'' from a version supporting stateful re-exec to an older version supporting it but whose serialisation format may have changed.
+
+* Ability for any version of Upstart supporting stateful re-exec to be able to generate serialisation data at the current serialisation data format version.
+
+* Ability for any version of Upstart supporting stateful re-exec to be able to generate serialisation data at any previous serialisation data format version.
+   (to allow for stateful downgrades - re-exec scenario "<code>SSD-L</code>").
+
+* Ability to handle failure to read the existing state partially or fully.
+
+* Ability to handle failure to parse the existing state partially or fully.
+
+* The serialisation data should encode the version of Upstart.
+
+* The serialisation data should encode the version of the serialisation format.
+
+* The serialisation data should encode Session objects.
+
+* The serialisation data should encode Event objects.
+
+* The serialisation data should encode JobClass objects.
+
+* The serialisation data should encode Job objects.
+
+* Abilility for all Jobs and associated processes running prior to the stateful re-exec to continue to be managed by Upstart after the stateful re-exec.
+
+* Ability to retain command-line settings across an exec.
+
+   Currently, Upstart clears the command-line to "prettify" output for <code>ps(1)</code>. We should probably continue to do this, but ''also'' save <code>argv</code> to allow the re-exec to be run with the same options as when it was originally started (it would be confusing to boot with debug mode and have it revert to non-debug mode after a re-exec).
+
+=== Design ===
+
+Upstart needs the ability to perform the following operations in order:
+
+# Serialise its existing internal state.
+# Re-exec itself.
+# Read the serialised state and deserialise it back into its internal data structures.
+# Continue operating as normal.
+
+Although the state passing will not be "total" (not every single
+internal data structure will or can be handled), after the
+deserialisation Upstart should have as near full knowledge of the state
+prior to the re-exec as possible.
+
+=== Implementation ===
+
+==== State-Passing ====
+
+Upstart will re-exec itself using the following process.
+
+Note that the ''parent'' becomes the new instance of Upstart, ''not''
+the child (since Upstart must continue to be PID 1).
+
+ 1. Admin or maintainer script calls "<code>telinit u || :</code>" to request Upstart restart itself.
+
+    This is the existing re-exec interface so Upstart will be changed to now also perform state-passing.
+
+    Basic (non-stateful) re-exec support is currently available and used by <code>/etc/init.d/umountroot</code> to ensure Upstart doesn't hold "stale" links to old library versions which would cause shutdown to hang.
+
+ 1. The <code>SIGTERM</code> handler calls a new re-exec handling function.
+
+    This ensures Upstart is not sitting in the main loop.
+
+    Ensure all signals are blocked.
+
+ 1. Dispatch all D-Bus messages to ensure no <code>initctl</code> commands are being handled.
+
+    Upstart is now effectively "paused" (no longer accepting D-Bus (and also initctl) commands, handling jobs nor emitting events).
+ 
+ 1. Serialise all required internal state.
+
+    If this fails, degrade to stateless re-exec.
+
+ 1. Create a pipe.
+
+ 1. Ensure pipe fds are '''NOT''' marked <code>O_CLOEXEC</code> such that they perist across an <code>exec(2)</code>.
+
+ 1. Parent sets <code>O_CLOEXEC</code> for all D-Bus file descriptors so they are NOT closed on exec.
+
+ 1. Parent sets <code>O_CLOEXEC</code> for all Log file descriptors so they are NOT closed on exec.
+
+ 1. Fork to create a child process.
+
+ 1. Parent closes writing end of pipe.
+
+ 1. Parent <code>exec(2)</code>s the new version of <code>/sbin/init</code> passing a magic flag ("<code>--state-fd <fd></code>") which informs Upstart to read state from the specified file descriptor.
+
+    The <code>--state-fd</code> option is new and distinct from the existing <code>--restart</code> flag which performs a "bare" re-exec.
+
+    The child is now actually the "old" process (running the original version of Upstart), whereas the parent is now the "new" process (running the most-recently-installed version of Upstart (which ''may'' be older than the old!!)
+
+ 1. Parent blocks reading from file descriptor "<code><fd></code>".
+
+ 1. Child meanwhile closes reading end of the pipe.
+
+ 1. Child closes D-Bus control server connection to allow new parent to open it.
+
+ 1. Child closes D-Bus control bus connection to allow new parent to open it.
+
+ 1. Child writes state in JSON format (as generated by original parent) to writing end of pipe and exits.
+
+    If it fails to complete the write in "some amount of time" (say 10 seconds?), this is deemed to indicate that the new parent doesn't support serialisation but the check performed above failed somehow, so it should log an error to the system log and exit.
+
+    This scenario '''should''' be impossible, but handle it anyway.
+
+ 1. Parent reads serialisation data from reading end of pipe and reconstructs the internal objects (sessions, events, JobClasses, Jobs).
+
+ 1. Parent closes reading end of pipe.
+
+ 1. Parent clears <code>O_CLOEXEC</code> flag for all deserialised D-Bus and Log objects such that they are not leaked to Jobs.
+
+ 1. Parent continues with normal initialisation.
+
+==== Preparatory Tasks ====
+
+Before attempting stateful re-exec, PID 1 needs to handle the following:
+
+===== D-Bus =====
+
+* Complete servicing of all possible D-Bus client requests (<code>initctl</code>, etc)
+   (by flushing the D-Bus queue for the control bus).
+   Note that some existing D-Bus messages will linger (for example those
+   associated with long-running <code>initctl emit foo</code>-type scenarios)
+   and will therefore need to be encoded.
+* Obtain file descriptor for the control bus from D-Bus.
+* Close the control server (used by <code>initctl</code> for root only)
+   This has to be done to stop any new requests and because the new
+   Upstart will want to create it.
+* Clear the close-on-exit flag for the control bus file descriptor.
+* Serialise the control bus file descriptor.
+* Serialise all blocked messages (<code>Blocked->message</code>) along with
+   their D-Bus serial number (<code>dbus_message_get_serial(blocked->message->message)</code>).
+   This involves first marshalling the D-Bus message using <code>dbus_message_marshal()</code>.
+* Obtain the file descriptors for all existing D-Bus connections by
+   iterating through <code>control_conns</code> and calling
+   <code>dbus_connection_get_unix_fd()</code> on each connection prior to serialising them.
+
+===== ptrace =====
+
+All processes curently being ptraced need to be handled. The most reasonable approach would seem to be to wait for the application to reach the <code>started</code> state.
+
+However, that is dangerous. Imagine this scenario:
+
+# user creates a new job and mis-specifies the <code>expect</code> stanza ("<code>export daemon</code>" when the application doesn't even fork).
+# <code>sudo apt-get dist-upgrade</code> pulls in new version of Upstart.
+# PID 1 waits for the erroneous app to complete 2 forks.
+
+The final step will never complete so the <code>apt-get dist-upgrade</code> will hang indefinately.
+
+We could "timeout" after a few seconds of waiting maybe but that approach is ugly.
+
+Since <code>ptrace(3)</code> '''IS''' retained across an <code>exec(3)</code> of the parent ("debugger") process, no
+special treatment is required: processes which were being ptraced prior
+to the re-exec will continue to trap and pass control to the re-exec'ed
+PID 1 after the re-exec.
+
+==== Serialisation ====
+
+<nowiki>[[http://tools.ietf.org/html/rfc4627|JSON]]</nowiki> will be used to represent the serialised state.
+
+Rationale:
+
+* JSON is simple.
+* JSON is standardised.
+* JSON is able to represent arrays and objects.
+* JSON is UTF-8 encoded and human-readable.
+* There are a number of available parsers.
+
+===== Process =====
+
+The minimum set of internal objects that are required to perform stateful re-exec are:
+
+* <code>Session</code>
+* <code>Event</code>
+* <code>JobClass</code>
+* <code>Job</code>
+* <code>Log</code>
+
+====== Serialisation ======
+
+ 1. Create a "header" encoding meta data about the serialisation, including:
+*** Upstart version
+*** timestamp
+*** serialisation data format version
+# Serialise all <code>Session</code> objects.
+# Serialise all <code>Event</code> objects including the <code>blocking</code> list.
+# Iterate over all <code>JobClass</code> objects in <code>job_classes</code> and all
+    <code>Job</code> instances referenced by each <code>JobClass</code> and serialise
+    all <code>Job</code> objects "below" (as a child of) their associated parent <code>JobClass</code> in the JSON.
+ 1. For those jobs whose associated <code>JobClass.console</code> is <code>CONSOLE_LOG</code>, serialise a <code>Log</code> object.
+
+Notes:
+
+* Event though <code>Event</code> objects and reference <code>Job</code> objects and ''vice versa'', the serialisation can be handled in a single pass since as-yet-unserialised entities can be safely referred to by name or index value since we know we will eventually serialise all entities.
+
+* If Upstart detects that the user is down-grading and it sees syntax it doesn't understand, a flag will be added to the <code>ConfSource</code> stating that the job cannot be restarted (although it can still be stopped).
+
+* <code>Log</code> may pose some problems since it includes an <code>NihIo</code> and an <code>NihIoBuffer</code>.
+
+   The <code>NihIoBuffer</code> is relatively easy to serialise, but the <code>NihIo</code>, along with including an <code>NihIoBuffer</code> also includes an <code>NihIoWatch</code>.
+
+====== Deserialisation ======
+
+# Read the serialisation data ensuring the "header" can be understood.
+# Deserialise the <code>Session</code> objects.
+# Deserialise the <code>Event</code> objects.
+# Deserialise the <code>JobClass</code> objects.
+# Deserialise the <code>Job</code> objects associated with each <code>JobClass</code> object.
+# Create a ConfSource with a "special" path ("serialized_conf_source" or similar) that is not backed by any actual file. If a job that is already running from the initramfs is stopped and started, at that point you get the correct ''new'' <code>/etc/init/job.conf</code> from the main system.
+
+Notes:
+
+* Since an <code>Event</code> can block a <code>Job</code> and a <code>Job</code> has pointers to one or more <code>Event</code> objects, the deserialisation cannot be performed in a single pass.
+
+   To resolve this circular loop, first <code>Events</code> are deserialised '''without''' their <code>blocking</code> list. Next, <code>JobClass</code> and <code>Job</code> objects are serialised, again '''without''' associated any <code>blocking</code> lists associated with <code>Job</code>s.
+   Once all objects are (partially) deserialised, a second pass is made where all <code>blocking</code> lists are "fixed up" (<code>blocked_new()</code> is called). This now works since <code>blocked_new</code> now has atleast a skeletal object (<code>Job</code>, <code>Event</code>, ''et cetera'') to reference.
+   After the second pass, all objects are able to correctly reference one another.
+
+===== Data Representation =====
+
+====== Schema ======
+
+The format of the JSON should resemble:
+
+{| class="wikitable"
+|-
+| <#FF0000> FIXME
+|}
+
+====== Example ======
+
+See http://people.canonical.com/~jhunt/upstart/stateful-reexec/state.json
+
+=== Re-Exec Scenarios ===
+
+Table showing possible re-exec scenarios.
+
+{| class="wikitable"
+|-
+| '''Scenario'''
+| '''Importance'''
+| '''Old Version'''
+| '''New Version'''
+| '''Scenario'''
+| '''Re-Exec Strategy'''
+| '''Notes'''
+|-
+| <code>NNU</code>
+| high
+| not supported
+| not supported
+| non-stateful upgrade
+| stateless
+| Behaviour today
+|-
+| <code>NSU</code>
+| high
+| not supported
+| supported @ s-version 'x'
+| non-stateful to stateful upgrade
+| stateless (1)
+| Upgrading to first version of Upstart supporting stateful re-exec
+|-
+| <code>NSU-X</code>
+| low
+| non-Upstart init, not supported
+| supported @ s-version 'x'
+| non-stateful to stateful upgrade
+| stateless (1)
+| Non-Upstart init daemon upgrading to a version of Upstart supporting stateful re-exec
+|-
+| <code>SSU-E</code>
+| high
+| supported @ s-version 'x'
+| supported @ s-version 'x'
+| stateful to stateful upgrade
+| stateful
+| Expected common case (2) - versions equal.
+|-
+| <code>SND</code>
+| medium
+| supported @ s-version 'x'
+| not supported
+| stateful to non-stateful downgrade
+| stateless
+| 
+|-
+| <code>SSU-G</code>
+| high
+| supported @ s-version 'x'
+| supported @ s-version 'y'
+| stateful to newer stateful version upgrade
+| stateful
+| moving to newer (greater than) version
+|-
+| <code>SSD-L</code>
+| medium
+| supported @ s-version 'y'
+| supported @ s-version 'x'
+| stateful to older stateful version downgrade
+| stateful (3)
+| moving to old (less than) version
+|}
+
+Key and Notes:
+
+* The importance column refers to the relative priority of particular scenarios: "high" '''must''' be supported, "medium" '''may''' be supported (this cycle).
+* Terminology
+** "supported" refers to re-exec support being available.
+** "s-version" refers to the serialisation data format version, not the version of Upstart itself.
+** "stateful" refers to stateful re-exec.
+** "stateless" refers to a "bare" re-exec with no state passing.
+** <code>NSU-X</code> is essentially the same scenario as <code>NSU</code> but is listed for completeness.
+     This scenario may become relevant to <nowiki>[[http://www.debian.org|Debian]]</nowiki> very soon. Ubuntu handled this scenario when Upstart was first introduced by '''not''' re-exec'ing `/sbin/init` after Upstart was first installed but having Upstart be the init daemon post-reboot.
+* Footnotes
+** (1) - non-stateful version of Upstart is unaware of newer versions stateful re-exec abilities.
+** (2) - the serialisation data format version should change as little as possible.
+** (3) - Newer versions of Upstart must support all previous serialisation versions.
+
+=== Risks ===
+
+==== System Testing ====
+
+Currently, there is no facility that would allow re-exec scenarios to be exercised against multiple <code>/sbin/init</code> binaries.
+
+That is to say, although the scenarios can be tested indirectly by generating the appropriate JSON and piping it into <code>/sbin/init</code>, there is no way to '''automatically''' test the real scenario where, for example, version 'X' of Upstart is upgraded to version 'Y'.
+
+==== 3rd Party Library ====
+
+Making use of a 3rd-party library for JSON parsing is a risk in that it
+won't be using the <nowiki>[[https://launchpad.net/libnih|NIH Utility Library]]</nowiki>
+and so won't have all the benefits associated with using it.
+
+To mitigate this risk, the chosen library will be audited and improved
+where necessary before being used. Additionally, the set of tests for
+this feature will be extremely large and must cover all possible failure
+scenarios.
+
+==== Unrepresentable State ====
+
+This design requires any changes to internal data structures to be accompanied by:
+
+* Appropriate updates to the serialisation and deserialisation code.
+* Additional stateful re-exec tests to cover the changed internals.
+
+There are 2 problems with this:
+
+* It's a manual process, so great care needs to be taken to ensure it happens! :)
+   This could be mitigated by somehow auto-generating the serialisation/deserialisation code, but that would be very complex. A cheap compromise would be to ensure that every change to Upstart forced a complete set of '''system''' tests to run that exercise all possible stateful re-exec scenarios to atleast ensure that stateful re-exec will not break.
+
+* It makes any future changes to Upstart internals potentially very costly in terms of time and could slow down development speed as a result.
+
+   Aside from automation, it is unclear how to further mitigate this issue.
+
+It is worth noting that Scott included (partial?) stateful re-exec support in early revisions of Upstart (versions <code>0.2.0</code> to <code>0.3.2</code> inclusive), but eventually dropped this feature due to the maintenance cost.
+
+==== D-Bus handling ====
+
+D-Bus marks all sockets as O_CLOEXEC and it does not appear there is an
+easy way to determine the fds D-Bus has in use and clear that bit.
+
+=== Testing ===
+
+This is a large feature which will require extremely careful unit, functional, and system testing.
+
+All failure scenarios should be included in the tests (where possible).
+
+* Ensure that a stopped system job can be serialised, deserialised and started.
+* Ensure that a system job blocked on an event can be serialised, deserialised and started.
+* Ensure that a user job blocked on an event can be serialised, deserialised and started.
+* Ensure that an event blocked on a system job can be serialised, deserialised and started.
+* Ensure that an event blocked on a user job can be serialised, deserialised and started.
+* Ensure that a stopped system job in a chroot can be serialised, deserialized and started.
+* Ensure that a stopped user job can be serialised, deserialised and started.
+
+<pre>
+
+  for proc in pre-start main post-start pre-stop post-stop
+  do
+    for type in system user
+    do
+      for action in "allowed to continue" stopped restarted
+      do
+        echo "Ensure that a $type job running the $proc process can be serialised, deserialised and $action".
+      done
+    done
+  done
+
+</pre>
+
+* Ensure that a task which dies ''after'' serialisation but ''before'' deserialisation is handled.
+* Ensure that a respawn service which dies ''after'' serialisation but ''before'' deserialisation is handled.
+* Ensure that a respawn service which forks once ''after'' serialisation but ''before'' deserialisation is handled.
+* Ensure that a respawn service which forks twice ''after'' serialisation but ''before'' deserialisation is handled.
+
+=== Impossible Scenarios ===
+
+The following is a list of scenarios that cannot be handled directly:
+
+* Upstart is downgraded to a version that requires an older libnih, but libnih itself is not downgraded.
+* libnih's ABI changes so it is upgraded. Upstart is then re-exec'ed but either this happens before an updated Upstart package is installed or no new Upstart package is available to install.
+
+These scenarios must be handled via packaging policy.
+
+=== Unresolved Issues ===
+
+* If Upstart is downgraded to a version which supports stateful re-exec but whose serialisation data format cannot represent the current state, should Upstart refuse to perform stateful re-exec or simply "do the best it can"?
+
+   Ideally, any newer version of Upstart will support every previous serialisation data format version such that this scenario be handled correctly. However:
+
+** Downgrading like this should not be a common operation (so should we spend the effort doing this?)
+** Ideally we need a way to query the serialisation data formation version prior to attempting the re-exec.
+
+     We could add a <code>--serialisation-version</code> flag and have Upstart fork, run "<code>/sbin/init --serialisation-version</code>" first and if it detects that it cannot represent the state for the new version refuse to retain state on re-exec.
+
+=== Limitations ===
+
+We are extremely keen to involve the community from an early stage to aide in testing and to allow them to provide feedback on this useful feature. However, since the code is still in development, this initial "preview" of the stateful re-exec feature will have a number of limitations:
+
+* Not yet possible to pass D-Bus connections across the re-exec.
+   (requires <code>dbus_connection_open_from_fd()</code> from lp:~jamesodhunt/dbus/create-connection-from-fd)
+
+   '''DETAILS:''' all D-Bus clients, including the Upstart bridges will be forcibly disconnected from Upstart. This means that for example any new udev events resulting from plugging hardware post-boot will not be propagated back to Upstart for the duration between the bridge stopping and (the new) Upstart respawning it.
+
+   '''IMPACT:''' Medium/High.
+
+   '''OUTCOME:''' Must be fixed.
+
+* Downgrading of Upstart (to a version that does not support stateful re-exec) not yet handled fully.
+
+   '''IMPACT:''' An impotent process will be left post re-exec that will linger until either killed or the system is shut down.
+
+   '''OUTCOME:''' Should be fixed.
+
+* Upstart cannot yet work in the initramfs reliably.
+
+   '''DETAILS:'''more precisely, if a job existed in the initramfs with the same name as a job in the root filesystem context, the re-exec'ed Upstart in the root file system would not have a correct view of its version of the job until that job configuration files changed after the re-exec.
+
+   '''IMPACT:''' Low - Ubuntu does not yet use Upstart in the initramfs. Added to which, Upstart can now operate with '''no''' initramfs in the common-case.
+
+   '''OUTCOME:''' Should be fixed.
+
+=== Additional Information ===
+
+A debug facility should be added to Upstart where it exposes a D-Bus method that allows the current state to be serialised when called. This can then be used as work progresses to ensure expected results.
+
+----
+CategorySpec

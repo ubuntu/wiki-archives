@@ -1,0 +1,221 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== Ubuntu Cloud Infrastructure ==
+== Introduction ==
+{| class="wikitable"
+|-
+| <tablestyle="float:right; font-size: 0.9em; width:40%; background:#F1F1ED; margin: 0 0 1em 1em;" style="padding:0.5em;"><<BR>>
+|}
+
+Ubuntu Cloud Infrastructure is a ready to deploy Infrastructure-as-a-Service (IaaS) based on OpenStack. These instructions apply to Ubuntu 12.04 LTS (Precise Pangolin) to deploy OpenStack Essex release.
+
+See <nowiki>[[UbuntuCloudInfrastructure11.10]]</nowiki> for install steps on Ubuntu 11.10.
+
+== Installation ==
+
+There are multiple ways to install Ubuntu Cloud Infrastructure. 
+* Ubuntu Cloud Live Image: a single node all in one cloud booting from USB
+* Ubuntu Cloud Infrastructure with MAAS and Juju: our recommended method
+* Install Ubuntu Cloud Infrastructure from packages: the hard way
+
+=== Ubuntu Cloud Live Image ===
+
+# Download the image from http://cdimage.ubuntu.com/ubuntu-cloud-live/releases/12.04/
+# Create a USB stick using USB Creator or some other tools as described <nowiki>[[https://help.ubuntu.com/community/Installation/FromUSBStick|here]]</nowiki>
+# Boot from the created USB stick
+# apt-get install juju
+# open the file /home/ubuntu/Desktop/GettingStarted.txt and follow the instructions for final configuration.
+
+Your Ubuntu Cloud Infrastructure is ready to be used. See the section <nowiki>[[UbuntuCloudInfrastructure#Use_Your_Cloud|Use your cloud]]</nowiki> for more details.
+
+=== Ubuntu Cloud Infrastructure with MAAS and Juju ===
+
+This install is done in 3 steps:
+ 1. Install the MAAS server
+ 2. Install Juju
+ 3. Deploy Ubuntu Cloud Infrastructure with Juju
+Which are described below.
+
+==== Requirements ====
+* It's assumed the user has sufficient number of nodes available in MAAS. If you don't intend to use the helper application, <nowiki>[[https://launchpad.net/juju-jitsu|juju-jitsu]]</nowiki> and its ''deploy-to'' option allowing you to co-locate services, then the minimum deployment outlined below requires a minimum of 10 machines including the juju bootstrap node and MAAS server.
+
+==== Installing the MAAS server ====
+
+ 1. Follow the steps provided at <nowiki>[[http://maas.ubuntu.com/docs/install.html]]</nowiki>
+ 2. Add enough nodes to support your OpenStack deployment as described at <nowiki>[[http://maas.ubuntu.com/docs/nodes.html]]</nowiki>
+** If using <nowiki>[[https://launchpad.net/juju-jitsu|juju-jitsu]]</nowiki>, the minimum recommended number of machines is 6.
+
+==== Install Juju ====
+
+This can be done on the same server you have deployed MAAS onto.
+
+'''1. Create SSH keys'''
+
+Juju requires SSH keys to be able to access the deployed nodes. In case those keys do not exist, then we have to create them before we bootstrap our environment:
+
+<pre>
+ssh-keygen -t rsa
+</pre>
+
+'''2. Deploy juju'''
+
+Follow the steps described at <nowiki>[[https://maas.ubuntu.com/docs/juju-quick-start.html]]</nowiki> 
+
+==== Deploying Ubuntu Cloud Infrastructure with Juju ====
+
+'''1. Create a configuration file'''
+
+Create a *minimal* deployment config. There are more options for each, look at each respective charm's config.yaml. We'll name this file '''openstack.cfg''' and will use it afterward by specifying "--config=openstack.cfg" in "juju deploy" commands.
+
+<pre>
+keystone:
+### Set this here for testing only, otherwise randomly 
+### generated and stored on-disk on keystone node
+    admin-password: "openstack"
+nova-cloud-controller:
+    network-manager: "FlatDHCPManager"
+nova-volume:
+### This must be a free block device that is writable on the nova-volume host.
+### Or use a file path and size as follows: 
+### block-device: "/var/lib/nova-volumes/vol1.img|2G"
+    block-device: "xvdb"
+    overwrite: "true"
+</pre>
+
+'''2. Deploy from local branches of charms (optional)'''
+
+Starting with Ubuntu 12.04 LTS By default, Juju now deploys charms directly from its central charm repository if no --repository option is provided. You may wish to modify the default charms that we are providing. In this case you will need to first checkout the charms from bzr using the following script:
+
+<pre>
+mkdir -p precise
+cd precise
+for i in glance keystone nova-cloud-controller nova-compute nova-volume openstack-dashboard rabbitmq-server ; do
+    bzr branch lp:~charmers/charms/precise/$i/trunk $i
+done
+bzr branch lp:charms/mysql mysql
+bzr branch lp:charms/rabbitmq rabbitmq
+cd ..
+</pre>
+
+You will then need to modify each one of the juju deploy command to add "--repository=. local:<charm-name>". For example, the line 
+<pre>
+juju deploy mysql
+</pre>
+would be replaced by
+<pre>
+juju deploy --repository=. local:mysql
+</pre>
+
+'''3. Deploy the various services''' 
+
+Deploy each service, specifying configs where necessary
+
+<pre>
+juju deploy mysql
+juju deploy rabbitmq-server
+juju deploy --config=openstack.cfg keystone
+juju deploy --config=openstack.cfg nova-cloud-controller
+juju deploy --config=openstack.cfg nova-volume
+juju deploy nova-compute
+juju deploy glance
+juju deploy openstack-dashboard
+</pre>
+
+If you choose to co-locate services on the same machine, then it is suggested that you deploy this way:
+
+<pre>
+juju deploy mysql
+juju deploy --config=openstack.cfg keystone
+juju deploy --config=openstack.cfg nova-cloud-controller
+juju deploy --config=openstack.cfg nova-volume
+juju deploy nova-compute
+</pre>
+(wait for all services to start)
+<pre>
+juju deploy glance --to [machine # of keystone]
+juju deploy rabbitmq-server --to [machine # of mysql]
+</pre>
+(wait for glance to show as started)
+<pre>
+juju deploy openstack-dashboard --to [machine # of keystone]
+</pre>
+
+'''4. Establish relation between services'''
+
+When all services are started, begin adding relations with Keystone and the database (this needs to happen first), then between the other services.
+<pre>
+juju add-relation keystone mysql
+juju add-relation nova-cloud-controller mysql
+juju add-relation nova-cloud-controller rabbitmq-server
+juju add-relation nova-cloud-controller glance
+juju add-relation nova-cloud-controller keystone
+juju add-relation nova-volume nova-cloud-controller
+juju add-relation nova-volume mysql
+juju add-relation nova-volume rabbitmq-server
+juju add-relation nova-compute mysql
+juju add-relation nova-compute rabbitmq-server
+juju add-relation nova-compute glance
+juju add-relation nova-compute nova-cloud-controller
+juju add-relation glance mysql
+juju add-relation glance keystone
+juju add-relation openstack-dashboard keystone
+</pre>
+
+'''5. Expose the services you want (optional)'''
+
+If you are using this to deploy OpenStack on a IaaS for testing purposes, the last step is to expose the services that should be made available to outside requests, opening the required firewall ports in the security group. This is obviously not needed when deploying using MAAS.
+
+<pre>
+juju expose openstack-dashboard
+juju expose nova-cloud-controller
+</pre>
+
+== Use Your Cloud ==
+
+At this point, the Openstack cloud has been deployed and should be functioning. 
+
+Point your browser to the public address of the openstack-dashboard node, "http://node-address:70/horizon" or "https://node-address:433/horizon", login using admin/openstack (passwd defined in cfg above) and you can begin using the cloud, adding users, etc. Use the command "juju status openstack-dashboard" to get its IP address.
+
+NOTE: If you are running the node from the Live Image and have followed the configuration steps in the GettingStarted.txt file as mentioned above, the dashboard username/password will be ubuntu/ubuntu123, NOT admin/openstack.
+
+After you've logged into the dashboard, you can add new users from the "Users" panel of the Admin toolbar. Once logged in as a new user, you can export your EC2 and Nova credentials as well as a Juju environments.yaml configuration from the 'Settings' section of the dashboard (linked from the upper-right)
+
+=== EC2 API ===
+To begin using the EC2 API, select '''Settings'''-> '''EC2 Credentials''' -> '''Download EC2 Credentials''' in the Openstack dashboard. Save the file (eg, /home/adam/openstack/"). We can then unzip these and begin using our cloud:
+
+<pre>
+cd /home/adam/openstack
+unzip 247e0c5de9dc415a8e411da643308eb6d-x509.zip
+. ec2rc.sh
+wget http://uec-images.ubuntu.com/server/server/releases/oneiric/beta-1/ubuntu-11.10-beta1-server-cloudimg-amd64.tar.gz
+uec-publish-tarball ./ubuntu-11.10-beta1-server-cloudimg-amd64.tar.gz images
+euca-add-keypair adam >adam.pk
+euca-run-instances -k adam ami-00000002
+</pre>
+
+=== Juju ===
+
+You can also begin using Juju to deploy services into your new cloud. To generate a Juju environments.yaml entry suitable for use against the new Openstack cluster, select '''Settings''' -> '''Juju Environment Config''' -> '''Download Juju Environment Config''' in the Openstack dashboard. Note that you'll need to update the 'default-image-id' in this file to match the AMI id of an Ubuntu cloud image that you've published (eg, ami-00000002 from above).
+
+=== Scaling ===
+
+If we still have extra machines, they can easily be added, for example, as a compute node through Juju to increase our resources:
+
+<pre>
+juju add-unit nova-compute
+</pre>
+
+== See Also ==
+* http://docs.openstack.org/
+* https://www.ubuntu.com/cloud
+* https://jujucharms.com
+* https://maas.io
+* http://help.ubuntu.com/community/UEC/Images

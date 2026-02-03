@@ -1,0 +1,121 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== Processing and displaying benchmark results using Autotest and Jenkins ==
+
+This is documentation of an experiment to develop a method of extracting and displaying the results of benchmarks which are part of the autotest client. The autotest client comes with a number of tests. Some of these are simple pass/fail tests, and integrate well with our Jenkins framework, when the results are converted to JUnit XML test results. Other tests are benchmarks, and each of these produces one or more values which reflect various performance aspects. Jenkins does not provide a good method for tracking and visualizing these benchmark results, so I set out to determine what is required to do it.
+
+Each value produced by a benchmark test is called a ''metric'' in this documentation and in associated code.
+
+The goals were to:
+
+* Collect results from multiple runs of benchmarks with archival storage.
+* Require minimal changes to Jenkins, avoiding new plugins if possible
+* Remove storage of these results from the Jenkins environment
+* Allow display of results across multiple test runs on different OS releases and kernel versions
+* Allow flexible filtering of individual metrics within benchmarks
+
+The two benchmark tests used for testing this method were dbench and bonnie. Dbench produces a single metric, while bonnie produces a number of metrics.
+
+There are two major phases - '''collection and storage of the benchmark metrics''', and '''display of the data'''.
+
+=== Collection and Storage of metrics ===
+
+In our test setup, Jenkins jobs are used to run autotest client tests. Test results are stored in the Jenkins "workspace". Scripts for this phase are kept in sconklin's autotest repository, in the client/tools/ directory:
+
+<nowiki>[[https://github.com/autotest/autotest/|That repository is here]]</nowiki>
+
+Collection and storage takes place in the jenkins job script. For reference, here is a jenkins script example, for the bonnie test:
+
+<pre>
+cd /src/autotest/client
+sudo mkdir -p $WORKSPACE/bonnie
+sudo bin/autotest --output_dir=$WORKSPACE/bonnie tests/bonnie/control
+
+tools/results2junit.py $WORKSPACE/bonnie/results/default/* | sudo tee $WORKSPACE/bonnie/output.xml > /dev/null
+
+tools/process_metrics.py --testname=bonnie --path=$WORKSPACE/bonnie | sudo tee $WORKSPACE/bonnie/$BUILD_ID.json > /dev/null
+
+scp $WORKSPACE/bonnie/$BUILD_ID.json 172.31.0.155:results/
+</pre>
+
+==== Autotest data format ====
+
+There are two data files produced by an autotest benchmark test that have information that we need. They are stored under the Jenkins working directory in:
+
+* '''results/default/<testname>/keyval''' - This contains meta information:
+** version=1
+** sysinfo-cmdline=BOOT_IMAGE=/boot/vmlinuz-3.2.0-12-generic-pae root=UUID=f46d7292-3c0b-4b23-aaa4-c4c2a82f8614 ro quiet splash vt.handoff=7
+** sysinfo-memtotal-in-kb=4001852
+** sysinfo-phys-mbytes=4096
+** sysinfo-uname=3.2.0-12-generic-pae #21-Ubuntu SMP Tue Jan 31 20:44:35 UTC 2012 i686 i686 i386 GNU/Linux
+
+* '''results/default/<testname>/results/veyval''' - this contains the test metrics:
+** chnk{perf}=0
+** files{perf}=2048
+** rand_ksec{perf}=275.1
+** rand_pctcp{perf}=0
+** randcreate_create_pctcp{perf}=11
+** randcreate_delete_ksec{perf}=263
+** randcreate_delete_pctcp{perf}=0
+** [etc]
+
+==== Post-processing metrics and metadata at the end of a Jenkins test ====
+
+The python script ''process_metrics.py'' reads the test result files and outputs json data to stdout containing sections for metadata and metrics. Because the directory path for the results contains the test name, and because we want to capture the Jenkins test name in the metadata, you must supply the test name as an argument to that script, as well as a path to the workspace. This script is run after the test in the jenkins job script.
+
+''process_metrics.py'' also collects some environment variables defined during the Jenkins job which are of interest, and stores them in the metadata. The following environment variables are collected:
+
+* BUILD_NUMBER
+* BUILD_ID
+* JOB_NAME
+* BUILD_TAG
+* EXECUTOR_NUMBER
+* NODE_NAME
+* NODE_LABELS
+
+If any other information is desired in the metadata, it can be added with the ''--attrs'' argument, which accepts a list of ''name=value'' pairs and places them in the metadata.
+
+==== Storage of the metrics ====
+
+Storage of results is currently implemented as a collection of flat files in a single directory, which are processed and selected based on metadata to (for example) select a single test name. This has proven adequate, although nothing rules out the adoption of more complex storage if and when it proves necessary.
+
+The json data is placed in a file named from the Jenkins BUILD_ID, and then is transferred to another server using ssh. To do this, a passphrase-less ssh key was created for the jenkins user, to allow transfer of the files.
+
+=== Filtering and Display of benchmark data ===
+
+Code for this phase is kept in the kteam-tools repository, in the testing/ directory
+
+<nowiki>[[http://kernel.ubuntu.com/git?p=ubuntu/kteam-tools.git;a=summary|That repository is here]]</nowiki>
+
+Once the benchmark data is outside of the Jenkins server, data from multiple tests is combined and filtered, and converted to html pages which display graphical results using <nowiki>[[http://www.highcharts.com/demo/|HighCharts javascript libraries]]</nowiki>.
+
+==== Merging and Filtering benchmark data ====
+
+Merging and filtering is done using the ''merge_benchmark_data'' script in the kteam-tools repository.
+
+This script processes all specified json files containing benchmark results, and generates json data for charting. You may use the '''--job-name=''' command line parameter to filter output to a single Jenkins job name.
+
+In addition, you may specify either an exclusive list of metrics to include in the chart (using '''--include-only'''), or a list of metrics to be excluded from all those present (using '''--mute-metrics='''). These two command line arguments are exclusive of each other.
+
+An example of the use of this script for the bonnie benchmark results is:
+
+<pre>
+./merge_benchmark_data --job-name=bonnie-test --mute-metrics="size{perf}" sample-bench-data/*.json > ./bonnie.json
+</pre>
+
+==== Generating html charts ====
+
+Once the data for charting has been produced, the ''benchmark-report'' script reads that data and generates the html output. This script generates output in index.html, so the output should be renamed if generating multiple reports:
+
+<pre>
+./benchmark-report --title="Bonnie - All" ./bonnie.json
+mv index.html bonnie.html
+</pre>

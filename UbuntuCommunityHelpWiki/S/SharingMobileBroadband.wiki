@@ -1,0 +1,204 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== Introduction ==
+{| class="wikitable"
+|-
+| <tablestyle="float:right; font-size: 0.9em; width:40%; background:#F1F1ED; margin: 0 0 1em 1em;" style="padding:0.5em;"><<BR>>
+|}
+
+This describes how to configure mobile broadband (via a USB dongle or other ppp based) then re-broadcasting this via wireless or wired ethernet. This guide was written for a machine running ubuntu 8.10, but should work for later versions. This is aimed at home servers or appliances - sharing a mobile broadband connection can be more easily done through NetworkManager on recent distros.
+
+== Prerequisites ==
+
+* Mobile broadband connection via USB (actually, you can modify this to work for any sort of internet connection)
+* Wireless ethernet card that supports <nowiki>[[https://help.ubuntu.com/community/WifiDocs/MasterMode|Master Mode]]</nowiki>
+* Ubuntu (or similar) installation
+
+== Install Software ==
+<pre>
+sudo apt-get install wvdial bridge-utils hostapd madwifi-tools wireless-tools dnsmasq ufw
+</pre>
+
+== Get broadband connection working ==
+wvdial handles the broadband connection. The following setup was created to work for Virgin Mobile Broadband in Australia:
+* created /etc/wvdial.conf; you need to replace <YOUR_IS_APN> with the APN your connection is using
+<pre>
+[Dialer Defaults]
+Init2 = ATZ
+Init3 = ATQ0 V1 E1 S0=0 &C1 &D2 +FCLASS=0
+Stupid Mode = 1
+Modem Type = USB Modem
+ISDN = 0
+Phone = *99#
+Modem = /dev/ttyUSB0
+username = guest
+Password = guest
+Dial Command = ATDT
+Baud = 466600
+Auto Reconnect = 1
+Init4 = AT+CGDCONT=1,"IP","<YOUR_ISP_APN>"
+</pre>
+* edit /etc/ppp/peers/wvdial - added 'defaultroute'
+* edit /etc/ppp/options - added '-chap'
+* edit /etc/ppp/options - added 'persist' - this will auto-reconnect dropped connections
+
+== Create Network Interfaces ==
+edit /etc/network/interfaces
+<pre>
+                       iface lo inet loopback
+
+############ internet connection
+                       auto ppp0
+                       iface ppp0 inet wvdial
+
+############ wired
+                       auto eth0
+                       iface eth0 inet manual
+
+############ wireless
+                       auto ath0
+                       iface ath0 inet manual
+
+############ bridge
+                       auto br0
+                       iface br0 inet static
+                               address 192.168.0.10
+                               network 192.168.0.0
+                               netmask 255.255.255.0
+                               broadcast 192.168.0.255
+                               bridge-ports eth0 ath0
+</pre>
+
+In this case, ppp0 is the net connection, eth0 is wired ethernet, ath0 is wireless. ath0 might be something else depending on your wireless card. br0 is the bridge between wired and wireless, so both will appear to be the same network. In this case, the address of the server is 192.168.0.10 as defined in br0. You might want to change this and/or the network address.
+
+Reboot after configuring this (or just bring down, then back up all of the net interfaces). 
+
+== ufw ==
+
+ufw is the firewall. In this case, it tells the network system to masquerade packets between the internal network and Internet, and also blocks incoming traffic from the Internet. It can be configured with lots more rules
+
+Edit /etc/default/ufw to include DEFAULT_FORWARD_POLICY="ACCEPT"
+
+Edit /etc/ufw/sysctl.conf to include net.ipv4.ip_forward=1 (and optionally net.ipv6.conf.default.forwarding=1 for IPv6)
+
+Add to /etc/ufw/before.rules:
+<pre>
+* nat
+:POSTROUTING ACCEPT [0:0]
+-A POSTROUTING -s 192.168.0.0/24 -o ppp0 -j MASQUERADE 
+COMMIT
+</pre>
+
+Ensure "net/ipv4/ip_forward=1" is uncommented in /etc/ufw/sysctl.conf
+Turn ufw off:
+<pre>
+sudo ufw disable 
+</pre>
+
+Then on:
+<pre>
+sudo ufw enable 
+</pre>
+
+Allow the internal network access through:
+<pre>
+sudo ufw allow from 192.168.0.0/24 
+</pre>
+
+To allow dhcp to work, you need to let udp port 67 packets through (this can't be restricted to a subnet since the computer picking up the dhcp address won't have an IP address yet)
+<pre>
+sudo ufw allow 67/udp
+</pre>
+
+You can also allow other protocols through (e.g. ssh) - either by well known protocol names, or port numbers. The man page details how to restrict to certain hosts, or deny access to protocols:
+<pre>
+sudo ufw allow ssh
+</pre>
+
+== DNS ==
+For some reason, DNS wasn't being configured properly on my setup when booting (although this worked fine when bringing up ppp0 after booting). If this is the case, you can edit /etc/resolv.conf to include:
+<pre>
+nameserver YOUR_ISP_DNS1_HERE #replace with your ISPs DNS server
+nameserver YOUR_ISP_DNS2_HERE #replace with your ISPs DNS server
+nameserver 8.8.8.8 #optional google DNS server for fallback
+nameserver 8.8.4.4 #google
+</pre>
+
+== dnsmasq ==
+dnsmasq is a lightweight DNS and DHCP server designed for NAT applications. It is included in NetworkManager, but we'll use it standalone; edit /etc/dnsmasq.conf :
+<pre>
+server=YOUR_ISP_DNS_HERE  #for DNS server (just in case it doesn't pick up automagically, not necessary to include)
+...
+interface=br0
+...
+dhcp-range=192.168.0.50,192.168.0.150,12h
+</pre>
+
+== hostapd ==
+hostapd handless the Access Point part of the wireless connection.
+<pre>
+cat "options ath_pci autocreate=ap" >> /etc/modprobe.d/madwifi
+</pre>
+Back up /etc/hostapd/hostapd.conf, then replace with this:
+<pre>
+                       driver=madwifi #use nl80211 for most cards
+                       interface=ath0
+                       bridge=br0
+                       hw_mode=g #OR OTHER MODE (a/b). n is not set here
+                       ssid=<INSERT ESSID>
+                       wpa=3
+                       wpa_key_mgmt=WPA-PSK
+                       wpa_pairwise=TKIP CCMP
+                       wpa_passphrase=<INSERT PASSWORD>
+</pre>
+
+ESSID is the name of the wireless network you want to create, you also need to set a passphrase. The above setup will create WPA-PSK (pre-shared key = passphrase) security; you can relax this to make it unsecured (read the docs). You may also need to change the driver and interface lines to suit your wifi card.
+
+* make sure hostapd.conf is chmod 600
+* Change /etc/default/hostapd so RUN_DAEMON="yes"
+
+== Lock down services ==
+
+The computer is directly connected to the Internet. It _is_ the firewall to the rest of your network, so is important to keep it secure. The firewall (ufw) will do a certain amount, but if you run any services (e.g. ssh) that you want access to from the Internet you should make sure those are locked down. For ssh, allow only key-based authentication; other services are probably best restricted to the internal network only (if needed, you can tunnel these via an ssh session)
+
+== Squid Caching Proxy (Optional) ==
+Mobile broadband can be expensive and sometimes slow; you may want to install a caching proxy to lower the amount of bandwidth through your connection, and speed things up.
+
+<pre>
+sudo apt-get install squid
+</pre>
+
+* edit /etc/squid/squid.conf:
+** set acl localnet to 192.168.0.0/24
+** set to allow http_access from localnet
+** tweak some options (increase disk, memory, and object cache sizes)
+=== (Optional) Enable proxy autoconfig ===
+This may or may not work - proxy autoconfig seems to (still) be a black art 
+* add dhcp-option=252,http://192.168.0.10/wpad.dat to dnsmasq.conf
+* create /var/www/proxy.pac:
+<pre>
+		   function FindProxyForURL(url, host) { 
+			if (isInNet(host,"192.168.0.0", "255.255.255.0")) {return "DIRECT";}
+			return "PROXY 192.168.0.10:3128; DIRECT";
+		}
+</pre>
+* link proxy.pac to wpad.dat:
+<pre>
+cd /var/www
+sudo ln -s proxy.pac wpad.dat
+</pre>
+* install apache to be able to serve wpad.dat
+
+== External Links ==
+
+* http://blog.robin.smidsrod.no/index.php/2008/08/08/how_to_setup_an_atheros_based_access_poi
+* https://help.ubuntu.com/community/WifiDocs/WirelessAccessPoint
+* http://hezmatt.org/~mpalmer/blog/general/using_virgin_mobile_broadband_with_wvdial.html

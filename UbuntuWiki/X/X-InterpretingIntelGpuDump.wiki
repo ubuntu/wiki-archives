@@ -1,0 +1,174 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+The GPU (graphics processing unit) is a specialized processor that offloads graphics rendering from the CPU. It is especially important for 3D rendering, but can also do 2D acceleration, video decoding, etc. 
+
+=== Ringbuffers, batchbuffers, and debug registers ===
+
+The graphics drivers run on the CPU and are responsible for feeding instructions to the GPU. 
+They do this by placing the instructions in a so-called ''ringbuffer''. 
+A ringbuffer is a piece of memory that the CPU can write to and the GPU can read from.
+The CPU writes instructions to the GPU from the beginning of the ringbuffer and maintains a TAIL register which contains the address of the next memory address that the CPU will write. 
+In other words the CPU has finished writing everything up to the TAIL address, but not the TAIL address itself.
+last valid instruction that the CPU has finished writing.
+The GPU follows and executes the instructions that the CPU has written up to the TAIL register.
+It maintains a HEAD register that contains the address of the next instruction that the GPU will read.
+The last instruction read is the instruction before the the HEAD.
+When CPU reaches the end of the ringbuffer it wraps around and starts writing from the beginning (which is why it is called a ''ring''buffer).
+It just has to watch the HEAD register to make sure it doesn't overwrite any instructions that the GPU hasn't yet read.
+
+Often it is not practical for the CPU to write all instructions to the ringbuffer. 
+It then writes instructions to another piece of memory and this is called a ''batchbuffer'' since it contains a batch of instructions.
+It then places an instruction in the ringbuffer to read from a batchbuffer at a given memory location.
+At the end of the batchbuffer there is either an instruction that says that this is the end of the batchbuffer, in which the GPU continues from where it left the ringbuffer, or an instruction to read from another batchbuffer (this is called a ''chain'').
+
+In addition to the HEAD and TAIL register, there are tons of other registers and `intel_gpu_dump` prints a few that are useful for debugging. 
+By comparing this information with the data in the ringbuffer and batchbuffers, one can often get idea of what has gone wrong if the GPU has hung.
+
+=== Interpreting an actual IntelGpuDump.txt ===
+
+At <nowiki>[[attachment:TypicalIntelGpuDump.txt]]</nowiki> there is an actual output of `intel_gpu_dump` from when the system was in a healthy state. 
+The system was exercised a little with `glxgears` in order to produce this dump with some 3D instructions and a HEAD which is not on top of TAIL. 
+Let's look at the different parts:
+
+First come the debug registers.
+
+<pre>
+ACTHD: 0x0f71a038
+EIR: 0x00000000
+EMR: 0xffffffcd
+ESR: 0x00000001
+PGTBL_ER: 0x00000000
+IPEHR: 0x02000000
+IPEIR: 0x00000000
+INSTDONE: 0xffe5fafd
+INSTDONE1: 0x000fffff
+  busy: Projection and LOD
+  busy: Bypass FIFO
+  busy: Color calculator
+  busy: Command Processor
+</pre>
+
+ ACTHD: ACTive HeaD pointer register:: This memory contains the memory address of the HEAD of the currently active ringbuffer or batchbuffer.
+ ESR: Error Status Register:: The bits here are set when the hardware detects different errors. They can be cleared again by software.
+ EMR: Error Mask Register:: This is a bit mask that decides which of the error bits in the ESR that gets propagated to the EIR. Bits from ESR are propagated to EIR if the corresponding bit in EMR is 0.
+ EIR: Error Identity Register:: Error bits propagated from the ESR if the corresponding EMR bit is 0. Any bit set in the EIR will cause a Master Error bit to be set, so that the driver can know that an error has occured.
+ PGTBL_ER: PaGe TaBLe Error Register:: This register holds more details about the error if it is a page table error/GTT error, i.e. an error related to the table translating GPU memory addresses into physical (CPU) addresses.
+ IPEHR: Instruction Parser Error Header Register:: This register is loaded with the header of each instruction that is executed. If the GPU locks up due to an invalid instruction, this register will hold the instruction that triggered the lockup.
+ IPEIR: Instruction Parser Error Identification Register:: Identifies if an Invalid Instruction Error happened in the ringbuffer or a batchbuffer. 0x00000000 if the error is in the ringbuffer and 0x00000010 is it is in a batchbuffer.
+ INSTDONE: INstruction STream interface DONE Register:: This register consists of 32 single bits that is cleared when a subsystem of the GPU is busy. When the GPU is idle, all bits are set, but since some bits are reserved and has value 0, the default value is 0xffe7fffe. When the GPU hangs, this register can be used to tell which functions failed to complete.
+ INSTDONE1: Additional INstruction STream interface DONE:: Like INSTDONE, but for other tasks. Not very well documented, but only the lower 20 bits are used.
+
+Then comes a batchbuffer:
+
+<pre>
+batchbuffer at 0x0a689000:
+0x0a689000:      0x61040000: 3DSTATE_PIPELINE_SELECT
+0x0a689004:      0x79090000: 3DSTATE_GLOBAL_DEPTH_OFFSET_CLAMP
+0x0a689008:      0x00000000:    dword 1
+0x0a68900c:      0x61020000: STATE_SIP
+0x0a689010:      0x00000000:    dword 1
+0x0a689014:      0x780b0000: 3DSTATE_VF_STATISTICS
+0x0a689018:      0x61010004: STATE_BASE_ADDRESS
+0x0a68901c:      0x00000001:    General state at 0x00000000
+0x0a689020:      0x00000001:    Surface state at 0x00000000
+0x0a689024:      0x00000001:    Indirect state at 0x00000000
+0x0a689028:      0x00000001:    General state upper bound 0x00000000
+0x0a68902c:      0x00000001:    Indirect state upper bound 0x00000000
+...
+0x0a689930:      0x60020100: CONSTANT_BUFFER: valid
+0x0a689934:      0x0a649002:    offset: 0x00299240, length: 0x00000002
+0x0a689938:      0x7b001404: 3DPRIMITIVE: tri strip sequential
+0x0a68993c:      0x00000016:    vertex count
+0x0a689940:      0x00000000:    start vertex
+0x0a689944:      0x00000001:    instance count
+0x0a689948:      0x00000000:    start instance
+0x0a68994c:      0x00000000:    index bias
+0x0a689950:      0x00000000: MI_NOOP
+0x0a689954:      0x05000000: MI_BATCH_BUFFER_END
+0x0a689958:      0x00000000:
+0x0a68995c:      0x00000000:
+...
+0x0a68cff8:      0x00000000:
+0x0a68cffc:      0x00000000:
+</pre>
+
+This particular batchbuffer is not currently executing and therefore doesn't have its own HEAD. 
+This is consistent with the ACTHD register 0x0f71a038 that is not in the range 0x0a689000-0x0a689954.
+
+And finally, the ringbuffer:
+
+<pre>
+Ringbuffer: Reminder: head pointer is GPU read, tail pointer is CPU write
+ringbuffer at 0x00000000:
+0x00000000:      0x10800001: MI_STORE_DATA_INDEX
+0x00000004:      0x00000080:    dword 1
+0x00000008:      0x004cf867:    dword 2
+0x0000000c:      0x01000000: MI_USER_INTERRUPT
+0x00000010:      0x02000004: MI_FLUSH
+...
+0x0000003c:      0x00000000: MI_NOOP
+0x00000040:      0x18800180: MI_BATCH_BUFFER_START
+0x00000044:      0x0a689000:    dword 1
+0x00000048:      0x02000004: MI_FLUSH
+...
+0x0001f488:      0x18800180: MI_BATCH_BUFFER_START
+0x0001f48c:      0x0f71a000:    dword 1
+0x0001f490: HEAD 0x02000004: MI_FLUSH
+0x0001f494:      0x00000000: MI_NOOP
+0x0001f498:      0x10800001: MI_STORE_DATA_INDEX
+0x0001f49c:      0x00000080:    dword 1
+0x0001f4a0:      0x004cf81a:    dword 2
+0x0001f4a4:      0x01000000: MI_USER_INTERRUPT
+...
+0x0001f528:      0x10800001: MI_STORE_DATA_INDEX
+0x0001f52c:      0x00000080:    dword 1
+0x0001f530:      0x004cf81e:    dword 2
+0x0001f534:      0x01000000: MI_USER_INTERRUPT
+0x0001f538: TAIL 0x02000006: MI_FLUSH
+0x0001f53c:      0x00000000: MI_NOOP
+0x0001f540:      0x18800180: MI_BATCH_BUFFER_START
+0x0001f544:      0x0f6ea000:    dword 1
+...
+0x0001ffdc:      0x01000000: MI_USER_INTERRUPT
+0x0001ffe0:      0x02000004: MI_FLUSH
+0x0001ffe4:      0x00000000: MI_NOOP
+0x0001ffe8:      0x18800180: MI_BATCH_BUFFER_START
+0x0001ffec:      0x0f6fe000:    dword 1
+0x0001fff0:      0x02000004: MI_FLUSH
+0x0001fff4:      0x00000000: MI_NOOP
+0x0001fff8:      0x00000000: MI_NOOP
+0x0001fffc:      0x00000000: MI_NOOP
+</pre>
+
+The last instruction in the ringbuffer that have been read by the GPU is 
+<pre>
+0x0001f488:      0x18800180: MI_BATCH_BUFFER_START
+0x0001f48c:      0x0f71a000:    dword 1
+</pre>
+This says that there is a batchbuffer ready at memory address 0xf71a000. 
+The GPU is apparently currently executing this batchbuffer since the ACTHD register is 0x0f71a038. 
+For some reason this batchbuffer is not captured by the dump.
+The last instruction written by the CPU is
+<pre>
+0x0001f534:      0x01000000: MI_USER_INTERRUPT
+</pre>
+and the next instruction
+<pre>
+0x0001f538: TAIL 0x02000006: MI_FLUSH
+</pre>
+is about to get overwritten.
+
+=== Code Meanings ===
+Sarvatt notices that:
+
+* IPEHR: 0x7xxxxxxx typically have been mesa problems
+* IPEHR: 0x018xxxxx typically are hangs during dpms cycles

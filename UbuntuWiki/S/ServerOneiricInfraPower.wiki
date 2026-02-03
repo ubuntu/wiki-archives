@@ -1,0 +1,307 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+* '''Launchpad Entry''': UbuntuSpec:servercloud-p-infra-power
+* '''Created''': 2010-05-15
+* '''Contributors''': Arnaud Quette
+* '''Packages affected''': nut, fence-agents, powernap, powerwake [cobler, orchestra, ensemble, ...?]
+
+---- /!\ '''This is a WIP document''' ----
+
+=== Summary ===
+
+Oneiric will provide advanced power management features for servers and infrastructures.
+
+=== Release Note ===
+
+This section should include a paragraph describing the end-user impact of this change.  It is meant to be included in the release notes of the first release in which it is implemented.  (Not all of these will actually be included in the release notes, at the release manager's discretion; but writing them is a useful exercise.)
+
+It is mandatory.
+
+=== Rationale ===
+
+Ubuntu provides various power management software, dedicated to protection (NUT), management (NUT, fence-agents) or efficiency (PowerWake and PowerNap).
+
+But there are several remaining issues:
+
+* NUT, PowerWake/PowerNap and fence-agents are separate systems, with no consolidated data or visibility,
+* NUT still lacks some basic features to provide a good user experience: device discovery, configuration and complete user interfaces for management,
+* There are also missing part of the power-chain that cruelly lack from visibility: <nowiki>[[http://en.wikipedia.org/wiki/Power_supply|power supply units (PSU)]]</nowiki>.
+
+In the below schema, imagine that PSU#1 is faulty. Now what if UPS #2 reaches low battery, and so cannot provide power anymore to the only valid PSU? The CLC will crash!
+
+<nowiki>[[File:ServerOneiricInfraPower-examplePSU.png]]</nowiki>
+
+Moreover, with Cloud systems being more and more deployed, infrastructure tools are needed to ease deployment and management of the power infrastructure. A complete visibility of the power-chain would also provide more advanced features.
+
+The following illustration represent a small cloud infrastructure, made of 3 servers: 1 Cloud Controller (CLC) and 2 Node Controllers (NC).
+
+Each server has 2 PSU, each PSU is connected to an outlet of a PDU, and finally each PDU is powered by an UPS. 
+
+<nowiki>[[File:ServerOneiricInfraPower-exampleRack.png]]</nowiki>
+
+An example PowerChain for the CLC would be:
+<pre>
+    PSU1 ==> PDU1:outlet1 ==> UPS1 ==> Main Power
+    PSU2 ==> PDU2:outlet1 ==> UPS2 ==> Main Power
+</pre>
+
+This specification defines the remaining tooling and missing pieces required to provide a complete infrastructure power management to Ubuntu systems, easily and by default. 
+
+=== User stories ===
+
+* Jorge is deploying a standalone SMB server, protected by an UPS. He wants an easy configuration tool, that also detects his peripheral. A simple management and monitoring console would make a complete integration.
+* Chuck wants the same ease and features for his many clusters / data centers, but also advanced features and supervision tools.
+* Nick is running a Cloud. He would love to optimize the power availability and usage of his infrastructure, to make it greener and more efficient. Discovering his power infrastructure through DNS-SD, and including PowerChain information in each new physical node deployment
+
+=== Design ===
+
+You can have subsections that better describe specific parts of the issue.
+
+==== Devices discovery ====
+
+NUT' build infrastructure allows for automated extraction of devices support information, directly from the drivers.
+
+This currently allows to generate support files for USB systems like <nowiki>[[http://svn.debian.org/wsvn/nut/trunk/scripts/#_trunk_scripts_|hotplug and hal (both obsolete), udev and UPower]]</nowiki> at distribution (ie 'make dist') time.
+
+This mechanism will be extended to SNMP information, and will allow to generate new headers and files, to create:
+
+* nut-scanner: a command line tool to discover NUT supported power devices and services
+* libnut-scanner: the core C library, which offers all functions
+* Perl and Python wrappers around nut-scanner, or bindings using libnut-scanner
+
+The following devices and systems will be supported:
+
+* Power supply units, using IPMI,
+* <nowiki>[[http://www.networkupstools.org/stable-hcl.html?connection=USB|all USB devices supported by NUT]]</nowiki>,
+* <nowiki>[[http://www.networkupstools.org/stable-hcl.html?connection=USB|all SNMP devices supported by NUT]]</nowiki>,
+* <nowiki>[[http://www.networkupstools.org/stable-hcl.html?connection=USB|Eaton network devices, supported by NUT using XML/HTTP]]</nowiki>,
+* NUT instances, through the below Avahi support. This will allow to discover the whole infrastructure, and not just devices. This also include deployed but not configured NUT nodes that need Puppet + Augeas to push configuration from the provisioning system (CLC).
+
+Note: local PowerNap instance may also be discovered and considered.
+
+==== Avahi publication script ====
+
+The base idea is to publish NUT services on the network, through mDNS, using Avahi.
+
+This will allow:
+
+* management systems to quickly and easily identify power information providers, and contact these for more information,
+* NUT slaves systems to get a list of NUT masters to connect to. 
+
+There has been a <nowiki>[[http://lists.alioth.debian.org/pipermail/nut-upsdev/2011-April/005377.html|discussion on the NUT mailing list]]</nowiki>.
+
+The idea is to have '''avahi-publish''' started along '''upsd''' and/or '''upsmon''', and publish NUT essential configuration information.
+
+==== Configuration library and tools ====
+
+This point is still under discussion: Augeas lenses for NUT, along with the various Augeas bindings and tools may be sufficient.
+
+A high level Python wrapper may however be considered.
+
+==== PowerChain design ====
+
+The idea behind the PowerChain is simple: there are many links in a power-chain:
+
+* power supply unit,
+* UPS,
+* PDU.
+
+Having a consolidated view on the whole allows real HA and SmartGrid features.
+
+This feature requires data acquisition from the above devices, and a powerchain-aware monitoring system.
+
+Links will be single linked to its parent.
+
+==== NUT PSU / native IPMI driver ====
+
+As per the above, the interest for a NUT PSU driver is real.
+
+To achieve this, the creation of a 'nut-psu' driver, using OpenIPMI, would for example expose the following NUT data:
+
+<pre>
+device.mfr: DELL
+device.mfr.date: 01/05/11 - 08:51:00
+device.model: PWR SPLY,717W,RDNT            
+device.part: 0RN442A01
+device.serial: CN179721130031
+device.type: psu
+driver.name: nut-ipmipsu
+driver.parameter.pollinterval: 2
+driver.parameter.port: id2
+driver.version: 2.6.1-3231M
+driver.version.data: IPMI PSU driver
+driver.version.internal: 0.05
+input.current: 0.28
+input.frequency.high: 63
+input.frequency.low: 47
+input.voltage: 242.00
+input.voltage.maximum: 264
+input.voltage.minimum: 90
+ups.id: 2
+ups.realpower.nominal: 717
+ups.status: OL
+ups.voltage: 12
+</pre>
+
+Measurement data from the PSU are also be considered
+Commands, like '''on, off, reboot''' will also supported by NUT.
+
+==== Improved fence-agents ====
+
+NUT provides an automagic mechanism that allows to declare hardware support information, like USB VendorID:ProductID and SNMP ones, to be declared only once, in the NUT driver. These data are then extract, at dist time (ie 'make dist' operation, used by maintainers to generate .tar.gz or alike) to create various support files, for: HAL and hotplug (deprecated), udev, UPower and for the upcoming nut-scanner.
+
+An interesting point is that NUT is already serving as a knowledge base for an external project (UPower).
+
+Considering this, a generic '''fence-snmp-pdu''' could be created, using automatically extracted SNMP information from NUT drivers, to deal with the many <nowiki>[[http://www.networkupstools.org/stable-hcl.html?connection=Network|NUT supported SNMP devices]]</nowiki>.
+
+Creating a '''fence-nut''' agent would also allow to control UPS providing outlet group management. 
+
+=== Implementation ===
+
+This section should describe a plan of action (the "how") to implement the changes discussed. Could include subsections like:
+
+==== Devices discovery ====
+
+This features is part of the NUT roadmap for 2.8.0.
+
+Implementation has already started, and can be tracked on:
+
+* <nowiki>[[http://svn.debian.org/wsvn/nut/branches/nut-scanner/#_branches_nut-scanner_|Upstream Subversion repository]]</nowiki>
+* <nowiki>[[https://code.edge.launchpad.net/~aquette/nut/nut-scanner|launchpad]]</nowiki>
+
+USB scan is mostly functional, along with local NUT devices detection.
+To test it:
+
+<pre>
+$ svn co svn://svn.debian.org/nut/branches/nut-scanner
+$ cd nut-scanner
+$ ./autogen.sh
+$ ./configure
+$ cd tools/nut-scanner
+$ make nut-scanner
+$ ./nut-scanner
+Scanning USB bus:
+[nutdev1]
+	driver=usbhid-ups
+	port=auto
+	vendorid=0x463
+	productid=0x0001
+	serial=AV2G3300L
+Scanning XML/HTTP bus:
+Scanning NUT bus (old connect method):
+	xcp-usb@localhost
+	hid-usb@localhost
+	snmp1@localhost
+	simu@localhost
+	nmc-eaton@localhost
+	powernap@localhost
+</pre>
+
+==== Avahi publication script ====
+
+The exact implementation will vary according to the init system used (sysV, upstart, systemd).
+For sysV, add a function to the NUT initscript(s), 
+
+Detailed implementation is still to be completed (list of published info, upstart/systemd implementation).
+
+==== Configuration library and tool ====
+
+Implementation of a Python module should be done in 'scripts/python/module/PyNUT.py'.
+The class should be named 'PyNUTClient'.
+
+==== PowerChain implementation ====
+
+Implementation details:
+
+* Create a new '''nut-psu''' driver,
+* Create a new NUT data, 'device.parent', defined in ups.conf and exposed by all NUT drivers. This will store the parent reference in NUT canonical form:
+<pre>
+    device[:outlet][@hostname[:port]]
+
+    Example:
+      ups.conf
+        [psu1]
+            driver = nut-psu
+            port = psu1
+            parent = pdu1:outlet1@localhost
+        [pdu1]
+            driver = snmp-ups
+            port = <ip address>
+            parent = ups1@localhost
+        [ups1]
+            driver = usbhid-ups
+            port = auto
+            parent = main
+
+      $ upsc psu1 device.parent
+      pdu1:outlet1@localhost
+</pre>
+* Implement power-chain support in upsc ('-P' option to get a tree list, when using '-l' and '-L')
+<pre>
+      $ upsc -P localhost
+      psu1 -> pdu1:outlet1 -> ups1
+
+      $ upsc -Pl localhost
+      ups1
+       |-> pdu1:outlet1
+            |-> pdu1
+</pre>
+
+* Implement power-chain support in upsmon
+
+==== Improved fence-agents ====
+
+==== Migration ====
+
+Include:
+* data migration, if any
+* redirects from old URLs to new ones, if any
+* how users will be pointed to the new way of doing things, if necessary.
+
+=== Packaging ===
+
+Packaging will happen in Debian, and will then be synchronized in Ubuntu.
+
+The current short run TODO list is:
+
+* Create a 'nut-client' package, including upsmon, upsc, upsrw, upscmd, and related files
+* Create documentation packages 'nut-doc', provided by default by 'nut-doc-html' (multi page version) and 'nut-doc-pdf'
+* Distribute Augeas lenses:
+** scripts/augeas/*.aug /usr/share/augeas/lenses/
+** scripts/augeas/tests/*.aug /usr/share/augeas/lenses/test/
+** Distribute by default with 'nut' or 
+* Distribute device-recorder.sh (need to be renamed to 'nut-recorder') with nut-dev
+* Create a 'python-nut' (name to be discussed) including PyNUT (scripts/python/module/)
+* Distribute scripts/perl/Nut.pm (perl-nut ?)
+
+With the 2.8.0 NUT release (around september), the following things are also scheduled:
+
+* Enable SSL support, through Mozilla NSS
+* Distribute new drivers (nut-psu, nut-powernap(?), ...)
+* Distribute nut-scanner and configuration tools and library (separate package?)
+
+=== Test/Demo Plan ===
+
+It's important that we are able to test new features, and demonstrate them to users.  Use this section to describe a short plan that anybody can follow that demonstrates the feature is working.  This can then be used during testing, and to show off after release. Please add an entry to http://testcases.qa.ubuntu.com/Coverage/NewFeatures for tracking test coverage.
+
+This need not be added or completed until the specification is nearing beta.
+
+=== Unresolved issues ===
+
+This should highlight any issues that should be addressed in further specifications, and not problems with the specification itself; since any specification with problems cannot be approved.
+
+=== BoF agenda and discussion ===
+
+Use this section to take notes during the BoF; if you keep it in the approved spec, use it for summarising what was discussed and note any options that were rejected.
+
+----
+CategorySpec

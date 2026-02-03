@@ -1,0 +1,276 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+This Guide will walk you through the process of installing a L2TP VPN Server on Ubuntu Server 12.4 
+
+See this guide https://raymii.org/s/tutorials/IPSEC_L2TP_vpn_with_Ubuntu_14.04.html for one tested with 14.4. 
+
+This configuration has been successfully tested with Android, Windows, and iOS devices.
+
+=== Instructions ===
+
+<pre>
+sudo apt-get install xl2tpd openswan ppp
+</pre>
+
+==== IPSec / Openswan ====
+In the /etc/ipsec.conf file copy:
+<pre>
+config setup
+    nat_traversal=yes
+    virtual_private=%v4:10.0.0.0/8,%v4:192.168.0.0/16,%v4:172.16.0.0/12,%v4:!10.152.2.0/24
+### contains the networks that are allowed as subnet= for the remote client. In other words, the address ranges that may live behind a NAT router through which a client connects.
+    oe=off
+    protostack=netkey
+ 
+conn L2TP-PSK-NAT
+    rightsubnet=vhost:%priv
+    also=L2TP-PSK-noNAT
+ 
+conn L2TP-PSK-noNAT
+    authby=secret
+    pfs=no
+    auto=add
+    keyingtries=3
+    rekey=no
+### Apple iOS doesn't send delete notify so we need dead peer detection
+### to detect vanishing clients
+    dpddelay=30
+    dpdtimeout=120
+    dpdaction=clear
+### Set ikelifetime and keylife to same defaults windows has
+    ikelifetime=8h
+    keylife=1h
+    type=transport
+### Replace IP address with your local IP (private, behind NAT IP is okay as well)
+    left=x.x.x.x
+### For updated Windows 2000/XP clients,
+### to support old clients as well, use leftprotoport=17/%any
+    leftprotoport=17/1701
+    right=%any
+    rightprotoport=17/%any
+### force all to be nat'ed. because of iOS
+    forceencaps=yes
+</pre>
+Make sure you follow the setup in the ipsec.conf file, the part "config setup" and "conn l2tp-psk" should be to the very left while the other text 8 spaces to the right.
+
+In the "/etc/ipsec.secrets" file copy:
+<pre>
+x.x.x.x   %any:  PSK "somegoodpassword"
+</pre>
+Replace x.x.x.x with your Server's IP 
+
+Start the IPSEC service with 
+<pre>
+/etc/init.d/ipsec start
+</pre>
+
+Please verify the IPSEC service with :  
+<pre>
+sudo ipsec verify
+</pre>
+you must get no errors.
+
+<pre>
+Checking your system to see if IPsec got installed and started correctly:
+Version check and ipsec on-path                                 [OK]
+Linux Openswan U2.6.28/K2.6.32-32-generic-pae (netkey)
+Checking for IPsec support in kernel                            [OK]
+NETKEY detected, testing for disabled ICMP send_redirects       [OK]
+NETKEY detected, testing for disabled ICMP accept_redirects     [OK]
+Checking that pluto is running                                  [OK]
+Pluto listening for IKE on udp 500                              [OK]
+Pluto listening for NAT-T on udp 4500                           [OK]
+Checking for 'ip' command                                       [OK]
+Checking for 'iptables' command                                 [OK]
+Opportunistic Encryption Support                                [DISABLED]
+</pre>
+
+Create a file  called "ipsec.vpn" in "/etc/init.d/"
+<pre>
+case "$1" in
+  start)
+echo "Starting my Ipsec VPN"
+iptables  -t nat   -A POSTROUTING -o eth0 -s 10.152.2.0/24 -j MASQUERADE
+echo 1 > /proc/sys/net/ipv4/ip_forward
+for each in /proc/sys/net/ipv4/conf/*
+do
+    echo 0 > $each/accept_redirects
+    echo 0 > $each/send_redirects
+done
+/etc/init.d/ipsec start
+/etc/init.d/xl2tpd start
+;;
+stop)
+echo "Stopping my Ipsec VPN"
+iptables --table nat --flush
+echo 0 > /proc/sys/net/ipv4/ip_forward
+/etc/init.d/ipsec stop
+/etc/init.d/xl2tpd stop
+;;
+restart)
+echo "Restarting my Ipsec VPN"
+iptables  -t nat   -A POSTROUTING -o eth0 -s 10.152.2.0/24 -j MASQUERADE
+echo 1 > /proc/sys/net/ipv4/ip_forward
+for each in /proc/sys/net/ipv4/conf/*
+do
+    echo 0 > $each/accept_redirects
+    echo 0 > $each/send_redirects
+done
+/etc/init.d/ipsec restart
+/etc/init.d/xl2tpd restart
+ 
+;;
+** )
+ echo "Usage: /etc/init.d/ipsec.vpn  {start|stop|restart}"
+ exit 1
+  ;;
+esac
+</pre>
+This will configure the firewall forwarding. If you use a local IP pool other than 10.152.2, be sure to update it.
+
+Then set the permission to execute:
+<pre>
+sudo chmod 755 ipsec.vpn
+</pre>
+Disable the ipsec default init script with
+<pre>
+}}}
+
+And enable the custom one.
+{{{
+</pre>
+
+==== L2TP ====
+In the file /etc/xl2tpd/xl2tpd.conf
+<pre>
+[global]
+ipsec saref = no
+ 
+[lns default]
+ip range = 10.152.2.2-10.152.2.254
+local ip = 10.152.2.1
+require chap = yes
+refuse pap = yes
+require authentication = yes
+ppp debug = yes
+pppoptfile = /etc/ppp/options.xl2tpd
+length bit = yes
+</pre>
+* ip range = range of IP’s to give to the connecting clients
+* local ip = IP of VPN server. Value must be outside of "ip range".
+* refuse pap = refure pap authentication
+* ppp debug = yes when testing, no when in production
+
+Choose a good challenge-response authentication string. The secret should, ideally, be 16 characters long, and  should probably  be longer to ensure sufficient security. There is no minimum length requirement. In the file /etc/xl2tpd/l2tp-secrets: 
+<pre>
+* * exampleforchallengestring
+</pre>
+
+In the file  /etc/ppp/options.xl2tpd copy:
+<pre>
+refuse-mschap-v2
+refuse-mschap
+ms-dns 8.8.8.8
+ms-dns 8.8.4.4
+asyncmap 0
+auth
+crtscts
+idle 1800
+mtu 1200
+mru 1200
+lock
+hide-password
+local
+name l2tpd
+proxyarp
+lcp-echo-interval 30
+lcp-echo-failure 4
+</pre>
+====== ms-dns option ======
+Here you set the dns server for  your lan, this dns server are pushed to the road warrior when he connects. If you wan to add several servers just add several lines.
+
+If you need to push wins settings to the clients there is an separate option for that.
+
+====== mtu / mru ======
+On openswan.org they informs that it's important to reduce the mru/mtu size.
+Because l2tp/ipsec are encapsulated several times it causes overhead, reducing this makes it possible to transmit all packages over lines with reduced mtu size.
+
+====== proxyarp ======
+Adds an entry to this system’s ARP [Address Resolution Protocol] table with the IP address of the peer and the Ethernet address of this system. This will have the effect of making the peer appear to other systems to be on the local ethernet.
+
+====== name l2tpd ======
+Is used in the ppp authentication file.
+
+==== Adding Users ====
+In the file /etc/ppp/chap-secrets copy:
+<pre>
+user1 l2tpd chooseagoodpassword *
+user2 * chooseagoodpassword *
+</pre>
+* client = username for the user
+* server = the name we define in the ppp.options file for xl2tpd
+* secret = password for the user
+* IP Address = leave to * for any address or define addresses from were a user can login.
+Note: you can add as many user you like.
+
+==== Forward ====
+
+in /etc/sysctl.conf
+<pre>
+net.ipv4.ip_forward=1
+</pre>
+Load the new settings made in /etc/sysctl.conf
+<pre>
+sysctl -p
+</pre>
+
+==== Starting the VPN ====
+<pre>
+sudo /etc/init.d/ipsec.vpn restart
+sudo /etc/init.d/xl2tpd restart
+</pre>
+
+=== Connecting the VPN to iOS device ===
+
+ 1. Go to Settings > General > Network > VPN > Add VPN Configuration > L2TP
+ 2. VPN Description > the name you like
+ 3. Set VPN server > external ip address of the VPN server (x.x.x.x)
+ 4. Account > PPP username
+ 5. Set password > somegoodpassword
+ 6. Set L2TP Secret > was exampleforchallengestring
+ 7. Connect using the PPP username/password (user1 chooseagoodpassword)
+
+=== Connecting the VPN to an Android device ===
+
+ 1. Go to Settings  > Wireless & networks > VPN settings > Add VPN > Add L2TP/IPSec PSK VPN >
+ 2. VPN Name / Description > the name you like
+ 3. Set VPN server > external ip address of the VPN server (x.x.x.x)
+ 4. Set IPSec pre-shared key / password > somegoodpassword
+ 5. Enable L2TP secret > enable
+ 6. Set L2TP Secret > was exampleforchallengestring
+ 7. Press back, then connect using the PPP username/password (user1 chooseagoodpassword)
+
+=== Debug ===
+
+In case of problems this are a few commands that can help out the debugging.
+<pre>
+sudo tcpdump -i ppp0
+sudo tail -f /var/log/auth.log
+sudo tail -f /var/log/syslog
+</pre>
+You can also monitor the results on the Server with
+<pre>
+sudo tcpdump -i eth0 host aaa.bbb.ccc.ddd and not port ssh
+</pre>
+aaa.bbb.ccc.ddd are the public IP address of your Clients
+
+----
+CategoryVPN <nowiki>[[CategoryVPN]]</nowiki>

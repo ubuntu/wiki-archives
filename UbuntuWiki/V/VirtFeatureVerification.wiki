@@ -1,0 +1,477 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+The Ubuntu Hypervisor stack consists of qemu-kvm and libvirt at its core.  QEMU provides the userspace emulation, KVM provides the kernel acceleration, and libvirt provides an abstraction layer for applications to interface with various hypervisors at an API level.
+
+This page is dedicated to enumerating and tracking the testing of some of the basic and advanced features of this hypervisor stack.
+
+For basic documentation, see:
+* Manpage:qemu
+
+=== Results ===
+
+==== Feature: Nested KVM ====
+
+Nested KVM is possible for AMD machines, but not yet for Intel ones.  Further (to my surprise), on AMD, you can only nest amd64 on amd64, or i386 on i386.  You cannot nest an i386 VM inside an amd64 VM.
+
+To start a VM in which you wish to nest another vm, use the -enable-nesting flag to kvm.  Then just call kvm as usual inside that VM.
+
+Nesting is not yet supported in libvirt by default.  To use it, I did the following:
+
+* '''Created a new wrapper called kvm.nested'''
+<pre>
+cat > /usr/bin/kvm.nested << EOF
+/usr/bin/kvm $* -enable-nesting
+EOF
+</pre>
+
+* '''Allow libvirt to use that wrapper'''
+<pre>
+cat >> /lib/apparmor.d/abstractions/libvirt-qemu << EOF
+  /usr/bin/kvm.nested rmix,
+EOF
+/etc/init.d/apparmor restart
+</pre>
+
+* Then in your vm.xml, use:
+<pre>
+    <emulator>/usr/bin/kvm.nested</emulator>
+</pre>
+instead of the usual
+<pre>
+    <emulator>/usr/bin/kvm</emulator>
+</pre>
+
+* Finally, while not necessary, I used LVM partitions for the nested guest rather than container files.
+==== QEMU Feature: Serial Console ====
+
+* '''Command line''':
+ <pre>
+kvm -serial stdio
+</pre>
+* '''Additional setup''': Add <code>console=ttyS0</code> to the kernel boot parameter
+* '''Result''': Serial console input/output is on stdio of the shell that launched the VM
+
+==== libvirt serial console ====
+
+* ''' Use the following snipped in your VM definition: '''
+ <pre>
+  <serial type='tcp'>
+      <source mode='bind' host='127.0.0.1' service='2445'/>
+      <protocol type='telnet'/>
+      <target port='0'/>
+    </serial>
+    <console type='tcp'>
+      <source mode='bind' host='127.0.0.1' service='2445'/>
+      <protocol type='telnet'/>
+      <target type='serial' port='0'/>
+    </console>
+ }}}
+* Then telnet to port 2445 to see the console
+
+==== QEMU Feature: VNC ====
+* '''Command line''':
+ {{{
+kvm -vnc :1
+</pre>
+* '''Additional setup''': Run <code>vncviewer :1</code> from another command prompt
+* '''Result''': VM's graphical display should be in a VNC window, rather than SDL
+
+==== QEMU Feature: virtio disks ====
+* '''Command line''':
+ <pre>
+kvm -drive file=maverick.img,if=virtio,index=0,boot=on
+ }}}
+* '''Result''': Image boots
+
+==== QEMU Feature: virtio net ====
+* '''Command line''':
+ {{{
+kvm -net nic,virtio -net user -redir tcp:2224::22
+ }}}
+* '''Result''': Image is able to boot and access network, and host can ssh into guest using 'ssh -p 2224 localhost'
+
+==== Distributions ====
+
+* '''Fedora''':
+** Installed 32-bit and 64-bit fedora 13, from livecds
+* '''Debian''':
+** Installed 32-bit and 64-bit, from netboot cd images
+* '''CentOS 5.5''':
+** Boots of livecd and dvd
+** Installs and boots from dvd
+** Install with 'Virtualization' option installs a xen kernel
+*** This fails to boot
+**** first needs 'noapic' boot argument to get past bios 'bug'
+**** then appears to fail at device creation
+*** Note this is only for an install as virtualization host, normal install boots fine
+
+==== Windows ====
+
+** Windows 7 Ultimate x64 - passed
+*** No sound (no soundcards emulated by qemu are supported in 64-bit windows 7)
+*** Otherwised worked well
+
+==== libvirt save/restore VM ====
+
+* succeeded with 0.8.1
+* save takes 50 seconds, restore 1 (512M ram, 100M save image)
+* QEMU_MONITOR_MIGRATE_TO_FILE_BS fix needed
+
+==== libvirt+qemu hot-add ====
+
+* '''In guest''':
+ {{{
+modprobe acpiphp
+ }}}
+
+* '''On host''':
+ {{{
+'virsh attach-disk 13 --type disk /home/serge/newdisk.img --mode shareable --driver file vda
+ }}}
+* '''Result''':
+** Success (can fdisk, format, and mount new disk)
+** Cannot choose index (uses next available, i.e. can't use vdb if vfa unused)
+** Note there is a bug that can cause the loss of virtio NIC
+*** this will be fixed with 0.8.2 libvirt merge
+
+==== live migration ====
+
+* I created two maverick-server kvm guests (on a lucid host)
+* exported /srv/export from the host to the guests over NFS
+* In /srv/export, I placed a small (1G) debian.img I'd installed on the host
+* On the first maverick guest, I created a d32.xml <nowiki>[[attachment:d32.xml]]</nowiki> and
+   {{{
+virsh define d32.xml
+virsh start d32
+d=`virsh list | grep d32 | awk '{ print $1 '}`
+virsh migrate --live $d qemu+ssh://secondguest/session
+   }}}
+   Where secondguest is of course the name or ip address for the second guest.
+* '''Result''':
+** Success - the host continued perfectly on the second guest
+** Caveat
+*** This had to be done using qemu.kvm, not the maverick package
+*** The maverick package has a bug (LP: #591423) which prevented
+       non-kvm qemu booting (at all) in my guests.
+*** This means there may be other bugs in the maverick package
+       preventing live migration.
+*** When 0.13.0 qemu is merged, that should pull in all fixes.
+
+==== libvirt NAT network ====
+
+* This is the default in Ubuntu libvirt setups, so it is
+   always being tested.  To confirm, check 'iptables -L'
+   and 'ifconfig -a' output after installing and starting
+   libvirt.
+
+==== libvirt private network ====
+
+* Created /etc/libvirt/qemu/networks/private.xml as the
+    default:
+    {{{
+cat >> /etc/libvirt/qemu/networks/private.xml << EOF
+<network>
+        <name>default</name>
+        <bridge name="virbr%d" />
+        <ip address="192.168.152.1" netmask="255.255.255.0">
+          <dhcp>
+            <range start="192.168.152.2" end="192.168.152.254" />
+          </dhcp>
+        </ip>
+</network>
+EOF
+d=/etc/libvirt/qemu/networks/autostart/
+(cd $d; rm -f *; ln -s ../private.xml)
+     }}}
+* Rebooted, created a VM.
+* ifconfig -a shows virbr0 exists
+* iptables -L shows no forwarding or NAT rules
+* Starting up the VM, it can ping the host and other guests on
+   the same network, but not the outside world.
+
+==== kvm bridged network ====
+
+* Works.
+* (as root):
+{{{
+apt-get remove network-manager wicd
+
+cat > /etc/network/interfaces << EOF
+auto lo
+iface lo inet loopback
+
+auto eth0
+iface eth0 inet manual
+
+auto br0
+iface br0 inet dhcp
+        bridge_ports eth0
+        bridge_stp off
+        bridge_fd 0
+        bridge_maxwait 0
+EOF
+</pre>
+* (reboot)
+* MACADDR="52:54:$(dd if=/dev/urandom count=1 2>/dev/null | md5sum | sed 's/^\(..\)\(..\)\(..\)\(..\).*$/\1:\2:\3:\4/')"; echo $MACADDR
+* kvm -drive file=server1.img,if=scsi,index=0,boot=on -m 1G -smp 2 -net nic,macaddr=$MACADDR,model=virtio -net tap,ifname=tap1,script=no,downscript=no
+* Hook the tap device into the bridge on the host:
+<pre>
+/sbin/ifconfig tap1 0.0.0.0 up
+brctl addif br0 tap1
+</pre>
+
+* And request an address on the guest:
+<pre>
+dhclient eth0
+</pre>
+
+==== save / restore ====
+
+===== kvm =====
+
+* Took an installed qcow2 VM.  Created a testing clone using
+ <pre>
+ qemu-img create -f qcow -b orig.img new.img
+ }}}
+
+* Ran it under kvm with a monitor on stdio:
+ {{{
+ kvm -drive file=new.img,if=virtio,index=0,boot=on -m 512M -monitor stdio
+ }}}
+ 
+* Saved one snaphost, created a file, saved another snapshot, restored the
+   first snapshot, confirmed the file was gone, restored the second snapshot,
+   confirmed the file was there.
+ {{{
+<kvm monitor on terminal>               <VM console>
+   savevm p1
+                                         echo ab > ab
+   savevm p2
+   loadvm p1
+                                         cat ab #(no such file)
+   loadvm p2
+                                         cat ab # (shows contents of ab)
+ }}}
+
+* Quit kvm, restarted with the same image, restored the second snapshot
+   again
+ {{{
+loadvm p2
+ }}}
+
+* Everything worked as expected.  Save is slow, a known bug which should be
+   fixed in upstream.
+
+===== libvirt ====
+
+As of libvirt 0.8.1, a new snapshot API is supported.  The backing file
+must be qcow2, and the disk definition for the VM must include a line
+defining it as type qcow2, i.e.:
+
+{{{
+<driver name'qemu' type='qcow2' cache='writethrough'>
+</pre>
+
+Then, while the machine is running, you can do
+<pre>
+virsh snapshot-create VM-name
+</pre>
+
+That command returns a snapshot ID, i.e. '12798656811'.  You can list
+all snapshots with 'virsh snapshot-list VM-name', and you can restore from
+a snapshot with 'virsh snapshot-revert VM-name snapshot-name'.  This
+however only snapshots memory, not disk.  The most promising route for
+doing full snapshots from libvirt is the soon-to-come ability to
+send arbitrary qemu monitor commands through libvirt.  This will not
+likely be available in libvirt 0.8.3.
+
+==== KSM ====
+
+Started up several KVM instances, and looked at
+
+<pre>
+/sys/kernel/mm/ksm/pages_shared
+</pre>
+
+which went up.
+
+==== PXE ====
+
+* Success
+* I tested it somewhat ugly, as follows.  First, installed
+   syslinux tftp on the host.
+* Set up a pxelinux.cfg on the host:
+
+<pre>
+mkdir /var/lib/tftpboot/pxelinux.cfg
+cat > /var/lib/tftpboot/pxelinux.cfg/default << eof
+label default
+  kernel vmlinuz-2.6.35-9-generic
+  initrd initrd.img-2.6.35-9-generic
+  append root=/dev/sda ro
+eof
+
+cp /boot/{vmlinuz-2.6.35-9-generic,initrd.img-2.6.35-9-generic} \
+	 /var/lib/tftpboot
+cp /usr/lib/syslinux/{memdisk,menu.c32,pxelinux.0,vesainfo.c32,vesamenu.c32} \
+	 /var/lib/tftpboot
+</pre>
+
+* Create a dummy VM and set it up to boot from network (PXE).
+
+* On the host, kill libvirt's default dnsmasq, and restart it willing to do tftp:
+
+<pre>
+dnsmasq --strict-order --bind-interfaces --pid-file=/var/run/libvirt/network/default.pid --conf-file= --listen-address 192.168.122.1 --except-interface lo --dhcp-range 192.168.122.2,192.168.122.254 --dhcp-lease-max=253 --enable-tftp --tftp-root=/var/lib/tftpboot --dhcp-boot=pxelinux.0
+</pre>
+
+* The VM will boot, and land in busybox with an '(initramfs)' prompt,
+since it was unable to find a root fs.  (Installing an nfs server
+to serve a root fs would get us past that)
+
+==== GPXE (Etherboot) ====
+
+===== etherboot package (on lucid and maverick) =====
+
+* FAILS
+* apt-get install etherboot
+* cp /usr/lib/etherboot/rtl8139.dsk.gz .; gunzip rtl8139.dsk.gz
+* kvm -fda rtl8139.dsk -net nic,model=rtl8139 -net user -bootp http://etherboot.org/gtest/gtest.gpxe
+* FAIL (on lucid and maverick)
+** infinite loop at bios
+
+===== gpxe upstream (on lucid) =====
+
+* WORKS
+<pre>
+git clone git://git.etherboot.org/scm/gpxe.git
+cd gpxe/src
+make
+kvm -fda bin/gpxe.dsk -net nic -net user -bootp http://etherboot.org/gtest/gtest.gpxe
+</pre>
+* boots.
+
+===== STATUS (ACTION/TODO) =====
+* (Have contacted the Debian maintainer to find out merge plans)
+
+==== iscsi boot ====
+
+* PASS
+* followed directions at
+** http://berrange.com/posts/2010/05/05/provisioning-kvm-virtual-machines-on-iscsi-the-hard-way-part-1-of-2/
+** http://berrange.com/posts/2010/05/05/provisioning-kvm-virtual-machines-on-iscsi-the-hard-way-part-2-of-2/
+* Briefly:
+
+<pre>
+apt-get install tgt open-iscsi-utils open-iscsi
+tgtd
+dd if=/dev/zero of=/var/lib/tgtd/kvmguests/a.img bs=1M seek=10240 count=0
+dd if=/dev/zero of=/var/lib/tgtd/kvmguests/shareddata.img bs=1M count=512
+tgtadm --lld iscsi --op new --mode target --tid 1 --targetname iqn.2004-04.fedora:fedora13:iscsi.kvmguests
+tgtadm --lld iscsi --op new --mode logicalunit --tid 1 --lun 1 --backing-store /var/lib/tgtd/kvmguests/a.img 
+tgtadm --lld iscsi --op new --mode logicalunit --tid 1 --lun 2 --backing-store /var/lib/tgtd/kvmguests/shareddata.img 
+tgtadm --lld iscsi --op bind --mode target --tid 1 --initiator-address ALL
+cat > /root/pool.xml << EOF
+	<pool type='iscsi'>
+	 <name>kvmguests</name>
+	 <source>
+	  <host name='localhost'/>
+	  <device path='iqn.2004-04.fedora:fedora13:iscsi.kvmguests'/>
+	 </source>
+	 <target>
+	  <path>/dev/disk/by-path</path>
+	 </target>
+	</pool>
+EOF
+virsh pool-define /root/pool.xml 
+virsh pool-start kvmguests
+</pre>
+* Used virt-viewer to create a VM with backing store on the iscsi pool
+* Installed ubuntu 10.04 server, booted a few times
+* Relevant xml from VM definition:
+<pre>
+    <disk type='block' device='disk'>
+      <driver name='qemu' type='raw'/>
+      <source dev='/dev/disk/by-path/ip-127.0.0.1:3260-iscsi-iqn.2004-04.fedora:fedora13:iscsi.kvmguests-lun-1'/>
+      <target dev='hda' bus='ide'/>
+      <address type='drive' controller='0' bus='0' unit='0'/>
+    </disk>
+</pre>
+
+==== SR-IOV ====
+Not yet tested, but came across this page, which might be helpful:
+* http://fedoraproject.org/wiki/Features/SR-IOV#How_To_Test
+
+==== USB passthrough ====
+
+===== Using Libvirt =====
+
+* fired up a pre-existing vm
+
+<pre>
+	virsh start maverick2
+</pre>
+
+* plugged in a usb drive
+
+* found the usb address using lsusb, which gave me
+
+{{
+Bus 002 Device 006: ID 1058:1023 Western Digital Technologies, Inc. 
+}}}
+
+* defined a xml file with the device info:
+
+<pre>
+<hostdev mode='subsystem' type='usb'>
+	<source>
+		<vendor id='0x1058'/>
+		<product id='0x1023'/>
+	</source>
+</hostdev>
+</pre>
+
+* passed the usb drive to the vm
+
+<pre>
+sudo virsh attach-device maverick2 /tmp/a.xml
+</pre>
+
+* HOWEVER this does not work with apparmor enabled.  You must either
+   disable apparmor, or add
+
+   
+<pre>
+/dev/bus/usb/*/[0-9]* rw,
+</pre>
+
+to either /etc/apparmor.d/libvirt-qemu (which gives all guests
+full access to physical host devices) or to 
+<pre>
+/etc/apparmor.d/libvirt/libvirt-<uuid>
+</pre>
+which will give only the one guest that access.  (Thanks to jdstrand
+for help getting that straight.)
+
+===== Using KVM =====
+
+Make sure to start kvm with the '-usb' flag and opening
+a monitor (say using '-monitor stdio').  Then
+pass the usb device using the monitor command:
+
+<pre>
+ usb_add host:1058:1023
+</pre>
+
+using the same vendor/product ids as above, or by invoking on the command line like this:
+<pre>
+  kvm -usb -usbdevice host:1390:0001 ...
+</pre>

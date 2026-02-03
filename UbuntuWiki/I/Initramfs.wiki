@@ -1,0 +1,99 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+initramfs is the solution introduced for the 2.6 Linux kernel series.  The idea is that there's a lot of initialisation magic done in the kernel that could be just as easily done in userspace.
+
+At a first glance, it is only slightly different than a traditional initrd.  Initramfs' are loaded quite a bit sooner than initrd's are.
+
+The key parts of initramfs are:
+
+* CPIO archive, so no filesystems at all are needed in kernel.  The archive is simply unpacked into a ram disk.
+
+* This unpacking happens before do_basic_setup is called.  This means that firmware files are available before in-kernel drivers load.
+
+* The userspace init is called instead of prepare_namespace.  All finding of the root device, and md setup happens in userspace.
+
+* An initramfs can be built into the kernel directly by adding it to the ELF archive under the section name .init.ramfs
+
+* initramfs' can be stacked.  Providing an initramfs to the kernel using the traditional initrd mechanisms causes it to be unpacked along side the initramfs' that are built into the kernel.
+
+* All magic naming of the root device goes away.  Integrating udev into the initramfs means that the exact same view of the /dev tree can be used throughout the boot sequence.  This should solve the majority of the SATA failures that are seen where an install can succeed, but the initrd cannot boot.
+
+== Detailed Description ==
+
+Initramfs is used as the first root filesystem that your machine has access to. It is used for mounting the real rootfs which has all your data. The initramfs carries the modules needed for mounting your rootfs. But you could always compile your kernel to have these modules. Then would you need the initramfs? The answer to this is “depends on your system”. Some system configurations need a user space utility to provoke the kernel to configure the devices appropriately. Eg: cryptdevices : they need to have a password from the user. This password requesting utility being a user space utility, could pose a chicken and egg problem i.e your rootfs contains the user space utilities, but the rootfs cannot come up till the user space utilities are available. In such cases, the initramfs plays a mediator in between giving a temporary rootfs which has bears the user space utilities needed for mounting the real rootfs.
+
+Where do these userspace utilities come from?
+
+These userspace utilities needed for mounting the real rootfs originally come from your rootfs. When you create a initramfs using the “update-initramfs” or “mkinitramfs” commands, these commands copy these utilities from the place where they are kept to a temporary dir.
+Eg: The binary cryptsetup comes from the package cryptsetup. This binary is kept at /sbin/.
+So when you install this package here is what happens:
+
+*** adds a file in your /usr/share/initramfs/hooks/ - eg: cryptroot. These files are executed when you type update-initramfs. If you look at this script “cryptroot” then you will notice that this hook copies cryptsetup from /sbin/cryptsetup to the initramfs/sbin/cryptsetup  
+*** and it also automatically calls update-initramfs
+
+So every package that can potentially configure your root device, has a “hook” script which is executed when you execute update-initramfs or mkinitramfs so as to include the necessary user space utilities in your initramfs - rootfs. "update-initramfs" is generally called when you install such a package that is potentially capable of configuring your root device. For eg: if you install the package "cryptsetup", no matter if your root device is encrypted or not, the installation of the package would call update-initramfs which will execute the "hook" script installed (when the package was installed).
+
+All these files are collected in a temporary directory and then they are cpio archived and then gziped.
+So if you want to inflate your initramfs kept in /boot then you fire the following commands :
+<pre>
+cd `mktemp -d` && gzip -dc /boot/initrd.img-`uname -r` | cpio -ivd
+</pre>
+
+When you want to create an initramfs from a temporary directory you run the following commands:
+say dir name is initrd-test
+
+<pre>
+cd initrd-test
+find . | cpio -o -H newc > ../initrd-test.img
+cd ..
+gzip initrd-test.img
+cp initrd-test.img.gz initrd-test.img
+</pre>
+
+To get the builtin initramfs out of the kernel:
+<pre>
+objcopy -j .init.ramfs -O binary /boot/vmlinux-2.6.10-2-powerpc  /dev/stdout | gunzip -cd | cpio -i
+</pre>
+Note that the archive has leading /'s which are honoured.
+
+When your root device depends on a module (i.e not compiled in the kernel), such a module _must_ be in the initramfs for your root device to be discovered at boot time. Modules are generally installed at /lib/modules/<kernel-version>/ when you install a kernel package. However when you manually make compile a kernel, its essential to call make modules_install (which installs the compiled modules in /lib/modules/<kernel-version>) and follow this by "depmod" (which will generate a modules.dep and map file in /lib/modules/<kernel-version>). After this step you are required to manually update your initramfs (or create a new one if this is a new kernel) by calling "update-initramfs" or "mkinitramfs". If you forget these steps, then your root device will not be discovered at boot time. Note that this same scheme of commands applies to the case when you compile any single module separately (instead of installing the ubuntu kernel package).
+
+Now here is how the initramfs executes. The first process to get control is the init process. The init process procedurally invokes other scripts kept in the initrd. These scripts are kept in the scripts dir in your initramfs.
+The scripts dir is further divided into the following dirs:
+
+*** init-top
+*** init-premount
+*** boot-top (your crypt scripts execute here - to ask the user password for eg)
+*** boot-premount
+*** boot
+*** boot-bottom
+*** init-bottom
+
+Here boot is replaced by local or remote depending on whether your rootfs is local or remote. This is the script that actually mounts your rootfs on initramfs/root/. If everything goes right then the boot-bottom, init-bottom scripts are executed sequentially. init then gets the control back and does the following things:
+
+*** moves the /sys from initramfs to /initramfs/root/sys (in your real rootfs)
+*** moves /proc from initramfs to /initramfs/root/proc
+*** calls run-init to run the real init in your real rootfs kept in /root. run-init does something like chroot to the real rootfs and then executes the init kept in /sbin/ or /bin or whatever user requested as a boot parameter.
+
+(Your devfs should be moved by one of the bottom scripts already)
+If something went wrong while mounting your rootfs, then a recovery action is tried out and if that fails too then a console is presented to the user for manual intervention.
+
+"Various packages decide where their scripts should go". But, all scripts that are necessary for mounting your rootfs need to be essentially kept in {init-top, init-premount, boot-top, boot-premount}
+
+Generally packages have multiple scripts which need to be executed at initramfs time.  Generally these multiple scripts have a sequence of execution that needs to be followed. For eg: say that a Package P has two scripts S1 and S2 to be executed at boot time for system configuration. S1 needs to be executed after S2 (say) and before root can be mounted - if say S1 and S2 help in configuring the root device. So then S1 could be kept in init-top if it does not depend on anything else and S2 could be kept in init-premount if it does not depend on anything else other than S1.
+
+Other than this general rule of thumb, there is no other restriction on where you could keep your script.
+
+This implies that various scripts from different package in the same dir say “init-premount” _may_ be unrelated to each other in execution sequence. So they could be executed really parallelly.  This is what we plan to exploit in the event based initramfs.  Note that the scripts in the same directory could be related to each other as well. In this case their sequence is decided by a file called as “order” kept in that dir.  There could be scripts in different directories which are unrelated in terms of sequence of execution and they could be executed in parallel too.  We need to identify these scripts.
+
+Currently however the scripts are executed one after the other, but this might change when <nowiki>[[Foundations-Specs-EventBasedInitramfs]]</nowiki> gets implemented.
+
+CategoryBoot

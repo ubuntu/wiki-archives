@@ -1,0 +1,1035 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+'''Booting Linux natively on a UEFI system (without BIOS CSM) using GRUB2'''
+
+----
+
+----
+
+=== Introduction ===
+
+'''IMPORTANT: This page is a bit outdated. A newer and simpler documentation about UEFI is available here: <nowiki>[[UEFI]]</nowiki>.'''
+
+<nowiki>[[http://en.wikipedia.org/wiki/Unified_Extensible_Firmware_Interface|UEFI]]</nowiki> is the firmware that will eventually replace BIOS in commercial PCs. PCs certified for Windows 8 will require UEFI booting by default.  Many vendors have started adopting UEFI as their firmware. Some of the notable UEFI firmwares are Phoenix Secure''''''Core Tiano, AMI Aptio, and Insyde H2O.
+
+Caution if you want to dual boot. Due to bug <nowiki>[[https://bugs.launchpad.net/ubuntu-release-notes/+bug/769669|769669]]</nowiki> the boot partition will be formatted. This has resulted in the Windows bootloader being deleted for some users of Ubuntu 11.04 & 11.10. This issue has been resolved in Ubuntu 12.04.   To be safe, even on non-Mac machines, you can boot the <nowiki>[[http://askubuntu.com/questions/37999/what-is-different-about-the-mac-iso-image|Mac alternate ISO CD]]</nowiki>, where the UEFI bootloader has been removed.  You can install Linux in BIOS mode, and then set up e grub2 EFI.
+
+----
+
+==== Non-Mac UEFI systems ====
+
+Linux officially supports both the UEFI and BIOS firmware. However Windows supports UEFI only with Vista for x86_64, SP1 and later (on UEFI 1.1), or Windows 7 (on UEFI 2.0), or Windows 8 (on UEFI 1.1), and only with GPT partitioning.
+
+----
+
+==== Apple Mac EFI systems ====
+
+Apple officially supports only EFI booting for Mac OS X, although technically it is possible to boot Mac OS X using BIOS firmware.
+
+Booting Linux using (U)EFI on Intel Macs has the following advantages :
+
+* For dual-graphic card models, the power-saving card can be used (Nvidia 9400M, Intel GMA HD (aka 5700MHD), Intel GMA HD 3000, or Intel GMA HD 4000), resulting in significantly longer battery life and lower temperatures.   Only for Intel graphics, the same is achievable in BIOS mode with the "setpci" command described below.
+* Faster bootloading, because the legacy BIOS does not need to be loaded, and it does not need to search for BIOS bootable disks.
+* SATA disks are accessed in AHCI mode instead of legacy IDE mode, allowing advanced features (native command queuing, aggressive link power management, and more)
+* On Xserve models, there is no legacy BIOS layer, a.k.a. CSM.
+* Use of hard disks larger than 2 TiB (2.2 TB) with GPT partitioning instead of MBR partitions.
+
+However it also has the following drawbacks :
+
+* EFI booting is still experimental and not yet supported as a mainstream boot method on Macs, since Apple uses a nonstandard mix of EFI 1.x with some UEFI 2.x functionalities (x86_64, GOP, etc.).
+* Models with Thunderbolt connectors only support external monitors with the discrete graphic card, not with the Intel integrated graphic card (the same limitation is also applicable on MacOS X).
+* Some hardware features might not work reliably : screen brightness control, suspend/resume, etc.
+* Virtual terminals (Ctrl-Alt-function key) might not work with some graphic drivers (they stay black).
+* OS kernel architecture (32 or 64-bit) must be the same as the EFI architecture (unless "eficross" is used, which is available from kernel 3.4)
+
+===== Caution for Mac owners =====
+
+In Ubuntu 11.04 (x86_64 only), due to bug <nowiki>[[https://bugs.launchpad.net/ubuntu-release-notes/+bug/774089|774089]]</nowiki>, the ISO CD supports UEFI booting and the Ubuntu installer will try to set up the bootloader for (U)EFI boot. But the installer '''formats the EFI System Partition''' to FAT16 (even if the filesystem is non-empty) and also uses efibootmgr, therefore Intel Macs may fail to boot due to corrupted firmware. This feature is not recommended on Mac models because it can corrupt the firmware.  You will need to reflash the firmware to repair it. The bug was fixed in Ubuntu 11.10.
+
+On Macs use only the <nowiki>[[http://cdimage.ubuntu.com/releases/natty/release/ubuntu-11.04-alternate-amd64+mac.iso|Mac alternate ISO CD]]</nowiki>
+
+----
+
+=== Setting up GRUB2 (U)EFI ===
+
+----
+
+==== Detect (U)EFI firmware processor architecture ====
+
+If you have a non-Mac UEFI system, then you have a x86_64 (aka 64-bit) UEFI 2.x firmware.
+
+Some of the known x86_64 UEFI 2.x firmwares are Phoenix Secure''''''Core Tiano, AMI Aptio, Insyde H2O.
+
+Some of the known systems using these firmwares are Asus EZ Mode BIOS (in Sandy Bridge P67 and H67 motherboards), MSI ClickBIOS, HP Elite''''''Books, Sony Vaio Z series, Lenovo Think''''''Pads (>=2010), many Intel Server and Desktop motherboards
+
+Some machines (<nowiki>[[https://lkml.org/lkml/2011/6/8/322|all Dell laptops, all new Apple from 2010 on, some Lenovo]]</nowiki>) have bugs in their UEFI firmware, preventing them from booting (black screen). Linux Kernel 3.0 (and higher versions) includes patches with workarounds for them.  It is therefore recommended to use a Linux kernel of version 3.0 or higher.
+
+Pre-2008 Macs usually have i386-efi firmware while >=2008 Macs have mostly x86_64-efi. All Macs capable of running Mac OS X Snow Leopard 64-bit Kernel have x86_64 EFI 1.x firmware.
+
+imac 8,1 has 64-bit EFI.
+
+Type the following command in a MacOS terminal :
+
+<pre>
+ioreg -l -p IODeviceTree | grep firmware-abi
+</pre>
+
+Output :
+{| class="wikitable"
+|-
+| EFI32
+| 32-bit (i386) EFI
+|-
+| EFI64
+| 64-bit (x86_64) EFI
+|}
+
+Also, architecture of your EFI is shown in "refit" -> "about" screen.
+
+----
+
+==== Building GRUB2 (U)EFI ====
+
+Download the latest grub2 <nowiki>[[ftp:--ftp.gnu.org-gnu-grub-|source code ZIP file]]</nowiki> (1.99 as of May 2011).
+
+1.99 is recommended because it supports dual-graphic cards, GOP and contains the "newreloc" feature and btrfs support. (U)EFI booting is broken in grub 1.98.
+
+It is strongly recommended to use a Linux distribution to compile grub2-efi and also that the processor architecture of both the kernel and UEFI firmware match.
+
+Building grub2 requires the following programs to be installed (build dependencies):
+
+<pre>
+bison
+autoconf
+automake
+flex
+autogen
+python (2.x series) (for autogen.sh if building from bzr repo)
+texinfo
+help2man
+gettext (NLS support)
+device-mapper
+freetype2 (libs)
+</pre>
+
+Under Ubuntu 12.04 run this command to install the required build dependencies:
+
+<pre>
+sudo apt-get install bison libopts25 libselinux1-dev autogen m4 autoconf help2man libopts25-dev flex libfont-freetype-perl automake autotools-dev libfreetype6-dev texinfo
+</pre>
+
+For bzr development version checkout
+
+<pre>
+bzr branch --revision -1 bzr branch http://bzr.savannah.gnu.org/r/grub/trunk/grub
+cd grub
+./autogen.sh
+</pre>
+
+For 32-bit EFI:
+
+<pre>
+export EFI_ARCH=i386
+./configure --with-platform=efi --target=${EFI_ARCH} --program-prefix=""
+make
+</pre>
+
+For 64-bit (U)EFI:
+
+<pre>
+export EFI_ARCH=x86_64
+./configure --with-platform=efi --target=${EFI_ARCH} --program-prefix=""
+make
+</pre>
+
+On Mac, if after you've installed and configured, when you reboot, rEFIt/rEFInd reports "Error: Unsupported while loading grub.efi", it is likely you compiled the wrong version (64 vs 32 bit). Try the other EFI architecture.
+
+----
+
+==== Install GRUB2 in (U)EFI systems ====
+
+Boot into Linux (any live ISO) preferably in UEFI mode.
+
+Determine your <nowiki>[[http://en.wikipedia.org/wiki/EFI_System_partition|EFI SYSTEM PARTITION]]</nowiki> or create it (>=100 MiB FAT32 partition - GPT fdisk type code EF00 or GNU Parted 'boot' flag in GPT).
+
+Then mount the partition at /mnt/EFISYS (or at any mountpoint you wish). The following code assumes /dev/sda1 to be EFISYS partition.
+
+<pre>
+sudo mkdir -p /mnt/EFISYS # if the mount-point does not exist
+sudo modprobe dm-mod # required to make grub-probe stop complaining
+sudo mount -t vfat -o rw,users /dev/sda1 /mnt/EFISYS
+sudo mkdir -p /mnt/EFISYS/efi/grub
+</pre>
+
+Then, build an EFI application for GRUB and copy it and the other modules:
+
+<pre>
+cd <grub2_compiled_source_dir>/grub-core
+../grub-mkimage -O ${EFI_ARCH}-efi -d . -o grub.efi -p "" part_gpt part_msdos ntfs ntfscomp hfsplus fat ext2 normal chain boot configfile linux multiboot
+sudo cp grub.efi *.mod *.lst /mnt/EFISYS/efi/grub
+</pre>
+
+Note : The -p "" option is important for creating a portable grub.efi app. Now create a grub.cfg in /mnt/EFISYS/efi/grub :
+
+<pre>
+sudo touch /mnt/EFISYS/efi/grub/grub.cfg
+</pre>
+
+----
+
+=== Make the firmware launch GRUB2 (U)EFI as default ===
+
+----
+
+==== Non-Mac x86_64 UEFI systems ====
+
+For non-Mac UEFI systems, <nowiki>[[http://linux.dell.com/efibootmgr/|efibootmgr]]</nowiki> is used to modify the UEFI Firmware Boot Manager. This requires the kernel to be booted in UEFI mode and that the kernel processor architecture should match the firmware architecture (and 'noefi' is NOT used) for 'efivars' kernel module to be loaded and efibootmgr to access the boot manager variables. Initially the user is required to manually launch /boot/efi/efi/grub/grub.efi from the firmware itself if grub2-efi was installed in BIOS mode. Then efibootmgr should be run to create the boot entry.
+
+<pre>
+sudo modprobe efivars
+
+cd <grub2_compiled_source_dir>/grub-core
+../grub-probe --target=device /boot/efi/efi/grub/grub.efi
+
+sudo efibootmgr --create --gpt --disk /dev/sda --part 1 --write-signature --label "GRUB2" --loader "\\EFI\\grub\\grub.efi"
+</pre>
+
+In the above command, /boot/efi/efi/grub/grub/efi can be split up as /boot/efi and /efi/grub/grub.efi, which translates to (/dev/sda) -> partition 1 -> \\EFI\\grub\\grub.efi .
+
+Note the capital EFI, FAT32 file system is case-insensitive since it does not use UTF-8 encoding by default. In that case the firmware uses capital 'EFI' instead of small "efi," although using \\efi\\grub\\grub.efi should be just fine (this will change if the filesystem encoding is UTF-8). Also the path names in UEFI firmware are similar to Microsoft Windows path names and also uses backslashes (they are doubled because the shell interprets "\\" to mean a single backslash). The "label" is any name for your identification; the actual label used does not affect booting the system.
+
+----
+
+==== Apple Mac EFI systems (both EFI architecture) ====
+
+For Macs you can choose any one of the 3 boot methods : rEFIt/rEFInd, Apple, and grub-only.
+
+----
+
+===== Via rEFIt/rEFInd =====
+
+The most flexible way to boot grub EFI is to load it from rEFIt (version 0.14 as of mid-2010; apparently abandoned), or its successor <nowiki>[[http://www.rodsbooks.com/refind/|rEFInd]]</nowiki> (version 0.6.1 as of end-2012). It's quite easy, just copy grub.efi and related files to /efi/grub/ in any FAT or HFS+ partition, rEFIt/rEFInd will find it automatically and list it in the boot menu, along with the MacOS partition and all BIOS bootable partitions (also those on CD and USB drives). If you install the ext2fs or ReiserFS drivers provided with rEFIt/rEFInd, you can place your boot loader in the root or /efi/grub directory of any ext2fs, ext3fs, or ReiserFS volume, as well. As of rEFInd version 0.6.0, ext4fs drivers are available as well as many other new features.
+
+----
+
+===== Using Apple bootloader itself (safest option) =====
+
+You need to use the following naming convention for grub.efi :
+
+{| class="wikitable"
+|-
+| EFI
+| Bootloader path and filename
+|-
+| 32-bit
+| /EFI/BOOT/BOOTIA32.EFI
+|-
+| 64-bit
+| /EFI/BOOT/BOOTX64.EFI
+|}
+
+When you press the Alt key during boot, your Intel Mac should show the disk as "EFI Boot".
+
+In order to make the partition appear in the Apple boot picker menu, and be selectable as a startup disk, the boot partition should be in HFS+ format and have the following files :
+
+* /mach_kernel : can be empty
+* /.Volume''''''Icon.icns : optional icon
+* /System/Library/CoreServices/boot.efi : must be bless'ed (see section below) and may be booted, if so should be a symlink to the actual bootloader.
+* /System/Library/CoreServices/SystemVersion.plist which should look something like
+
+<pre>
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+        <key>ProductBuildVersion</key>
+        <string></string>
+        <key>ProductName</key>
+        <string>Linux</string>
+        <key>ProductVersion</key>
+        <string>Ubuntu 12.04</string>
+</dict>
+</plist>
+</pre>
+
+----
+
+===== Blessing grub.efi (Grub2 as the only bootloader) =====
+
+If you do not need an alternate (ie safe) boot method, you can configure grub.efi as the only loader. First, place grub.efi in any folder in any HFS+ partition.
+
+Boot Mac OS X.
+
+Detect where your grub.efi is stored. For example, in folder /Volumes/something, then uses bless it (type command in MacOS X terminal):
+
+<pre>
+sudo bless --folder=/Volumes/something --file=/Volumes/something/efi/grub/grub.efi --setBoot
+</pre>
+
+Alternatively, the command "hfs-bless" from the <nowiki>[[https://bugzilla.redhat.com/show_bug.cgi?id=755093|mactel-boot]]</nowiki> package can be used under Linux.
+
+----
+
+=== Selecting the (U)EFI Graphic Protocol ===
+
+If you are getting this error on the screen upon booting a menu entry
+
+<pre>
+error: no suitable mode found.
+Booting however
+</pre>
+
+and if no kernel boot messages are shown, then insert this to your grub.cfg file
+
+<pre>
+insmod efi_gop
+insmod efi_uga
+insmod font
+
+if loadfont ${prefix}/unicode.pf2
+then
+    insmod gfxterm
+    set gfxmode=auto
+    set gfxpayload=keep
+    terminal_output gfxterm
+fi
+</pre>
+
+and copy /usr/share/grub/unicode.pf2 (or /usr/share/grub2/unicode.pf2 depending on your distro) to your grub2 efi dir (/boot/efi/efi/grub mostly).
+
+Otherwise detect which graphics protocol is supported by the firmware to enable only that module
+
+----
+
+==== Non-Mac UEFI systems ====
+
+Non Mac systems use only Graphics Output Protocol. Thus efi_gop module should be loaded.
+
+----
+
+==== Apple Mac EFI systems ====
+
+For Macs detect the most reliable way to determine whether your hardware model has UGA (Universal Graphics Adapter) or GOP (Graphics Output Protocol) is to select "About rEFIT" in the rEFIt boot screen (or "About rEFInd" for rEFInd), you will see an output like this :
+
+<pre>
+EFI Revision 1.10
+Platform:  x86_64 (64 bit)
+Firmware:  Apple 1.10
+Screen Output:  UGA Draw (EFI 1.10), 1440 x 900
+</pre>
+
+or
+
+<pre>
+EFI Revision 1.10
+Platform:  x86_64 (64 bit)
+Firmware:  Apple 1.10
+Screen Output:  Graphics Output (UEFI), 1440 x 900
+</pre>
+
+Depending on the "Screen Output" value, add one of the two following command lists :
+
+<pre>
+set debug=video
+insmod efi_gop
+</pre>
+
+or
+
+<pre>
+set debug=fb
+insmod efi_uga
+</pre>
+
+The easiest way is to try the first one, and if you get an error message, try the second one. As a rule of thumb, models released after 2008 (Mac''''''Book5 and higher) should have GOP.
+
+Beware that on some Mac models (eg <nowiki>[[http://ubuntuforums.org/showpost.php?p=10723594&postcount=320|MacBookPro8,x]]</nowiki>), suspend/resume only works when none of efi_uga and efi_gop are used.
+
+----
+
+=== Selecting the graphic card ===
+
+If your model has 2 graphics card and you wish to completely power down the discrete graphic card in order to save more power, you must add
+
+<pre>
+outb 0x728 1 # Switch select
+outb 0x710 2 # Switch display
+outb 0x740 2 # Switch DDC
+outb 0x750 0 # Power down discrete graphics
+</pre>
+
+This uses the IO ports of the "gmux" Apple device (offset 0x700). Under MacOS , the "Apple''''''Graphics''''''Control" driver provides an API used by the MacOS mode switching GUI and by gfxCardStatus.
+
+Note: After every suspend/resume, the discrete graphic card is powered up again, so you need to disable it through a <nowiki>[[http://ubuntuforums.org/showpost.php?p=10695119&postcount=261|command line program]]</nowiki>, which can be executed automatically on each resume by PM-Utils.
+
+If is also possible to dynamically switch from the integrated to the discrete graphics, see the the patch <nowiki>[[http://ubuntuforums.org/showpost.php?p=10848581&postcount=456|"Add apple_gmux driver and provide support to use it with vga_switcheroo"]]</nowiki>
+
+Significant progress has been implemented recently (as of April 2012) within the 
+<nowiki>[[http://linux-hybrid-graphics.blogspot.com.es/2012/04/apple-macbook-pro-and-linux-hybrid_21.html|Linux Hybrid Graphics project]]</nowiki>
+
+Conversely, it is also possible to hide the Intel graphics entirely at the PCI level with the following commands in grub.cfg : 
+<pre>
+setpci -s 00:00.0 50.W=2
+setpci -s 00:00.0 54.B=d
+</pre>
+
+The first command sets the amount of RAM used for the card and some other settings. The second command is just an enable switch.
+----
+
+=== Non-Mac x86_64 UEFI specific info ===
+
+----
+
+==== Chainloading Windows x86_64 UEFI-GPT ====
+
+Find the UUID of the FAT32 filesystem in the UEFI SYSTEM PARTITION where the Windows UEFI Bootloader files reside. For example, if Windows bootmgfw.efi exists at /boot/efi/efi/Microsoft/Boot/bootmgfw.efi (ignore the upper-lower case differences since that is immaterial in FAT fs):
+
+<pre>
+1ce5-7f28
+</pre>
+
+Then, add this code to grub.cfg to chainload Windows x86_64 (Vista SP1+, 7 or 8) installed in UEFI-GPT mode :
+
+<pre>
+menuentry "Windows x86_64 UEFI-GPT" {
+    search --fs-uuid --no-floppy --set=root 1ce5-7f28
+    chainloader (${root})/efi/Microsoft/Boot/bootmgfw.efi
+}
+</pre>
+
+----
+
+=== Apple Mac EFI specific info ===
+
+----
+
+==== Loading OSX ====
+
+To load OSX, use the following section in grub.cfg:
+
+<pre>
+menuentry "MacOSX" {
+## Search the root device for Mac OS X's loader.
+  search --file --no-floppy --set=root /usr/standalone/i386/boot.efi
+## chainload the loader, pass parameters like -v directly
+  chainloader (${root})/usr/standalone/i386/boot.efi #-v
+}
+</pre>
+
+For debug output, uncomment the "-v" option. Apple's boot.efi is a Universal EFI binary, which is compatible with both i386 and x86_64 architectures, so the path is valid for all models.
+
+If your Mac OS X is installed on a partition with !FileVault full-disk encryption, you will not be able to chain load Mac OS X from GRUB.
+
+----
+
+==== Chainloading BIOS operating systems ====
+
+You can use appleloader to boot from legacy disk/cdrom/usb:
+
+<pre>
+menuentry "Boot from MBR" {
+  appleloader HD
+}
+
+menuentry "Boot from CD" {
+  appleloader CD
+}
+
+menuentry "Boot from USB" {
+  appleloader USB
+}
+</pre>
+
+The last one may not work on some model.
+
+----
+
+==== Loading Linux ====
+
+First of all, you need kernel version >=2.6.25 , <=2.6.24 do not work very well. You can use the following section in grub.cfg:
+
+<pre>
+menuentry "Linux (with bios dump)" {
+  search --file --no-floppy --set=root /vmlinuz
+  loadbios /boot/vbios.bin /boot/int10.bin
+  linux /vmlinuz root=/dev/sda3 video=efifb
+  initrd /initrd.img
+}
+
+menuentry "Linux (with bios dump and fix video)" {
+  search --file --no-floppy --set=root /vmlinuz
+  fix_video
+  loadbios /boot/vbios.bin /boot/int10.bin
+  linux /vmlinuz root=/dev/sda3 video=efifb
+  initrd /initrd.img
+}
+
+menuentry "Linux (without bios dump)" {
+  search --file --no-floppy --set=root /vmlinuz
+  fakebios
+  linux /vmlinuz root=/dev/sda3 video=efifb
+  initrd /initrd.img
+}
+</pre>
+
+First, you need to decide whether to use a BIOS dump. BIOS dump is necessary for certain x.org drivers, as they need to scan the video rom for important data structure such as DDC table. Some driver even calls INT 10 to locate VESA BIOS, so the IVT for INT10 needs to be set properly as well.
+
+To get the BIOS dump, you need to boot into BIOS mode, then use these commands to generate dump files:
+
+<pre>
+dd if=/dev/mem of=/boot/vbios.bin bs=65536 skip=12 count=1
+dd if=/dev/mem of=/boot/int10.bin bs=4 skip=16 count=1
+</pre>
+
+It would create /boot/vbios.bin and /boot/int10.bin to be used by the loadbios command.
+
+In some cases, BIOS dump is not needed (for instance with NVidia proprietary drivers), or BIOS mode is not supported by the hardware (such as Xserve models). Then you need to use fakebios, so that grub would try to mimic a BIOS environment.
+
+For Intel cards, you may experience screen distortion in the console mode. To solve this problem, use fix_video command in grub.cfg. Currently, fix_video has been reported to work with Intel 945GM, Intel 965GM and Intel X3100.
+
+----
+
+==== Enabling framebuffer console ====
+
+Check whether the framebuffer console ("fbcon") is included in your kernel.
+
+<pre>
+grep "CONFIG_FRAMEBUFFER_CONSOLE=" /boot/config-`uname -r`
+</pre>
+
+If it is included statically in your kernel ("y"), it will work as is. If it is included as a kernel module ("m"), the kernel module "fbcon" must be added to the initial RAM disk :
+
+<pre>
+echo fbcon | sudo tee -a /etc/initramfs-tools/modules
+echo uvesafb | sudo tee -a /etc/initramfs-tools/modules # For NVidia splash
+sudo update-initramfs -u -k all
+</pre>
+
+----
+
+==== Configuring X.org ====
+
+Sometimes, x.org driver doesn't work even with BIOS dump. Then you need to use frame buffer instead. In xorg.conf, use fbdev in Device section, it may look like this:
+
+<pre>
+Section "Device"
+        Identifier      "Configured Video Device"
+        Driver          "fbdev"
+EndSection
+</pre>
+
+If your model has 2 graphics card, you must specify the PCI device ID for the active card (the one selected in "Energy Saving" in MacOS X) in xorg.conf, otherwise it will take the first one, which will not be connected to the screen if the second card is active.
+
+For Mac''''''Book''''''Pro5,x :
+
+<pre>
+Section "Device"
+        Identifier      "Configured Video Device"
+        Driver          "nvidia"
+        BusID           "PCI:3:0:0"
+EndSection
+</pre>
+
+For Mac''''''Book''''''Pro6,x :
+
+<pre>
+Section "Device"
+        Identifier      "Device0"
+        Driver          "intel"
+        BusID           "0:2:0"
+EndSection
+</pre>
+
+You can obtain the PCI address with the command "lspci", that you can run either in grub2 EFI, either in a Linux terminal in EFI mode.
+
+Here are the PCI addresses of the dual-graphics models :
+
+{| class="wikitable"
+|-
+| Model
+| Integrated
+| Discrete
+|-
+| Mac''''''Book''''''Pro5,x
+| PCI:3:0:0
+| PCI:2:0:0
+|-
+| Mac''''''Book''''''Pro6,x
+| PCI:0:2:0
+| PCI:1:0:0
+|-
+| Mac''''''Book''''''Pro8,x
+| PCI:0:2:0
+| PCI:1:0:0
+|}
+
+On Mac''''''Book''''''Pro6,x, the screen picture looks distorted when using the Intel integrated graphics. This is because the Intel drivers do not recognize the double LVDS link to the screen when no BIOS initializes it. Problem is described <nowiki>[[http://www.mail-archive.com/intel-gfx@lists.freedesktop.org/msg01337.html|in this discussion]]</nowiki>. Please recompile your kernel with the <nowiki>[[https://patchwork.kernel.org/patch/641481/|"Implement manual override of LVDS single/dual channel mode" patch]]</nowiki> or <nowiki>[[http://permalink.gmane.org/gmane.comp.freedesktop.xorg.drivers.intel/3149|mailing list submission]]</nowiki>, install it, and add the following parameter boot parameters in grub.cfg :
+
+<pre>
+i915.lvds_channels=2 i915.modeset=1 i915.lvds_use_ssc=0
+</pre>
+
+For kernel 3.5, the patch was included in bug <nowiki>[[https://bugs.freedesktop.org/show_bug.cgi?id=37742|"37742"]]</nowiki>.  Beware : the parameter is now spelled "lvds_channel_mode" instead of "lvds_channels".
+
+----
+
+==== Linux boot options ====
+
+In some cases, you need to add these options to linux command line.
+
+<pre>
+acpi=force
+</pre>
+
+This is usually not needed with fakebios/loadbios (DMI can be detected with the bios dump), but if you are still having the ATA timeout or USB not response issue, try this option.
+
+<pre>
+noefi
+</pre>
+
+In 2.6.27-2.6.28, amd64 kernel, there is a bug that would cause EFI to hang. Since 2.6.27, it would only map available RAM, and the EFI runtime needs to be mapped with efi_ioremap. However, efi_ioremap only reserves MAX_EFI_IO_PAGES (100) pages for EFI, which is not enough for Apple 64-bit firmware (about 17M). To workaround this, you need to pass the "noefi" option which tells the kernel to disable EFI. However, some models do not need this workaround (eg Mac''''''Book''''''Pro5,3).
+
+Alternatively, you can try the following kernel option, explained in <nowiki>[[http://mjg59.livejournal.com/132477.html#comments|EFI implementation bugs]]</nowiki> :
+<pre>
+noexec=off
+</pre>
+
+Alternatively, you can try the 3.0-rc1 kernel, which contains several EFI-related fixes.
+
+If everything else fails, you can try a known good workaround by installing the "Run EFI in physical mode"  <nowiki>[[https://patchwork.kernel.org/patch/119823/|patch for kernel <= 2.6.36]]</nowiki> , or <nowiki>[[https://patchwork.kernel.org/patch/337911/|patch for kernel >= 2.6.37]]</nowiki> . This patch is less recommended because both MacOS and Windows run in virtual mode, so the EFI firmware is better tested when when the operating system runs in virtual mode. Also this patch is known to cause <nowiki>[[https://bugzilla.redhat.com/show_bug.cgi?id=699313|problems]]</nowiki> when efivars kernel module is used since the module requires EFI virtual mode to work properly.
+
+<pre>
+cd /usr/src
+sudo patch -p0 -i v2-EFI-Run-EFI-in-physical-mode.patch
+</pre>
+
+then recompile and install the kernel.
+
+----
+
+==== Key mapping ====
+
+As Apple Mac EFI doesn't recognize ctrl sequence, we need to use special key to mimic its function. Define the following mappings in grub.cfg in 1.98 :
+
+<pre>
+set F1=ctrl-x
+set F2=ctrl-a
+set F3=ctrl-e
+</pre>
+
+In grub 1.99, you can use the built-in equivalent already defined :
+
+<pre>
+Ctrl-X = F10
+Ctrl-C = F2
+</pre>
+
+----
+
+==== Tested configurations ====
+
+This section contains the list of models on which Linux has been successfully tested in EFI mode.
+
+{| class="wikitable"
+|-
+| Model
+| Distribution
+| Kernel
+| Video Driver
+| grub
+| Extra steps
+| OK and KO
+|-
+| Mac''''''Book''''''Air3,2
+| Ubuntu 12.04 64-bit
+| <nowiki>[[http://kernel.ubuntu.com/~kernel-ppa/mainline/v3.3.2-precise/|3.3.2-030302-generic]]</nowiki>
+| nouveau
+| grub-efi64 1.99
+| A <nowiki>[[https://bugs.launchpad.net/ubuntu/+source/xserver-xorg-video-nouveau/+bug/898784|NouveauBug]]</nowiki> means you must use a 3.3 kernel.
+| Console and everything works great. Beautiful.
+|-
+| Mac''''''Book''''''Pro5,3
+| Ubuntu 10.04 32-bit
+| 2.6.32-24-generic-pae
+| nvidia-195.36.24
+| grub-efi64 1.98
+| Need to first boot in BIOS mode, then reboot in EFI mode. "noefi" kernel option.
+| No physical terminal with vanilla kernel, reboot and suspend KO
+|-
+| Mac''''''Book''''''Pro5,3
+| Ubuntu 10.10 64-bit
+| 2.6.36
+| nvidia-260.19.06
+| grub-efi64 1.99
+| Reboot and suspend OK, console works at boot but Ctrl-Alt-F1..6 displays black screen
+| 
+|-
+| Mac''''''Book''''''Pro5,1
+| Ubuntu 10.04 64-bit
+| 2.6.32-22
+| nvidia-195.36.24
+| grub-efi64 1.97
+| Works fine with patched "drivers/video/efifb.c" (from kernel 2.6.34 and up) using NVIDIA 9400M
+| 
+|-
+| Mac''''''Book''''''Pro4,1
+| Ubuntu 10.10 64-bit
+| 2.6.35.4
+| nvidia-260.19.06-0ubuntu1
+| grub-efi 1.99beta
+| Model details of "drivers/video/efifb.c" were wrong and needed patching/recompiling
+|-
+| Mac''''''Book''''''Pro8,3
+| Ubuntu 11.04-Beta 64-Bit
+| 2.6.38.?
+| Intel
+| grub-efi trunk, 1.99-rc1 appears to work too
+| Requires 'noefi'
+| Booted from external ESATA drive via Express''''''Card. Xorg picks up the Intel video chip and LVDS1 as output, however screen remains blank.
+|-
+| Imac 8,1
+| Ubuntu 10.11 32-bit
+| 2.6.38-10-generic-pae
+| nvidia proprietary
+| standard
+| just efi_uga and loadbios commands required
+| local consoles (ALT-F1) does not work (black screen). AHCI works OK. USB works OK. Interrupts does not work without loadbios neither with noefi nor without
+|-
+| Mac''''''Book''''''Pro8,3
+| Ubuntu 11.10 - Ubuntu 12.04 amd64
+| 2.6.38 through 3.6.0-rc2
+| radeon/intel vga_switcheroo
+| grub-efi-amd64 1.99
+| I keep a repo of the Ubuntu quantal kernel git merged with what patches I've found are required for EFI boot on my 8,3 @ github https://github.com/akatrevorjay/linux
+| Works great, besides some small glitches here and there with switching between DIS and IGD, you have to do it a few times to get it to switch. Lowered temperatures down 30C
+|}
+
+----
+
+=== Troubleshooting ===
+
+----
+
+==== Live CD is not a Boot Option ====
+
+Some ASUS models use Aptio firmware from American Megatrends. It appears some version of the BIOS are case sensitive (for example, version 205 and 208). It looks for the filename EFI/BOOT/bootx64.efi, but Ubuntu provides EFI/BOOT/BOOTX64.EFI. The result is the Live CD is not a Boot Option in the Boot Menu. See https://bugs.launchpad.net/linux/+bug/1261465.
+
+==== Kernel unbootable without noefi ====
+
+If the kernel fails to boot with noexec=off or reboot_type=k or any other boot option(s) (without noefi) in UEFI mode, recompile the kernel with the following patches (to be applied in order) -
+
+* <nowiki>[[http://git.kernel.org/?p=linux/kernel/git/torvalds/linux-2.6.git;a=commit;h=2b5e8ef35bc89eee944c0627edacbb1fea5a1b84|x86, efi: Remove virtual-mode SetVirtualAddressMap call]]</nowiki>
+* <nowiki>[[http://git.kernel.org/?p=linux/kernel/git/torvalds/linux-2.6.git;a=commit;h=9cd2b07c197e3ff594fc04f5fb3d86efbeab6ad8|x86, efi: Consolidate EFI nx control]]</nowiki>
+* <nowiki>[[http://git.kernel.org/?p=linux/kernel/git/torvalds/linux-2.6.git;a=commit;h=202f9d0a41809e3424af5f61489b48b622824aed|x86, efi: Merge contiguous memory regions of the same type and attribute]]</nowiki>
+* <nowiki>[[http://git.kernel.org/?p=linux/kernel/git/torvalds/linux-2.6.git;a=commit;h=7cb00b72876ea2451eb79d468da0e8fb9134aa8a|x86, efi: Pass a minimal map to SetVirtualAddressMap()]]</nowiki>
+* <nowiki>[[http://git.kernel.org/?p=linux/kernel/git/torvalds/linux-2.6.git;a=commit;h=935a638241b0658b9749edd060f972575f9d4a78|x86, efi: Ensure that the entirity of a region is mapped]]</nowiki>
+* <nowiki>[[http://git.kernel.org/?p=linux/kernel/git/torvalds/linux-2.6.git;a=commit;h=916f676f8dc016103f983c7ec54c18ecdbb6e349|x86, efi: Retain boot service code until after switching to virtual mode]]</nowiki>
+* <nowiki>[[http://git.kernel.org/?p=linux/kernel/git/torvalds/linux-2.6.git;a=commit;h=7d68dc3f1003a38948c55c803c32d1989dd49198|x86, efi: Do not reserve boot services regions within reserved areas]]</nowiki>
+* <nowiki>[[http://git.kernel.org/?p=linux/kernel/git/torvalds/linux-2.6.git;a=commit;h=f70e957cda22d309c769805cbb932407a5232219|x86: Don't use the EFI reboot method by default]]</nowiki>
+
+These patches are included in linux kernel version 3.0-rc7 (as of July 2011).
+
+Other related patches :
+* <nowiki>[[https://patchwork.kernel.org/patch/852462/|x86, efi: free memory with the correct call]]</nowiki>
+* <nowiki>[[https://patchwork.kernel.org/patch/865582/|x86: CONFIG_EFI should select CONFIG_RELOCATABLE]]</nowiki>
+
+----
+
+==== Kernel Panic on Reboot ====
+
+On some Sandy Bridge UEFI systems, the Linux kernel <nowiki>[[http://img.flashtux.org/img132dcbc19160x584317ed.jpg|panics]]</nowiki>.  This has been reported on both <nowiki>[[https://bugs.archlinux.org/task/23067|Arch Linux]]</nowiki> and <nowiki>[[https://bugs.launchpad.net/ubuntu/+source/linux/+bug/721576|Ubuntu]]</nowiki>. This is due to buggy UEFI firmware which has bugs in its EFI Reboot Runtime Service which the kernel uses for rebooting. Add
+
+<pre>
+reboot=a,w
+</pre>
+
+to the kernel command line in grub.cfg to work around this problem. This instructs the kernel to use <nowiki>[[http://git.kernel.org/?p=linux/kernel/git/torvalds/linux-2.6.git;a=blob_plain;f=Documentation/x86/x86_64/boot-options.txt;hb=HEAD|ACPI and warm reboot]]</nowiki>.
+
+----
+
+==== Page Attribute Table problem ====
+
+<pre>
+[   21.999903] Xorg:1098 conflicting memory types c0000000-c0546000 write-combining<->uncached-minus
+[   21.999906] reserve_memtype failed 0xc0000000-0xc0546000, track write-combining, req write-combining
+</pre>
+
+Add the following kernel option :
+
+<pre>
+nopat
+</pre>
+
+----
+
+==== Display stuck after grub output ====
+
+If you use a 32-bit kernel on 64-bit EFI firmware, the following option instructs the kernel not to access the UEFI Runtime Services :
+
+<pre>
+noefi
+</pre>
+
+This happens in some Dell Latitude systems and some Mac''''''Book''''''Pro6,x and 8,x . For those systems, you should use a Linux kernel compiled with the "Run EFI in physical mode" patch.
+
+----
+
+==== Corrupted initial RAM disk ====
+
+<pre>
+usb 2-5: new high speed USB device using ehci_hcd and address 3
+md: autorun …
+md: … autorun DONE.
+RAMDISK: Couldn't find valid RAM disk image starting at 0.
+VFS: Cannot open root device "sda3" or unknown-block(0,0)
+Please append a correct "root=" boot option; here are the available partitions:
+Kernel panic - not syncing: VFS: Unable to mount root fs on unknown-block(0,0)
+Pid:1, comm: swapper Not tainted 2.6.36-020636-generic #201010210905
+</pre>
+
+The initial RAM disk is corrupted by grub 1.98, please see the <nowiki>[[http://www.mail-archive.com/bug-grub@gnu.org/msg12597.html|problem description]]</nowiki>. Solution : upgrade to grub 1.99. The "newreloc" feature takes cares to avoid overwriting the memory.
+
+----
+
+----
+
+==== Apple Mac EFI specific info ====
+
+----
+
+===== Distorted screen picture =====
+
+On a Mac''''''Book''''''Pro6,x, the screen picture looks distorted. When loading the i915 module it displays an error in dmesg which has probably something to do with the distortion:
+
+<pre>
+[   23.271254] i915 0000:00:02.0: Invalid ROM contents
+[   23.272049] [drm:intel_init_bios] *ERROR* VBT signature missing
+[   23.273002] [drm] failed to find VBIOS tables
+</pre>
+
+You need the "Implement manual override of LVDS single/dual channel mode" patch.
+
+----
+
+===== IRQ assignment errors =====
+
+<pre>
+Jun 13 21:07:47 MBP kernel: [    0.506231] ehci_hcd 0000:00:04.1: can't find IRQ for PCI INT B; please try using pci=biosirq
+Jun 13 21:07:47 MBP kernel: [    0.506522] ehci_hcd 0000:00:04.1: Found HC with no IRQ.  Check BIOS/PCI 0000:00:04.1 setup!
+Jun 13 21:07:47 MBP kernel: [    0.506811] ehci_hcd 0000:00:04.1: init 0000:00:04.1 fail, -19
+</pre>
+
+These errors can occur as a result of the "noefi" kernel parameter, which can cause problems with IRQ assignments for PCI devices (for instance SATA and USB controllers), so some devices might not be properly recognized.  During kernel boot, you will enter a BusyBox prompt and the keyboard is unresponsive.
+
+When the "noefi" option is used, a side effect on some models (eg Mac''''''Book''''''Pro5,3) is that booting straight into EFI mode does not work : an additional workaround is to first boot any OS in BIOS mode, then reboot in EFI mode. The fastest way is to boot grub BIOS, then press "c" for command-line, then type "reboot", then boot grub EFI, then select the Linux kernel. The cause of the problem or the reason why it acts as a workaround are unclear.
+
+----
+
+===== Display seems stuck after grub output =====
+
+If you see the following output with grub 1.98 and no further output afterwards :
+
+{<pre>
+   [Initrd, addr=0x3f7fff00, size=0x7f0349]
+</pre>}
+
+It might not as bad as it looks like. First boot Linux in BIOS mode, and add the following option in your grub.cfg :
+
+<pre>
+initcall_debug
+</pre>
+
+Then reboot Linux in EFI mode.
+
+Test 1 : The keyboard backlight (if your model has one) should still be on (tested on Ubuntu 10.04). After 10-30 seconds, the keyboard backlight should quickly flash on-off-on, which indicates that Linux is properly booted, but with a headless display and the X Server fails to start.
+
+Test 2 : Go to another physical machine, and start a SSH connection to your headless Mac. Type the command :
+
+<pre>
+dmesg | grep efifb
+</pre>
+
+and you will probably see an output like this :
+
+<pre>
+[    0.388807] calling  efifb_init+0x0/0x7b @ 1
+[    0.388821] initcall efifb_init+0x0/0x7b returned -19 after 9 usecs
+</pre>
+
+-19 stands for ENODEV, which is the "generic" error code returned by the efifb driver when its initialization fails.
+
+If efifb is successfully initialized, you should see an an output like this :
+
+<pre>
+[    0.386130] calling  efifb_init+0x0/0x7b @ 1
+[    0.386143] efifb: dmi detected MacBookPro5,3 - framebuffer at d0010000 (1440x900, stride 8192)
+[    0.386180] efifb: probing for efifb
+[    0.386901] efifb: framebuffer at 0xd0010000, mapped to 0xf8080000, using 7200k, total 7200k
+[    0.386906] efifb: mode is 1440x900x32, linelength=8192, pages=1
+...
+[    0.386948] initcall efifb_init+0x0/0x7b returned 0 after 796 usecs
+</pre>
+
+Check whether the X Server is started. If not, check the files /var/log/Xorg.[0-n].log for errors.
+
+Test 3 : Boot in EFI, then force a hardware shutdown by holding down the power button, then reboot in BIOS mode and check the files /var/log/kern.log.[0-n].
+
+----
+
+===== Wrong graphic card is activated =====
+
+If your grub 1.98 output looks like the following :
+
+<pre>
+ROM image is present
+   [Linux-bzImage, setup=0x3400, size=0x3d56c0]
+   [Initrd, addr=0x3f7fff00, size=0x7f0349]
+</pre>
+
+it means it cannot use the activated graphic card. Debug result : grub_efi_locate_protocol succeeds, but the "get_mode" fails with return code GRUB_EFI_NOT_READY (6). Solution : switch to the other graphic card in MacOS X and reboot. The output should look like the following :
+
+<pre>
+ROM image is present
+   [Linux-bzImage, setup=0x3400, size=0x3d56c0]
+Video mode: 1440x900-32@0
+Display Controller: 2:0.0
+Device id: 64710de
+MMIO(0): 0xe4000000
+VMEM(1): 0xc0000000
+MMIO(3): 0xe2000000
+Frame buffer base : 0xc0030000
+Video line length: 8192
+   [Initrd, addr=0x3f7fff00, size=0x7f0349]
+</pre>
+
+----
+
+===== Workaround in case grub cannot determine the graphic properties =====
+
+This step is not needed in normal cases : it is the bootloader's responsibility (ie grub) to determine the graphics properties and pass them to the kernel in the linux_kernel_params structure. The bootloader uses the EFI boot services for this purpose, which are terminated before control is passed to the kernel. However, if grub cannot determine your graphics properties, you can as a workaround hard-code them in the Linux kernel. Make sure your kernel knows the "Frame''''''Buffer''''''Base" and "Pixels''''''Per''''''Scan''''''Line" for your particular Mac hardware model. Type the following command in a MacOS X 10.5 or 10.6 terminal :
+
+<pre>
+sudo ioreg -lw0 |grep manufacturer|cut -b25-80;sudo ioreg -lw0|grep "product-name"|cut -b 25-80;sudo dtrace -qn 'BEGIN{boot_args=((struct boot_args*)(`PE_state).bootArgs);printf("FrameBufferBase: 0x%08x\nPixelsPerScanLine: %d\nHorizontalResolution: %d\nVerticalResolution: %d", boot_args->Video.v_baseAddr, boot_args->Video.v_rowBytes/4, boot_args->Video.v_width, boot_args->Video.v_height);exit(0)} '
+</pre>
+
+This gives an output similar to this :
+
+<pre>
+<"Apple Inc.">
+<"MacBookPro5,3">
+FrameBufferBase: 0xc0030000
+PixelsPerScanLine: 2048
+HorizontalResolution: 1440
+VerticalResolution: 900
+</pre>
+
+Beware that different values are possible for the Frame''''''Buffer''''''Base on the same model, depending on the amount of RAM installed for 4GB or less (first hex digit), but possibly also from which PCI devices are active (fourth hex digit). For a dual-graphic card system, 2 values for the Frame''''''Buffer''''''Base are possible, depending on which graphic card was activated when the machine was booted. Any of those 2 values can be used.
+
+Make sure that the file "drivers/video/efifb.c" of your <nowiki>[[http://git.kernel.org/?p=linux/kernel/git/torvalds/linux-2.6.git;a=history;f=drivers/video/efifb.c;h=815f84b07933f7b97dc1fab249055531f6cc65b2;hb=HEAD|kernel source]]</nowiki> has the correct values. If not, please recompile your kernel with the correct hard-coded values, and contribute your values in this <nowiki>[[http://ubuntuforums.org/showthread.php?t=1557326|forum thread]]</nowiki>.
+
+Note that adding the following parameter to the linux kernel command line in grub.cfg is NOT working:
+
+<pre>
+video=efifb:base:0xc0030000,stride:2048,width:1440,height:900
+</pre>
+
+----
+
+=== Miscellaneous info ===
+
+----
+
+==== UEFI Shell ====
+
+The UEFI Shell is a shell/terminal for the firmware which allows launching UEFI applications which include UEFI bootloaders. Apart from that, the shell can also be used to obtain various other information about the system or the firmware like memory map (memmap), running partitioning programs (diskpart), loading UEFI drivers, editing text files (edit), hexedit etc. You can download a BSD licensed UEFI Shell from Intel's Tianocore EDK2 Sourceforge.net project.
+
+<nowiki>[[http://tianocore.git.sourceforge.net/git/gitweb.cgi?p=tianocore/edk2;a=blob_plain;f=ShellBinPkg/UefiShell/X64/Shell.efi;hb=HEAD|x86_64 UEFI Shell (Beta)]]</nowiki>
+
+<nowiki>[[http://tianocore.git.sourceforge.net/git/gitweb.cgi?p=tianocore/edk2;a=blob_plain;f=EdkShellBinPkg/FullShell/X64/Shell_Full.efi;hb=HEAD|x86_64 UEFI Shell (Old)]]</nowiki>
+
+<nowiki>[[http://tianocore.git.sourceforge.net/git/gitweb.cgi?p=tianocore/edk2;a=blob_plain;f=ShellBinPkg/UefiShell/Ia32/Shell.efi;hb=HEAD|i386 UEFI Shell (Beta)]]</nowiki>
+
+<nowiki>[[http://tianocore.git.sourceforge.net/git/gitweb.cgi?p=tianocore/edk2;a=blob_plain;f=EdkShellBinPkg/FullShell/Ia32/Shell_Full.efi;hb=HEAD|i386 UEFI Shell (Old)]]</nowiki>
+
+Use the Beta Shell. If it doesn't work use the Old shell. Few Asus and other AMI Aptio x86_64 UEFI firmware based motherboards (from Sandy Bridge onwards) provide an option called Launch EFI Shell from filesystem device . For those motherboards, download the x86_64 UEFI Shell and copy it to you EFI SYSTEM PARTITION as <EFI_SYSTEM_PARTITION>/shellx64.efi (mostly /boot/efi/shellx64.efi) .
+
+----
+
+=== Alternatives ===
+
+==== BIOS ====
+
+grub BIOS (aka grub-pc) can be used as a fallback, which is more widely tested and supported.  On Mac machines with 2 GPUs, it is possible to unhide the Intel GPU with the following command in grub2 BIOS :
+
+<pre>
+setpci -s 00:00.0 54.B=0b
+</pre>
+
+==== grub 1 EFI (aka grub-legacy) ====
+
+The Fedora Core 11 (and higher) Live CD contains a bootable grub EFI 0.97 (the <nowiki>[[http://git.kernel.org/?p=boot/grub-fedora/grub-fedora.git;a=summary|grub-legacy]]</nowiki> originally patched by Intel for EFI and <nowiki>[[http://fedoraproject.org/wiki/Features/Grub2|forked by Red Hat]]</nowiki> for Fedora Core). The 32-bit edition runs on hardware models with EFI 32-bit and the 64-bit edition runs on hardware models with EFI 64-bit. They are bootable using the Apple bootloader.
+
+Limitation : if your hardware has UGA graphics, grub-legacy is not able to determine the "Frame''''''Buffer''''''Base" and "Pixels''''''Per''''''Scan''''''Line" for your particular Mac hardware model, because these values are not provided by the EFI API for UGA. With grub-legacy, the workaround using hard-coded values in efifb is necessary. Grub2, however, is able to figure out these values by some PCI scanning code.   For Fedora 18, Grub2 will be used in EFI mode; it is already the default for BIOS mode since Fedora 16.
+
+==== efilinux ====
+
+Ubuntu 12.10 will use <nowiki>[[https://lists.ubuntu.com/archives/ubuntu-devel/2012-June/035445.html|Intel's efilinux]]</nowiki> as UEFI bootloader in order to comply with Microsoft's UEFI Secure Boot.
+
+==== EFI Stub Loader ====
+
+Linux kernel 3.3 can be run as a UEFI application, with the <nowiki>[[http://www.rodsbooks.com/efi-bootloaders/efistub.html|EFI Stub Loader]]</nowiki>.  This method is still highly experimental.
+
+----
+
+=== Feedback ===
+
+Any questions, or suggestions ?
+
+Apple Mac users - Please leave a message in the <nowiki>[[http://ubuntuforums.org/forumdisplay.php?f=328|Ubuntu Apple Users forum]]</nowiki> (also for non-Ubuntu users) Non-Mac x86_64 UEFI users (Sandy Bridge etc.) - Please open a thread in Ubuntu forums (or) send a mail to <nowiki>[[mailto:help-grub@gnu.org|help-grub]]</nowiki> mailing list.
+
+Bug reports and feature requests should be sent to <nowiki>[[mailto:bug-grub@gnu.org|bug-grub]]</nowiki> or <nowiki>[[mailto:grub-devel@gnu.org|grub-devel]]</nowiki> mailing list, not to be posted in the forums.
+
+Most of the non-Mac info have been copied directly from the Arch Linux <nowiki>[[https://wiki.archlinux.org/index.php/GRUB2|grub2]]</nowiki> and <nowiki>[[https://wiki.archlinux.org/index.php/UEFI|UEFI]]</nowiki> pages.
+
+----
+
+=== References ===
+
+* <nowiki>[[http://grub.enbug.org/TestingOnMacbook|Original TestingOnMacbook page]]</nowiki>
+
+* <nowiki>[[http://en.wikipedia.org/wiki/UEFI|UEFI on Wikipedia]]</nowiki>
+
+* <nowiki>[[http://en.wikipedia.org/wiki/EFI_System_partition|EFI System Partition on Wikipedia]]</nowiki>
+
+* Linux Kernel UEFI <nowiki>[[http://kernel.org/doc/Documentation/x86/x86_64/uefi.txt|Documentation]]</nowiki>
+
+* <nowiki>[[http://www.uefi.org/home/|UEFI Forum]]</nowiki> - contains the official <nowiki>[[http://www.uefi.org/specs/|UEFI Specifications]]</nowiki> - GUID Partition Table is part of UEFI specification.
+
+* <nowiki>[[http://sourceforge.net/apps/mediawiki/tianocore/index.php?title=Welcome_to_TianoCore|Intel's Tianocore Project]]</nowiki> for Open-Source UEFI firmware which includes DuetPkg for direct BIOS based booting and OvmfPkg used in QEMU and Oracle VirtualBox
+
+* <nowiki>[[http://www.intel.com/technology/efi/|Intel's page on EFI]]</nowiki>
+
+* <nowiki>[[http://homepage.ntlworld.com/jonathan.deboynepollard/FGA/efi-boot-process.html|FGA: The EFI boot process]]</nowiki>
+
+* <nowiki>[[http://refit.sourceforge.net/|Homepage of rEFIt]]</nowiki>
+
+* <nowiki>[[http://www.rodsbooks.com/refind/|Homepage of rEFInd]]</nowiki>
+
+* <nowiki>[[http://www.microsoft.com/whdc/device/storage/GPT_FAQ.mspx|Microsoft's Windows and GPT FAQ]]</nowiki> - Contains info on Windows UEFI booting also
+
+* <nowiki>[[https://gitorious.org/tianocore_uefi_duet_builds/pages/Windows_x64_BIOS_to_UEFI|Convert Windows Vista SP1+ or 7 x86_64 boot from BIOS-MBR mode to UEFI-GPT mode without Reinstall]]</nowiki>
+
+* <nowiki>[[https://gitorious.org/tianocore_uefi_duet_builds/pages/Linux_Windows_BIOS_UEFI_boot_USB|Create a Linux BIOS+UEFI and Windows x64 BIOS+UEFI bootable USB drive]]</nowiki>
+
+* <nowiki>[[http://groups.google.com/group/linux.kernel/browse_thread/thread/9230ce8bb985917c/303c34b442d2c205|Discussion about EFI support in Linux]]</nowiki>
+
+----
+----
+CategoryBootAndPartition CategoryMac

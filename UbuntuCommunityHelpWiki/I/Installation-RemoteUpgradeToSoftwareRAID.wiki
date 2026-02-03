@@ -1,0 +1,258 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+Remote Server Upgrade to Software RAID 
+
+== Introduction ==
+{| class="wikitable"
+|-
+| <tablestyle="float:right; font-size: 0.9em; width:40%; background:#F1F1ED; margin: 0 0 1em 1em;" style="padding:0.5em;"><<BR>>
+|}
+
+This is a guide to installing software RAID 1 (mirroring) on a remote Ubuntu server with no access to external media.  The purpose is to provide a step-by-step method for mirroring a running system onto a new second physical disk that has been installed. 
+
+I performed this installation over SSH on a remote server running Ubuntu 9.04 (Jaunty Jackalope) with legacy grub (version 0.97).  The server had 2 250GB hard disks installed, although only one was partitioned and mounted with the running operating system.  The server also had a lights-out board installed with remote KVM access.  This is an environment typically offered by UK hosting company Fasthosts.co.uk. 
+
+This guide comes with no warranty of success.  As file partitions are being manipulated, there is a high risk of data loss.  You must back up any and all data that you cannot afford to lose.  
+
+== Overview ==
+
+The plan is as follows:
+* Partition the new disk
+* Create degraded RAID partitions involving the new disk
+* Copy data from the original disk into the RAID partitions
+* Configure the system to boot from the new disk on the mounted RAID partitions
+* Reboot and add the original disk partitions to the RAID partitions
+
+The following assumptions are made:
+* The new disk is at least the same size as the original disk, and is installed and visible in the BIOS
+* The hardware and BIOS are capable of booting from the new disk
+* You are able to reboot the server and enter the BIOS
+
+== Mirror Original Disk onto the New Disk ==
+=== Preparation ===
+
+* Ensure any hardware RAID (or FakeRAID) is disabled in the BIOS.  Details on how to do this are specific to each BIOS, though the setting is usually found in advanced peripheral settings.
+
+* Update the package lists and install mdadm
+{{{ 
+sudo apt-get update
+sudo apt-get install mdadm
+}}}
+
+=== Partition Organisation ===
+
+Throughout this guide, the original disk (hd0) is /dev/sda, and the new disk (hd1) is /dev/sdb.
+
+For the purpose of this guide, /dev/sda has the following partitions and mount points:
+* /dev/sda1 swap partition
+* /dev/sda2 Extended partition
+* /dev/sda5 mounted at /boot
+* /dev/sda6 mounted at /
+* /dev/sda7 mounted at /var
+* /dev/sda8 mounted at /home
+
+=== Configure the New Disk ===
+
+Copy partition configuration of /dev/sda to /dev/sdb
+<pre>
+sudo sfdisk -d /dev/sda | sfdisk --force /dev/sdb
+</pre>
+
+Change the system for each partition on /dev/sdb to FD (Linux RAID autodetect)
+<pre>
+sudo for partition in 1 5 6 7 8; do sfdisk --change-id /dev/sdb $partition fd; done
+</pre>
+
+Remove any RAID meta data from the new disk.  This would be the case if you had previously attempted to install RAID on this disk.
+<pre>
+sudo for partition in 1 5 6 7 8; do mdadm --zero-superblock /dev/sdb$partition; done
+</pre>
+
+If there was ''no'' meta data on the new disk, then you will see an error similar to the following which you do not need to worry about:
+<pre>
+mdadm: Unrecognised md component device - /dev/sdb1
+</pre>
+Note, there will be no output if meta data was actually zero'd.  
+
+Create degraded RAID arrays, one per partition.
+<pre>
+sudo for partition in 1 5 6 7 8; do mdadm --create /dev/md$partition --level=1 --raid-devices=2 missing /dev/sdb$partition; done
+</pre>
+
+Create file systems on the RAID partitions.
+<pre>
+sudo mkswap /dev/md1
+sudo for partition in 5 6 7 8; do mkfs.ext3 /dev/md$partition; done
+</pre>
+
+=== Copy Data to New Disk ===
+
+Update the mdadm configuration with our new RAID devices
+<pre>
+sudo mdadm -Es >>/etc/mdadm/mdadm.conf
+</pre>
+
+Ensure raid1 and md are loaded by the kernel at boot time, and load raid1 now to save a reboot.
+<pre>
+sudo echo raid1 >> /etc/modules 
+sudo echo md >> /etc/modules 
+sudo modprobe raid1
+</pre>
+
+Beginner Tip: It will be useful to have all your UUID's in a local text file for easy copy/paste.  Open a text editor such as gedit locally and list all the UUID's with the following command:
+{{{ 
+sudo blkid
+}}}
+Then highlight all the output, and paste your highlighted text to your text editor by clicking your middle mouse button in that window.  In the following steps, you can then easily highlight a UUID and paste it into your PuTTY or SSH client window with your middle mouse button.
+
+Add an option to the grub boot menu to enable us to boot from the RAID partitions.
+<pre>
+sudo nano /boot/grub/menu.lst
+</pre>
+Scroll to the bottom, and create a copy of the first stanza that you find after the line 
+<pre>
+
+title           Ubuntu 9.04 kernel 2.6.28-19-generic
+uuid            6b27b795-ff0e-4d1e-a631-851d6bdc63d5
+kernel          /vmlinuz-2.6.28-19-generic root=UUID=b6cb3dae-a029-4457-8807-dd45070622e9 ro quiet splash
+initrd          /initrd.img-2.6.28-19-generic
+quiet
+
+title           Ubuntu 9.04 kernel 2.6.28-19-generic
+uuid            6b27b795-ff0e-4d1e-a631-851d6bdc63d5
+kernel          /vmlinuz-2.6.28-19-generic root=UUID=b6cb3dae-a029-4457-8807-dd45070622e9 ro quiet splash
+initrd          /initrd.img-2.6.28-19-generic
+quiet
+</pre>
+
+The reason we make a copy is so that if there is an issue with booting onto the RAID partitions, you can recover to boot from the original disk.
+In the copied stanza block, make the following changes and save:
+* Prepend the title with RAID
+* Change uuid to that of /dev/md5, the partition that will be mounted at /boot from the list above (it should currently be set to the uuid of /dev/sda5)
+* Change the kernel root uuid to that of /dev/mdb6, the partition that will be mounted at / (it should currently be set to the uuid of /dev/sda6)
+* Optional: Comment hiddenmenu so that the menu is displayed at boot without need to hit Escape
+* Optional: increase the timeout from 3 to 10, to give you time to make a selection
+<pre>
+
+title           Ubuntu 9.04 kernel 2.6.28-19-generic
+uuid            6b27b795-ff0e-4d1e-a631-851d6bdc63d5
+kernel          /vmlinuz-2.6.28-19-generic root=UUID=b6cb3dae-a029-4457-8807-dd45070622e9 ro quiet splash
+initrd          /initrd.img-2.6.28-19-generic
+quiet
+
+title           RAID Ubuntu 9.04 kernel 2.6.28-19-generic
+uuid            82987988:99a015c2:92160f38:875c2921
+kernel          /vmlinuz-2.6.28-19-generic root=UUID=8f6ac739:0afbba20:92160f38:875c2921 ro quiet splash
+initrd          /initrd.img-2.6.28-19-generic
+quiet
+</pre>
+Now we need to ensure that our RAID partitions are mounted instead of /dev/sdax.  First make a copy of your current partition mounts, again so that if we fail to boot onto the RAID partition, we have a chance to recover.
+<pre>
+sudo cp /etc/fstab /tmp
+</pre>
+Then update the UUIDs for each mount point to the corresponding RAID partition UUIDs in /etc/fstab
+<pre>
+sudo nano /etc/fstab
+</pre>
+
+Mount the raid partitions and copy all data from /dev/sda.  
+<pre>
+sudo mkdir /raid
+sudo mount /dev/md6 /raid
+sudo mkdir /raid/{boot,var,home}
+sudo mount /dev/md5 /raid/boot
+sudo mount /dev/md7 /raid/var
+sudo mount /dev/md8 /raid/home
+sudo rsync -auHxv / /raid/
+sudo rsync -auHxv /boot/ /raid/boot/
+sudo rsync -auHxv /var/ /raid/var/
+sudo rsync -auHxv /home/ /raid/home/
+</pre>
+
+Create a new initramfs on the RAID partition so that grub can find it at boot time.
+<pre>
+cd /raid
+sudo chroot /raid
+sudo mount /proc
+sudo update-initramfs -u
+exit
+</pre>
+
+=== Install Grub on New Disk and Prepare to Reboot ===
+
+First of all, launch grub and check if the boot files have been copied to the new disk where grub can find them.  If the data was copied successfully above, then you should see the output along the following lines:
+<pre>
+sudo grub
+grub> find /grub/stage1
+ (hd0,4)
+ (hd1,4)
+</pre>
+In the output above, hd0 refers to the original disk, and 4 refers to the partition where the files exist.  Partitions are zero-based in grub, so 4 implies /dev/sda5.
+
+Now map (hd0) in grub to our new disk and install the bootloader:
+<pre>
+grub> device (hd0) /dev/sdb
+grub> root (hd0,4)
+grub> setup (hd0)
+grub> quit
+</pre>
+
+Finally, before rebooting, change the system for each partition on /dev/sda to FD (Linux RAID autodetect):
+<pre>
+sudo for partition in 1 5 6 7 8; do sfdisk --change-id /dev/sda $partition fd; done
+</pre>
+
+=== Reboot into RAID ===
+Ensure you have your remote KVM access available and reboot the server.  You need to enter the BIOS and prioritise the second disk over the first disk in the boot sequence.  When the grub boot menu appears, select the RAID entry.  If all is well, Ubuntu will load.
+
+Login, and add the /dev/sdax partitions to their corresponding RAID devices:
+<pre>
+sudo for partition in 1 5 6 7 8; do mdadm --add /dev/md$partition /dev/sda$partition; done 
+</pre>
+You can monitor progress of the synchronisation with the following command (hit Ctrl-C to exit):
+<pre>
+sudo watch cat /proc/mdstat
+</pre>
+
+== If Things Go Wrong ==
+
+If the server failed to boot onto the RAID partitions, you will end up at an initramfs prompt.
+To recover, you need to mount your /boot partition on the original disk /dev/sda, copy /tmp/fstab back to /etc/fstab, reboot, and select the non RAID option from the menu (or prioritise the first disk for boot in the BIOS).
+
+Once you've logged in, you will need to remove all traces of the RAID from your new disk so that you can start again.
+For some reason, I found my RAID partitions had been renamed, so you should check what your RAID partitions are named as using any of the following commands:
+<pre>
+sudo fdisk -l
+sudo cat /proc/mdstat
+sudo parted -l
+</pre>
+Now stop all the RAID partitions.  Modify these commands according to how your RAID partitions are named.  In my case, they were renamed to /dev/md_d1, /dev/md_d5, etc)
+<pre>
+sudo for partition in 1 5 6 7 8; do mdadm --stop /dev/md_d$partition; done
+</pre>
+Remove the RAID meta data from the disk
+<pre>
+sudo for partition in 1 5 6 7 8; do mdadm --zero-superblock /dev/sdb$partition; done
+</pre>
+I found that `parted -l` was showing `unrecognised disk label` against the RAID partition references.  To remove them, delete them from /dev
+<pre>
+sudo rm -rf /dev/md_d*
+</pre>
+Finally, remove the RAID partition configuration from the mdadm configuration file.  There will be one line per partition at the end of `/etc/mdadm/mdadm.conf` that all must be removed:
+<pre>
+ARRAY /dev/md1 level=raid1 num-devices=2 UUID=172e1028:a1b301c3:92160f38:875c2921
+ARRAY /dev/md5 level=raid1 num-devices=2 UUID=82987988:99a015c2:92160f38:875c2921
+ARRAY /dev/md6 level=raid1 num-devices=2 UUID=8f6ac739:0afbba20:92160f38:875c2921
+</pre>
+When you are ready to try again, reboot and be sure to jump into the BIOS and prioritise disk 0 in the boot order.
+
+----
+CategoryInstallation

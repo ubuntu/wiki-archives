@@ -1,0 +1,589 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+There are a few different ways to allow a virtual machine access to the external network. 
+
+* The default virtual network configuration is known as <nowiki>[[#usermodenetworking|Usermode Networking]]</nowiki>.  NAT is performed on traffic through the host interface to the outside network.  
+
+* Alternatively, you can configure <nowiki>[[#bridgednetworking|Bridged Networking]]</nowiki> to enable external hosts to directly access services on the guest operating system.
+
+If you are confused, the <nowiki>[[https://jamielinux.com/docs/libvirt-networking-handbook/|libvirt Networking Handbook]]</nowiki> provides a good outline.
+
+== Usermode Networking ==
+
+In the default configuration, the guest operating system will have access to network services, but will not be visible to other machines on the network.  The guest will be able, for example, to browse the web, but will not be able to host an accessible web server.
+
+By default, the guest OS will get an IP address in the 192.168.122.0/24 address space and the host OS will be reachable at 192.168.122.1.
+
+You should be able to ssh into the host OS (at 192.168.122.1) from inside the guest OS and use scp to copy files back and forth.
+
+If this configuration is suitable for your purposes, no other configuration is required.
+
+If your guests do not have connectivity "out-of-the-box" see <nowiki>[[#Troubleshooting|Troubleshooting]]</nowiki>, below.
+
+== Bridged Networking ==
+
+Bridged networking allows the virtual interfaces to connect to the outside network through the physical interface, making them appear as normal hosts to the rest of the network.
+
+'''Warning:''' Network bridging will not work when the physical network device (e.g., eth1, ath0) used for bridging is a wireless device (e.g., ipw3945), <nowiki>[[https://www.linuxfoundation.org/collaborate/workgroups/networking/bridge#It_doesn.27t_work_with_my_Wireless_card.21|as most wireless device drivers do not support bridging]]</nowiki>! 
+
+'''NOTE:''' Bridging is popular, and so it has reference material in several places that may not all be updated at once.  These are the links I know of;
+* <nowiki>[[KVM-Networking|KVM Networking]]</nowiki> - This page.
+* <nowiki>[[NetworkConnectionBridge|Network Connection Bridge]]</nowiki> - An in depth page on bridging.
+* <nowiki>[[BridgingNetworkInterfaces|Installing bridge utilities]]</nowiki> - A similar page from a Bridge-Utils point of view.
+* <nowiki>[[NetworkMonitoringBridge|Network Monitoring Bridge]]</nowiki> - An in-line sniffer page.
+
+=== Creating a network bridge on the host ===
+You can set up your system to boot with a bridge.  This works well, but does disable network manager so may not be best for desktops.  You can also create a bridge on demand.  This allows network manager to stay, but you have to remember to start the bridge before starting the VMs which use it. (Autostarted VMs can not use this)
+
+==== Creating a bridge on demand ====
+
+* You can do this from the command line or a script.  Details are covers on the <nowiki>[[NetworkConnectionBridge|Network Connection Bridge]]</nowiki> page.
+* You can use Network Manger to set up your bridge.  This is covered in a website at <nowiki>[[http://ask.xmodulo.com/configure-linux-bridge-network-manager-ubuntu.html|ask.xmodulo.com/configure-linux-bridge-network-manager-ubuntu.html]]</nowiki>.
+
+==== Creating a persistent bridge ====
+
+Install the bridge-utils package:
+<pre>
+sudo apt-get install bridge-utils
+</pre>
+
+We are going to change the network configuration. This assumes you are not using NetworkManager to control your network cards (eth0 in the example's case).  If you are using NetworkManager, and want to continue to do so, '''do not use this method.''' Modifying <code>/etc/network/interfaces</code> will disable Network Manager on the next reboot. 
+
+If you are on a remote connection, and so cannot stop networking, go ahead with the following commands, and use <code>sudo invoke-rc.d networking restart</code> or <code>sudo reboot</code> at the end. If you make a mistake, though, it won't come back up.
+
+To set up a bridge interface, edit /etc/network/interfaces and either comment or replace the existing config with ('''replace with the values for ''your'' network'''):
+
+<pre>
+auto lo
+iface lo inet loopback
+
+auto br0
+iface br0 inet static
+        address 192.168.0.10
+        network 192.168.0.0
+        netmask 255.255.255.0
+        broadcast 192.168.0.255
+        gateway 192.168.0.1
+        dns-nameservers 192.168.0.5 8.8.8.8
+        dns-search example.com
+        bridge_ports eth0
+        bridge_stp off
+        bridge_fd 0
+        bridge_maxwait 0
+</pre>
+'''Note:''' the lines <code>auto eth0</code> and <code>iface eth0 inet manual</code> are not in the file.  This is because br0 will bring up the components assigned to it.
+
+'''bridge_stp off''' is a setting for spanning tree.  If you have a possibility for network looks, you may want to turn this on.
+
+'''bridge_fd 0''' turns off all forwarding delay.  If you do not know what this is, you probably do not need it.
+
+'''bridge_maxwait 0''' is how long the system will wait for the Ethernet ports to come up. Zero is no wait.
+
+For DHCP, use;
+
+<pre>
+auto lo
+iface lo inet loopback
+
+auto br0
+iface br0 inet dhcp
+        bridge_ports eth0
+        bridge_stp off
+        bridge_fd 0
+        bridge_maxwait 0
+
+</pre>
+
+This will create a virtual interface br0.  You can have multiple bridges, and some need not have any actual network card assigned.
+
+Now restart networking:
+
+<pre>
+sudo /etc/init.d/networking restart
+</pre>
+Or
+<pre>
+sudo reboot
+</pre>
+If your VM host "freezes" for a few seconds after starting or stopping a KVM guest when using bridged networking, it is because a Linux bridge will take the hardware address of the lowest numbered interface out of all of the connected interface.  To work around this, add the following to your bridge configuration:
+
+<pre>
+post-up ip link set br0 address f4:6d:04:08:f1:5f
+</pre>
+
+and replace f4:6d:04:08:f1:5f with the hardware address of a physical ethernet adapter which will always be part of the bridge.
+
+=== Configuring ubuntu-vm-builder to create bridged guests by default ===
+
+{| class="wikitable"
+|-
+| This is handled by giving ubuntu-vm-builder the --bridge=br0 flag starting in karmic.
+|}
+
+Virtual machines are defined in XML files; ubuntu-vm-builder, the tool we will use to create VMs, bases them on the template file /etc/vmbuilder/libvirt/libvirtxml.tmpl (before Ubuntu 8.10 /usr/share/ubuntu-vm-builder/templates/libvirt.tmpl). In older versions of Ubuntu this file needed a hardcoded change to replace ''<source network='default'/>'' with ''<source bridge='br0'/>''.
+
+In Ubuntu 10.04 (Lucid and probably later versions) the libvirtxml.tmpl file uses variables so set '''bridge=br0''' in /etc/vmbuilder.cfg or ~/.vmbuilder.cfg (for system-wide or per-user configuration).
+
+Below is an example /etc/vmbuilder.cfg file. To use it change at least example.com to your domain:
+<pre>
+[DEFAULT]
+
+arch = i386
+domain = example.com
+part = vmbuilder.partition
+user = localadmin
+name = LocalAdmin
+pass = default
+
+[kvm]
+libvirt = qemu:///system
+bridge = br0
+virtio_net = true
+
+[ubuntu]
+suite = lucid
+flavour = virtual
+components = main,universe
+</pre>
+
+=== Generating a KVM MAC ===
+
+If you are managing your guests via command line, the following script might be helpful to generate a randomized MAC using QEMU's registered <nowiki>[[http://en.wikipedia.org/wiki/Organizationally_unique_identifier|OUI]]</nowiki> (52:54:00):
+<pre>
+MACADDR="52:54:00:$(dd if=/dev/urandom bs=512 count=1 2>/dev/null | md5sum | sed 's/^\(..\)\(..\)\(..\).*$/\1:\2:\3/')"; echo $MACADDR
+</pre>
+
+If you're paranoid about assigning an in-use MAC then check for a match in the output of "ip neigh".  However, using this random method is relatively safe, giving you an approximately ''n'' in 16.8 million chance of a collision (where ''n'' is the number of existing QEMU/KVM guests on the LAN).
+
+=== Converting an existing guest ===
+
+If you have already created VMs before, you can make them use bridged networking if you change the XML definition (in /etc/libvirt/qemu/) for the network interface, adjusting the mac address as desired from:
+<pre>
+    <interface type='network'>
+      <mac address='00:11:22:33:44:55'/>
+      <source network='default'/>
+    </interface>
+</pre>
+to:
+<pre>
+    <interface type='bridge'>
+      <mac address='00:11:22:33:44:55'/>
+      <source bridge='br0'/>
+    </interface>
+</pre>
+'''Note: Make sure the first octet in your MAC address is EVEN (eg. 00:)''' as MAC addresses with ODD first-bytes (eg. 01:) are reserved for multicast communication and can cause confusing problems for you.  For instance, the guest will be able to receive ARP packets and reply to them, but the reply will confuse other machines.  This is not a KVM issue, but just the way Ethernet works.
+
+You do not need to restart libvirtd to reload the changes; the easiest way is to log into virsh (a command line tool to manage VMs), stop the VM, reread its configuration file, and restart the VM:
+
+<pre>
+yhamon@paris:/etc/libvirt/qemu$ ls
+mirror.xml  networks  vm2.xml
+yhamon@paris:/etc/libvirt/qemu$ virsh --connect qemu:///system
+Connecting to uri: qemu:///system
+Welcome to virsh, the virtualization interactive terminal.
+
+Type:  'help' for help with commands
+       'quit' to quit
+
+virsh # list
+ Id Name                 State
+----------------------------------
+ 10 vm2                  running
+ 15 mirror               running
+
+virsh # shutdown mirror
+Domain mirror is being shutdown
+
+virsh # define mirror.xml
+Domain mirror defined from mirror.xml
+
+virsh # start mirror
+Domain mirror started
+
+</pre>
+
+The VM "mirror" is now using bridged networking.
+----
+
+=== DNS and DHCP Guests ===
+libvirt uses dnsmasq to hand out IP addresses to guests that are configured to use dhcp. If on your host machine you add 192.168.122.1 (the default IP of your host in libvirt) as your first nameserver in /etc/resolv.conf, then you can do name resolution for your guests. dnsmasq is smart enough to use the other 'nameserver' entries in your /etc/resolv.conf for resolving non-libvirt addresses. For example, if your current /etc/resolv.conf is:<pre>
+search example.com
+nameserver 10.0.0.1
+</pre>
+
+Change this to be:<pre>
+search example.com
+nameserver 192.168.122.1
+nameserver 10.0.0.1
+</pre>
+
+Now, if you have a virtual machine named 'hardy-amd64', after starting it, you can do: <pre>
+$ host hardy-amd64
+hardy-amd64 has address <IP address given by dnsmasq>
+</pre>
+
+Note that when using ssh you may need to use a trailing '.' after the hostname:<pre>
+$ ssh hardy-amd64.
+</pre>
+
+Finally, for this to work, your guest must send its hostname as part of the dhcp request. This is done automatically on many operating systems. For systems that do not send this automatically and use dhcp3, you can adjust the dhclient.conf file. For example, on Ubuntu 6.06 LTS (Dapper), adjust /etc/dhcp3/dhclient.conf to have:<pre>
+send host-name "<your guest hostname here>";
+</pre>
+
+'''IMPORTANT:''' Depending on your network configuration, your host's /etc/resolv.conf file might be periodically overwritten. You can edit /etc/resolvconf/resolv.conf.d/head instead to prevent this. If that is not an option you will have to either adjust the dhcp server on your network to hand out the additional libvirt name server for your libvirt hosts, or adjust each host machine accordingly. As there are many possible configurations for host machines, users are encouraged to look at <code>resolvconf</code> and/or <code>man interfaces</code>.
+
+== Private Virtual Switch (Guest-Only Network) ==
+
+If you want to create a virtual network for use only by the Guests and the host then you must proceed as follows (bellow user$ is the CLI prompt for the user with access to KVM and root# is the CLI prompt for the root user)
+
+Create a bridge device to be used by this network (in the example bellow I'm assigning the IP 10.3.11.254 to the Host):
+
+<pre>
+user$ sudo su
+root# cat << __EOF__ >> /etc/network/interfaces
+
+auto privatebr0
+iface privatebr0 inet static
+	address 10.3.11.254
+	netmask 255.255.255.0
+        pre-up    brctl addbr privatebr0
+        post-down brctl delbr privatebr0
+__EOF__
+root# /etc/init.d/networking restart
+</pre>
+
+Use virsh to create the private network:
+
+<pre>
+user$ virsh net-list --all  # check existing KVM networks
+Name                 State      Autostart
+-----------------------------------------
+default              active     yes       
+
+user$ echo '<network> <name>privatenet</name> <bridge name="privatebr0" /> </network>' >> /tmp/net.xml
+user$ virsh net-define /tmp/net.xml
+Network privatenet defined from /tmp/net.xml
+
+user$ virsh net-list --all
+Name                 State      Autostart
+-----------------------------------------
+default              active     yes       
+privatenet           inactive   no        
+
+user$ virsh net-start privatenet
+Network privatenet started
+
+user$ virsh net-list --all
+Name                 State      Autostart
+-----------------------------------------
+default              active     yes       
+privatenet           active     no        
+
+user$ virsh net-autostart privatenet
+Network privatenet marked as autostarted
+
+user$ virsh net-list --all
+Name                 State      Autostart
+-----------------------------------------
+default              active     yes       
+privatenet           active     yes       
+
+</pre>
+
+Now you can add a virtual network device to any of you Guests, select "privatenet" as its source device and this guest will be connected to the virtual switch. 
+
+== Booting Over the Network Using PXE ==
+
+The Ubuntu releases prior to Karmic (9.10) did not ship pxe binary ROM images. Install ''kvm-pxe'' package (from universe) in order to use ''kvm boot order=nc''. Visit <nowiki>[[http://etherboot.org]]</nowiki> to learn more about network booting and downloading/creating the appropriate ROM images.
+
+KVM and QEMU can emulate a number of network cards. ROM Files included in kvm-pxe are:
+{| class="wikitable"
+|-
+| 'KVM Name' ''nic,model=''
+| 
+| 'Etherboot Identification'
+| 
+| 'Etherboot Filename'
+| 
+| 'KVM filename'
+|-
+| e1000
+| 
+| ((e1000:e1000-0x1026 -- [8086,1026]))
+| 
+| gpxe-0.9.3-e1000-0x1026.rom
+| 
+| pxe-e1000.bin
+|-
+| ne2k_pci (default)
+| 
+| ns8390:rtl8029 -- [10ec,8029]
+| 
+| gpxe-0.9.3-rtl8029.rom
+| 
+| pxe-ne2k_pci.bin
+|-
+| pcnet
+| 
+| 
+| 
+| 
+| 
+| pxe-pcnet.bin
+|-
+| rtl8139
+| 
+| 
+| 
+| 
+| 
+| pxe-rtl8139.bin
+|-
+| virtio
+| 
+| 
+| 
+| 
+| 
+| pxe-virtio.bin
+|}
+
+Other ROM files include:
+{| class="wikitable"
+|-
+| 'KVM Name' ''nic,model=''
+| 
+| 'Etherboot Identification'
+| 
+| 'Etherboot Filename'
+| 
+| 'KVM filename'
+|-
+| i82551
+| 
+| 
+| 
+| 
+| 
+| pxe-i82551.bin
+|-
+| i82557b
+| 
+| 
+| 
+| 
+| 
+| pxe-i82557b.bin
+|-
+| i82559er
+| 
+| 
+| 
+| 
+| 
+| pxe-i82559er.bin
+|-
+| ne2k_isa
+| 
+| 
+| 
+| 
+| 
+| pxe-ne2k_isa.bin
+|-
+| smc91c111
+| 
+| 
+| 
+| 
+| 
+| pxe-smc91c111.bin
+|-
+| lance
+| 
+| 
+| 
+| 
+| 
+| pxe-lance.bin
+|-
+| mcf_fec
+| 
+| 
+| 
+| 
+| 
+| pxe-mcf_fec.bin
+|}
+
+Copy the respective file to /usr/share/kvm and/or /usr/share/qemu.
+
+=== Use virtio for Ubuntu or Windows guests ===
+
+For Windows guests follow <nowiki>[[http://www.linux-kvm.com/content/tip-how-setup-windows-guest-paravirtual-network-drivers|this]]</nowiki> instruction.
+
+You may find the performances of the network relatively poor (approx. 100/120mbits on my servers, which are quite fast). Make sure that you enable virtio. Go to the definition file of your VM, and add the virtio line to the definition of your network interface:
+
+<pre>
+    <interface type='bridge'>
+      <mac address='52:54:00:a0:41:92'/>
+      <source bridge='br0'/>
+      <model type='virtio'/>   <-- add this line, leave the rest
+    </interface>
+</pre>
+
+Or, if you're using KVM on the command line, add the options:
+<pre>
+-net nic,model=virtio -net user
+</pre>
+
+This improves the network performances by a lot (nearly a factor of 10) and corrects an issue some people reported with their network connections going away after a period of time or data transfer.
+
+== Multiple nics with multiple subnets (VLANs) ==
+
+You may experience some KVM host connectivity issues when using multiple nics, each on their own subnet/vlan (multiple default routes?).  In my case SSH logins (to the KVM host) would take a long time and connectivity would be cut when I restarted the network interfaces making ssh sessions and virt-manager connections crash.
+
+I needed multiple nics, each to be on a separate subnet (vlan).  Each nic is then dedicated to a specific VM on the KVM host.  The VMs then connect directly to the network using a bridge device.
+
+I never experienced problems with KVM guest connectivity.  Only the KVM Host.
+
+I fixed the problem using the following configuration in /etc/network/interfaces on the KVM host.  Please note the use of "manual" and "metric". YMMV. :D
+
+Note: first make sure that the guest OS loads the right network drivers.  This worked for me:  remove network modules 8139cp and 8139 too, then modprobe 8139cp
+
+<pre>
+
+auto lo
+iface lo inet loopback
+
+auto eth0
+iface eth0 inet dhcp
+	metric 0
+
+auto eth1
+iface eth1 inet manual
+
+auto br1
+iface br1 inet dhcp
+        bridge_ports eth1
+	bridge_stp off
+	bridge_fd 0
+	bridge_maxwait 0
+	metric 1
+
+auto eth2
+iface eth2 inet manual
+	
+auto br2
+iface br2 inet dhcp
+        bridge_ports eth2
+        bridge_stp off
+        bridge_fd 0
+        bridge_maxwait 0
+	metric 1
+
+</pre>
+
+== IP Aliases ==
+
+IP aliases provide a convenient way to give VM guests their own external IPs:
+
+1. Set up bridged networking.
+
+2. Create necessary IP aliases in the host as usual: 
+put in /etc/network/interfaces, e.g.,
+<pre>
+auto eth0:0
+iface eth0:0 inet static
+address 192.168.0.11
+netmask 255.255.255.0
+</pre>
+
+3. Hardwire the guest's IP, either changing it to static, e.g., as
+192.168.122.99, in /etc/network/interfaces in the guest or with a host
+entry in dhcp configuration (see below).
+
+4. Enable routing in the host: uncomment net.ipv4.ip_forward=1 in /etc/sysctl.conf (/etc/ufw/sysctl.conf if using ufw), or temporarily with 
+echo 1 >/proc/sys/net/ipv4/ip_forward.
+
+5. Change virtlib forward from nat to route and adjust dhcp range to exclude
+the address used for guest (optionally, add host entry for it):
+virsh net-edit default and change the xml to something like this:
+<pre>
+<network>
+  <name>default</name>
+  <uuid>12345678-1234-1234-1234-123456789abc</uuid>
+  <forward mode='route'/>
+  <bridge name='virbr0' stp='on' delay='0' />
+  <ip address='192.168.122.1' netmask='255.255.255.0'>
+    <dhcp>
+      <range start='192.168.122.100' end='192.168.122.254' />
+      <host mac"=00:11:22:33:44:55" name="guest.example.com" ip="192.168.122.99" />
+    </dhcp>
+  </ip>
+</network>
+</pre>
+
+6. Direct traffic from external interface to internal and back:
+<pre>
+iptables -t nat -A PREROUTING -d 192.168.0.11 -j DNAT --to-destination 192.168.122.99
+iptables -t nat -A POSTROUTING -s 192.168.122.99 -j SNAT --to-source 192.168.0.11
+</pre>
+Where to put those depends on your firewall setup;
+if you use ufw you might use /etc/ufw/before.rules.
+You might also need to adjust your firewall filtering rules.
+
+== Redirecting selected ports to virtual machines ==
+
+If you want to redirect a specific port of the host to a virtual machine,
+e.g., if you want have email server in a virtual machine at 192.168.122.90
+and redirect smtp port 25 there, and the host machine's IP is 192.168.0.10, it
+can be done like this (in the host):
+
+<pre>
+iptables -t nat -A PREROUTING -d 192.168.0.10 -p tcp --dport 25 -j DNAT --to-destination 192.168.122.90:25
+</pre>
+
+== Troubleshooting ==
+
+=== No Default (Usermode) Connectivity ===
+If you are using default (usermode) networking, but your guest operating system does not have connectivity, it may be a problem with your iptables configuration.  ''libvirtd'' should have created a number of iptables rules when it was installed.  
+
+In particular, list your iptables nat table:
+<pre>
+sudo iptables -n -t nat -L
+</pre>
+
+You should see:
+<pre>
+...
+Chain POSTROUTING (policy ACCEPT)
+target     prot opt source               destination         
+MASQUERADE  all  --  192.168.122.0/24    !192.168.122.0/24    
+...
+</pre>
+
+If this rule is missing, you can try to recreate it by:
+# Stop all of your virtual machines
+# Destroy and recreate the default network: <pre>
+virsh net-destroy default 
+virsh net-start default
+</pre>
+
+=== Network Bridge Losing Connectivity ===
+A number of people are having problems with the network bridge losing connection with the client after large amounts of data transfer (eg. during rsync).  Try to enable <nowiki>[[#virtio|virtio]]</nowiki>.
+
+=== Network Bridge Does Not Appear in Virt-Manager ===
+A network bridge configured as described above will not appear in virt-manager when using a remote management session, see <nowiki>[[https://bugs.launchpad.net/ubuntu/+source/libvirt/+bug/520386|bug #520386]]</nowiki>.
+
+----
+CategoryVirtualization

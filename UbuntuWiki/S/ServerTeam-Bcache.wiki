@@ -1,0 +1,241 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== What is bcache : ==
+
+<nowiki>[[https://www.kernel.org/doc/Documentation/bcache.txt | Bcache]]</nowiki> is an attempt to take all advantages of both ssd and hdd drives or RAID devices. To sum-up, HDD have great capacity, and have achieve good sequential read and write operations, but are very slow on random writes and reads, so they don't have a high level of IOPS ; SSD have very good overall performance specially high IOPS, so random writes and reads are way better than HDD, but they lack capacity. To overcome some of the default of HDD, RAID has been at the rescue to achieve some goals like, better reliability, better performance and better capacity. Some tools like lvm also allow adding physical disks and show them as bigger ones.
+
+So bcache tries to take the goods from all those technologies by adding another level of indirection. It will use the SSD for what it is good at : IOPS, and random reads/write, but it will let sequentials reads/writes on HDD/Raid devices by default. It will use SSD as a huge cache of many gigabytes to be able to write data almost always sequentially on HDD.
+
+Some SSD also have better sequentials read and write nowadays than single HDD, but if you compare to some SAS RAID, it can't compete, but still is way better in random IO. There is a tunable option to allow sequential write and read to be cached by bcache also ; in the examples following, it will not be used.
+
+In the future, it will be possible to use native raid mechanism on caching devices, for reliability improvement and maybe also for performance boost (ie : RAID0). 
+
+Today, it appears to be possible to use a combination of lvm, md (linux raid) and bcache, but no extensive tests have been done so far on this setup, and some compatibility issues may occur depending on the chipsets used.
+
+== Bcache caching modes ==
+
+=== ”writeback” : ===
+*** The most performant caching mode.
+
+*** Data written to the device is first written on the ssd, and then copied on the backing device asynchronously, write is considered complete at the end of the copy on SSD. For security purpose, the mechanism here always ensure that no data is considered safe until it has been completely written to the backing device (dirty pages), so if a power outage happened while data are still on the SSD, at next boot, data will be pushed back to the backing device. The goal here was to be as secure with bcache and software Linux Raid as with a hardware Raid device with BBUs.
+
+=== ”writethrough” : ===
+*** Secure caching mode.
+
+*** Data written to the device is copied on the ssd and the HDD at the same time, write is considered complete at the end of write on the HDD. So this tend to be more secure than “writeback”, but will lack of some of the performance gain.
+
+=== ”writearound” : ===
+*** Read-only caching mode.
+
+*** Data written to the device goes directly to the HDD, it is not written to SSD at all, so you don't benefit of any write gain like writethrough; also the first time this data is read, it will be read from HDD. The advantage of this is to have more space for caching reads, and to reduce the wear on the SSD. Right now there is no split between write cache and read cache as there can be on some filesystem (say ZFS), to handle particularities of the technologies behind ssd (slc, mlc, etc..).
+
+=== "none" : ===
+*** De-activate completely caching capability ( but the /dev/bcache# device is still available )
+
+=== Changing the caching mode ===
+
+The caching mode can be modified at running time. To know the current mode, you just issue:
+
+* sudo cat /sys/block/bcache0/bcache/cache_mode
+
+If, for example, the current mode is `writeback` the command will display<<BR>>
+`writethrough [writeback] writearound none`
+
+To change the caching mode to `writethrough`, run:
+* sudo su - -c 'echo writethrough > /sys/block/bcache0/bcache/cache_mode'
+
+Confirm:
+* sudo cat /sys/block/bcache0/bcache/cache_mode
+
+Output: <<BR>>
+`[writethrough] writeback writearound none`
+
+== Using bcache ==
+
+Bcache can use on plain devices or partitions on devices. Here in the following we will just use plain devices.
+
+What you need to use bcache :
+
+* an utopic or above version of ubuntu server
+* a spare ssd
+* a spare hdd
+
+'''WARNING!'''
+''All data on /dev/sdb and /dev/sdc will be lost if you follow this recipe. You can cache an already existing partition/drive, but this is out of scope.''
+
+If you're running Utopic Unicorn, you can test it as follow :
+
+be sure to be up-to-date:
+
+* sudo apt-get update
+* sudo apt-get upgrade
+* sudo apt-get install bcache-tools
+
+then you need to identify your devices. In the following example:
+* system will be on /dev/sda
+* hdd (referred as backing device) will be /dev/sdb
+* ssd (referred as caching device) will be /dev/sdc.
+
+'''WARNING!'''
+''All data on /dev/sdb and /dev/sdc will be lost if you follow this recipe. You can cache an already existing partition/drive, but this is out of scope.''
+
+We need to ensure that all superblock are wiped, the following is a little overkill, but must ensure that all is clear to make it work.
+
+We put zeroes on the first 4kB of the disk:
+* sudo dd if=/dev/zero if=/dev/sdb bs=512 count=8
+* sudo dd if=/dev/zero if=/dev/sdc bs=512 count=8
+* wipefs -a /dev/sdb
+* wipefs -a /dev/sdc
+
+now you can create your bcache:
+* make-bcache -C /dev/sdc -B /dev/sdb
+
+you can also set some config flags, ie:
+* make-bcache -C /dev/sdc -B /dev/sdb --discard --writeback
+
+where:
+* -C is for your caching device (ssd)
+* -B is for your backing device (hdd)
+* --discard is for using TRIM on ssd, not activated by default.
+* --writeback to use caching mode writeback, by default it is set to writethrough.
+
+TRIM is a unqueued sata command and as such can be slow, so by default is not set. But it also preserves SSD performance over time, so it is a matter of choice.
+
+Now you must be able to list your device:
+* ls /dev/bcache*
+* /dev/bcache0
+
+* create a new file system on this device:
+* sudo mkfs.ext4 /dev/bcache0
+
+'''Warning!'''
+''You are not able to create new partition on /dev/bcache0, if you need to do multiple bcache devices out of the two ssd and sata device, you need to partition your plain disks before and create bcache devices with partitions as backing and caching devices.''
+
+Now you can mount your bcache device:
+
+* sudo mkdir /media/bcache
+* sudo mount /dev/bcache0 /media/bcache
+
+You must also add it to your fstab:
+* sudo su - -c “/dev/bcache0 /media/bcache ext4 rw 0 0 >> /etc/fstab”
+
+'''Warning!'''
+''If you have multiple bcache device, you NEED to use UUID, enumeration of bcache devices is not guaranteed. 
+You can retrive your bcache UUID by executing the following:
+* blkid /dev/bcacheX
+then replace /dev/bcacheX by UUID=YOUR_UUID_GIVEN_BEFORE in /etc/fstab.''
+
+Now your bcache must be ready at next boot.
+
+=== Some rough performance test : ===
+
+I created an utopic minimal server vm, with just openssh service. This vm is setup to tar-gz root filesystem at start and then self poweroff.
+
+I launched as many vms as logical cores present on the system concurrently. So here is 12 starting vms tests. They consumed 6GB of memory on the host system having 8GB of ram, and file system is about 1.4GB on each vm, so normally system cache effect won't be too much of importance (except if shared pages activated).
+
+The test happend in two parts:
+ 1. copy the base image to n images and start n vms concurrently until all of them are powered off.
+ 2. start n vms concurrently until they all power themselves off.
+
+As the test checks if images are already there, the first time it is run is longer than next ones. Additional runs must show the cache benefit.
+
+Start command used:
+* kvm -m 512 -nographics -drive if=virtio,file=${BASE}${BASE_IMAGE} -net nic -net user -k fr --kernel $BASE/vmlinuz --initrd $BASE/initrd --append "root=/dev/vda1 nomodeset"
+
+results are (only two runs, may need more runs to have averages):
+
+==== Hdd only ====
+12vms start on HDD:
+real 42m34.324s
+user 18m33.683s
+sys 4m20.040s
+
+12vms restart on hdd:
+real 36m20.788s
+user 17m49.306s
+sys 3m23.770s
+
+==== SSD only ====
+12 vms start on ssd:
+real 6m22.430s
+user 20m39.627s
+sys 3m11.735s
+
+12 vms restart (ssd):
+real 3m35.279s
+user 19m21.430s
+sys 2m5.923s
+
+==== Bcache writearound mode ====
+real 43m58.575s
+user 19m29.924s
+sys 4m39.586s
+
+real 4m16.057s
+user 18m57.197s
+sys 2m8.818s
+
+==== Bcache writethrough mode ====
+12 vms start:
+real 33m33.490s
+user 17m54.543s
+sys 3m56.084s
+
+12 vms restart:
+real 7m7.148s
+user 18m7.827s
+sys 2m26.736s
+
+==== Bcache writeback ====
+real 21m37.536s
+user 17m4.371s
+sys 3m11.529s
+
+12vms restart (writeback):
+real 3m58.942s
+user 18m30.382s
+sys 2m2.761s
+
+=== Recovering a previously configured bcache device (i.e.: reinstall of the system): ===
+
+load the module:
+* sudo modprobe bcache
+
+load the module at each start: 
+* sudo su - -c ‘echo bcache >> /etc/modules’
+
+Optional verify each device role:
+* sudo bcache-super-show -f /dev/sdb
+* sudo bcache-super-show -f /dev/sdc
+
+Re-register devices for bcache:
+* sudo su - - c ‘echo /dev/sdb > /sys/fs/bcache/register’
+* sudo su - - c ‘echo /dev/sdc > /sys/fs/bcache/register’
+
+Now you must be able to mount it:
+* sudo mount /dev/bcacheX /media/bcache
+
+=== Removing a bcache ===
+
+After your test you may want to recover your ressource, this is what you need to do to remove a bcache device:
+
+==== Backup ====
+First, you may need to backup data as you will delete everything.
+
+==== Umount ====
+If your device is mounted, it is safer to umount it now.
+* sudo umount -v /dev/bcache0
+
+==== Stopping the bcache ====
+* sudo su - -c "echo 1 >/sys/fs/bcache/......../unregister"
+* sudo su - -c "echo 1 >/sys/block/bcache0/bcache/stop"
+* sudo wipefs -a /dev/sdX_caching
+* sudo wipefs -a /dev/sdY_backing

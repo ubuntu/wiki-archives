@@ -1,0 +1,333 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== Highly Available LAMP Setup ==
+
+This tutorial will guide you through setting up a '''Highly Available LAMP''', using the following technologies:
+* '''HaProxy''' for load balancing
+* '''keepalived''' to share an IP between HaProxy Nodes
+* '''<nowiki>[[https://help.ubuntu.com/lts/serverguide/httpd.html|Apache2]]</nowiki> & PHP7''' for the web nodes
+* '''<nowiki>[[https://gluster.readthedocs.io/en/latest/|Gluster]]</nowiki>''' to shared data between web nodes
+* '''<nowiki>[[https://help.ubuntu.com/community/mariadb|MariaDB]]</nowiki>''' for the databases Nodes
+* '''<nowiki>[[http://galeracluster.com/products/|Galera]]</nowiki>''' to create a MariaDB synchronized cluster
+
+All packages required for this POC are present within the official Ubuntu repositories.<<BR>><<BR>>
+
+'''Tested''' for: Ubuntu Server 17.04<<BR>>
+'''Testing required''' for: Ubuntu Server 16.04 LTS, Ubuntu Server 17.10<<BR>><<BR>>
+
+Wordpress is used to exemplify this proof of concept, but almost anything else can be used with this setup.
+
+=== Graphical representation ===
+
+{{https://help.ubuntu.com/community/HALAMP?action=AttachFile&do=get&target=wordpresscluster.png}}
+
+=== Mandatory knowledge before starting ===
+
+Before starting to configure this setup, please be sure you have a good understanding of the following topics:
+
+• <nowiki>[[https://help.ubuntu.com/lts/serverguide/httpd.html|Apache2 Web Server]]</nowiki><<BR>>
+• <nowiki>[[https://help.ubuntu.com/community/mariadb|MariaDB]]</nowiki> or <nowiki>[[https://help.ubuntu.com/lts/serverguide/mysql.html|MySQL]]</nowiki><<BR>>
+• <nowiki>[[https://help.ubuntu.com/community/InstallingANewHardDrive#Command_Line_Partitioning|Creating a new filesystem]]</nowiki><<BR>>
+• <nowiki>[[https://help.ubuntu.com/lts/serverguide/networking.html|Ubuntu networking]]</nowiki><<BR>>
+
+=== IP Configuration ===
+
+Here are the names used within '''/etc/hosts''' for this setup:
+
+<pre>
+192.168.122.165 vrrp-wordpress
+
+192.168.122.161 haproxy-01
+192.168.122.162 haproxy-02
+
+192.168.122.171 wordpress-01
+192.168.122.172 wordpress-02
+192.168.122.173 wordpress-03
+
+192.168.122.181 mariadb1
+192.168.122.182 mariadb2
+192.168.122.183 mariadb3
+</pre>
+
+The first IP, '''vrrp-wordpress''', is actually an IP that is residing normally on haproxy-01. However, if this node goes down, the ha-proxy2 will automatically claim the IP. This is an active/standby setup for our load balancers.
+The '''haproxy{1..2}''' nodes are the load balancers monitoring the apache2 nodes and redirrecting traffic accordingly.<<BR>><<BR>>
+The nodes '''wordpress-0{1..3}''' are the apache2 nodes, having a wordpress installation. These nodes also have gluster installed, in order to replicate the web data across all 3 nodes. All of these nodes have haproxy installed and listening on 3306, in order to redirect mysql requests to one of the 3 mariadb nodes.<<BR>><<BR>>
+The nodes '''mariadb{1..3}''' are the databases. They are clustered with galera, a system that actively syncs all 3 nodes. This means that every time data is written to one node, it will be written in real time to all 3 nodes. Data can be read, at any time, from any of the nodes. Galera should be used with a proxy that is capable of redirecting DB writes to only one node, in order to avoid conflicts. If the setup you are going for will have intensive DB activity, please consider using maxscale between apache2 and mariadb, instead of haproxy.<<BR>><<BR>>
+The '''/etc/hosts''' configuration above should be present on all 8 nodes. There are various configurations across the nodes that require domain name. Keep in mind that 3 servers are required both for gluster and galera in oder to have quorum, so this setup won’t be really safe with less nodes.
+
+=== The MariaDB Nodes ===
+
+The MariaDB installation is not covered in this tutorial. Please refer to our community help pages for installing and configuring MariadB. <<BR>>
+
+After MariaDB has been installed on all nodes, there are only small  modifications you need to do in order to enable the Galera cluster. The packages are currently delivered along with mariadb-server, so no additional packages need to be installed.
+
+Create the file '''/etc/mysql/conf.d/galera.cnf''' and populate it with the following settings.<<BR>>
+Note: ''If you use different domain names, change wsrep_cluster_address and please provide node IP/name within wsrep_node_address and wsrep_node_name.''
+<pre>
+[mysqld]
+binlog_format=ROW
+default-storage-engine=innodb
+innodb_autoinc_lock_mode=2
+bind-address=0.0.0.0
+
+wsrep_on=ON
+wsrep_provider=/usr/lib/galera/libgalera_smm.so
+
+wsrep_cluster_name=training_cluster
+wsrep_cluster_address=gcomm://mariadb1,mariadb2,mariadb3
+
+wsrep_sst_method=rsync
+
+wsrep_node_address=192.168.122.181
+wsrep_node_name=mariadb1
+</pre>
+
+For the setup to work, MariaDB needs to listen on 0.0.0.0, or on the subnet that is reachable by your web nodes. The setting needs to be changed within '''/etc/mysql/mariadb.conf.d/50-server.cnf'''.
+
+To power up your first mariadb node by running 
+<pre>
+galera_new_cluster
+</pre>
+If you can't start the cluster because you powered off all nodes previously (after already startign the cluster once), it means that galera doesn't think it would be safe to start a new cluster (as this could lead to data loss). You probably have the following file on your system:
+<pre>
+root@mariadb1:~# cat /var/lib/mysql/grastate.dat 
+version: 2.1
+uuid:    519f7bdd-8cf6-11e7-b6eb-6b82a0a1dcdb
+seqno:   629
+safe_to_bootstrap: 0
+</pre>
+change the vale from '''safe_to_bootstrap''' to '''1''' and start the cluster.<<BR>>
+
+On the other 2 nodes, just run
+<pre>
+systemctl start mariadb
+</pre>
+Starting mariadb with systemctl will work only if the cluster is already running, since we added the galera config.<<BR>>
+
+After this you can confirm all nodes have joined the cluster by running the following bash command:
+
+<pre>
+root@mariadb1:~# echo "SHOW STATUS LIKE 'wsrep_cluster_size';" | mysql
+Variable_name Value
+wsrep_cluster_size 3
+</pre>
+
+=== Gluster on Apache2 nodes ===
+Lets install all required packages on the apache2 nodes:
+
+<pre>
+apt install libapache2-mod-php7.0 apache2 php7.0 php7.0-mysql php7.0-fpm
+apt install glusterfs-server
+</pre>
+
+You will need to add another virtual disk to the apache2 servers. I added a 5GB, since this is a POC and 5GB is enough for the wordpress files. After this, you need to use fdisk to create one partition. It should be '''fdisk /dev/vdb''' and '''n p enter enter enter w'''. After this, format it to xfs: '''mkfs.xfs -i size=512 /dev/vdb1'''. This is the end result you should reach:
+
+<pre>
+root@wordpress-03:~# fdisk -l /dev/vdb
+Disk /dev/vdb: 5 GiB, 5368709120 bytes, 10485760 sectors
+Units: sectors of 1 * 512 = 512 bytes
+Sector size (logical/physical): 512 bytes / 512 bytes
+I/O size (minimum/optimal): 512 bytes / 512 bytes
+Disklabel type: dos
+Disk identifier: 0xe611892d
+ 
+Device     Boot Start      End  Sectors Size Id Type
+/dev/vdb1        2048 10485759 10483712   5G 83 Linux
+
+root@wordpress-03:~# file -sL /dev/vdb1
+/dev/vdb1: SGI XFS filesystem data (blksz 4096, inosz 512, v2 dirs)
+</pre> 
+
+After installing packages and configuring the new disk on all hosts, use the following commands to connect all nodes to gluster and also check the status:
+
+<pre>
+gluster peer probe wordpress-02
+gluster peer probe wordpress-03
+</pre> 
+
+Your status should look like this:
+
+<pre>
+root@wordpress-01:~# gluster peer status
+Number of Peers: 2
+ 
+Hostname: wordpress-03
+Uuid: c0c40d4d-4e77-40bc-ba71-d6ef0db54018
+State: Peer in Cluster (Connected)
+ 
+Hostname: wordpress-02
+Uuid: e685a5c0-265b-4c07-9f5a-89f6b5ea1d07
+State: Peer in Cluster (Connected)
+</pre> 
+
+Now you have to mount that filesystem and create a gluster volume. The fstab entry should look like this (please use the UUID of your partition, not the one from the example; you can find the UUID with the command '''blkid'''):
+
+<pre>
+root@wordpress-01:~# grep vdb /etc/fstab
+UUID=380cf10f-c266-44a8-8461-6dc832135efe /mnt/vdb1 xfs defaults 0 0
+</pre>
+
+After mounting, mkdir /mnt/vdb1/brick. Do this on all hosts. When the xfs filesystem is mounted on all apache2 nodes, create the volume:
+
+<pre>
+gluster volume create httpglustervol replica 2 wordpress-01:/mnt/vdb1/brick wordpress-02:/mnt/vdb1/brick wordpress-03:/mnt/vdb1/brick
+</pre>
+
+After the volume was created, the volume status should look like this:
+
+<pre>
+root@wordpress-01:~# gluster volume status
+Status of volume: httpglustervol
+Gluster process                             TCP Port  RDMA Port  Online  Pid
+------------------------------------------------------------------------------
+Brick wordpress-01:/mnt/vdb1/brick          49154     0          Y       1529
+Brick wordpress-02:/mnt/vdb1/brick          49154     0          Y       1517
+Brick wordpress-03:/mnt/vdb1/brick          49153     0          Y       1292
+Self-heal Daemon on localhost               N/A       N/A        Y       7527
+Self-heal Daemon on wordpress-03            N/A       N/A        Y       1313
+Self-heal Daemon on wordpress-02            N/A       N/A        Y       6909
+ 
+Task Status of Volume httpglustervol
+------------------------------------------------------------------------------
+There are no active volume tasks
+</pre> 
+
+The gluster setup is not done yet. Please keep in mind that '''you are not allowed to manually create files on /mnt/vdb1/brick'''. These files are managed by gluster, and only by gluster. Create the folder /mnt/httpd and add it to '''/etc/fstab''' like this:
+<pre>
+localhost:/httpglustervol /mnt/httpd glusterfs defaults,_netdev 0 0
+</pre>
+Using '''localhost''' is considered dangerous by some engineers as it can lead in some cases to problems at booting the system, because gluster is not ready to deliver the device. Normally this gets fixed by using '''mount -a''' after the system booted. Some users reported small issues here.
+
+Now '''mount''' it, create a wordpress folder within (example '''mkdir /mnt/httpd/wordpress''') and 
+configure apache2 to point to this folder. Sample setting are bellow.
+
+Settings for the available site or just '''/etc/apache2/sites-enabled/000-default.conf''':
+<pre>
+<VirtualHost *:80>
+ 
+ ServerAdmin webmaster@localhost
+ DocumentRoot /mnt/httpd/wordpress
+ 
+ 
+ ErrorLog ${APACHE_LOG_DIR}/error.log
+ CustomLog ${APACHE_LOG_DIR}/access.log combined
+ 
+</VirtualHost>
+</pre>
+
+Paragraph required within '''/etc/apache2/apache2.conf'''
+<pre>
+<Directory /mnt/httpd/>
+ Options Indexes FollowSymLinks
+ AllowOverride None
+ Require all granted
+</Directory>
+ }}}
+
+You can now test the functionality of your web servers. SSH onto one of them, add some random php files to it and see if they replicate, and if all 3 nodes are delivering the content. Just to be sure you got it right, test the following:<<BR>>
+
+• automatic replication of files within /mnt/httpd on all 3 nodes <<BR>>
+• php web content on all 3 nodes. 
+
+=== HaProxy on Apache2 nodes ===
+
+The Apache2 Nodes require a proxy to connect to the databases. Please install haproxy on '''wordpress-0{1..3}''' and configure it according to the settings bellow, or if you want, install another proxy that you desire to have in your environment (a very good proxy would be '''maxscale''', as it can route writes to one mariadb nodes and reads to all of them, making sure that you don't have DB conflicts and that your load is well split among nodes).
+
+{{{
+apt install haproxy
+</pre>
+
+The settings for haproxy need to be appended at the end of '''/etc/haproxy/haproxy.cfg''':
+
+<pre>
+listen galera
+        bind 127.0.0.1:3306
+        balance leastconn
+        mode tcp
+        option tcpka
+        option mysql-check user haproxy
+        server mariadb1 192.168.122.181:3306 check weight 1
+        server mariadb2 192.168.122.182:3306 check weight 1
+        server mariadb3 192.168.122.183:3306 check weight 1
+</pre>
+
+You also need to log into one of the mariadb nodes and run some mysql commands in order to allow the haproxy user to run checks (required on only one mariadb server, as the others will sync the data):
+
+<pre>
+CREATE USER 'haproxy'@'192.168.122.171';
+CREATE USER 'haproxy'@'192.168.122.172';
+CREATE USER 'haproxy'@'192.168.122.173';
+</pre> 
+
+Now you can test from the wordpress nodes to see if haproxy and galera are working, by running the following bash command:
+{{
+mariadb -uhaproxy -h127.0.0.1
+}}
+
+You can run more tests here if you want. Try closind a DB to see if you get routed to another one. <<BR>>
+
+When you are done, install your required software to '''/mnt/httpd'''. If you followed the tutorial to create a POC, than just install wordpress to '''/mnt/httpd/wordpress'''
+<<BR>>
+
+=== HaProxy Nodes ===
+
+Install what we need on these nodes:
+<pre>
+apt install haproxy keepalived
+</pre>
+
+Append these minimal settigns to your haproxy config: <<BR>>
+'''/etc/haproxy/haproxy.cfg'''
+<pre>
+
+frontend http
+  bind *:80
+  mode http
+  default_backend web-backend
+ 
+backend web-backend
+   balance roundrobin
+   server wordpress-01 192.168.122.171:80 check
+   server wordpress-02 192.168.122.172:80 check
+   server wordpress-03 192.168.122.173:80 check
+ }}}
+
+Create '''/etc/keepalived/keepalived.conf''' and add the following content to it:
+
+{{{ 
+global_defs {
+   smtp_server localhost
+   smtp_connect_timeout 30
+}
+ 
+vrrp_instance VI_1 {
+    state MASTER
+    interface ens3
+    virtual_router_id 101
+    priority 101
+    advert_int 1
+    authentication {
+        auth_type PASS
+        auth_pass 1111
+    }
+    virtual_ipaddress {
+        192.168.122.165
+    }
+}
+</pre>
+
+On node '''haproxy-02, change the value from "priority 101" to 100''', so that haproxy-01 will always be active when alive. By doing this, haproxy-02 will get 192.168.122.165 only when haproxy-01 is dead.
+
+Test the entire setup. Recommanded tests:
+* close haproxy-01 and see if the site still answers on 192.168.122.165
+* close one apache2 server to see if the haproxy nodes properly detect it is down
+* close one of the mariadb servers to see if the apache2 nodes stop using it.
+* close one haproxy node, one apache2 node and one mariadb node to see if the setup still works

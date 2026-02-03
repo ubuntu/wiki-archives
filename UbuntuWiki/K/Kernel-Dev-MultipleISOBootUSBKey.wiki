@@ -1,0 +1,235 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+This page describes the process of creating a bootable USB key that has multiple ISO images on it. This is especially useful for conferences and testing.  The ISOs are simply placed unaltered onto the USB stick and may be directly booted using grub's loopback support.  Magic!
+
+=== Issues ===
+
+* Grub says: '''/casper/vmlinuz: file not found''' after selecting entry.
+** If you get this error, you should rename the grub entry to point at /casper/vmlinuz.efi
+
+=== Requirements ===
+
+1. Grub2 (version 1 does not support loopback mode)
+
+2. USB stick (large enough to hold your *.iso files)
+
+=== Automated Instructions ===
+
+1. Copy the script below into a file
+
+2. Ensure the file is executable (chmod +x <file>)
+
+3. Insert a USB stick 
+   '''''NB: All data on your stick will be lost - if it's important back it up'''''
+
+4. Run it as root (sudo ./<file> <drive>)
+
+    <pre>
+# !/bin/sh
+
+if [ "$(id -u)" != "0" ]; then
+   echo "This script must be run as root" 1>&2
+   exit 1
+fi
+
+if [ $# -ne 1 ]; then
+        echo "Usage: $0 <drive>"
+        exit 1
+fi
+
+DISK=$1
+
+echo "Ensuring device is not mounted"
+for i in `ls -1 ${DISK}*`; do 
+        umount $i > /dev/null 2>&1
+done
+
+echo "Erasing old partition information"
+dd if=/dev/zero of=${DISK} bs=1024 count=1024 > /dev/null 2>&1
+
+SIZE=`fdisk -l $DISK | grep Disk | awk '{print $5}'`
+
+CYLINDERS=`echo $SIZE/255/63/512 | bc`
+
+echo "Creating partitions"
+echo ",,,*" | sfdisk -D -H 255 -S 63 -C ${CYLINDERS} ${DISK} > /dev/null 2>&1
+
+echo "Formatting disk"
+mkfs.ext4 -L "MultiBoot" ${DISK}1 > /dev/null 2>&1 
+
+echo "Mounting device"
+if [ -b ${DISK}1 ]; then
+    mount ${DISK}1 /mnt > /dev/null 2>&1
+else
+    echo "ERROR: Can't find ${DISK}1"
+    exit
+fi
+
+ANSWER=0
+while [ $ANSWER -lt 1 ] || [ $ANSWER -gt 3 ]; do 
+        echo "Is your machine an x86 or AMD64 one?"
+        echo "1. i386 (32bit)"
+        echo "2. amd64 (64bit)"
+		echo "3. None (do not download any *.iso files)"
+        echo -n "> "
+        read ANSWER
+done
+
+mkdir /mnt/iso
+cd /mnt/iso
+
+if [ $ANSWER -eq 1 ]; then
+	echo "Fetching i386 isos"
+	wget http://releases.ubuntu.com/hardy/ubuntu-8.04.4-desktop-i386.iso
+	wget http://releases.ubuntu.com/jaunty/ubuntu-9.04-desktop-i386.iso
+	wget http://releases.ubuntu.com/karmic/ubuntu-9.10-desktop-i386.iso
+	wget http://releases.ubuntu.com/lucid/ubuntu-10.04.1-desktop-i386.iso
+	wget http://releases.ubuntu.com/maverick/ubuntu-10.10-desktop-i386.iso
+elif [ $ANSWER -eq 2 ]; then
+        echo "Fetching amd64 isos"
+	wget http://releases.ubuntu.com/hardy/ubuntu-8.04.4-desktop-amd64.iso
+	wget http://releases.ubuntu.com/jaunty/ubuntu-9.04-desktop-amd64.iso
+	wget http://releases.ubuntu.com/karmic/ubuntu-9.10-desktop-amd64.iso
+	wget http://releases.ubuntu.com/lucid/ubuntu-10.04.1-desktop-amd64.iso
+	wget http://releases.ubuntu.com/maverick/ubuntu-10.10-desktop-amd64.iso
+elif [ $ANSWER -eq 3 ]; then
+	echo "Not downloading ISOs"
+else
+        echo "ERROR: Unknown system type"
+        exit
+fi
+
+echo "Writing rebuild script"
+cat <<-EOD >"/mnt/rebuild"
+
+here=\`dirname \$0\`
+case "\$here" in
+    /*) 
+        ;;
+*** )  
+        here="\`pwd\`/\$here" ;;
+esac
+
+for iso in \`cd \$here && ls -1 iso/*.iso\`
+do
+    title=\`basename "\$iso" .iso\`
+    file="/\$iso"
+    cat <<-EOE >>"\$here/boot/grub/grub.cfg"
+menuentry "\$title" {
+  loopback loop \$file
+  linux (loop)/casper/vmlinuz boot=casper iso-scan/filename=\$file noeject noprompt quiet splash --
+  initrd (loop)/casper/initrd.lz
+}
+EOE
+done
+EOD
+
+chmod +x /mnt/rebuild
+
+echo "Installing grub to device"
+sudo grub-install --no-floppy --root-directory=/mnt ${DISK} > /dev/null 2>&1
+
+if [ $ANSWER -ne 3 ]; then
+	echo "Rebuilding grub.cfg"
+	/mnt/rebuild
+fi
+
+echo "Unmounting"
+cd - > /dev/null 2>&1
+sync;sync;umount /mnt
+    }}}
+
+=== Manual Instructions ===
+
+This is the detail step by step of how to make a multiple Ubuntu install
+USB stick.
+
+# Prepare a blank usb stick. I have two, 4G and 8G any size should do.
+# fdisk it and make a primary partition cover all the storage.
+
+    {{{
+Command (m for help): p
+
+Disk /dev/sdc: 4043 MB, 4043308544 bytes
+125 heads, 62 sectors/track, 1018 cylinders
+Units = cylinders of 7750 * 512 = 3968000 bytes
+Sector size (logical/physical): 512 bytes / 512 bytes
+I/O size (minimum/optimal): 512 bytes / 512 bytes
+Disk identifier: 0x0002098b
+
+   Device Boot      Start         End      Blocks   Id  System
+/dev/sdc1               1        1018     3944719   83  Linux
+</pre>
+
+# sudo mkfs.ext4 /dev/sdc1 (I tried vfat and ext4, all ok)
+# sudo mount /dev/sdc1 /mnt
+# sudo grub-install --no-floppy --root-directory=/mnt /dev/sdc
+# sudo vi /mnt/boot/grub/grub.cfg and key-in following messages
+
+    <pre>
+menuentry "Ubuntu 10.04 Desktop i386" {
+  loopback loop /iso/ubuntu-10.04-desktop-i386.iso
+  linux (loop)/casper/vmlinuz boot=casper iso-scan/filename=/iso/ubuntu-10.04-desktop-i386.iso noeject noprompt --
+  initrd (loop)/casper/initrd.lz
+}
+</pre>
+
+# sudo mkdir /mnt/iso
+# sudo cp ubuntu-10.04-desktop-i386.iso /mnt/iso/
+# sudo sync;sync;umount /mnt
+
+Then you can reboot and try it out.  Enjoy!
+
+=== Labeling your Stick ===
+
+If you are using ext4 for your base filesystem you can label the filesystem so that it will always get mounted at the same place.  This is handy if you are commonly adding and removing ISO images from the stick.  Simply use e2label to label the stick and it will mount in the same place:
+
+# sudo e2label /dev/sdc1 multi-iso
+# eject and reinsert the stick
+# df
+    <pre>
+[...]
+/dev/sdc1              3859224   2921048    742136  80% /media/multi-iso
+</pre>
+
+=== Automatic Rebuild ===
+
+'''''NB: If you followed the 'Automated Instructions' above, this script is created for you - just run to update (sudo <USB_STICK_MNT_POINT>/rebuild).'''''
+
+If you are going to add and remove ISOs on a regular basis you can add the following script to the disk as <code>rebuild</code>:
+
+    <pre>
+# !/bin/bash
+
+here=`dirname $0`
+case "$here" in
+/*) ;;
+* )  here="`pwd`/$here" ;;
+esac
+
+for iso in `cd $here && ls -1 iso/*.iso`
+do
+	title=`basename "$iso" .iso`
+	file="/$iso"
+	cat - <<EOE
+menuentry "$title" {
+  loopback loop $file
+  linux (loop)/casper/vmlinuz boot=casper iso-scan/filename=$file noeject noprompt quiet splash --
+  initrd (loop)/casper/initrd.lz
+}
+EOE
+done >"$here/boot/grub/grub.cfg"
+</pre>
+
+Then you can simply add and remove images from the USB stick iso directory and run:
+
+ 1. sudo /mnt/rebuild

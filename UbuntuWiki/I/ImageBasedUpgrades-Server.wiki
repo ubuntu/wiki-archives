@@ -1,0 +1,191 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== Server side ==
+=== Introduction ===
+The update server is where all the clients connect to to get the list of available updates.
+Updates are split into channels and devices. The client can query the list of channels and then grab an index file for their specific model.
+
+The server has been designed to be dumb, all the files are generated statically and so the server can be easily mirrored if needed.
+
+=== Files ===
+==== /channels.json ====
+The channels file lists the list of channels and for each a dict mapping the various devices to per-device json indexes.
+
+Structure:
+* Dict keyed by channel name
+** alias - Name of the channel this channel is an alias for (string, optional)
+** devices - Dict of devices keyed by device name supported by that channel (dict, mandatory)
+** index - Path to the device specific index file
+** keyring - Dict representing the device keyring (dict, optional)
+*** path - Path to the device keyring (string, mandatory)
+*** signature - Path to the device keyring signature (string, mandatory)
+** hidden - Whether the channel should be listed to the user (boolean, optional, default to false)
+
+Example:
+<pre>
+{
+    "devel": {
+        "alias": "saucy",
+        "devices": {
+            "grouper": {
+                "index": "/devel/grouper/index.json"
+            },
+            "maguro": {
+                "index": "/devel/maguro/index.json"
+            },
+            "mako": {
+                "index": "/devel/mako/index.json"
+            },
+            "manta": {
+                "index": "/devel/manta/index.json",
+                "keyring": {
+                    "path": "/daily/nexus7/device-signing.tar.xz",
+                    "signature": "/daily/nexus7/device-signing.tar.xz.asc"
+                }
+            }
+        }
+    },
+    "devel-proposed": {
+        "alias": "saucy-proposed",
+        "devices": {
+            "grouper": {
+                "index": "/devel-proposed/grouper/index.json"
+            },
+            "maguro": {
+                "index": "/devel-proposed/maguro/index.json"
+            },
+            "mako": {
+                "index": "/devel-proposed/mako/index.json"
+            },
+            "manta": {
+                "index": "/devel-proposed/manta/index.json"
+            }
+        },
+        "hidden": true
+    },
+    "saucy": {
+        "devices": {
+            "grouper": {
+                "index": "/saucy/grouper/index.json"
+            },
+            "maguro": {
+                "index": "/saucy/maguro/index.json"
+            },
+            "mako": {
+                "index": "/saucy/mako/index.json"
+            },
+            "manta": {
+                "index": "/saucy/manta/index.json",
+                "keyring": {
+                    "path": "/daily/nexus7/device-signing.tar.xz",
+                    "signature": "/daily/nexus7/device-signing.tar.xz.asc"
+                }
+            }
+        }
+    },
+    "saucy-proposed": {
+        "devices": {
+            "grouper": {
+                "index": "/saucy-proposed/grouper/index.json"
+            },
+            "maguro": {
+                "index": "/saucy-proposed/maguro/index.json"
+            },
+            "mako": {
+                "index": "/saucy-proposed/mako/index.json"
+            },
+            "manta": {
+                "index": "/saucy-proposed/manta/index.json"
+            }
+        },
+        "hidden": true
+    }
+}
+</pre>
+
+==== /<channel>/<model>/index.json ====
+The index contains the list of all available updates for a given device. It's that file that's used to figure out an upgrade path.
+
+Structure (dict containing the following keys):
+* global - dict of global variables
+** generated_at - Date at which the index was generated, output of "date -u" (string, mandatory)
+* images - List of dicts representing available images
+** base - Base version for a delta image (16bit unsigned integer, mandatory, for delta images only)
+** bootme - Flag to tell the downloader that a reboot is required in order to apply the update (boolean, optional, default to false)
+** description - Description string for the image (string, mandatory)
+** description-ll (eg. description-en) - Translated description string for the image (string, optional)
+** description-ll_CC (eg. description-en_US) - Translated description string for the image (string, optional)
+** files - List of dicts representing files that are part of the updates (list, mandatory)
+** checksum - SHA256 sum of the file (string, mandatory)
+** order - Used to sort the different files passed to the upgrader (integer, ascending order, mandatory)
+** path - Relative path or URL to the actual file (string, mandatory)
+** signature - Relative path or URL to the GPG signature for the file (string, mandatory)
+** size - Size of the file in bytes (integer, mandatory)
+** minversion - Minimum version of the previous installed system to update from (integer, optional, for full images only, default to 0, for full image only)
+** phased-percentage - What percentage of users should be getting the update (integer between 0 and 100, optional, defaults to 100)
+** type - Image type (string, mandatory, one of "full" or "delta")
+** version - Version number for the image (16bit unsigned integer, mandatory)
+** version_detail - String giving more details about the version (optional arbitrary string)
+
+==== /<channel>/<device>/device-signing.tar.xz ====
+Keyring tarball, refer to the <nowiki>[[ImageBasedUpgrades-GPG|GPG]]</nowiki> wiki page for the file format.
+
+==== /<channel>/<some-path>/<some-file>.tar.xz ====
+'''WARNING: The actual layout depends on the upgrader and the target platform. The tarball layout for the initial implementation hasn't been fixed yet so this section is subject to change.'''
+An update file, the format for update files is the same for full and delta images.
+
+The following files/directories may be found inside:
+* <partition>/files/* - fs structure containing all the files that need to be copied to the partition
+* <partition>/removed - list of files to remove on the partition
+* META-DATA - Update data, containing the list of actions the upgrader needs to perform
+
+==== Number of files included in an update ====
+An update can contain any number of files, all will be applied sequentially, sorted by the order field.
+
+For Ubuntu-generated images, we expect to use 3 files:
+* hardware-dependent - contains the hardware specific bits (android system, boot partition, recovery partition, ...)
+* hardware-independent - contains the common bits between devices (ubuntu rootfs)
+* version - contains a single file, ubuntu:/etc/ubuntu-build (containing the build number)
+
+Those images will always include at least two files, one hardware-dependent or hardware-independent and one containing the updated version file.
+
+This is done so that the hardware-independent may be shared acroos a large number of supported devices and so that the hardware-dependent bit may be shared across update channels.
+The benefit from this is massive space saving on the server side (compared to having a single file containing everything).
+
+Carrier/OEM may choose to build a single file containing the equivalent of our 3 files. There's no restriction in the number of files that can be applied by the upgrader and there's no special-casing based on the file content.
+
+=== Security ===
+To ensure nobody may intercept the traffic to our update server and send fake or old updates back to the client, the design includes various measures to ensure the security of our updates:
+* channels.json and index.json MUST be retrieved over HTTPs. This is to avoid someone intercepting HTTP trafic and pushing an older copy of the update server.
+* channels.json and index.json are GPG signed (detacted armored signature as <filename>.asc), those MUST be checked by the client
+* The SHA256 of the update files is included in the index and MUST be checked by the client to validate the integrity of the files and confirm that they match the one listed in the index (GPG signature alone isn't sufficient as someone could send us an older signed file).
+* The update files are also GPG signed (detached armored signature as <filename>.asc), those CAN be checked by the client and MUST be checked by the upgrader.
+
+Details on the GPG trust path and key update/revocation process may be found in the separate <nowiki>[[ImageBasedUpgrades-GPG|GPG]]</nowiki> wiki page.
+
+=== Requirements ===
+* Static web server
+* SSL certificate (to retrieve the JSON indexes)
+
+=== Code ===
+* https://code.launchpad.net/~ubuntu-system-image/ubuntu-system-image/server
+
+=== Versioning ===
+The update version needs to be an integer so that it's easily sortable, the recommended format is a serial starting at 1 for the first image and incrementing from that point.
+
+=== Release cadence ===
+The system can cope with any release cadence provided enough available storage space on the server.
+
+Depending on channels we may end up pushing daily development updates or weekly/monthly stable updates. Those updates may be published as both delta and full images or just delta images if it makes testing/QA easier for that channel.
+
+For each full image it's possible to indicate a minimum supported version for the previous image which hints the updater client that it should try to upgrade to another version before upgrading to that full image.
+
+The "bootme" flag may also be set in cases where we think a full reboot is required between updates.

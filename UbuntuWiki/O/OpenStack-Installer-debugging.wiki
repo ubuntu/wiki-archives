@@ -1,0 +1,135 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== General Debugging Tips ==
+
+See these other pages for more specific troubleshooting:
+* <nowiki>[[single-install|Debugging a Single install]]</nowiki>
+* <nowiki>[[multi-install|Multi Install Debugging]]</nowiki>
+* <nowiki>[[autopilot-install|OpenStack Autopilot Debugging]]</nowiki>
+* <nowiki>[[ui|UI Debugging]]</nowiki>
+
+=== Errors during uninstall ===
+
+If you see a warning message like this one after running the uninstall command '''sudo openstack-install -u''':
+
+<pre>
+ Ubuntu Openstack Installer Uninstalling ...Could not determine install type, was /home/$USER/.cloud-install removed prior to running the uninstallation?
+</pre>
+
+It's possible that the ''.cloud-install'' state directory is either missing or corrupted. Here's how to manually uninstall to a clean state:
+
+==== Manual uninstall a Landscape Autopilot or Multi(MAAS) install ====
+
+Make sure the nodes are released in the MAAS web ui so that their status is (Ready). 
+
+Next manually remove the '''~/.cloud-install''' directory:
+
+  '''sudo rm -rf /home/<user>/.cloud-install'''
+
+==== Manual uninstall a single install ====
+
+Look at the IPs of the container:
+
+  '''sudo lxc-ls -f openstack-single-$USER'''
+
+The output should be something like this:
+
+<pre>
+⟫ sudo lxc-ls -f openstack-single-$USER                                                                                        
+NAME                     STATE    IPV4                                IPV6  AUTOSTART  
+-------------------------------------------------------------------------------------
+openstack-single-ubuntu  RUNNING  10.0.3.52, 10.0.6.1, 192.168.122.1  -     YES        
+</pre>
+
+Look for the IP route using the ''lxcbr0'' bridge that routes to the container:
+
+  '''sudo ip route show dev lxcbr0'''
+
+The output should be something like this:
+
+<pre>
+⟫ sudo ip route show dev lxcbr0
+10.0.3.0/24  proto kernel  scope link  src 10.0.3.1
+10.0.6.0/24 via 10.0.3.52 
+</pre>
+
+Here, we see that the 10.0.6.0/24 network is routed via the container's 10.0.3.52 network. This is the route that the installer set up and the one we want to delete. If we don't see a line like that, we can skip this step as the installer did not get to that point.
+
+To delete the route: (where $N is whatever you saw above, here it'd be 6)
+
+  '''sudo ip route del 10.0.$N.0/24'''
+
+Finally, remove the container itself:
+
+  '''sudo lxc-destroy -f -n openstack-single-$USER'''
+
+Then to ensure a fully clean re-install, remove ''~/.cloud-install'':
+
+  '''sudo rm -rf ~/.cloud-install'''
+
+that's it for a single install. Nothing else was installed on your system.
+
+=== Debugging a Juju bootstrap ===
+
+It's possible to pass the debug flag to a Juju bootstrap through the installer with the following option:
+
+  '''$ DEBUG_JUJU_BOOTSTRAP=1 sudo -E openstack-install'''
+
+  Any time you want to expose environment variables to the installer make sure to run with ''sudo -E''
+
+This will essentially append the ''--debug'' option to '''juju bootstrap''' and give you more insight into the juju bootstrap process if problems arise.
+
+=== Run in Headless mode ===
+
+Sometimes problems can occur that may be masked by the UI (we're getting better at that we promise 8-)). If this happens we can run the installer in a more synchronous way to further track down the issue.
+
+An example is to pass this configuration to the installer to run in a headless mode
+
+{{{#!highlight yaml
+openstack_password: pass
+http_proxy: http://squid.internal:3128
+https_proxy: http://squid.internal:3128
+apt_mirror: http://us.archive.ubuntu.com/ubuntu/
+install_type: Single
+apt_proxy: http://10.0.3.1:3142
+apt_https_proxy: http://10.0.3.1:3142
+headless: True
+}}}
+
+  '''$ sudo openstack-install -c config.yaml'''
+
+This will do a full OpenStack deployment without any user intervention.
+
+=== Juju Bootstrap timing out ===
+
+This usually indicates a slow network connection to the outside world. To increase the timeout juju waits for a successful bootstrap you can edit '''/usr/share/openstack/templates/juju-env/maas.yaml''' and increase the following:
+
+{{{#!highlight yaml
+environments:
+  maas:
+    type: maas
+    maas-server: 'http://{{maas_server}}/MAAS/'
+    maas-oauth: '{{maas_apikey}}'
+    admin-secret: "{{openstack_password}}"
+    default-series: {{ubuntu_series}}
+    authorized-keys-path: ~/.ssh/id_rsa.pub
+{%- if http_proxy %}
+    apt-http-proxy: {{http_proxy}}
+{%- else %}
+    apt-http-proxy: 'http://{{maas_server}}:8000/'
+{%- endif %}
+    lxc-clone: true
+    bootstrap-timeout: 3600  <--- INCREASE this number, default is 10 minutes.
+}}}
+
+Once changed you'll need to perform a fresh installation.
+
+  Keep in mind that once you upgrade the openstack package that file will be reverted back to it's default.

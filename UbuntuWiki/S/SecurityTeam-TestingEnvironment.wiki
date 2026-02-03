@@ -1,0 +1,500 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+When testing security updates, it is important to test the update in a full
+Ubuntu environment for the release being tested. Put simply, an update for an
+Ubuntu 16.04 LTS package should be tested in a full install of Xenial. The
+Ubuntu Security team has created some scripts and put them into
+<nowiki>[[https://code.launchpad.net/~ubuntu-bugcontrol/ubuntu-qa-tools/master|ubuntu-qa-tools]]</nowiki>. These tools use kvm and libvirt, the preferred virtualization technology in Ubuntu. KVM requires the virtualization extensions to be available and enabled in your BIOS. You can test to see if you have these by using the ```kvm-ok``` command. QEMU is an alternative and can be used with libvirt and uvt, but it is slow. If you cannot use kvm, then it is worth looking at another virtualization technology such as virtualbox.
+
+uvt is essentially a wrapper script for virsh and virt-install for both making VM creation repeatable and to help batch commands to multiple VMs. Using uvt should not be considered mandatory as all this can be achieved via other means (though use of ```uvt new``` is encouraged and should save you time).
+
+This guide does not impose a specific version of Ubuntu; the latter is entirely up to you.
+
+=== Setting up uvt ===
+Much of this (and more) can be found in the <nowiki>[[https://git.launchpad.net/ubuntu-qa-tools/tree/vm-tools/README|vm-tools/README]]</nowiki> file.
+
+ 0. Install the necessary software:<pre>
+$ sudo apt-get install qemu-system-x86 libvirt-daemon-system virtinst genisoimage xorriso python3-lxml git whois
+</pre>
+ 0. Add your user to the `libvirt` group:<pre>
+$ sudo adduser <username> libvirt
+
+Note: You may need to 'su - <username>' or 'sg libvirt' for the group addition/change to take effect
+</pre>
+ 0. Download the ubuntu-qa-tools branch:<pre>
+$ git clone lp:ubuntu-qa-tools
+  Note: If you have issue trying the above you can try directly on one of these: git://git.launchpad.net/ubuntu-qa-tools, git+ssh://git.launchpad.net/ubuntu-qa-tools, https://git.launchpad.net/ubuntu-qa-tools
+</pre>
+ 0. Add the UQT_VM_TOOLS environment variable to your startup scripts (eg ~/.bashrc) and have it point to the ubuntu-qa-tools branch:<pre>
+export UQT_VM_TOOLS="$HOME/git-pulls/ubuntu-qa-tools/vm-tools"
+</pre>
+ 0. update your PATH to include the vm-tools directory (eg via ~/.bashrc):<pre>
+export PATH="$PATH:$UQT_VM_TOOLS"
+</pre>
+ 0. Add bash-completion support for ```uvt``` by adding the following to your ```~/.bash_completion``` files:<pre>
+if which uvt 1>/dev/null; then
+  source $(dirname $(realpath $(which uvt)))/uvt-completion.bash
+fi
+</pre>
+ 0. [OPTIONAL] While `uvt` will use reasonable defaults without a config file, you may also use `uvt config` to create $HOME/.uvt.conf. It can then be customized to have something like:<pre>
+
+vm_image_size="20"
+
+vm_memory="3000"
+
+vm_vcpus="2"
+
+vm_extra_packages="screen vim"
+</pre>
+
+ 0. (optional, uvt offers to download them, too) Download the desktop CD images for each release and put them in the directory specified in the vm_dir_iso configuration option.
+
+=== Virtual machines for testing ===
+The security team should have at least one virtual machine per release and
+one for the development release. The recommended method is to use kvm with
+libvirt, which is what is documented here.
+
+kvm on 64-bit will allow 32-bit OS guests, so if running a 64-bit host OS, then
+can have both i386 and amd64 installs. It's often useful to spend some time
+getting a pristine image exactly how you want it, then you clone/snapshot off
+of it for development work and/or testing.
+
+'''WARNING:''' in this configuration you need to take special care to isolate
+the virtual machines from hostile network traffic, since anyone could login as root
+or your user to a VM. One way to do this is by using NAT with libvirt (the default).
+
+==== Networking with libvirt ====
+In order to perform name lookups for virtual machines, you must do one of the following changes:
+
+===== Option 1 (preferred): Use the libvirt NSS module =====
+ 0. Install the NSS module:<pre>
+$ sudo apt install libnss-libvirt
+</pre>
+ 0. Enable the NSS module by editing the ```/etc/nsswitch.conf``` and adding libvirt to the hosts line:<pre>
+hosts:          files mdns4_minimal [NOTFOUND=return] libvirt dns mymachines
+</pre>
+
+===== Option 2: Disable dnsmasq =====
+ 0. Put a line into ```/etc/dhcp/dhclient.conf``` like so:<pre>
+prepend domain-name-servers 192.168.122.1;
+</pre>
+
+ 0. Disable the system dnsmasq to prevent it from looping with libvirt's dnsmasq by modifying ```/etc/NetworkManager/NetworkManager.conf``` to comment out the following line:<pre>
+}}}
+
+===== Option 3: Forward non-qualified lookups =====
+ 0. Configure the Network Manager dnsmasq to send non-qualified lookups to the libvirt dnsmasq by creating a ```/etc/NetworkManager/dnsmasq.d/libvirt``` file containing:{{{
+server=//192.168.122.1
+</pre>
+
+ 0. Configure the libvirt dnsmasq to not forward non-qualified lookups by modifying ```/etc/libvirt/qemu/networks/default.xml``` to add the following to the ```<network>``` section:<pre>
+  <dns forwardPlainNames="no">
+  </dns>
+</pre>
+
+===== Option 4: Tell systemd-resolved to use libvirt's dnsmasq for VMs only (17.04+) =====
+Ubuntu 16.10 uses systemd-resolved by default and 17.04 enables the stub resolver. With this configuration you can no longer put libvirt's dnsmasq (eg, 'nameserver 192.168.122.1') in /etc/resolv.conf or otherwise pass the server in as a nameserver because it creates a loop with the systemd-resolve stub resolver. Instead:
+
+NOTE: If systemd-resolve returns "systemd-resolve: command not found", use "resolvectl status" instead of "systemd-resolve --status" for the following commands.
+
+ 0. adjust the libvirt network xml to put all VMs into their own domain (eg, 'vm') and to not forward to host: <pre>
+$ virsh net-edit default
+<network>
+  <name>default</name>
+  <domain name='vm' localOnly='yes'/>
+  ...
+$ virsh net-destroy default
+$ virsh net-start default
+</pre>
+ 0. adjust systemd-resolved to use 192.168.122.1 for queries on virbr0 with the 'vm' search domain: <pre>
+$ systemd-resolve --status virbr0
+Link 11 (virbr0)
+      Current Scopes: DNS LLMNR/IPv4
+       LLMNR setting: yes
+MulticastDNS setting: no
+      DNSSEC setting: allow-downgrade
+    DNSSEC supported: no
+
+$ sudo gdbus call --system --dest=org.freedesktop.resolve1 --object-path=/org/freedesktop/resolve1 --method=org.freedesktop.resolve1.Manager.SetLinkDNS 11 '[(2, [byte 0xc0, 0xa8, 0x7a, 0x01])]'
+
+$ sudo gdbus call --system --dest=org.freedesktop.resolve1 --object-path=/org/freedesktop/resolve1 --method=org.freedesktop.resolve1.Manager.SetLinkDomains 11 '[("vm", true)]'
+
+$ systemd-resolve --status virbr0
+Link 11 (virbr0)
+      Current Scopes: DNS LLMNR/IPv4
+       LLMNR setting: yes
+MulticastDNS setting: no
+      DNSSEC setting: allow-downgrade
+    DNSSEC supported: no
+         DNS Servers: 192.168.122.1
+          DNS Domain: ~vm
+</pre>
+ Unfortunately the above is not preserved on reboot. Ideally the above would happen on boot or whenever the 'default' libvirt network is brought up. TODO: figure out the best place to put this. For now, this can be added to your ~/.bashrc so you can simply run `update_resolved_for_libvirt` as needed: <pre>
+update_resolved_for_libvirt() {
+    libvirt_iface="virbr0"
+    echo "Was:"
+    sys_ver=`systemd --version | egrep -o " ([0-9]{3}) "`
+    if <nowiki>[[ $sys_ver -ge 239 ]]</nowiki>
+    then
+        echo "Systemd version >= 239 using resolvectl status"
+        status_cmd="resolvectl status"
+    else
+        echo "Systemd version < 239 using systemd-resolve --status"
+        status_cmd="systemd-resolve --status"
+    fi
+
+    $status_cmd "$libvirt_iface"
+
+    iface_idx=`$status_cmd "$libvirt_iface" | grep '(virbr0)' | cut -f 2 -d ' '`
+    if [ -z "$iface_idx" ]; then
+        if <nowiki>[[ $sys_ver -ge 239 ]]</nowiki>
+        then
+            echo "Could not find interface with 'resolvectl status'"
+        else
+            echo "Could not find interface with 'systemd-resolve --status'"
+        fi
+        return
+    fi
+### set virbr0 DNS to use 192.168.122.1
+    sudo gdbus call --system --dest=org.freedesktop.resolve1 --object-path=/org/freedesktop/resolve1 --method=org.freedesktop.resolve1.Manager.SetLinkDNS "$iface_idx" '[(2, [byte 0xc0, 0xa8, 0x7a, 0x01])]'
+### set virbr0 search domains to 'vm'
+    sudo gdbus call --system --dest=org.freedesktop.resolve1 --object-path=/org/freedesktop/resolve1 --method=org.freedesktop.resolve1.Manager.SetLinkDomains "$iface_idx" '[("vm", true)]'
+
+### show the configuration
+    echo "Now:"
+    $status_cmd "$libvirt_iface"
+    echo "(requires '<domain name=\"vm\" localOnly=\"yes\"/>' in libvirt net xml"
+    echo "and 192.168.122.1 removed from /etc/resolv.conf)"
+}
+</pre>
+===== Option 5: Skip DNS resolution entirely =====
+Skipping DNS resolution entirely is also possible by adjusting `~/.ssh/config` to have: <pre>
+Host sec-*-amd64 sec-*-i386
+    ProxyCommand nc $(virsh domifaddr $(echo %h | sed "s/\.vm//g") | awk -F'[ /]+' '{if (NR>2 && $5) print $5}'|tail -1) %p
+### terminate the connection after the VM is shutdown
+    ServerAliveInterval=5
+    ServerAliveCountMax=1
+</pre>
+
+After one of the above options is chosen, you then will be able to ssh into the machines with:
+* 16.10 and lower or if adjusting ~/.ssh/config:<pre>
+$ ssh sec-lucid-amd64
+</pre>
+ or:<pre>
+$ ssh sec-lucid-amd64.
+</pre>
+ Notice the '.' at the end of the second command. This may be needed due to a bug in dnsmasq when using NAT with some versions of Ubuntu.
+* 17.04 and higher: <pre>
+$ ssh sec-lucid-amd64.vm
+</pre>
+
+If avahi is installed in the guest, you can also use:<pre>
+$ ssh sec-lucid-amd64.local
+</pre>
+
+'''IMPORTANT:''' When using the tools, keep in mind that you may connect to the same VM with different hostnames. Eg, you could connect to the `sec-lucid-amd64` VM as  '`sec-lucid-amd64.`', '`sec-lucid-amd64.local`' or '`sec-lucid-amd64`'. `uvt` tests if the VM is up by testing hostnames in this order and it is possible for the first to fail and the second to succeed. Therefore, you should login via ssh to at least the first two (if not all three), so that you have the host keys for the host. You may be having this problem if you see something like:<pre>
+----- sec-maverick-amd64 -----
+Starting sec-maverick-amd64 (snapshotted) ...
+Waiting for 'sec-maverick-amd64' to come up host is up
+Command: ssh -t -o BatchMode=yes -l root sec-maverick-amd64.local "ls /tmp"
+Host key verification failed.
+</pre>
+
+In this case, the ssh host key was in ~/.ssh/known_hosts for '`sec-maverick-amd64.`', but not for '`sec-maverick-amd64.local`'.
+
+==== Host upgrades to 19.04+ (osxsave dropped from qemu) ====
+Old virtual machines built with uvt prior to October 2016 or any VM that was built using `--cpu=host` or specific CPU models may end up with the following in the domain XML: <pre>
+<cpu mode='custom' match='exact' check='partial'>
+...
+  <feature policy='require' name='osxsave'/>
+...
+</pre>
+
+qemu in 19.04 dropped the osxsave feature so VMs with this cpu definition fail to start: <pre>
+$ virsh start sec-trusty-i386
+error: Failed to start domain sec-trusty-i386
+error: internal error: process exited while connecting to monitor: 2019-04-17T14:10:37.222226Z qemu-system-x86_64: can't apply global Broadwell-noTSX-x86_64-cpu.osxsave=on: Property '.osxsave' not found
+</pre>
+
+Simply use `virsh edit <vm name>` to remove `<feature policy='require' name='osxsave'/>`. If using snapshots, revert to a pristine snapshot, edit the xml, then snapshot the vm.
+
+==== UFW enabled extra step ====
+If ufw is enabled, the firewall may block the VMs from fetching the updated packages from your local repo. 
+
+  0. Check if ufw is enabled
+    <code>$sudo ufw status </code>
+  0. If status is active, you may need to run (check your firewall configuration, first)
+    <code>$sudo ufw allow in on virbr0</code>
+
+ 
+==== Snapshotted virtual machines ====
+With this method, we have VMs which are initially created with a pristine libvirt snapshot. Eg, might have the following virtual machines:
+* esm-trusty-amd64
+* esm-xenial-amd64
+* esm-bionic-amd64
+* sec-focal-amd64
+* esm-focal-amd64
+* sec-jammy-amd64
+* esm-jammy-amd64
+* sec-noble-amd64
+* esm-noble-amd64
+
+Create your VMs for every supported LTS/interim release (best to do this sequentially, even though it takes a while):<pre>
+vm_release_list="focal jammy mantic noble oracular"
+for i in $vm_release_list ; do
+    uvt new $i amd64 sec
+done
+</pre>
+
+Later, in step 6, you will create VMs for every supported ESM release.
+
+The basic idea is as follows:
+# `uvt new` after installing the OS will create the `pristine` snapshot
+# using `uvt start <vm>` starts the image normally, and `uvt stop <vm>` shuts it down cleanly. Changes to the VM are preserved across reboots
+# using `uvt start -r <vm>` reverts all changes made to the VM since the last snapshot, then starts the VM in the pristine state. Note that if you know you are going to revert to the previous snapshot, you can use `uvt stop -f <vm>` which does an unclean shutdown akin to pulling the plug.
+
+Typical uses:
+* revert to pristine snapshot and discard:<pre>
+$ uvt start -r <vm>
+... do your stuff ...
+$ uvt stop -f <vm>
+</pre>
+
+* snapshot with persistence across stops:<pre>
+$ uvt start -r <vm>            # revert all changes and start with a clean slate
+... do your stuff ...
+$ uvt stop <vm>                # no '-f' so a clean shutdown is performed
+$ uvt start <vm>               # notice no '-r', so changes are not reverted
+... do more stuff ...
+$ uvt stop <vm>
+... do even more stuff ...
+$ uvt stop -f <vm>             # done with work, so pull the plug for a quick shutdown (assumes -r on next start)
+</pre>
+
+'''IMPORTANT:''' Changes made in a snapshot will be lost if you use '-r' with `uvt start` or otherwise remove the snapshots.
+
+To update the pristine image and make a new snapshot:<pre>
+$ uvt start -r <vm>            # revert all changes and start with a clean slate
+... make changes to the VM ...
+$ uvt stop <vm>                # cleanly shut it down
+$ uvt snapshot <vm>            # update the pristine snapshot
+</pre>
+
+As a convenience, you can perform package upgrades using:<pre>
+$ uvt update --autoremove <vm> # reverts to pristine snapshot, starts the VM, dist-upgrades, cleans up, then updates the pristine snapshot
+</pre>
+
+'''NOTE:''' as of 2017/09/20 if adjusting ~/.ssh/config to skip DNS resolution, invoke uvt with `UVT_USE_DOMIFADDR=1 uvt ...`
+
+'''IMPORTANT NOTE FOR TRUSTY VMs'''
+
+Starting with OpenSSH 8.8 (Jammy and newer), RSA signatures using the SHA-1 hash algorithm are disabled by default. Support for RSA/SHA-256/512 signatures was not introduced until release 7.2 (Xenial and newer) which means there will be an incompatibility issue (no mutual signature algorithm) when attempting to SSH from a system running Jammy or newer, to a Trusty VM. In your local ssh config file (~/.ssh/config), you can add the following stanza to allow for the RSA/SHA-1 signature algorithm to be used when connecting to a Trusty vm (replacing the host name accordingly):
+
+--------------------------------
+
+Host sec-trusty-*
+ PubkeyAcceptedKeyTypes=+ssh-rsa
+
+--------------------------------
+
+Alternatively, OpenSSH since Trusty supports Ed25519 keys, which is another option and solution to this issue.
+
+==== Batch commands ====
+If using dnsmasq as above, you can also use `uvt cmd` to do batch commands for the
+virtual machines, like so:<pre>
+$ uvt cmd -p sec 'uname -a'
+$ uvt cmd -r -p sec "apt-get update && apt-get -y upgrade"
+</pre>
+
+`uvt cmd` uses 'release_list' in $HOME/.uqt-vm-tools.conf and will ssh in to all running sec-*-* machines and perform the specified command. Specifying ```-r``` to `uvt cmd` will login to the machine and run the command as root, otherwise it runs as non-root (ie your username in the guest).
+
+Other useful commands:
+* uvt start: start a single VM of a group of VMs. Eg:<pre>
+$ uvt start -r sec-xenial-amd64           # start a single VM, reverting to the last snapshot
+$ uvt start -p sec -a amd64               # start all amd64 VMs starting with 'sec'
+$ uvt start -v -p sec -a amd64            # start all amd64 VMs starting with 'sec' without virt-viewer
+</pre>
+* uvt stop: stop a single running VM or a group of running VMs. Eg:<pre>
+$ uvt stop sec-xenial-amd64               # stop a single VM via ACPI
+$ uvt stop -r sec-xenial-amd64            # stop a single VM via ACPI, and revert to pristine snapshot
+$ uvt stop -f -p sec                     # hard stop all VMs starting with 'sec'
+</pre>
+* uvt snapshot: snapshot a single running VM or a group of running VMs. Eg:<pre>
+$ uvt snapshot sec-xenial-amd64           # snapshot a single VM
+$ uvt snapshot -p sec                    # snapshot all VMs starting with 'sec'
+</pre>
+* uvt revert: reverts a single running VM or a group of running VMs to pristine snapshot. Eg:<pre>
+$ uvt revert sec-xenial-amd64             # snapshot a single VM
+$ uvt revert -p sec                      # snapshot all VMs starting with 'sec'
+</pre>
+* uvt update: update and snapshot a single running VM or a group of running VMs. Eg:<pre>
+$ uvt update sec-xenial-amd64            # dist-upgrade and snapshot a single VM
+$ uvt update -p sec                     # dist-upgrade and snapshot all VMs starting with 'sec'
+</pre>
+* uvt remove: remove a single VM or a group of VMs. Eg:<pre>
+$ uvt remove sec-xenial-amd64             # delete a single VM
+$ uvt remove -p sec                      # delete all VMs starting with 'sec'
+</pre>
+* uvt repo: toggle the local repo (eg where 'umt repo' puts stuff) for a single running VM or a group of running VMs. Eg:<pre>
+$ uvt repo -e sec-xenial-amd64            # enable the local repo for a single VM
+$ uvt repo -d sec-xenial-amd64            # disable the local repo for a single VM
+$ uvt repo -e -p sec                     # enable the local repo for all running VMs starting with 'sec'
+</pre>
+* uvt view: connect to the VNC console of a single VM or a group of VMs using virt-viewer. Eg:<pre>
+$ uvt view sec-xenial-amd64
+$ uvt view -p sec
+</pre>
+
+==== Setting up an ESM VM ====
+Extra steps are required for setting up a VM for an ESM supported release.
+
+ 1. Create the VMs using the ESM prefix:<pre>
+$ vm_esm_release_list="trusty xenial bionic focal jammy noble"
+$ for i in $vm_esm_release_list ; do
+$     uvt new $i amd64 esm
+$ done
+</pre>
+
+Now follow the next steps for each ESM VM:
+
+ 1. Start the VM and log in:<pre>
+$ uvt start -v esm-<release>-amd64
+$ ssh esm-<release>-amd64
+</pre>
+
+ 1. Install the apt-transport-https package that's required to communicate with a private Launchpad PPA:<pre>
+$ sudo apt-get install apt-transport-https
+</pre>
+
+# Take note of the required information for accessing the PPA
+## Adjust https://launchpad.net/~<LP_USER>/+archivesubscriptions with your Launchpad username and go to the page
+## Find the <code>ESM Infrastructure Security (ppa:ubuntu-esm/esm-infra-security)</code> and <code>ESM Apps Security (ppa:ubuntu-esm/esm-apps-security</code> rows and click the "view" links to the right
+## You'll need the apt sources lines (containing the credentials), as well as the key ID of the PPA archive key
+
+ 1. Create a `/etc/apt/auth.conf.d/esm-ppa.conf` file with restrictead read access, to protect private PPA credentials:
+  <pre>
+$ touch /etc/apt/auth.conf.d/esm-ppa.conf
+$ chmod 600 /etc/apt/auth.conf.d/esm-ppa.conf
+</pre>
+
+ 1. Populate the contents of the `/etc/apt/auth.conf.d/esm-ppa.conf` file (ensuring its previous permissions are kept):
+  <pre>
+machine private-ppa.launchpadcontent.net/ubuntu-esm/esm-infra-security/ubuntu
+login <username>
+password <password>
+
+machine private-ppa.launchpadcontent.net/ubuntu-esm/esm-apps-security/ubuntu
+login <username>
+password <password>
+</pre>
+
+ 1. Add the apt sources lines, without credentials, to a new sources file: <pre>
+$ # For xenial and NEWER (replace RELEASE below)
+$ echo "deb https://private-ppa.launchpadcontent.net/ubuntu-esm/esm-apps-security/ubuntu RELEASE main
+" | sudo tee -a /etc/apt/sources.list.d/esm-ppa.list
+
+$ # For bionic and OLDER (replace RELEASE below)
+$ echo "deb https://private-ppa.launchpadcontent.net/ubuntu-esm/esm-infra-security/ubuntu RELEASE main
+" | sudo tee -a /etc/apt/sources.list.d/esm-ppa.list
+</pre>
+
+ 1. Import the PPA key:<pre>
+$ sudo apt-key adv --recv-key --keyserver keyserver.ubuntu.com <PPA_ARCHIVE_KEY_ID>
+</pre>
+
+  For jammy and newer, apt-key is deprecated, so you may want to do the following instead:<pre>
+$ curl -sS 'http://keyserver.ubuntu.com/pks/lookup?op=get&search=0xPPA_ARCHIVE_KEY_ID' | sudo sh -c 'cat >/etc/apt/keyrings/esm-ppa.asc'
+$ sudo sed -i 's|^deb |deb [signed-by=/etc/apt/keyrings/esm-ppa.asc] |' /etc/apt/sources.list.d/esm-ppa.list
+</pre>
+
+ 1. Synchronize the package index files and upgrade any outdated packages:<pre>
+$ sudo apt-get update
+$ sudo apt-get dist-upgrade
+</pre>
+
+ 1. Shut down the VM:<pre>
+$ sudo shutdown -h now
+</pre>
+
+ 1. In the host environment, snapshot the VM:<pre>
+$ uvt snapshot esm-<release>-amd64
+</pre>
+
+You can now use the <release>-esm-amd64 chroot to prepare source packages and perform local test builds using UMT, as documented below.
+
+=== Miscellaneous ===
+==== apt-key ====
+If you use `uvt repo` you may notice that while your apt archive is signed, the VM doesn't know about your key. This can be solved with:<pre>
+$ gpg --armor --export <your key id> | ssh root@<vm> sudo apt-key add - # for deb
+$ gpg --armor --export <your key id> | ssh <vm> gpg --no-default-keyring --keyring ~/.gnupg/trustedkeys.gpg --import - # for deb-src
+</pre>
+
+==== ssh-add ====
+Many VM operations can be quite slow on spinning-metal hard drives; be sure your ssh key is added to your ssh-agent for a long enough time to handle all operations. Consider adding the key without a timeout:<pre>
+$ ssh-add
+</pre>
+
+==== Migrate existing VMs into uvt ====
+You can migrate VMs to use `uvt` in the following manner:
+ 0. copy the disk image into `vm_path` (by default, `$HOME/machines`) as <domain>.qcow2. Eg, for a machine named 'my-vm':<pre>
+$ cp <path to>/my-vm/disk0.qcow2 $HOME/machines/my-vm.qcow2
+</pre>
+  `uvt` only supports qcow2 images (due to its use of snapshots), so if the VM uses a raw image, do something like:<pre>
+$ qemu-img convert -f raw <path to>/my-vm/disk0.img -O qcow2 $HOME/machines/my-vm.qcow2
+</pre>
+ 0. update the libvirt XML to use the new path to the disk in `vm_path` (eg, `virsh edit my-vm`). Eg:<pre>
+    ...
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='qcow2'/>
+      <source file='<vm_path>/my-vm.qcow2'/>
+    ...
+</pre>
+ 0. create the pristine snapshot:<pre>
+$ uvt snapshot my-vm
+</pre>
+  You can verify that the snapshot was created with `virsh snapshot-list <domain>`. Eg:<pre>
+$ virsh snapshot-list my-vm
+ Name                 Creation Time             State
+------------------------------------------------------------
+ pristine             2012-10-09 11:09:27 -0500 shutoff
+</pre>
+==== Importing qcow2 images ====
+Similar to the above, you can import cloud images (eg, those used by autopkgtest) like so: <pre>
+$ autopkgtest-buildvm-ubuntu-cloud -r bionic
+$ mv ./autopkgtest-bionic-amd64.img test-bionic-amd64.qcow2 # cloud images are qcow2
+$ virsh dumpxml <some existing vm, eg, sec-bionic-amd64> > ./xml
+... edit xml to remove `<uuid>` and `<mac address='...'>`, to update `<name>` (eg, 'test-bionic-amd64') and the path to the disk (eg, test-bionic-amd64.qcow2) ...
+$ virsh define ./xml
+$ uvt start <name>
+... assuming it boots, login, then shutdown ...
+$ uvt snapshot <name>
+</pre>
+* on systems with netplan (eg, 18.04+), be sure to edit `/etc/netplan/50-cloud-init.yaml` so that it has the expected interface name and MAC addresss (both seen with `ip addr`). Eg: <pre>
+$ cat /etc/netplan/50-cloud-init.yaml 
+...
+network:
+    ethernets:
+        ens3:
+            dhcp4: true
+            match:
+                macaddress: '52:54:00:5A:57:24'
+            set-name: ens3
+    version: 2
+$ sudo netplan generate
+$ sudo netplan apply
+</pre>
+** adjust /etc/hostname and anything else to taste, then shutdown and rerun `uvt snapshot <name>`
+
+==== Reclaim qcow2 space ====
+You can compact the qcow2 images periodically to save hard drive space; on a dozen VMs using 89 gigabytes of disk space, the following was able to shrink them 45% to only 61 gigabytes of disk space:<pre>
+for f in sec-{lucid,precise,quantal,saucy,trusty}-{amd64,i386} ; do echo $f ; qemu-img convert -s pristine -p -f qcow2 -O qcow2 $f.qcow2 reclaimed.qcow2 ; mv reclaimed.qcow2 $f.qcow2 ; virsh snapshot-delete $f --snapshotname pristine ; uvt snapshot $f ; done
+</pre>

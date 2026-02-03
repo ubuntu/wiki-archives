@@ -1,0 +1,266 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+* '''Launchpad Entry''': UbuntuSpec:server-lucid-id-mgmt-reference-env
+* '''Created''': MathiasGug
+* '''Contributors''': 
+* '''Packages affected''':
+
+=== Summary ===
+
+A set of puppet recipes will be developed to automate the deployment of an Identity management test infrastructure on EC2 and UEC. Openldap and MIT Kerberos are glued together by puppet recipes to provide user and group management.
+
+=== Release Note ===
+
+=== Rationale ===
+
+Identity management infrastructures can take quite some time to setup. Providing a testing platform that can be automatically set up and teared down can help in streamlining the testing of Ubuntu integration into an identity management infrastructures.
+
+=== User stories ===
+
+* Jerry, an Ubuntu developer, wants to test if the update of the kerberos clients he is preparing is still functional. He logs into his EC2 account and starts several instances to create a complete Identity Management test environment.
+* Fred, a system administrator at a school, needs to deploy a central Identity Management solution for his labs. He looks at the puppet recipes for the Identity Management test environment to get started in deploying his own solution.
+
+=== Assumptions ===
+
+=== Design ===
+
+==== Automated deployment using puppet recipes ====
+
+Every instance is configured via puppet recipes. Relevant packages are installed automatically with the debconf answers preseeded and the necessary package integration done. Kerberos principals are automatically created by puppet which uses an admin account.
+
+A puppet master will be hosted on the Master Id server to bootstrap the puppet infrastructure.
+
+==== Architecture ====
+
+The test architecture is composed by different instances running in the same security zone.
+
+===== Master Id Server =====
+
+Runs Openldap slapd and MIT KDC which are connected via slapi.
+
+====== openldap-dit ======
+
+The DIT, schemas, overlays and modules are based on the <nowiki>[[https://code.launchpad.net/openldap-dit/|openldap-dit]]</nowiki> project. It provides an infrastructure to cover user and group management based on openldap and MIT kerberos.
+
+====== DIT ======
+The base dn needs to follow the convention of dc=domain,dc=toplevel otherwise ldap resolution via dns srv record won't work. For EC2, the default base dn is '''dc=compute-1,dc=internal'''.
+
+* dc=compute-1,dc=internal
+** ou=People
+** ou=Groups
+** ou=Services
+** ou=Realms
+** ou=System Accounts
+*** cn=kdc-service
+*** cn=kadmin-service
+** ou=System Groups
+*** cn=Directory Admins
+*** cn=Account Admins
+*** cn=Directory Replicators
+*** cn=Directory Monitors
+** ou=Password Policies
+*** cn=default
+
+====== schemas ======
+
+Schemas relevant to user and group management:
+* cosine
+* inetorgperson
+* mit-kerberos
+* rfc2307bis (latest draft -02)
+* ppolicy
+
+====== overlays ======
+* ppolicy
+* refint
+* syncprov
+* unique
+
+====== password policies ======
+
+Password policies can be handled either by MIT kerberos or by LDAP. However the KDC is not able to leverage the LDAP model. Kerberos password policies are used by pam_krb5 while LDAP password policies are used by pam_ldap.
+
+====== replication ======
+Slapd is configured as a provider to be used for Mirror Mode.
+
+ACLs for slaves is controlled via SASL maps to the cn=Directory Replicators group:
+
+<pre>
+access to dn.subtree="dc=example,dc=com"
+	by group.exact="cn=Replicator,ou=Group,dc=soe,dc=ucsc,dc=edu" read
+	by * break
+</pre>
+
+<pre>
+limits group="cn=Replicator,ou=Group,dc=soe,dc=ucsc,dc=edu"
+ size=unlimited
+ time=unlimited
+</pre>
+
+<pre>
+sasl-regexp
+        uid=(.*),cn=uconn.edu,cn=gssapi,cn=auth
+        ldap:///dc=uconn,dc=edu??sub?(krb5PrincipalName=$1@UCONN.EDU)
+</pre>
+
+See:
+* <nowiki>[[http://www.openldap.org/lists/openldap-software/200607/msg00131.html]]</nowiki>
+* <nowiki>[[http://www.openldap.org/lists/openldap-software/200607/msg00133.html]]</nowiki>
+
+====== Installation/deployment ======
+
+A puppet recipe is responsible for:
+## installing slapd package
+## installing openldap-test-dit package
+## installing krb5 package
+## configuring krb5 to use openldap as its backend
+## create a puppet admin principal
+
+===== Slave Id Server(s) =====
+
+Runs both Openldap slapd and MIT KDC via slapi. 
+
+The data store is read-only and replicated from the master via the openldap replication protocol in Mirror Mode. Write requests are transparently redirected to the master by the slapo-chain overlay.
+
+A principal is created for the slave ('''ldap/slave.fqdn@REALM''') under ou=Services. kstart is used to refresh the ticket for the slave slapd service.
+
+The slave uses kerberos to access the master (via SASL+GSSAPI):
+
+<pre>
+bindmethod=sasl
+saslmech=gssapi
+authcid=ldap/slave.fqdn@REALM
+</pre>
+
+See <nowiki>[[http://www.openldap.org/lists/openldap-software/200607/msg00125.html]]</nowiki>.
+
+====== Installation/deployment ======
+
+A puppet recipe is responsible for:
+## installing slapd package
+## creating a replication ldap principal using the puppet admin principal
+## configuring slapd to replicate from the master server and redirect write request to the master
+## installing krb5 package
+## configuring krb5 to use openldap as its backend
+
+===== DNS server =====
+
+The dns server publishes kerberos and ldap related DNS records as well as cname for hosts:
+* _kerberos               TXT
+* _kerberos._udp          SRV
+* _kerberos-master._udp   SRV
+* _kpasswd._udp           SRV
+* _ldap._tcp              SRV
+
+Example (BIND-style):
+<pre>
+     $ORIGIN foobar.com.
+     _kerberos               TXT       "FOOBAR.COM"
+     kerberos                CNAME     daisy
+     kerberos-1              CNAME     use-the-force-luke
+     kerberos-2              CNAME     bunny-rabbit
+     _kerberos._udp          SRV       0 0 88 daisy
+                             SRV       0 0 88 use-the-force-luke
+                             SRV       0 0 88 bunny-rabbit
+     _kerberos-master._udp   SRV       0 0 88 daisy
+     _kerberos-adm._tcp      SRV       0 0 749 daisy
+     _kpasswd._udp           SRV       0 0 464 daisy
+</pre>
+
+The DNS server acts as a forwarder as well forwarding to the default dns server. In EC2 the default dns server does the correct resolution for AA/PTR records which are used in kerberos canonicalisation.
+
+Every instance in the security zone uses the dns server by default.
+
+====== Installation/deployment ======
+
+A puppet recipe is responsible for:
+* installing bind9
+* configure bind9 zones with the relevant ip addresses for the kerberos and ldap services.
+
+===== File server =====
+
+Runs kerberized file services: 
+* nfs
+* cifs
+
+====== Installation/deployment ======
+
+A puppet recipe is responsible for:
+* installing nfs-server and samba packages
+* create the host, nfs and cifs principals using the puppet admin principal
+
+=== Implementation ===
+
+See the work items in the <nowiki>[[UbuntuSpec:server-lucid-id-mgmt-reference-env|blueprint]]</nowiki>.
+
+=== Test/Demo Plan ===
+
+=== Unresolved issues ===
+
+=== BoF agenda and discussion ===
+
+==== UDS Session notes ====
+
+===== Goal =====
+Provide a reference identity management environment covering user and group mgmt deployable on UEC/EC2 with puppet. Instances will be setup using puppet recipes and be used for testing purposes of the login integration. The reference platform integrates openldap and MIT kerberos for authentication and login purposes.
+
+Define the overall architecture:
+  - review the openldap-dit project
+  - required packages (slapd, krb5)
+  - necessary glue to be written via puppet recipes
+
+===== openldap-dit =====
+Review:  
+https://code.launchpad.net/openldap-dit/
+ - schemas
+ - DIT
+ - ACLs
+ - sudo role
+ - dns 
+ - dhcp
+ - RFC 2307 (user and group defintion)
+ - Samba
+ 
+Package available but not uploaded at the moment.  Needs testing
+Convert some of the openldap-dit-setup.sh to debconf questions.
+ 
+Reliance on DNS? -> need to integrate a DNS server in the infrastructure.
+* publish _srv records.
+* included in the puppet recipes.
+
+Target architecture:
+ Instances:
+  1. Master slapd+KDC
+  2. (2 or more) Replicated slapd+KDC (multiple instances)
+  3. File server (nfs, cifs server)
+  4. Dns server
+  
+Possible extension:
+ - any server that consumes idm 
+  
+===== Schemas =====
+User and group mgmt: rfc 2307
+* latest version from howard's draft
+ 
+ppolicy is not the latest one.  Inter related with mit kerberos
+* should not be used in the test environement?
+ 
+DHCP is out of scope (because of the cloud environment)
+
+Client testing:
+ - AutoFS component?
+ - NFSv4.
+ - samba (including joining machines to domain and logging with domain user)
+ - password expiration, password history, changing password. (need to sync multiple passwords for Samba)
+ 
+----
+CategorySpec

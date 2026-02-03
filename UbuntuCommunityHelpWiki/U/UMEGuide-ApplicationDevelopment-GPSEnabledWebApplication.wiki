@@ -1,0 +1,237 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+This will show how to create a GPS enabled standalone web application for a Mobile Internet Device.
+
+== Background ==
+
+Traditionally gps was provided on Debian like systems using gpsd (apt-get install gpsd). There are however some problems using gpsd on resource constrained environments most noteably that gpsd is designed to be run at system start, and stopped when the system is shutdown (or a USB/bluetooth hotplug device started when that device is plugged in or removed). 
+Therefore if a client is started before gpsd is running (for example a gps applet is started before the BT device is connected), then the only way for it to know about gpsd is for it to attempt to connect to the gpsd socket and keep trying every so often until it succeeds. This makes gpsd client programs very busy, always having to wake up to check to see if it can connect and on a system that runs on batteries having processes that can't sleep very often is a bad thing which drains away the battery. Also there is a problem with the granularity of the info that gpsd provides, as running clients get notified about everything, even if they don't care about it. GPS emits a new fix on every <nowiki>[[http://en.wikipedia.org/wiki/NMEA_0183|NMEA]]</nowiki> sentence received, which for most gps devices is about 5 a second and each time the clients are all woken up even if they don't care about the data that has changed.
+
+gpsd has no way for clients to say that they are only interested in position data, or only in whether the device has a fix or not. Even if the gps unit is stationary, satellite data is constantly changing, and the clients will be woken up on every message.
+Because of these problems <nowiki>[[http://blogs.gnome.org/iain/2007/11/12/like-whores-dancing-for-their-trinkets|Iain Holmes]]</nowiki> at <nowiki>[[http://o-hand.com|o-hand]]</nowiki> wrote <nowiki>[[http://folks.o-hand.com/iain/gypsy/|gypsy]]</nowiki>. This is a gps multiplexing daemon which gives finer control of gps info and allows programs to call the following objects:
+
+** Gypsy Position - for getting location information
+** Gypsy Course - for getting course information
+** Gypsy Accuracy - for getting accuracy information
+** Gypsy Satellite - for getting satellite information
+
+The code to interact with the gypsy daemon <nowiki>[[http://burtonini.com/bzr/gypsy-status/gypsy.py|(gypsy.py)]]</nowiki> and to show its status <nowiki>[[http://burtonini.com/bzr/gypsy-status/status.py|(status.py)]]</nowiki> which I 'pimped' for the Django application was written by <nowiki>[[http://burtonini.com/|Ross Burton]]</nowiki> and released LGPL and GPL respectively.
+
+== Implementation ==
+
+Set up a <nowiki>[[http://www.intel.com/technology/systems/lpia/|LPIA]]</nowiki> (Low Power Intel Architecture) image on Ubuntu Hardy.  I chose a menlow-lpia platform.Then create a Django project called 'locate' (or something more original), however do not set up apache or postgresql or mysql. These applications are not suitable for an embedded device. This application will use the Cherry Py <nowiki>[[http://www.eflorenzano.com/blog/post/hosting-django-site-pure-python/|standalone WSGI server]]</nowiki> and SQLite. 
+
+Edit settings.py so that it looks like:
+<pre>
+DATABASE_ENGINE = 'sqlite3'           # 'postgresql_psycopg2', 'postgresql', 'mysql', 'sqlite3' or 'oracle'.
+DATABASE_NAME = os.path.join(os.path.dirname(__file__), 'data', 'locate.db')             # Or path to database file if using sqlite3.
+DATABASE_USER = ''             # Not used with sqlite3.
+DATABASE_PASSWORD = ''         # Not used with sqlite3.}}}
+
+The
+<code>DATABASE_NAME = os.path.join(os.path.dirname(__file__), 'data', 'locate.db')</code>
+
+is a trick which enables the SQLite filesystem database to be stored in the project inside the folder called data. This is an advantage when using revision control systems such as subversion. A similar trick works for the site media...create a folder called media in the project root and then in settings.py put:
+
+{{{
+import os,sys
+path = os.path.dirname(sys.argv[0])
+full_path = os.path.abspath(os.path.join(path, '../media'))}}}
+Then set a STATIC_ROOT variable equal to full_path {{{
+STATIC_ROOT = full_path}}}
+Finally, in urls.py import the django settings like <code>from django.conf import settings</code> and set the static.serve to {{{ (r'^media/(?P<path>.*)$', 'django.views.static.serve', {'document_root': settings.STATIC_ROOT, 'show_indexes': True}),
+</pre>
+
+Also create a folder in the project root called server and inside this folder check out a copy of the standalone server:
+<pre>
+wget http://svn.cherrypy.org/trunk/cherrypy/wsgiserver/__init__.py -O wsgiserver.py
+</pre> 
+and create a file called run.py with this in it:
+<pre>
+import wsgiserver
+import os
+import django.core.handlers.wsgi
+
+if __name__ == "__main__":
+    os.environ['DJANGO_SETTINGS_MODULE'] = 'locate.settings'
+    server = wsgiserver.CherryPyWSGIServer(
+        ('127.0.0.1', 8000),
+        django.core.handlers.wsgi.WSGIHandler(),
+        server_name='Lowkate',
+        numthreads = 20,
+    )
+    try:
+        server.start()
+    except KeyboardInterrupt:
+        server.stop()}}}
+
+The locate project should be running when the device desktop comes up so we need to start the server.Edit <code>/usr/bin/ume-xephyr-start</code> and add:
+
+{{{
+echo "Starting Locate"
+export PYTHONPATH="/home/ume/Web/django_projects/locate/:$PYTHONPATH"
+export PYTHONPATH="/home/ume/Web/django_projects/:$PYTHONPATH"
+export DJANGO_SETTINGS_MODULE=locate.settings
+python /home/ume/Web/django_projects/locate/server/run.py&}}}
+
+the command
+
+{{{
+python /home/ume/Web/django_projects/locate/server/run.py&}}}
+executes the python file run.py and starts the server as a background process which allows other processes (e.g. the Xephyr UI) to continue executing.
+
+The locate project should now look like:
+
+{{{
+root@ian-laptop:/home/ian/Dev/Ume/menlow-lpia/targets/target1/fs/home/ume/Web/django_projects/locate# ls 
+data media server __init__.py  manage.py  settings.py  urls.py }}}
+which is a completely self-contained project environment 
+
+== Test the Gypsy to GPS Connection ==
+
+Install inside the target the <nowiki>[[http://ianlawrence.info/downloads/debian/gypsy-lpia/gypsy_0.5-1_lpia.deb|gypsy lpia deb]]</nowiki> and <nowiki>[[http://ianlawrence.info/downloads/debian/gypsy-lpia/libgypsy0_0.5-1_lpia.deb|library]]</nowiki> . 
+
+The bluetooth GPS device I used was the <nowiki>[[http://www.nokiahowto.com/link?cid=EDITORIAL_184774|Nokia Wireless GPS Module LD-3W]]</nowiki> and to communicate with it we need to find out its address. Make sure bluetooth is enabled
+<code>sudo apt-get install bluetooth bluez-utils  bluez-gnome gnome-bluetooth libbluetooth2 libbtctl4 libgnomebt0 nautilus-sendto</code>
+
+and run:
+
+{{{
+ian@lawrence:~$ hcitool scan
+Scanning ...	
+
+00:19:B7:8C:A7:F7 IansPhone 
+00:02:76:C5:58:B2 Nokia LD-3W}}}
+
+This returns the address of the GPS device - 00:02:76:C5:58:B2 
+There is a nice GUI to do this <nowiki>[[http://blueman.tuxfamily.org/|here]]</nowiki>
+
+Add this address into gypsy.py
+{{{
+59    dbus.mainloop.glib.DBusGMainLoop(set_as_default=True) 
+60 
+61    gps = GPS("00:02:76:C5:58:B2") 
+62    gps.Start()}}}
+
+and then inside a target terminal:
+
+{{{
+export DISPLAY=:2
+python status.py}}}
+
+The status of the GPS is displayed along with a small map of the user location pulled from a mapping API 
+ <nowiki>[[File:gypsy.png]]</nowiki>
+
+== D-BUS and HTTP Requests ==
+
+It is not possible to query DBUS without starting some sort of a loop - such as the call to
+
+<code>DBusGMainLoop</code>
+
+in status.py. This will not happen in a web application and so some alternative solution is necessary.
+
+<nowiki>[[http://www.xmlrpc.com/|XML-RPC]]</nowiki> Requests are a way of: 
+
+"allowing software running on disparate operating systems, running in different environments to make procedure calls over the Internet.
+It's remote procedure calling using HTTP as the transport and XML as the encoding."
+
+Django has an XML-RPC server already available thanks to the work of <nowiki>[[http://grahambinns.com/blog/categories/django/|Graham Binns]]</nowiki> and Brendan Adams so <nowiki>[[http://code.google.com/p/django-xmlrpc/|install this]]</nowiki> and then make a method in settings.py like:
+
+{{{
+XMLRPC_METHODS = (   
+('locate.django_xmlrpc.views.handle_xmlrpc', 'handle_xmlrpc',),   
+('locate.django_xmlrpc.views.handle_gypsy', 'handle_gypsy',),
+                  )}}}
+
+and in django_xmlrc/views.py create a method signature like:
+
+{{{
+@xmlrpc_func(returns='string', args=['string', 'int', 'int', 'int',]) 
+def handle_gypsy(timestamp, latitude, longitude, altitude):   
+    """Take the values we need from the the gypsy XML object and store them in a database (or file system) """   
+    data = Raw(time=timestamp, lat=latitude, long=longitude, alt=altitude)   
+    data.save()    
+### This returns the values passed in (useful for debugging)   
+    return "The timestamp is %s, the latitude is %i, the longitude is %i, and the altitude is %i." % (timestamp, latitude, longitude, altitude)}}}
+
+The XML-RPC client needs to pass the GPS XML object to the "handle_gypsy" function seen here 
+ <nowiki>[[File:xml1.png]]</nowiki> 
+(also create a models.py to store the GPS data)
+
+In gypsy.py add
+{{{
+ 2 import xmlrpclib
+</pre>
+and
+<pre>
+ 63     gps.Start()
+ 64 
+ 65     server = xmlrpclib.ServerProxy('http://127.0.0.1:8000/xmlrpc/')
+ 66 
+ 67     def position_changed(fields, timestamp, latitude, longitude, altitude):
+ 68         server.handle_gypsy(timestamp, latitude, longitude, altitude)
+</pre>
+
+which passes the GPS data into our Django web application.
+
+All that remains to do is query our database for the last GPS position. Create an application called geoapp
+with a views.py like
+<pre>
+  1 # Create your views here.
+  2       
+  3 from django.http import HttpResponse
+  4 from locate.django_xmlrpc.models import Raw
+  5 from django.shortcuts import render_to_response
+  6      
+  7     
+  8 
+  9 def get_position(request):
+ 10      latest_GPS = Raw.objects.all().order_by('-id')[:1]
+ 11 
+ 12      return render_to_response('location_list.html', {'latest_GPS': latest_GPS})
+ 13 }}}
+and a template of
+{{{
+<html>
+<head></head>
+<body>
+{% if latest_GPS %}
+   <ul>
+   {% for co in latest_GPS %}
+    <li>
+     I am located at <a href="http://geohash.org/?q={{co.lat}},{{co.long}}">this</a> URL.</li>
+   {% endfor %}
+   </ul>
+{% else %}
+    No coordinates
+{% endif %}
+</body>
+</html>
+</pre> 
+
+This uses geohash.org which is a latitude/longitude geocode system invented by Gustavo Niemeyer when writing the web service at geohash.org, and put into the public domain. It offers short URLs to uniquely identify positions on the Earth, so that referencing them in emails, forums, and websites is more convenient.
+Here is <nowiki>[[http://geohash.org/6xmq3gxthq55|where I was]]</nowiki> when writing this.
+ <nowiki>[[File:geohash.png]]</nowiki>
+
+Here is the complete application 
+ <nowiki>[[attachment:lowkate.zip]]</nowiki>
+
+There are many things to work on in this application. A nice user applet instead of hacking the gypsy code to pass the XML would be one significant improvement as would some limit on the amount of data being passed into the database. Also this 'blue sky' idea below seems interesting!  
+
+ ''' Further Research and Ideas'''
+
+* Interaction with the onboard camera. For example, user takes photo of an unknown object (like a building or landmark) and return good results about it from a search API 
+   <nowiki>[[http://petitinvention.wordpress.com/2008/02/10/future-of-internet-search-mobile-version/|The Future of Internet Search Mobile Version]]</nowiki>
+
+   How: 
+   We know the user location and now we need the software to work out what an object is ....we need to capture gstreamer output from camera and pass it to 
+   <nowiki>[[http://www.artoolworks.com/community/osgart/|augmented reality software]]</nowiki> for visual object extraction and then overlay API search info back onto the image
+ 

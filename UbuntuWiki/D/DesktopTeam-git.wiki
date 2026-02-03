@@ -1,0 +1,665 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+
+The <nowiki>[[DesktopTeam]]</nowiki> uses `git` to manage its packages. Here's how to do some common things. You need `git-buildpackage` installed for most of this.
+
+Suggested configuration is available in the end.
+
+== General concepts ==
+
+=== Branches and repo layout ===
+
+We will use a layout with 3 remote repositories:
+<pre>
+$ git remote show
+origin          # will point to salsa (default for pull and push without any argument)
+upstreamvcs     # will point to upstream repository, to cherry-pick easily upstream fixes
+</pre>
+
+Note: we named in the page the remote  '''upstreamvcs''', to not be mislead with local branch names (which are for instance debian/branchname and upstream/branchname) if any. Consequently, instead of having '''debian/latest''', a local branch tracking '''debian/debian/latest''' remote, we end up with '''debian/latest''' tracking '''origin/debian/latest''', which is easier to understand.
+
+Note: '''debian/latest''' and '''ubuntu/latest''' were previously '''debian/master''' and '''ubuntu/master''' respectively, but were <nowiki>[[https://lists.debian.org/debian-gtk-gnome/2023/09/msg00001.html|renamed to the current names on 4 September 2023]]</nowiki> going forward to use more <nowiki>[[https://canonical.com/blog/inclusive-language-and-its-future-at-canonical|inclusive naming]]</nowiki> and more closely follow <nowiki>[[https://dep-team.pages.debian.net/deps/dep14/|DEP-14]]</nowiki>.
+
+As those remote name are local to your system, you can rename them as you see 
+
+==== Salsa remote branches ====
+
+===== Default =====
+
+Let's look at the various branches in the origin (salsa) remote repository:
+<pre>
+$ git remote show origin
+* remote origin
+[…]
+  HEAD branch: ubuntu/latest
+  Local branches configured for 'git pull':
+    pristine-tar    merges with remote pristine-tar
+    ubuntu/latest   merges with remote ubuntu/latest
+    upstream/latest merges with remote upstream/latest
+  Local refs configured for 'git push':
+    pristine-tar    pushes to pristine-tar    (up to date)
+    ubuntu/latest   pushes to ubuntu/latest   (up to date)
+    upstream/latest pushes to upstream/latest (up to date)
+</pre>
+
+* '''ubuntu/latest''' branch is the content of the latest development release. Work ready to be uploaded or uploaded in dev release mostly happens here. It's the default branch.
+* '''pristine-tar''' is an internal gbp-buildpackage branch, used to reconstruct release tarballs (using upstream/latest). You are not intended to interact with it directly.
+* '''upstream/latest''' is another internal gbp-buildpackage branch. It's a merge between the upstream git branch corresponding to the latest release from the upstream repository and extra content coming from the tarball. You are not intended to interact with it directly.
+
+We find back those 3 branches locally:
+* '''ubuntu/latest''' -> pull and push from '''origin''' (salsa) remote repository, on '''ubuntu/latest''' branch (origin/ubuntu/latest)
+* '''pristine-tar'''  -> pull and push from '''origin''' (salsa) remote repository, on '''pristine-tar''' branch (origin/pristine-tar)
+* '''upstream/latest''' -> pull from '''upstream''' remote repository, on the '''latest''' branch (upstream/latest), and push to '''origin''' (salsa) remote repository, on '''upstream/latest''' branch (origin/upstream/latest).
+
+Basically, you will only interact with '''ubuntu/latest''' under that configuration, and let gbp handling the 2 other branches. When you `gbp pull` and `gbp push`, the 3 branches will be kept up to date if no conflict occurs. This is easier than checkout every branch before pushing them.
+
+===== Maintenance branches =====
+
+Once we have maintenance branches on a project (ensure you already followed <nowiki>[[#Create_a_maintenance_branch]]</nowiki>), additional remote branches are available:
+<pre>
+$ git remote show origin 
+* remote origin
+  […]
+  Remote branches:
+    pristine-tar    tracked
+    ubuntu/bionic   tracked
+    ubuntu/latest   tracked
+    upstream/latest tracked
+    upstream/3.28.x tracked
+</pre>
+
+* '''ubuntu/bionic''' branch is the content for the corresponding release, once a particular release it out. It's the previous '''ubuntu/latest''' branch when bionic was in development.
+* '''upstream/3.28.x''': this branch (automatically managed by gbp buildpackage) corresponds to the '''upstream/latest''' branch, but tracking a particular upstream series, similar to the '''ubuntu/bionic''' branch. This branch is only necessary if you imported a new tarball (like 3.29 series) in ''''upstream/latest''' and want to release an unimported yet 3.28.3 upstream release in bionic for instance.
+
+Each one should have a corresponding local branch when working on bionic.
+
+==== Debian remote branches ====
+
+In addition, we'll have at least another branch tracking salsa debian remote repository. Their main (default) branch is named debian/latest:
+* '''debian/latest''' -> pull (no push, unless you are a debian developer) from '''origin''' remote repository, on '''debian/latest''' branch.
+
+==== Upstream remote branches ====
+
+By default, we don't have upstream branches checked out locally. We added the '''upstreamvcs''' repo and have access to its content, which will be fetched when importing new upstream tarball thanks to the version tag, and inject the history in '''upstream/latest''' (or '''upstream/version''', as explained before).
+
+<pre>
+$ git remote show upstreamvcs
+* remote upstreamvcs
+[…]
+  HEAD branch: main
+[…]
+    gnome-3-28                                  tracked
+[…]
+  Local branch configured for 'git pull':
+    upstream/latest merges with remote main
+</pre>
+
+You can ofc checkout any of those branch locally if you want
+We have '''upstream/latest''' tracking the '''upstreamvcs''' repo on '''main''' branch. We can track any additional branches as needed for cherry-picking fixes.
+
+Let's checkout locally upstreamvcs/main branch and make it the current checkout:
+<pre>
+$ git checkout -b upstreamvcs-main upstreamvcs/main
+Branch 'upstreamvcs-main' set up to track remote branch 'main' from 'upstreamvcs'.
+Switched to a new branch 'upstreamvcs-main'
+</pre>
+
+We asked to create a new local branch named '''upstreamvcs-main''' (first argument), tracking the remote named '''upstreamvcs''', on the branch '''main''' (second argument).
+
+==== Local branches ====
+
+To sum up all this, the minimal setup it the following ([] are tracked branch):
+<pre>
+$ git branch -vv
+  debian/latest   c02b29966 [origin/debian/latest] Revert "Don't recommend libnss-myhostname since it doesn't seem needed any more (LP: #1766575)"
+  upstreamvcs-main    d814d9db0 [upstreamvcs/main] Update Chinese (Taiwan) translation
+  pristine-tar    e59ab7422 [origin/pristine-tar] pristine-tar data for gnome-control-center_3.29.1.orig.tar.xz
+* ubuntu/latest   63337a4cd [origin/ubuntu/latest] releasing package gnome-control-center version 1:3.29.1-0ubuntu5
+  upstream/latest 0bd90ca34 [origin/upstream/latest] region: Show scrollbars if needed
+</pre>
+
+With an ubuntu maintenance branch, and so, linked gbp buildpackage tarball branch, and upstream "main" branch checked out, with a local branch, we have in addition:
+<pre>
+  upstreamvcs-main    d814d9db0 [upstreamvcs/main] Update Chinese (Taiwan) translation
+  ubuntu/bionic   ba45348d3 [origin/ubuntu/bionic] debian/gbp.conf: use gbp-buildpackage for ubuntu.
+  upstream/3.28.x 83b100dc9 [origin/upstream/3.28.x] New upstream version 3.28.3
+</pre>
+
+=== Local changes ===
+
+With the suggested configuration (see it at the end of the page), any non committed changes (file modifications, additions or removal) will halt the build, as they won't be included as a safety reminder.
+
+You can either:
+* ignore them, appending `--git-ignore-new`. The resulting package and build won't include those uncommitted changes. (`../build-area/<your-package>` will match the last commit).
+* force using the current directory with your local modifications instead of build-area, and include (despite the "ignore-new" option) any local modifications to the package. For this, append `--git-ignore-new --git-export-dir=""`
+
+== Check out a branch for the first time ==
+
+'''1. Salsa remote'''
+
+If the Vcs-Git field is correct, you can
+<pre>
+$ debcheckout --git-track=* gnome-control-center
+declared git repository at https://salsa.debian.org/gnome-team/gnome-control-center/
+git clone https://salsa.debian.org/gnome-team/gnome-control-center -b ubuntu/latest gnome-control-center ...
+[…}
+</pre>
+
+Otherwise, you can check out any `git-buildpackage` repository manually
+
+<pre>
+$ gbp clone salsa-gnome:gnome-control-center
+gbp:info: Cloning from 'salsa-gnome:gnome-control-center'
+$ cd gnome-control-center
+</pre>
+
+We want to push tags automatically, as gbp relies on them (this is a local configuration):
+<pre>
+$ git config push.followTags true
+</pre>
+
+'''2. Add upstream and debian remote'''
+<pre>
+$ git remote add -f upstreamvcs git@gitlab.gnome.org:GNOME/gnome-control-center.git
+</pre>
+
+You should now have 3 branches correctly setup and tracking the correct branch with expected configuration.
+
+<pre>
+$ git branch -vv
+  pristine-tar    e59ab7422 [origin/pristine-tar] pristine-tar data for gnome-control-center_3.28.1.orig.tar.xz
+* ubuntu/latest   ba45348d3 [origin/ubuntu/latest] debian/gbp.conf: use gbp-buildpackage for ubuntu.
+  upstream/latest 83b100dc9 [origin/upstream/latest] New upstream version 3.28.1
+</pre>
+
+And 3 remotes, we only use one right now.
+
+<pre>
+$ git remote
+origin
+upstreamvcs
+</pre>
+
+'''3. Maintenance branches'''
+
+If we want to track maintenance branches as well:
+
+<pre>
+$ git remote show origin 
+* remote origin
+  […]
+  HEAD branch: ubuntu/latest
+  Remote branches:
+    pristine-tar    tracked
+    ubuntu/bionic   tracked
+    ubuntu/latest   tracked
+    upstream/latest tracked
+</pre>
+
+Let's track ubuntu/bionic:
+
+<pre>
+$ git checkout ubuntu/bionic
+Branch 'ubuntu/bionic' set up to track remote branch 'ubuntu/bionic' from 'origin'.
+Switched to a new branch 'ubuntu/bionic'
+</pre>
+
+/!\ this short syntax is only available because we create a local '''ubuntu/bionic''' tracking on the '''origin''' repo the matching named '''ubuntu/bionic'''. It doesn't work with any other repository name or when name doesn't match (and need an explicit `git branch -u local-name remote/branch-name && git checkout local-name`).
+
+Let's check that:
+<pre>
+$ git branch -vv
+  pristine-tar    e59ab7422 [origin/pristine-tar] pristine-tar data for gnome-control-center_3.28.1.orig.tar.xz
+* ubuntu/bionic   cf931abe4 [origin/ubuntu/bionic] debian/patches/privacy-panel-whoopsie.patch
+  ubuntu/latest   dce53a3d2 [origin/ubuntu/latest] Change gbp option order to be more meaningful
+  upstream/latest 83b100dc9 [origin/upstream/latest] New upstream version 3.28.1
+</pre>
+
+== Day to day operation ==
+
+=== Building a binary or source package ===
+
+* Binary package:
+<pre>
+$ gbp buildpackage
+[…]
+</pre>
+
+* Source package:
+<pre>
+$ gbp buildpackage -S
+[…]
+</pre>
+
+With the proposed configuration, the artefacts will all end up in `../build-area` (including tarball, which is reconstructed from the pristine-tar + upstream/latest branch) and build directory is cleaned up.
+
+==== Useful tips ====
+
+Some potential cases:
+
+* Don't purge the **build-area** directory after building: `gbp buildpackage --git-no-purge`
+* Build current branch with local uncommitted modifications: `gbp buildpackage --git-ignore-new --git-export-dir=""`
+
+==== Refreshing branches ====
+
+* Use gbp pull to refresh current ubuntu/<branch> and corresponding upstream/<release> (only the ones referenced in your current checkout debian/gbp.conf) as well as pristine-tar branch.
+
+on ubuntu/latest:
+<pre>
+$ gbp pull
+gbp:info: Fetching from default remote for each branch
+gbp:info: Branch 'upstream/latest' is already up to date.
+gbp:info: Branch 'ubuntu/latest' is already up to date.
+gbp:info: Updating 'pristine-tar': 2bed57f20816..e59ab7422a13
+</pre>
+
+-> the branch '''pristine-tar''' has been updated as refenced in `debian/gbp.conf`.
+
+If you have a separate ubuntu/bionic branch, with its own upstream/3.28.x branch:
+<pre>
+$ git checkout ubuntu/bionic
+$ gbp pull
+gbp:info: Fetching from default remote for each branch
+gbp:info: Branch 'pristine-tar' is already up to date.
+gbp:info: Branch 'upstream/3.28.x' is already up to date.
+gbp:info: Updating 'ubuntu/bionic': fe031c0214ba..59adb2d88983
+
+</pre>
+
+`gbp pull`, contrary to `git push`, is a way for you to avoid checkouting each branch and `git pull` them one by one (as you need to have the branch as a current checkout for potential conflicts when pulling).
+
+==== Pushing your git changes to salsa ====
+
+Contrary for pulling, We are using `git push` for this. All branches tracking the origin repo will be pushed that way (no need to be on the correct checkout, contrary to `gbp pull`). Relevant tags as well (if you follow our advised configuration) will be pushed.
+
+=== Merge a new upstream version ===
+
+==== '''latest''' branch ====
+
+On the branch you want to have version imported (like ubuntu/latest here).
+
+As a first part, you need to create a '''patch/queue/ubuntu/latest''' branch with `gbp pq` that is useful in case you need to refresh patches later. If you have it already, just rebase it.
+
+<pre>
+$ gbp pq import # if you already have it, just use `gbp pq rebase instead`
+</pre>
+
+===== Using upstream tarball =====
+
+You need to follow this path in the case debian has not imported this version yet, although since we don't want to have duplicated `upstream/x.y.z` tags, in this case you should push the '''pristine-tar''' and '''upstream/<current>''' branches to `origin`
+
+<pre>
+$ git fetch upstreamvcs
+$ git checkout ubuntu/latest
+$ gbp import-orig ../gnome-control-center-3.28.2.tar.xz # can be as well --uscan to let it download and import
+What is the upstream version? [3.28.2] 
+gbp:info: Importing '../gnome-control-center-3.28.2.tar.xz' to branch 'upstream/latest'...
+gbp:info: Source package is gnome-control-center
+gbp:info: Upstream version is 3.28.2
+gbp:info: Replacing upstream source on 'ubuntu/bionic'
+gbp:info: Successfully imported version 3.28.2 of ../gnome-control-center-3.28.2.tar.xz
+$ git push
+</pre>
+
+This will push all needed branches ('''ubuntu/latest''' for instance and '''pristine-tarball''' + '''upstream/3.28.x''' or '''upstream/latest''' if this upload is a new upstream release).
+
+As said, now you should sync (or propose if not ubuntu developer) the affected upstream branch to <nowiki>[[https://salsa.debian.org|salsa.debian.org]]</nowiki> (making sure you push the new tag too).
+
+Note: If you get when importing:
+<pre>
+$ gbp import-orig ../gnome-control-center-3.29.2.tar.xz
+What is the upstream version? [3.29.2] 
+gbp:info: Importing '../gnome-control-center-3.29.2.tar.xz' to branch 'upstream/latest'...
+gbp:info: Source package is gnome-control-center
+gbp:info: Upstream version is 3.29.2
+gbp:error: Import of ../gnome-control-center-3.29.2.tar.xz failed: revision '…' not found
+</pre>
+
+There are 3 cases:
+* You didn't run `git fetch upstreamvcs` and so, didn't get latest commits and tags in your repository metadata.
+* Upstream has changed the tagging pattern (and so, `debian/gbp.conf` needs to be updated to match it)
+* Upstream is using an inconsistent release pattern (and so, `debian/gbp.conf` can't have a regexp for the version). In that case, please specify manually `--upstream-vcs-tag=exact_version_tag` to `gbp import-orig`. You can find the exact tag via `git describe --tags --abbrev=0 upstreamvcs/main`.
+
+Another error you could get is:
+<pre>
+$ gbp import-orig ../gnome-control-center-3.29.2.tar.xz
+What is the upstream version? [3.29.2] 
+gbp:error: Upstream tag 'upstream/3.29.2' already exists
+</pre>
+
+In this case, debian has already this tarball so you should follow the next chapter ("Using debian's upstream branch tags").
+
+===== Using debian's upstream branch tags =====
+
+If debian has already this version, you don't have to import the actual tarball but just merge with the latest upstream code, and so:
+
+<pre>
+git merge upstream/3.28.2 -m "Update upstream source from tag 'upstream/3.28.2'"
+</pre>
+
+==== Maintenance branch ====
+
+There could be some additional steps involved, if main does have a newer version than the maintenance branch, and you are the first to deal with that case for that maintenance release.
+
+Basically if `debian/gbp.conf` has `upstream-branch=upstream/latest` and the '''ubuntu/latest''' branch has a newer upstream version than the one you are importing (which was never imported), please read this. Otherwise, just follow the steps in the previous case, after eventually creating a maintenance branch (see corresponding section) and switching to it.
+
+For instance, let's say:
+- '''ubuntu/latest''' is on '''3.29.2'''
+- '''ubuntu/bionic''' is on '''3.28.1''' and we want to update to '''3.28.2'''
+- we have '''pristine-tar''' having '''3.28.1''' and '''3.29.2''' imported
+- consequently the '''upstream/latest''' branch has upstream commits and tags for '''3.28.1''', '''3.29.2''' and corresponding gbp tags '''upstream/3.28.1''' and '''upstream/3.29.2'''.
+
+Ensure you are on your '''ubuntu/bionic''' branch.
+
+'''1. Create a new upstream/<series>''' branch
+
+Note that you need to check latest version of '''upstream/latest''' in your maintenance branch ('''upstream/3.28.1''' in our case).
+<pre>
+$ git branch upstream/3.28.x upstream/3.28.1
+</pre>
+
+'''2. Update debian/gbp.conf to reference correct upstream gbp branch'''
+
+<pre>
+$ git commit -a
+</pre>
+
+===== Using upstream tarball =====
+
+'''3a. Then if this revision is not in salsa upstream branch yet'''
+<pre>
+$ git fetch upstreamvcs
+$ gbp import-orig ../gnome-control-center-3.28.2.tar.xz
+</pre>
+
+'''3b. Remember pushing your changes, including the new branch that you want to track'''
+<pre>
+$ git push
+$ git push -u upstream/3.28.x
+</pre>
+
+===== Using debian's upstream branch tags =====
+'''3a. Then if this revision is already in salsa upstrema branch'''
+<pre>
+git merge upstream/3.28.2 -m "Update upstream source from tag 'upstream/3.28.2'"
+</pre>
+
+'''4. Remember to push the upstream and '''pristine-tar''' branches to salsa'''
+
+You can push to your guest account and prepare a pull-request or directly on the gnome branch if you have the right.
+
+==== Refreshing patches ====
+
+When merging with an upstream release, the patches might need to be refreshed. In case your '''patch/queue''' branch is in sync with previous release you can just use:
+
+<pre>
+gbp pq rebase
+
+</pre>
+
+This is described better, for the case of using `gbp import-orig` in <nowiki>[[https://honk.sigxcpu.org/projects/git-buildpackage/manual-html/gbp.patches.newupstream.html|gbp documentation]]</nowiki>. This might won't work if you're instead merging with an `upstream/x.z.y` tag or if you didn't create the patch/queue branch first, so let's just write here one that should work in both cases, so you don't have to worry about too much:
+
+<pre>
+
+gbp pq drop
+
+gbp pq import --force --time-machine=30
+
+gbp pq rebase
+
+gbp pq export --no-patch-numbers
+</pre>
+
+Once back on '''ubuntu/latest''' or '''ubuntu/<series>''' branch, you need to commit the changes too.
+
+=== Release a package ===
+
+If this is a sponsored upload, the ''sponsor'' performs these steps.
+
+==== Generate changelog for native packages ====
+
+<pre>
+gbp dch
+
+</pre>
+
+==== Finalise changelog ====
+
+<pre>
+$ dch -r ""
+$ git commit debian/changelog -m "Finalise changelog"
+$ gbp buildpackage --git-tag-only
+$ gbp buildpackage -S
+$ dput ../build-area/….changes
+$ git push
+
+$ git tag | grep -E '^ubuntu/|^debian/|^upstream/' | xargs -r git push
+</pre>
+
+This will push all tracked branches to salsa if you made any change: ubuntu/latest, ubuntu/old-series, pristine-tar, upstream/lastest. Tags will also be pushed.
+
+=== Working on patches ===
+
+'''1. Ensure you are on the correct ubuntu/ branch (or your local experimental-feature branch).'''
+<pre>
+$ git checkout ubuntu/latest # for instance
+</pre>
+
+'''2. Turn each patches in debian/patches as commits.'''
+<pre>
+$ gbp pq rebase
+gbp:info: Switching to 'patch-queue/ubuntu/latest'
+Current branch patch-queue/ubuntu/latest is up to date.
+</pre>
+
+-> Now, we have every patch referenced in `debian/patches/series` applied as separate commits on top of '''ubuntu/latest''', in a '''patch-queue/ubuntu/latest''' branch, and we switched to that current checkout.
+
+For instance
+<pre>
+$ git missing ubuntu/latest.. # git log would also show the commits
+* 11a3a8cc6 - (HEAD -> patch-queue/ubuntu/latest) [PATCH] night-ligth-dialog: Avoid dereferencing invalid p
+ointer (5 minutes ago)
+* da06252e1 - [PATCH 4/4] thunderbolt: move to the 'Devices' page (5 minutes ago)
+* 2c9f5bcbb - [PATCH 3/4] thunderbolt: new panel for device management (5 minutes ago)
+* 660e9e633 - [PATCH 2/4] shell: Icon name helper returns symbolic name (5 minutes ago)
+* a78ae89dd - [PATCH 1/4] shell: Don't set per-panel icon (5 minutes ago)
+[…]
+</pre>
+
+'''3. Hack…'''
+
+We can `git add`/`git commit`. Any new commit will be a separate patch applied at the end of `debian/patches/series`. Commit description will be then converted to the patch description.
+
+Remember previous tip of `gbp buildpackage --git-ignore-new --git-export-dir=""` to build a package with current content without having to switch branch.
+
+'''4. optional: Reorder patches'''
+
+If we don't want this patch to be the last one, we can use an interactive git rebase:
+<pre>
+$ git rebase -i ubuntu/latest
+</pre>
+That way, we only see the patches commit, can reorder them, amend or stash them. Removing one will also remove the patch from debian/patches/series
+
+'''5. Reapply all changes to the original branch:'''
+
+<pre>
+$ gbp pq export --no-patch-numbers
+gbp:info: On 'patch-queue/ubuntu/latest', switching to 'ubuntu/latest'
+gbp:info: Generating patches from git (ubuntu/latest..patch-queue/ubuntu/latest)
+</pre>
+
+'''6. Modify changelog, git add, git commit'''
+
+Note that gbp pq will unfuzz a lot of patches everytime you use it, creating some noise. Please add those changes separated from your new or modified patch hack.
+
+And either push the change to your branch or to the main branches with a simple `git push`!
+
+=== Pick some upstream commits ===
+
+'''1. Refresh upstream repo if needed:'''
+
+Remember that we don't have a local checkout, only a remote that we need to refresh
+
+<pre>
+$ git fetch upstreamvcs
+</pre>
+
+'''2. Find the commit(s) you want to cherry-pick'''
+
+Look at log history with, for instance:
+
+<pre>
+$ git log -p upstreamvcs/main
+</pre>
+
+Many GNOME projects now use `main` instead of `master`, but some may still be using `master`, so you might need to use this instead:
+
+<pre>
+$ git log -p upstreamvcs/master
+</pre>
+
+'''3. Cherry-pick one commit as a patch (here on ubuntu/latest branch):'''
+
+<pre>
+$ git checkout ubuntu/latest
+$ git pull
+$ gbp pq rebase # or, gbp pq drop; gbp pq import (this will delete your patch queue and re-create it from debian/patches, which can be useful if the patch-queue branch gets out of sync with latest)
+$ git log -p upstream/latest
+$ git cherry-pick -e -x <hash>
+$ gbp pq export --no-patch-numbers
+$ git add debian/patches/* debian/changelog
+$ git commit
+</pre>
+
+See previous section for more info on '''gbp pq'''.
+
+=== Import an out of VCS ubuntu upload ===
+
+On the branch you want to have that ubuntu upload, after downloading the source tarball:
+<pre>
+$ gbp import-dsc ../gnome-control-center_3.28.1-0ubuntu5.dsc
+gbp:info: Version '1:3.28.1-0ubuntu5' imported under '…/gnome-control-center'
+$ git push
+</pre>
+
+This will push all needed branches (ubuntu/latest for instance and pristine-tarball + upstream/latest if this upload is a new upstream release).
+
+==== Out of VCS upload while having changes in tree ====
+
+/!\ importing take latest tarball and will eventually revert any changes that were sitting in the VCS. You have 2 strategies:
+* rewriting the history (but everyone who pulled the repo will have conflicts with refreshing) via a rebase. This is thus discouraged.
+* applying the latest source package, and reintroducing the changes (cherry-picking the commits). Note that as your commits are already in tree (but reverted), git cherry-pick <hash> won't work. You should rather:
+<pre>
+$ git show <hash> | git apply
+$ git commit -C <hash>
+</pre>
+
+=== Create a maintenance branch ===
+
+'''1. Find correct version'''
+
+Fin latest version in common between the development release and that maintenance branch. Here, we'll use the version tag '''ubuntu/1%3.28.1-0ubuntu4'''
+
+'''2. create a branch from start starting point, and push it to salsa'''
+<pre>
+$ git branch ubuntu/bionic ubuntu/1%3.28.1-0ubuntu4
+$ git checkout ubuntu/bionic 
+Switched to branch 'ubuntu/bionic'
+</pre>
+
+'''3. Adjust parameters in debian/gbp.conf and debian/control.'''
+
+<pre>
+$ git commit -a
+</pre>
+
+'''4. Push your changes to salsa and track that branch'''
+
+<pre>
+$ git push -u origin ubuntu/bionic 
+Total 0 (delta 0), reused 0 (delta 0)
+To git+ssh://git@salsa.debian.org:gnome-team/gnome-control-center
+* [new branch]          ubuntu/bionic -> ubuntu/bionic
+Branch 'ubuntu/bionic' set up to track remote branch 'ubuntu/bionic' from 'origin'.
+</pre>
+
+=== Merge with debian ===
+
+Do not forget to include up to the Debian version as a <code>-v</code> argument to <code>dpkg-genchanges</code>, so that it appears in the changes file too and is display.
+
+TO BE CONTINUED
+
+== Convert a package to git for the first time from Debian ==
+
+This section has been moved to <nowiki>[[DesktopTeam-git-NewPackageImport|DesktopTeam-git-NewPackageImport]]</nowiki>.
+
+== Configurations ==
+
+=== ~/.config/git/config ===
+
+To easily access to salsa git repositories with `git clone salsa:name-or-team/repo` or `git clone salsa-gnome:repo`, you should add to your .config/git/config file the following paragraph:
+<pre>
+[url "git@salsa.debian.org:"]                                                                                 
+    insteadof = salsa:
+
+[url "git@salsa.debian.org/gnome-team/"]                                                                                 
+    insteadof = salsa-gnome:
+</pre>
+
+See this <nowiki>[[https://docs.gitlab.com/ee/university/training/topics/env_setup.html|gitlab doc]]</nowiki> for more information on git configuration with gitlab.
+
+==== Useful aliases ====
+<pre>
+[alias]
+    matching-tags = "!f() { git for-each-ref --sort=creatordate --format '%(refname)' refs/tags| grep \"$1\"| sed s,^refs/tags/,,; }; f"
+    last-tags = matching-tags '.*'
+    last-match-tag = "!f() { git matching-tags $1 | tail -n1; }; f"
+    last-tag = last-match-tag '.*'
+    last-debian-tag = last-match-tag debian/
+    last-ubuntu-tag = last-match-tag ubuntu/
+    ubuntu-delta = "!f() { git diff $(git last-debian-tag) -- ${1:-debian} ':(exclude)debian/changelog'; }; f"
+</pre>
+
+=== ~/.gbp.conf ===
+
+`git-buildpackage` uses this file for its default configuration; some tweaks are recommended. 
+
+<pre>
+[buildpackage]
+export-dir = ../build-area/
+sign-tags = True
+keyid = 0xGPGKEYID
+</pre>
+
+See `gbp.conf(5)` and man of `gbp-buildpackage` for more options.
+
+=== Automerging changelogs ===
+
+To merge changelog automatically, `dpkg-mergechangelogs` can be used, so change `~/.config/git/config` as follows:
+<pre>
+[merge "dpkg-mergechangelogs"]  
+    name = debian/changelog merge driver
+    driver = dpkg-mergechangelogs -m %O %A %B %A
+</pre>
+
+Then set it as the default strategy. Add this to your ~/.config/git/attributes file (the file probably doesn't exist yet)
+<pre>
+debian/changelog merge=dpkg-mergechangelogs
+</pre>
+
+'''WARNING: This may not work when ubuntu packages use an higher epoch than the debian ones, so will need manual fix'''
+
+== Annex ==
+Work to be done:
+* https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=888313
+* Talk with upstream about preventing importing older tarball in upstream/latest and handling creation of upstream/maintenance-branch
+* Ensure that if no upstream tag is in debian/gbp.conf and not found in repo, erroring out when importing a tarballs.

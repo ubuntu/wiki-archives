@@ -1,0 +1,254 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+'''DISCLAIMER: Doing this is an unsupported configuration for Ubuntu, and may cause up-to and including boot breakage on upgrades. If possible please use the password based or TPM FDE options provided by the Ubuntu installer.'''
+
+== How to set up a fully encrypted disk with Ubuntu ==
+This page describes a way to set up an Ubuntu installation with a encrypted root partition and encrypted Swap.
+
+{| class="wikitable"
+|-
+| <rowbgcolor="#FFF280"> {i} Please refer to EncryptedFilesystems for further documentation.
+|}
+
+{| class="wikitable"
+|-
+| <rowbgcolor="#FFF280"> {i} The document <nowiki>[[https://help.ubuntu.com/community/Full_Disk_Encryption_Howto_2019|Full Disk Encryption]]</nowiki> might supersede this document.
+|}
+
+=== New installations of Ubuntu 12.10 and later ===
+
+During installation, check the checkbox “Encrypt the new Ubuntu installation for security”. <nowiki>[[https://www.eff.org/deeplinks/2012/11/privacy-ubuntu-1210-full-disk-encryption|See also the Electronic Frontier Foundation's notes]]</nowiki>.
+
+=== Encryption with dm_crypt ===
+
+If you'd like to use the newer and stronger dm_crypt method you should:
+<pre>
+sudo apt-get install cryptsetup
+sudo modprobe dm_crypt
+</pre>
+
+For each method of encryption, follow the listed howto:
+
+* CryptoRoot - `/usr/share/doc/cryptsetup/CryptoRoot.HowTo`
+* CryptoSwap - `/usr/share/doc/cryptsetup/CryptoSwap.HowTo`
+* Encrypted non-root HD partition - <nowiki>[[https://wiki.archlinux.org/index.php/Dm-crypt/Encrypting_a_non-root_file_system]]</nowiki>
+
+Other possibilities are listed at the dm_crypt wiki, including encryption across RAID devices, encrypting only a home directory (slightly harder), and encryption using LUKS: <nowiki>[[http://www.saout.de/tikiwiki/tiki-index.php]]</nowiki>
+
+=== Encryption with Cryptoloop ===
+
+{| class="wikitable"
+|-
+| <#ccaaaa> WARNING! We use the cryptoloop module in this howto. This module has well-known weaknesses.
+|}
+
+==== Prearrangement ====
+
+To set up Ubuntu the described way, you will need
+
+* a KNOPPIX CD
+* internet access
+
+Insert the KNOPPIX CD into your computer and boot. Set up KNOPPIX so that it is able to connect to the internet.
+
+==== Setting up the harddisk ====
+
+We need three partitions:
+
+{| class="wikitable"
+|-
+| '''Size'''
+| '''Mountpoint'''
+| '''Encrypted?'''
+| '''Purpose'''
+|-
+| 10M
+| /osloader
+| NO
+| Holds the ''initrd'' and kernel image needed to mount and load the rest of the system. GRUB will boot from this partition.
+|-
+| *
+| /
+| YES
+| Root partition. Holds a normal Ubuntu installation that will be launched by ''initrd''. The partition size depends on the available harddisk space but shouldn't be smaller than 2G.
+|-
+| *
+| swap
+| YES
+| Swap. The partition size depends on the used RAM.
+|}
+
+You can use <code>fdisk</code> to set up the partition table. The results should look similiar to
+
+<pre>
+Disk /dev/hda: 20.0 GB, 20003880960 bytes
+255 heads, 63 sectors/track, 2432 cylinders
+Units = cylinders of 16065 * 512 = 8225280 bytes
+
+   Device Boot      Start         End      Blocks   Id  System
+/dev/hda1   *           1           2       16033+  83  Linux
+/dev/hda2               3        2312    18555075   83  Linux
+/dev/hda3            2313        2432      963900   82  Linux swap / Solaris
+</pre>
+
+Now we check the partition for badblocks while filling it with random garbage, set up the encryption with <code>losetup</code> and format the encrypted partition. We will then mount it to install Ubuntu.
+
+<pre>
+sudo badblocks -c 10240 -s -w -t random -v /dev/hda2
+losetup -T -e aes128 /dev/loop0 /dev/hda2
+mkreiserfs /dev/loop0
+mkdir /mnt/ubuntu
+mount /dev/loop0 /mnt/ubuntu
+</pre>
+
+==== Installing Ubuntu ====
+
+The installation procedure from KNOPPIX is described in <nowiki>[[Installation-FromKnoppix#head-d373af719615b01a8733cbea9d477dc493df420c|Installation-FromKnoppix]]</nowiki>.
+
+You need a different <code>fstab</code>. Instead of a normal partition, the device for the <code>/</code> mountpoint is <code>/dev/loop0</code>. The swap entry needs more arguments to provide encrypted swap.
+
+<pre>
+/proc           /proc           proc            defaults                0 0
+/sys            /sys            sysfs           defaults                0 0
+
+/dev/hda1       /osloader       ext3            defaults,noauto         0 0
+/dev/loop0      /               reiserfs        defaults                0 1
+/dev/hda3       none            swap            sw,loop=/dev/loop1,encryption=aes128    0 0
+
+/dev/cdrom      /mnt/cdrom      auto            user,noauto,exec,ro     0 0
+</pre>
+
+After setting up the base system, install <code>loop-aes-utils</code>.
+
+<pre>
+apt-get install loop-aes-utils
+</pre>
+
+When installing the kernel and GRUB, quit the GRUB configuration assistent.
+
+==== Setting up the OS loader ====
+
+After installing the base system, we set up a small partition that mounts the encrypted root and kicks off <code>init</code>.
+
+<pre>
+mke2fs -j /dev/hda1
+mkdir /osloader
+mount /dev/hda1 /osloader
+</pre>
+
+Copy the kernel image there.
+
+<pre>
+cp /vmlinuz /osloader/vmlinuz
+</pre>
+
+We need to edit the <code>mkinitrd</code> configuration so that it supports loading the encrypted root partition.
+
+First edit <code>/etc/mkinitrd/mkinitrd.conf</code>, set <code>ROOT=probe</code> to <code>ROOT=</code> since it would complain about our <code>/dev/loop0</code> root.
+
+Add some required modules to <code>/etc/mkinitrd/modules</code>:
+
+<pre>
+ide-generic
+loop
+cryptoloop
+aes
+sha256
+reiserfs
+</pre>
+
+Then we add a script that handles the <code>losetup</code> stuff while booting. Create a file <code>/etc/mkinitrd/scripts/losetup</code> that has the following content:
+
+<pre>
+
+mknod -m 600 $INITRDDIR/dev/loop0 b 7 0
+mknod -m 600 $INITRDDIR/dev/hda2  b 3 2
+
+mkdir $INITRDDIR/loopcheck
+
+cat > $INITRDDIR/scripts/losetup.sh << EOF
+
+mount -nt proc proc proc
+
+losetup -e aes128 /dev/loop0 /dev/hda2
+mount -nr /dev/loop0 /loopcheck >/dev/null 2>/dev/null
+
+while [ \$? -ne 0 ]
+do
+        echo "Try again."
+        losetup -d /dev/loop0 2>/dev/null
+        losetup -e aes128 /dev/loop0 /dev/hda2
+        mount -nr /dev/loop0 /loopcheck >/dev/null 2>/dev/null
+done
+
+umount -n /loopcheck
+
+echo 1792 > /proc/sys/kernel/real-root-dev
+umount -n proc
+EOF
+
+chmod a+x $INITRDDIR/scripts/losetup.sh
+</pre>
+
+<pre>
+chmod a+x /etc/mkinitrd/scripts/losetup
+</pre>
+
+Now generate the initial ram disk with <code>mkinitrd -o /osloader/initrd 2.6.10-5-386</code>.
+
+Configure GRUB:
+
+<pre>
+mkdir /osloader/boot
+mkdir /osloader/boot/grub
+</pre>
+
+Add <code>/osloader/boot/grub/menu.lst</code>
+
+<pre>
+default 0
+timeout 0
+title Ubuntu
+        root (hd0,0)
+        kernel /vmlinuz ro quiet splash root=/dev/loop0 acpi=off nolapic
+        initrd /initrd
+        boot
+</pre>
+
+Install the MBR by running <code>grub-install --root-directory=/osloader /dev/hda</code>.
+
+To make sure the osloader partition is clean, add a little check script to <code>/etc/rcS.d/S00checkosloader</code>.
+
+<pre>
+
+if [ "`md5sum /dev/hda1`" != "`cat /etc/osloader_checksum`" ]
+then
+
+    echo "** FATAL SECURITY ERROR ************************************"
+    echo "*                                                          *"
+    echo "* The OS loader was modified!                              *"
+    echo "* This could have leaked your encryption password. You are *"
+    echo "* advised to install a new encryption setup.               *"
+    echo "*                                                          *"
+    echo "* Press Enter to boot up the system.                       *"
+    echo "************************************************************"
+
+    read junk
+fi
+</pre>
+
+<pre>
+chmod a+x /etc/rcS.d/S00checkosloader
+md5sum /dev/hda1 > /etc/osloader_checksum
+</pre>
+
+Now exit the chroot, reboot and you should have a fully encrypted environment.
+----

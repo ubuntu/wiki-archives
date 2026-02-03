@@ -1,0 +1,330 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+=== Introduction ===
+GPFS stands for the General Parallel File System. It is a commercial product from IBM, and is available for purchase for use on AIX and Linux platforms.  Linux packages and official support are currently only available for Red Hat and SuSE.  If you choose to install GPFS on Ubuntu, it is important for you to understand that your install will not supported by IBM.  But it may still be useful. :-)
+
+GPFS provides for incredible scalability, good performance, and fault tolerance (Ie: machines can go down, and the filesystem is still accessible to others).  For more information on GPFS, (<nowiki>[[http://en.wikipedia.org/wiki/General_Parallel_File_System|Wikipedia Page]]</nowiki> - <nowiki>[[http://www.ibm.com/systems/software/gpfs/|IBM GPFS Product Page]]</nowiki>).
+
+We run Ubuntu as our standard Linux distribution, and so I set forth to find a way to make GPFS work on Ubuntu.  These are the steps that I took, that hopefully will also allow you to produce a working GPFS cluster.
+
+=== Recent Updates ===
+* After the initial success in getting this system running, we've run into difficulties under certain circumstances with GPFS hanging on certain nodes, requiring a reset of the node (not just a reboot).  This is a kernel plus GPFS "portability layer" related issue.  Resolution is pending, but we are also contemplating Lustre (http://lustre.org/) as an alternative.  Our interest in Lustre is not because we won't be able to make GPFS work, but because the level of effort may be significantly less with Lustre, as is is open source, and the Lustre folks are more friendly towards Ubuntu and other non-Red Hat/SuSE distributions.
+
+=== Hardware Overview ===
+Three machines
+* box1.example.com
+* box2.example.com
+* box3.example.com
+
+Each machine will have 2 fibre channel cards connecting it to the SAN.
+
+We have three volumes presented from the SAN to all three machines.
+
+=== Software Install ===
+OS is Ubuntu Dapper on amd64.
+
+==== Dependencies ====
+Satisfy package dependencies for building and running:
+<pre>
+apt-get install libstdc++5 imake makedepend
+</pre>
+
+Additionally, the GPFS binaries have paths to certain binaries hard coded.  Bah!  Create links so that the necessary binaries can be found:
+<pre>
+test -e /usr/X11R6/bin || sudo ln -s /usr/bin      /usr/X11R6/bin
+test -e /bin/sort      || sudo ln -s /usr/bin/sort /bin/sort
+test -e /bin/awk       || sudo ln -s /usr/bin/awk  /bin/awk
+</pre>
+
+==== Purchase ====
+Purchase licenses for use of GPFS from IBM.
+
+==== Download ====
+Download "IBM General Parallel File System 3.1 English International(C89HWIE)" from the IBM Passport site.  The name of the downloaded file is: '''c89hwie.tar'''.  This file holds the same contents that you would find on the x86 and x86_64 CDs.
+
+==== Extract ====
+<pre>
+tar -xf c89hwie.tar
+cd linux_cd/
+sudo ./gpfs_install-3.1.0-0_x86_64
+</pre>
+
+After accepting the license, you should now have a directory full of RPMs.
+<pre>
+finley@box1:~/linux_cd% ls -1 /usr/lpp/mmfs/3.1/
+gpfs.base-3.1.0-0.x86_64.rpm
+gpfs.docs-3.1.0-0.noarch.rpm
+gpfs.gpl-3.1.0-0.noarch.rpm
+gpfs.msg.en_US-3.1.0-0.noarch.rpm
+license/
+status.dat
+</pre>
+
+==== Convert RPMs to Debs ====
+Let's turn 'em into debs, eh?
+<pre>
+cd /tmp
+cp /usr/lpp/mmfs/3.1/*.rpm .
+fakeroot alien *.rpm
+sudo cp *.deb /usr/lpp/mmfs/3.1/
+</pre>
+
+==== Install Debs ====
+Now we can install them.
+<pre>
+sudo dpkg -i /usr/lpp/mmfs/3.1/*.deb
+</pre>
+
+==== Build GPFS Kernel Modules ====
+They call this the "Linux portability interface".  It's an open source module that acts as a wrapper around the proprietary GPFS driver.
+
+Install build dependecies.
+<pre>
+KERNEL_VER_FULL=`uname -r`
+KERNEL_VER_SHORT=`uname -r | perl -pi -e 's/(\d+\.\d+\.\d+-\d+).*/$1/'`
+sudo apt-get install --reinstall linux-headers-${KERNEL_VER_FULL} linux-headers-${KERNEL_VER_SHORT}
+sudo apt-get build-dep linux-headers-${KERNEL_VER_FULL} linux-headers-${KERNEL_VER_SHORT}
+</pre>
+
+Change the perms on their source tree so that you can build as a non-root user.
+<pre>
+sudo chown -R finley /usr/lpp/mmfs/src/
+</pre>
+
+Apply the "2.6.15.x kernel" patch:
+<pre>
+cd /usr/lpp/mmfs/src/
+wget http://download.systemimager.org/pub/gpfs/gpfs.with_linux-2.6.15.x.patch.bz2
+bunzip2 gpfs.with_linux-2.6.15.x.patch.bz2
+patch -p5 < gpfs.with_linux-2.6.15.x.patch
+</pre>
+
+Edit the build config file.
+<pre>
+cd /usr/lpp/mmfs/src/
+cp config/site.mcr.proto config/site.mcr
+vi config/site.mcr  # see /usr/lpp/mmfs/src/README for details
+</pre>
+
+Do the build.
+<pre>
+export SHARKCLONEROOT=/usr/lpp/mmfs/src
+cd $SHARKCLONEROOT
+make World
+</pre>
+
+Install the modules and binaries.
+<pre>
+sudo make InstallImages
+</pre>
+
+==== Distribute the Install to other GPFS Clients ====
+NOTE: In GPFS vernacular, all participating machines are clients, whether or not they are directly attached to disk that is part of the GPFS filesystem.
+
+NOTE: You may wish to implement "SSH for Root" below prior to doing this step for convenience.
+
+<pre>
+for i in box2 box3
+do
+  echo $i
+  dir=/usr/lpp/mmfs/
+  rsync -av --delete-after $dir/ $i:$dir/
+done
+</pre>
+
+==== Modify your $PATH ====
+To have the GPFS binaries appear in the $PATH, we chose to modify /etc/profile, which affects all users on the system (that are using Bourne based shells).
+
+Just add the following line to the end of <code>/etc/profile</code>.
+<pre>
+PATH=$PATH:/usr/lpp/mmfs/bin
+</pre>
+
+=== Configuring the Cluster ===
+==== SSH for Root ====
+Unfortunately, one of GPFS' shortcomings is a need for all cluster nodes to be able to ssh to all other cluster nodes a) as root, and b) without a password.
+
+There are multiple ways to accomplish this.  We have chosen to use host based authentication.
+
+===== /etc/hosts =====
+First, all nodes need to know the addresses of all other nodes.
+
+GPFS seems to like the idea of a dedicated network for cluster communication, although this is not strictly necessary.  Here we're using a dedicated private network, off a secondary NIC, for each cluster client.  As this is a private network in our case, we don't keep this information in DNS.
+
+Make sure you have entries in /etc/hosts for each machine in the cluster.
+
+===== /etc/ssh/sshd_config =====
+Here are the relevant ssh server options:
+<pre>
+PermitRootLogin          yes
+IgnoreRhosts             no
+HostbasedAuthentication  yes
+</pre>
+
+===== /etc/ssh/ssh_config =====
+Here are the relevant ssh client options:
+<pre>
+HostbasedAuthentication   yes
+PreferredAuthentications  hostbased,publickey,keyboard-interactive,password
+EnableSSHKeysign          yes
+</pre>
+
+===== /root/.shosts =====
+For host based authentication of normal users, the changes to ssh_config and sshd_config are sufficient.  However, for the root user, it is also necessary to include a ".shosts" file in the root user's home directory.  It is recommended that this contain the IP addresses and base host names (as resolved by "getent hosts $ipaddress") for each GPFS client.
+<pre>
+root@box1:~# cat /root/.shosts
+box1-160
+10.221.160.41
+box3-160
+10.221.160.42
+box2-160
+10.221.160.43
+</pre>
+
+===== /etc/shosts.equiv =====
+This file allows normal users to take advantage of host based authentication without having to create their own .shosts files.  It's contents are exactly the same as a .shosts file.
+<pre>
+box1-160
+10.221.160.41
+box3-160
+10.221.160.42
+box2-160
+10.221.160.43
+</pre>
+
+===== /etc/ssh/ssh_known_hosts =====
+Having this file properly populated means that user's aren't prompted to accept a hosts key when connecting to it for the first time.
+<pre>
+box1-160 ssh-dss AAAAB3NzaC1kc3...
+box1-160 ssh-rsa AAAAB3NzaC1yc2...
+10.221.160.41 ssh-dss AAAAB3Nza...
+10.221.160.41 ssh-rsa AAAAB3Nza...
+box3-160 ssh-dss AAAAB3NzaC1kc3...
+box3-160 ssh-rsa AAAAB3NzaC1yc2...
+10.221.160.42 ssh-dss AAAAB3Nza...
+10.221.160.42 ssh-rsa AAAAB3Nza...
+box2-160 ssh-dss AAAAB3NzaC1kc3...
+box2-160 ssh-rsa AAAAB3NzaC1yc2...
+10.221.160.43 ssh-dss AAAAB3Nza...
+10.221.160.43 ssh-rsa AAAAB3Nza...
+</pre>
+
+==== iptables ====
+If you use iptables on your machines, you will want to allow traffic from ssh, and from the GPFS daemon, on all of the cluster nodes to all of the cluster nodes.  I don't know the exact port ranges the GPFS daemon uses off hand, but I'm sure one could look that up if one were so motivated.  For me, I will simply allow all traffic from all nodes to all nodes for now with a rule such as this for each cluster node:
+<pre>
+-A INPUT-TABLE -m conntrack --ctstate NEW -m tcp -p tcp --source 10.221.160.0/25 -j ACCEPT
+</pre>
+
+==== Create a NodeFile ====
+The file name is actually "NodeFile".
+
+Here are the contents:
+<pre>
+box1-160:quorum-manager
+box2-160:quorum-manager
+box3-160:quorum
+</pre>
+
+==== Create the Cluster ====
+<pre>
+mmcrcluster -N NodeFile -p box1-160 -s box2-160 -r `which ssh` -R `which scp` -C gpfs-cluster.example.com
+</pre>
+
+==== Start the GPFS Cluster ====
+The cluster needs to be operational prior to creating a file system.  So let's tell all the nodes to start participating in the cluster:
+<pre>
+mmstartup -a
+</pre>
+
+Verify that they were able to do so:
+<pre>
+
+ Node number  Node name       Quorum  Nodes up  Total nodes  GPFS state  Remarks
+------------------------------------------------------------------------------------
+       1      box1-160       2        3          3       active      quorum node
+       2      box3-160       2        3          3       active      quorum node
+       3      box2-160       2        3          3       active      quorum node
+
+</pre>
+
+==== Create a DescFile ====
+A DescFile contains information (Description) about the physical discs in the cluster.  Here are the contents of my DescFile:
+<pre>
+/dev/sdm1:box1-160:box2-160
+/dev/sdn1:box2-160:box3-160
+/dev/sdo1:box3-160:box1-160
+</pre>
+
+==== Prepare the Physical Disks as NSDs ====
+NSD stands for Network Shared Disk.
+<pre>
+cp DescFile DescFile.orig
+mmcrnsd -F DescFile
+</pre>
+
+'''NOTE:''' If mmcrnsd refuses to operate on your disks or partitions, because they were previously in use, '''and''' you know that they are currently '''NOT''' in use, then you can add the "-v no" option to the end of the mmcrnsd command above.
+
+After creating the NSDs, you can list them:
+<pre>
+root@box1:# mmlsnsd
+
+ File system   Disk name    Primary node             Backup node
+---------------------------------------------------------------------------
+ (free disk)   gpfs1nsd     box1-160             box2-160
+ (free disk)   gpfs2nsd     box2-160             box3-160
+ (free disk)   gpfs3nsd     box3-160             box1-160
+
+</pre>
+
+NOTE:  The mmcrnsd command mangles the DescFile, which is why we create a copy of it above.  The resultant file looks like this:
+<pre>
+gpfs1nsd:::dataAndMetadata:4001::
+gpfs2nsd:::dataAndMetadata:4003::
+gpfs3nsd:::dataAndMetadata:4002::
+</pre>
+
+==== Create the File System ====
+The mangled DescFile is now in an appropriate format for feeding into other commands, such as mmcrfs.  So now we can create the filesystem:
+<pre>
+mmcrfs /gpfs1 /dev/gpfs1 -F DescFile -B 256K
+</pre>
+
+Here's the output:
+<pre>
+
+The following disks of gpfs1 will be formatted on node box1.example.com:
+    gpfs1nsd: size 488281250 KB
+    gpfs2nsd: size 488281250 KB
+    gpfs3nsd: size 488281250 KB
+Formatting file system ...
+Disks up to size 2.2 TB can be added to storage pool 'system'.
+Creating Inode File
+Creating Allocation Maps
+Clearing Inode Allocation Map
+Clearing Block Allocation Map
+Completed creation of file system /dev/gpfs1.
+mmcrfs: Propagating the cluster configuration data to all
+  affected nodes.  This is an asynchronous process.
+</pre>
+
+==== Mount the File System ====
+<pre>
+mmmount /gpfs1 -a
+</pre>
+
+Output:
+<pre>
+Fri Apr 20 16:23:13 CDT 2007: mmmount: Mounting file systems ...
+</pre>
+
+=== Author ===
+* Brian Finley

@@ -1,0 +1,1262 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+
+== Abstract ==
+
+There are many howtos in the Internet about setting up mail servers and various people has various choice of MTAs. Some like, Qmail, while some like Postfix or Exim. I have been using Qmail for a long time and it is an excellent MTA. The way the Qmail is licensed and distributed that there are no binary packages so that users can easily setup with their favorite distribution, and installing basic Qmail setup even is not that difficult but users need applied various patches and tweaks etc to get a complete  setup done. With all these issues Qmail is the preferred choice of many geeks, since it won't give you head ache once up and running. The drawback is that this system is difficult to upgrade since users need to compile the source code and install.
+
+The decision behind this guide is to use Postfix, an equally secure and fast MTA like Qmail, it is easy to configure and setup a <nowiki>[[PostfixBasicSetupHowto| Basic System]]</nowiki> in any Linux distribution. Postfix has many add-ons and support Maildir format, PostgreSQL and MySQL backend for storing and managing virtual domains very  easily. This setup will be a complete virtual mail domain systems, with anti-virus and spam filtering for ISPs , hosting companies, and individual corporations who wish to use Ubuntu Linux as there preferred server platform.
+
+== System Overview ==
+
+It is important to know how our system works before going to install. A virtual mail system needs to be able to handle email for numerous domains with multiple users over a variety of interfaces. When you handle multiple domains within the same mail system it presents you some management issues. We have to answer these issues using  our technology. Assume, for example you may have following questions to answer.
+
+* What will you do if you have two users which require same username for different domains?
+
+* If you are providing imap access and smtp-auth, how do combine the various authentication daemons into a single system?
+
+* How do you provide security for the numerous components that comprise the system?
+
+* What we can do, if users are asking their own spam filtering policies.
+
+* Individual domain administrators are asking a web-based interface to manage their mail domains
+
+* How do you setup a web-based management system for Postfix?
+
+* Each user needs a web-base interface to change his mail account's password
+
+* How you are going backup user account database and disaster recovery?.
+
+* Utilizing ssl for transport layer security
+
+* Handle mailing lists for any domain
+
+'''How do you manage all these issues together?'''
+
+Don't panic, I will answer all these questions one by one. Be happy and continue to read this howto.
+
+=== What You Get ===
+
+* Web based system administration
+* Unlimited number of domains
+* Virtual mail users without the need for shell accounts
+* Domain specific user names
+* Mailbox quotas
+* Web access to email accounts
+* Web base interface to change user passwords
+* IMAP and POP3 support
+* Auto responders
+* SMTP Authentication for secure relaying
+* SSL for transport layer security
+* Strong SPAM filtering
+* Anti-Virus filtering
+* Log Analysis
+
+=== Packages Required ===
+
+The following packages are needed to implement our system and most of these packages are in APT repositories. In our installation section you will learn how to install and configure each.
+
+* <nowiki>[[http://www.webmin.com/|Webmin]]</nowiki>
+* <nowiki>[[http://www.postfix.org/|Postfix]]</nowiki>
+* <nowiki>[[http://www.mysql.com/|MySQL]]</nowiki>
+* <nowiki>[[http://www.apache.org/|Apache]]</nowiki>
+* <nowiki>[[http://www.php.net/|PHP]]</nowiki>
+* <nowiki>[[http://high5.net/postfixadmin/|Postfixadmin]]</nowiki>
+* <nowiki>[[http://www.courier-mta.org/imap/|Courier-IMAP]]</nowiki>
+* <nowiki>[[http://www.courier-mta.org/?pop3d.html|Courier-POP3]]</nowiki>
+* <nowiki>[[http://www.courier-mta.org/authlib/|Courier-authlib]]</nowiki>
+* <nowiki>[[http://asg.web.cmu.edu/sasl/|Cyrus-SASL]]</nowiki>
+* <nowiki>[[http://www.gnu.org/software/ispell/ispell.html|Ispell]]</nowiki>
+* <nowiki>[[http://www.squirrelmail.org/|Squirrelmail]]</nowiki>
+* <nowiki>[[http://awstats.sourceforge.net/|Awstats]]</nowiki>
+* <nowiki>[[http://www.ijs.si/software/amavisd/|Amavisd-new]]</nowiki>
+* <nowiki>[[http://spamassassin.apache.org/|Spamassassin]]</nowiki>
+* <nowiki>[[http://www.mailzu.net/|MailZu]]</nowiki>
+* <nowiki>[[http://razor.sourceforge.net/|Razor]]</nowiki>
+* <nowiki>[[http://www.rhyolite.com/anti-spam/dcc/|DCC]]</nowiki>
+* <nowiki>[[http://pyzor.sourceforge.net/|Pyzor]]</nowiki>
+* <nowiki>[[http://sqlgrey.sourceforge.net/|SQLgrey]]</nowiki>
+* <nowiki>[[http://www.vanheusden.com/sgwi/|Sgwi]]</nowiki>
+* <nowiki>[[http://www.clamav.net/|Clamav]]</nowiki>
+
+=== The Big Picture ===
+
+The following figure shows the big picture of our setup. If you look at it carefully the figure itself is self explanatory.
+
+<nowiki>[[File:CompleteSetupOverview.png]]</nowiki>
+
+In our setup:
+
+* '''Postfix''' Mail Transfer Agent receives emails via the SMTP protocol and delivers them to different places on your hard disk.
+
+* '''MySQL''' database server stores the information to control the behavior of postfix. It knows about users, domains, email forwarding and passwords.
+
+* '''Courier''' is a standalone mail server just like Postfix but we just use its POP3/IMAP server component to let users access the mailboxes.
+
+* '''SASL''', the Cyrus library  is using to authenticate  your users who are dialed in at another ISP while they are on the road they get an IP address outside of your network. Your mail server however only trusts local IP addresses. The SASL  ,'''Simple Authentication and Security Layer''', adds authentication to SMTP and makes your mail server trust them.
+
+== How Postfix Mappings Work? ==
+
+It is very important to understand how Postfix mapping works. Heart of our system is Postfix mapping. Let's discuss it here. Don't skip this section.
+
+The generic literal meaning of mapping is assign one value to another. What we have to map in Postfix is email user accounts or email address. One example is '''<code>/etc/aliases</code>''', the  local aliases or local system users mapping file used by Postfix. The syntax of this file is:
+
+<pre>
+postmaster: root
+</pre>
+
+This makes all the mails which are coming to '''<code>postmaster@yourdomain.tld</code>''' are redirected to '''<code>root@yourdomain.tld</code>'''. We can divide the above syntax to Left Hand Side '''LHS''' and Right Hand Side '''RHS'''. This RHS and LHS are common abbreviations which we usually used in mappings. The following table will make this idea even more clear.
+
+{| class="wikitable"
+|-
+| '''LHS'''
+| '''RHS'''
+|-
+| postmaster:
+| root
+|}
+
+{| class="wikitable"
+|-
+| <nowiki>[[File:IconHint.png]]</nowiki>
+| Usually we do not use colon(:) in LHS for Postfix and this has been done for backward compatibility with historical reasons. The local alias file is a special file that is compiled with '''newaliases''' command but not with usual Postfix mapping command '''postmap'''
+|}
+
+With a basic default Postfix installation we use text file for mappings. We write the mappings into this file and then convert it into a '''hash''' file using '''postmap''' command so Postfix can look up items quickly. For example, assume that we need to map our virtual mailboxes in a file called '''<code>/etc/Postfix/virtual_mailboxes</code>'''. The syntax of this file look like:
+
+<pre>
+info@domain1.com sigiri
+info@domain2.com kala
+</pre>
+
+You may have noticed that we don't have colon(:) in the '''LHS''' of the mappings file
+
+Then you need to run:
+
+<pre>
+postmap /etc/postfix/virtual_mailboxes
+</pre>
+
+You can access this mappings in the Postfix configuration file by including the following line:
+
+<pre>
+virtual_mailbox_maps = hash:/etc/postfix/virtual_mailboxes
+</pre>
+
+In our setup, we will replace this text mapping files with MySQL tables. Our intention is to make data handling lot more flexible, robust, and scalable. Since database tables can and usually contain more than just two columns you will need to tell Postfix which database column is meant to be the LHS and which is the RHS. This is accomplished by creating a configuration file which will look something like this:
+
+<pre>
+user = postfix
+password = YJiNLQtubgnOE
+hosts = 127.0.0.1
+dbname = postfix
+table = mailbox
+select_field = maildir
+where_field = username
+</pre>
+
+For the purposes of this discussion, lets assume this is saved in a file called '''<code>/etc/postfix/mysql_virtual_mailbox_maps.cf</code>'''. You would then be able to use this mapping in postfix using the following entry in '''<code>main.cf</code>''' file.
+
+<pre>
+virtual_mailbox_maps = mysql:/etc/postfix/mysql_virtual_mailbox_maps.cf
+</pre>
+
+The fields in this configuration file are the '''user''' that needs to connect to the MySQL database, '''password''' of that MySQL user, '''dbname''', the name of the MySQL database, '''table''' ,the name of the table in MySQL database and '''hosts''', the name of the server that MySQL runs on.
+
+Postfix uses the this configuration file as a guide on how to use the database table as a mapping similar to the mapping file with two fields described above. The LHS of the mapping is defined as '''<code>where_field</code>''' and the RHS is defined as '''<code>select_field</code>'''. In this example we will map the '''<code>maildir</code>''' column to the '''<code>username</code>''' column. Using the configuation, Postfix constructs a SQL query something like ''select maildir from postfix.mailbox where username='johndoe' '' to lookup the maildir for a given username. The following table breaks this distiction out:
+
+{| class="wikitable"
+|-
+| '''LHS'''
+| '''RHS'''
+|-
+| where_field
+| select_field
+|-
+| username
+| maildir
+|}
+
+== How Postfix Virtual Domains Work? ==
+
+Understanding how virtual domains work is very important to understand how our virtual mail setup works.
+
+There are two types of domains in Postfix.
+
+* '''Local domains:''' All domains which are listed as '''mydestination''' are treated as '''local domains''' by Postfix. Emails for local domains are delivered to system users which are listed in '''<code>/etc/passwd</code>''' file and these mails are spooled in '''<code>/var/mail</code>''' directory.
+
+* '''Virtual domains:''' In addition to the local domains Postfix can deliver mails for '''virtual domains'''. Unlike local domains, Postfix will let us handle virtual domains in a very flexible manner. The good thing with virtual domains is that we do not need system account in '''<code>/etc/passwd</code>''' for each and every mail account. This provides us a way to handle thousands of mail accounts very easily in our mail server system. The mapping which we discussed above is used to handle mail account information.  You can use MySQL, PostgreSQL , or LDAP for the user account management. In our setup we use MySQL back-end to manage user accounts of virtual domains.
+
+ Postfix handles virtual domains as two different categories and you need to understand how this works.
+
+** '''Virtual alias domains:''' These domains are used to forward or alias mails from one email address to another email address. Such domains can be used receive mailboxes and store on your hard disk. You do not necessarily need to use '''virtual alias domains''' in your setup. Instead we can user '''virtual_alias_maps ''' even if the domains are not listed as '''virtual alias domains'''. The '''virtual_alias_maps''' is a general-purpose redirection mapping that works for everything that passes your system including local domains.
+
+** '''Virtual mailbox domains:''' Postfix uses these domains to receive mails for users under the domains and store them in the mailboxes on the hard disk. This is parameter which will simply tell Postfix to receive the mails on behalf of the domain and store them in each user's mailbox. The '''virtual_mailbox_maps''' mapping is used by Postfix to determine the location of the mailbox on your hard disk. Please remember that you can still use the '''virtual_alias_maps''' mapping to forward email to other mailboxes or external email addresses so not every user on that domain must actually have a mailbox but can also just have the email forwarded somewhere else.
+
+{| class="wikitable"
+|-
+| <nowiki>[[File:IconHint.png]]</nowiki>
+| It is important to understand that a domain is either a '''virtual alias domain''' or a '''virtual mailbox domain''' or a '''local domain'''. If you make a domain a '''virtual alias domain''' you will not be able to receive email for that domain on your server. On the contrary you can use the '''virtual_alias_maps''' to forward/alias email for both types of domain. So the virtual mailbox domains are generally the more flexible to use.
+|}
+
+{| class="wikitable"
+|-
+| <nowiki>[[File:IconWarning.png]]</nowiki>
+| A domain can either be virtual or local and you can not use one domain in the both of these roles. Please never both. So if you decide you want your default domain be a virtual domain then remove it from the '''mydestination''' definition. Just leave it blank or set it to '''mydestination=localhost'''. Email addresses like root@localhost would then be delivered to the local '''root''' user.
+|}
+
+== Installing a Ubuntu Server System ==
+
+In this howto I assume that you already know how to setup a Ubuntu server system. I would suggest you to do a Ubuntu server installation without a GUI. If you want to know more about installation look <nowiki>[[https://wiki.ubuntu.com/Installation|here]]</nowiki>
+
+== DNS Setup ==
+
+This how to assumes that you already have at least one valid registered domain with an MX record setup for that domain. Setting up a BIND DNS server can be learned <nowiki>[[https://wiki.ubuntu.com/BIND9ServerHowto|here]]</nowiki>
+
+== Package Installation and Configuration ==
+
+You will to have install and configure all packages which I have mentioned in the '''"Package  Required"''' section. Let's deal with one by one.
+
+== Postfix Base Server Installation ==
+
+Here we install Postfix and other packages which Postfix  requires connect with a MySQL backend.
+
+=== Installing Postfix ===
+
+When you install Postfix I would suggest to select '''"Internet Site"''' option.
+
+To install Postfix, you need to install the <code>postfix</code> package. For Postfix documentation, you need the  <code>postfix-doc</code> package.
+
+=== Installing  MySQL map support for Postfix ===
+
+We need to add MySQL mapping support for Postfix. Hope that you have already read '''How Postfix Mappings Work?''' section in this how to.
+
+To install postfix-mysql, install the <code>postfix-mysql</code> package.
+
+To install MySQL client program, install the  <code>mysql-client</code> package.
+
+To install MySQL server, install the <code>mysql-server</code> package.
+
+== Installing Packages for Client Access and Authentication ==
+
+We will need to offer our user IMAP/POP3 access. Our setup will offer those using the following packages.
+
+To provide client authentication, install the <code>courier-authdaemon</code> package.
+
+To add MySQL support for courier-authdaemon, install the <code>courier-authmysql</code> package.
+On Ubuntu 7.10 AND ABOVE, courier-authmysql seems deprecated, install courier-authlib-mysql instead.
+
+To provide unencrypted POP3 access, install the <code>courier-pop</code> package.
+
+To provide SSL-encrypted POP3 access, install the <code>courier-pop-ssl</code> package.
+
+To provide unencrypted IMAP access, install the <code>courier-imap</code> package.
+
+To provide SSL-encrypted IMAP access , install the <code>courier-imap-ssl</code> package.
+
+Sometimes - since Ubuntu 12.04 - courrier-imap failed connecting users. <nowiki>[[http://ubuntuforums.org/showpost.php?p=11902102&postcount=16]]</nowiki>. Try to replace gamin by fam :
+
+<pre>
+sudo apt-get purge gamin
+sudo apt-get install fam
+sudo apt-get install courier-pop-ssl courier-imap-ssl courier-ssl courier-pop courier-imap courier-base
+</pre>
+
+== Installing package for SMTP authentication ==
+
+Our system will allow road-warriors to send email through our server using authenticated SMTP. This will basically stop unauthorized relaying through our mail server. Not only we are authenticating our user's when they are retrieving mails but also we authenticate them when they are sending mails as well.
+
+To provide encrypted authenticated SMTP, install the <code>postfix-tls</code> package.
+
+This may have already installed with postfix. If so,leave it.
+
+To install Cyrus SASL library, install the <code>libsasl2</code> package.
+
+To add authentication mechanisms for the SASL library, install the <code>libsasl2-modules</code> package.
+
+To add MySQL support authentication mechanisms with the SASL library, install the <code>libsasl2-modules-sql</code> package.
+
+To create certificates, install the <code>openssl</code> package.
+
+== Setting MySQL Backend ==
+
+Now that we have installed packages required to prepare a MySQL backend for Postfix.   In this section we will configure MySQL database for Postfix.
+
+=== Setting MySQL root Password ===
+
+Please note that MySQL root is different from Linux root account. It is the account which users can use to get administrative privilege with MySQL database sever. Initial installation of MySQL has no password for root account. If you have not setup a password for MySQL root yet, this is the time for you to do so. There are few ways to do the same and I will present two of them here. Please user either one of them.
+
+To set MySQL root in the command prompt:
+
+<pre>
+$ sudo mysqladmin -u root password rootpassword
+</pre>
+
+or you can use the following steps to do the same
+
+<pre>
+$ mysql -u root
+</pre>
+
+Then in the mysql prompt type:
+
+<pre>
+mysql> SET PASSWORD FOR 'root'@'localhost' = PASSWORD('rootpassword');
+</pre>
+
+Don't forget set a good password '''rootpassword'''
+
+=== Setting MySQL Database for Impatient Users ===
+
+The schema is based on the postfixadmin MySQL schema. If you are impatient you can directly create the tables using following steps.
+
+<pre>
+$ editor postfixadmin-mysql.sql
+</pre>
+
+Then copy and paste the following script to the above file and save it. Replace '''postfixpassword''' on the '''<code>INSERT INTO user</code>''' line with a password of your choosing for the postfix user. Do the same for the postfixadmin password.
+
+To create the database, type in a terminal.
+
+<pre>
+$ mysql -u root -p < postfixadmin-mysql.sql
+</pre>
+
+<pre>
+
+CREATE DATABASE postfix;
+
+GRANT SELECT ON postfix.* TO postfix@localhost IDENTIFIED BY 'postfixpassword';
+GRANT SELECT, INSERT, DELETE, UPDATE ON postfix.* TO postfixadmin@localhost IDENTIFIED BY 'postfixadmin';
+
+USE postfix;
+CREATE TABLE admin (
+  username varchar(255) NOT NULL default '',
+  password varchar(255) NOT NULL default '',
+  created datetime NOT NULL default '0000-00-00 00:00:00',
+  modified datetime NOT NULL default '0000-00-00 00:00:00',
+  active tinyint(1) NOT NULL default '1',
+  PRIMARY KEY  (username),
+  KEY username (username)
+) COMMENT='Postfix Admin - Virtual Admins';
+
+CREATE TABLE alias (
+  address varchar(255) NOT NULL default '',
+  goto text NOT NULL,
+  domain varchar(255) NOT NULL default '',
+  created datetime NOT NULL default '0000-00-00 00:00:00',
+  modified datetime NOT NULL default '0000-00-00 00:00:00',
+  active tinyint(1) NOT NULL default '1',
+  PRIMARY KEY  (address),
+  KEY address (address)
+) COMMENT='Postfix Admin - Virtual Aliases';
+
+CREATE TABLE domain (
+  domain varchar(255) NOT NULL default '',
+  description varchar(255) NOT NULL default '',
+  aliases int(10) NOT NULL default '0',
+  mailboxes int(10) NOT NULL default '0',
+  maxquota int(10) NOT NULL default '0',
+  transport varchar(255) default NULL,
+  backupmx tinyint(1) NOT NULL default '0',
+  created datetime NOT NULL default '0000-00-00 00:00:00',
+  modified datetime NOT NULL default '0000-00-00 00:00:00',
+  active tinyint(1) NOT NULL default '1',
+  PRIMARY KEY  (domain),
+  KEY domain (domain)
+) COMMENT='Postfix Admin - Virtual Domains';
+
+CREATE TABLE domain_admins (
+  username varchar(255) NOT NULL default '',
+  domain varchar(255) NOT NULL default '',
+  created datetime NOT NULL default '0000-00-00 00:00:00',
+  active tinyint(1) NOT NULL default '1',
+  KEY username (username)
+) COMMENT='Postfix Admin - Domain Admins';
+
+CREATE TABLE log (
+  timestamp datetime NOT NULL default '0000-00-00 00:00:00',
+  username varchar(255) NOT NULL default '',
+  domain varchar(255) NOT NULL default '',
+  action varchar(255) NOT NULL default '',
+  data varchar(255) NOT NULL default '',
+  KEY timestamp (timestamp)
+) COMMENT='Postfix Admin - Log';
+
+CREATE TABLE mailbox (
+  username varchar(255) NOT NULL default '',
+  password varchar(255) NOT NULL default '',
+  name varchar(255) NOT NULL default '',
+  maildir varchar(255) NOT NULL default '',
+  quota int(10) NOT NULL default '0',
+  domain varchar(255) NOT NULL default '',
+  created datetime NOT NULL default '0000-00-00 00:00:00',
+  modified datetime NOT NULL default '0000-00-00 00:00:00',
+  active tinyint(1) NOT NULL default '1',
+  PRIMARY KEY  (username),
+  KEY username (username)
+) COMMENT='Postfix Admin - Virtual Mailboxes';
+
+CREATE TABLE vacation (
+  email varchar(255) NOT NULL default '',
+  subject varchar(255) NOT NULL default '',
+  body text NOT NULL,
+  cache text NOT NULL,
+  domain varchar(255) NOT NULL default '',
+  created datetime NOT NULL default '0000-00-00 00:00:00',
+  active tinyint(1) NOT NULL default '1',
+  PRIMARY KEY  (email),
+  KEY email (email)
+) COMMENT='Postfix Admin - Virtual Vacation';
+</pre>
+
+=== Step by Step Database Setup ===
+
+The users who wish to setup database step by step can use the following steps and understand what table is using what purpose.
+
+==== Setting up Database, Users, and Privileges ====
+Connect to MySQL database as root
+
+<pre>
+$ mysql -u root -p
+</pre>
+
+Then execute the following SQL commands.
+
+To create and use the database:
+
+<pre>
+mysql> CREATE DATABASE postfix;
+mysql> USE postfix;
+</pre>
+
+To create Postfix user & set password (replace '''postfixpassword''' with a password of your choice):
+
+<pre>
+mysql> GRANT SELECT ON postfix.* TO postfix@localhost IDENTIFIED BY 'postfixpassword';
+</pre>
+
+To create Postfix Admin user & set password (replace '''postfixadmin''' with a password of your choice):
+
+<pre>
+mysql> GRANT SELECT, INSERT, DELETE, UPDATE ON postfix.* TO postfixadmin@localhost IDENTIFIED BY 'postfixadmin';
+</pre>
+
+==== Create the Table Admin ====
+
+This table is used create the administrators for our virtual mail system. The admin user will be able create, modify, and delete virtualdomain administrators, mailboxes and other administrative tasks in the mail system. Postfix is not using this table.
+
+Copy and paste the sql statement to your '''mysql>''' prompt.
+
+<pre>
+CREATE TABLE admin (
+  username varchar(255) NOT NULL default '',
+  password varchar(255) NOT NULL default '',
+  created datetime NOT NULL default '0000-00-00 00:00:00',
+  modified datetime NOT NULL default '0000-00-00 00:00:00',
+  active tinyint(1) NOT NULL default '1',
+  PRIMARY KEY  (username),
+  KEY username (username)
+) COMMENT='Postfix Admin - Virtual Admins';
+</pre>
+
+==== Create the Alias table ====
+
+Postfix is using the '''"address"''' and '''"goto"''' column. Courier is not using this table.
+
+{| class="wikitable"
+|-
+| <nowiki>[[File:IconHint.png]]</nowiki>
+| This table can be used for virtual .forward files. This table is nothing more than '''<code>/etc/aliases</code>''' that you will find on any *nix OS. Multiple destination email addresses need to be separated by a "," (comma).
+|}
+
+Following is the table structure for table alias. Copy and paste the sql statement to your '''mysql>''' prompt
+
+<pre>
+CREATE TABLE alias (
+  address varchar(255) NOT NULL default '',
+  goto text NOT NULL,
+  domain varchar(255) NOT NULL default '',
+  created datetime NOT NULL default '0000-00-00 00:00:00',
+  modified datetime NOT NULL default '0000-00-00 00:00:00',
+  active tinyint(1) NOT NULL default '1',
+  PRIMARY KEY  (address),
+  KEY address (address)
+) COMMENT='Postfix Admin - Virtual Aliases';
+</pre>
+
+==== Create the Domain table ====
+
+Postfix is using the '''"domain"''' and '''"description"''' column. Courier is not using this table.
+
+Copy and paste the sql statement to your '''mysql>''' prompt
+
+<pre>
+CREATE TABLE domain (
+  domain varchar(255) NOT NULL default '',
+  description varchar(255) NOT NULL default '',
+  aliases int(10) NOT NULL default '0',
+  mailboxes int(10) NOT NULL default '0',
+  maxquota int(10) NOT NULL default '0',
+  transport varchar(255) default NULL,
+  backupmx tinyint(1) NOT NULL default '0',
+  created datetime NOT NULL default '0000-00-00 00:00:00',
+  modified datetime NOT NULL default '0000-00-00 00:00:00',
+  active tinyint(1) NOT NULL default '1',
+  PRIMARY KEY  (domain),
+  KEY domain (domain)
+) COMMENT='Postfix Admin - Virtual Domains';
+
+</pre>
+
+==== Create the Domain Admin Table ====
+
+Table structure for table domain_admins. This table is used to create individual administrators for each virtual domain. Postfix or Courier is not using this table.
+
+Copy and paste the sql statement to your '''mysql>''' prompt.
+
+<pre>
+CREATE TABLE domain_admins (
+  username varchar(255) NOT NULL default '',
+  domain varchar(255) NOT NULL default '',
+  created datetime NOT NULL default '0000-00-00 00:00:00',
+  active tinyint(1) NOT NULL default '1',
+  KEY username (username)
+) COMMENT='Postfix Admin - Domain Admins';
+</pre>
+
+==== Create the Mailbox Table ====
+
+Postfix is using the '''"username"''' and '''"maildir"''' column while Courier is using the '''"username"''', '''"password"''', '''"name"''' and '''"maildir"''' column.
+
+Copy and paste the sql statement to your '''mysql>''' prompt.
+
+<pre>
+CREATE TABLE mailbox (
+  username varchar(255) NOT NULL default '',
+  password varchar(255) NOT NULL default '',
+  name varchar(255) NOT NULL default '',
+  maildir varchar(255) NOT NULL default '',
+  quota int(10) NOT NULL default '0',
+  domain varchar(255) NOT NULL default '',
+  created datetime NOT NULL default '0000-00-00 00:00:00',
+  modified datetime NOT NULL default '0000-00-00 00:00:00',
+  active tinyint(1) NOT NULL default '1',
+  PRIMARY KEY  (username),
+  KEY username (username)
+) COMMENT='Postfix Admin - Virtual Mailboxes';
+</pre>
+
+==== Create the Log Table ====
+
+Postfix or Courier is not using this table. Instead this table is used to log the activities of domain administrators and mailbox users.
+
+Copy and paste the sql statement to your '''mysql>''' prompt.
+
+<pre>
+CREATE TABLE log (
+  timestamp datetime NOT NULL default '0000-00-00 00:00:00',
+  username varchar(255) NOT NULL default '',
+  domain varchar(255) NOT NULL default '',
+  action varchar(255) NOT NULL default '',
+  data varchar(255) NOT NULL default '',
+  KEY timestamp (timestamp)
+) COMMENT='Postfix Admin - Log';
+</pre>
+
+==== Create the Vacation Table ====
+
+Virtual Vacation is done with a local shell account that can receive
+email. The email is then handled by a Perl script which sends the Vacation
+message back to the sender.
+
+Copy and paste the sql statement to your '''mysql>''' prompt.
+
+<pre>
+CREATE TABLE vacation (
+  email varchar(255) NOT NULL default '',
+  subject varchar(255) NOT NULL default '',
+  body text NOT NULL,
+  cache text NOT NULL,
+  domain varchar(255) NOT NULL default '',
+  created datetime NOT NULL default '0000-00-00 00:00:00',
+  active tinyint(1) NOT NULL default '1',
+  PRIMARY KEY  (email),
+  KEY email (email)
+) COMMENT='Postfix Admin - Virtual Vacation';
+</pre>
+
+==== Finish ====
+Disconnect from the MySQL database
+
+<pre>
+mysql> QUIT
+</pre>
+
+== Setting Postfix MySQL Maps ==
+
+As specified earlier in this document you need to tell Postfix where the control information is stored in the database. You need to create the following four text files in /etc/postfix for that reason.
+
+Note that in the files we create below, we specify <code>127.0.0.1</code> for the <code>hosts</code> field instead of <code>localhost</code>. This is because Postfix is run in a chroot environment, and if you specify <code>localhost</code> Postfix will try to connect to the MySQL deamon using a unix socket in the directory /var/run/mysql, to which it will not have access. Using <code>127.0.0.1</code> forces Postfix to connect using a TCP/IP socket, which will work in the chroot environment.
+
+{| class="wikitable"
+|-
+| <nowiki>[[File:IconWarning.png]]</nowiki>
+| In all files below we use <code>postfixpassword</code> for the password field. You will want to change this password to one of your own choosing for security reasons. You will also not want to post these configuration files when asking for help on the forums without changing the password field for obvious reasons.
+|}
+
+=== Creating Virtual Alias Maps ===
+
+Postfix will use this file for Virtual Alias Maps and it will use The LHS of the mapping is defined as '''where_field''' and the RHS is defined as '''select_field'''. In this file it would be a mapping of the '''address''' column to the '''goto''' column.
+
+<pre>
+$ sudo editor /etc/postfix/mysql_virtual_alias_maps.cf
+</pre>
+
+Then add the following code segment to the above file.
+
+<pre>
+user = postfix
+password = postfixpassword
+hosts = 127.0.0.1
+dbname = postfix
+table = alias
+select_field = goto
+where_field = address
+</pre>
+
+=== Virtual Domain Maps ===
+
+Posfix is only using domain field from this table. For domains we do not need to map LHS and RHS.
+
+<pre>
+$ sudo editor /etc/postfix/mysql_virtual_domains_maps.cf
+</pre>
+
+Then add the following code segment to the above file.
+
+<pre>
+user = postfix
+password = postfixpassword
+hosts = 127.0.0.1
+dbname = postfix
+table = domain
+select_field = domain
+where_field = domain
+</pre>
+
+=== Virtual Mailbox Maps ===
+
+Postfix will map '''username''' column with '''maildir''' querying mailbox table.
+
+<pre>
+$ sudo editor /etc/postfix/mysql_virtual_mailbox_maps.cf
+</pre>
+
+Then add the following code segment to the above file.
+
+<pre>
+user = postfix
+password = postfixpassword
+hosts = 127.0.0.1
+dbname = postfix
+table = mailbox
+select_field = maildir
+where_field = username
+</pre>
+
+=== Virtual Mailbox Quota Maps ===
+
+Postfix will this maps to handle the quota for virtual mailboxes. '''Username''' column will be mapped with the '''quota''' column in the '''mailbox''' table.
+
+<pre>
+$ sudo editor /etc/postfix/mysql_virtual_mailbox_limit_maps.cf
+</pre>
+
+Then add the following code segment to the above file.
+
+<pre>
+user = postfix
+password = postfixpassword
+hosts = 127.0.0.1
+dbname = postfix
+table = mailbox
+select_field = quota
+where_field = username
+</pre>
+
+=== Relay Domain Maps ===
+
+If you are going to use your mail system only for hosting backup MX for some virtual domains then you need this mapping to tell the Postfix to enable the relaying for these domains.
+
+<pre>
+$ sudo editor /etc/postfix/mysql_relay_domains_maps.cf
+</pre>
+
+Then add the following code segment to the above file.
+
+<pre>
+user = postfix
+password = postfixpassword
+hosts = 127.0.0.1
+dbname = postfix
+table = domain
+select_field = domain
+where_field = domain
+additional_conditions = and backupmx = '1'
+</pre>
+
+{| class="wikitable"
+|-
+| <nowiki>[[File:IconWarning.png]]</nowiki>
+| For security concerns you should let all these to be read by '''root''' only. If you let other users in the system to read these files, every body on your system can read the '''postfix''' database access password which is written in plain text and find out information about user accounts and alter them in the database. '''Dangerous!!!'''.
+|}
+
+Execute the following commands to make these file secure from others.
+
+To set the group of these files to postfix:
+
+<pre>
+$ sudo chgrp postfix /etc/postfix/mysql_*.cf
+</pre>
+
+To make the file readable by the group:
+
+<pre>
+$ sudo chmod 640 /etc/postfix/mysql_*.cf
+</pre>
+
+=== Create a vmail user ===
+
+Our system can hold mailboxes for thousands of users. All of these users are virtual users and none of them is a Linux system user, hence these users can not store their mail in our system's hard disk. You probably do not want to assign a unique UID (user ID) to every user, so let's create a Linux user who will become the owner of all mailboxes.
+
+<pre>
+$ sudo groupadd -g 5000 vmail
+$ sudo useradd -m -g vmail -u 5000 -d /home/vmail -s /bin/bash vmail
+</pre>
+
+== Configuring Postfix with MySQL maps ==
+
+We have already created our MySQL maps config files and now the time is to setup Postfix '''main.cf''' file so that Postfix can query MySQL database for virtual mailboxes and domains.
+
+Open the main.cf file.
+
+<pre>
+$ sudo editor /etc/postfix/main.cf
+</pre>
+
+Then add the following code segment to main.cf
+
+<pre>
+
+virtual_alias_maps = mysql:/etc/postfix/mysql_virtual_alias_maps.cf
+virtual_mailbox_domains = mysql:/etc/postfix/mysql_virtual_domains_maps.cf
+virtual_mailbox_maps = mysql:/etc/postfix/mysql_virtual_mailbox_maps.cf
+virtual_mailbox_limit = 51200000
+virtual_minimum_uid = 5000
+virtual_uid_maps = static:5000
+virtual_gid_maps = static:5000
+virtual_mailbox_base = /home/vmail
+virtual_transport = virtual
+
+virtual_create_maildirsize = yes
+virtual_mailbox_extended = yes
+virtual_mailbox_limit_maps = mysql:/etc/postfix/mysql_virtual_mailbox_limit_maps.cf
+virtual_mailbox_limit_override = yes
+virtual_maildir_limit_message = Sorry, the your maildir has overdrawn your diskspace quota, please free up some of spaces of your mailbox try again.
+virtual_overquota_bounce = yes
+</pre>
+== Setting up Postfix ==
+Postfix has several hundred configuration parameters that are controlled via the main.cf file. Fortunately, all parameters have sensible default values. We only have to define the following parameters
+<pre>
+$ sudo editor /etc/postfix/main.cf
+</pre>
+
+<pre>
+myhostname = mail.domain.com  
+mydestination = #Remains blank since we are going to host virtual domains
+relayhost = #Remains blank unless you are going to use your ISP's SMTP server mail sending out mails. In which case it would be set to the host name of the ISP's SMTP server 
+</pre>
+Leave the following to their default values
+<pre>
+alias_maps = hash:/etc/aliases
+alias_database = hash:/etc/aliases
+myorigin = /etc/mailname
+mynetworks = all
+mailbox_size_limit = 0
+recipient_delimiter = +
+inet_interfaces = all
+</pre>
+
+And set up permissions for postfix to use sasl, or you will get error:
+'''SASL authentication failure: cannot connect to saslauthd server: Permission denied'''
+<pre>
+usermod -G sasl postfix
+</pre>
+
+== Enhanced Mail Services ==
+
+=== Postfixadmin ===
+* download postfixadmin's debian package: http://postfixadmin.sourceforge.net/
+* install package
+<pre>
+dpkg -i postfixadmin_2.2.1.1_all.deb  
+</pre>
+ Warning: this package does not contains mysql scripts. You could use one from the svn version. I hope this will be fixed soon in released 2.2.
+* setup databases 
+ (warning: it could overlapped databases created manualy before)
+<pre>
+ http://localhost/postfixadmin/setup.php
+</pre>
+* restart apache2
+<pre>
+$ sudo service apache2 restart
+</pre>
+* edit /usr/share/postfixadmin/config.inc.php and setup database password and set the flag "configured"=true
+* browse to http://localhost/postfixadmin
+* now you can add domains and mailboxes
+
+* Note that this installs with postfixadmin as the dbname and username, so if you used all the above config, you need to have that be postfix instead.
+
+* *TODO** rewrite this part with release 2.3
+=== Courier-IMAP and Authentication Services ===
+* In /etc/courier/authdaemonrc
+Change to mysql mode
+<pre>
+authmodulelist="authmysql"
+</pre>
+Also change DEBUG to
+<pre>
+DEBUG_LOGIN=2
+</pre>
+This will save you alot of time trying to debug while tailing /var/log/mail*
+
+* In /etc/courier/authmysqlrc
+<pre>
+MYSQL_SERVER 127.0.0.1
+MYSQL_USERNAME postfix
+MYSQL_PASSWORD thepassword
+MYSQL_DATABASE postfix
+MYSQL_USER_TABLE mailbox
+MYSQL_LOGIN_FIELD username
+MYSQL_NAME_FIELD name
+MYSQL_CRYPT_PWFIELD password
+MYSQL_MAILDIR_FIELD maildir
+MYSQL_QUOTA_FIELD concat(quota,'S')
+MYSQL_HOME_FIELD        '/home/vmail'
+MYSQL_UID_FIELD '5000'
+MYSQL_GID_FIELD '5000'
+</pre>
+* Restart daemons and checks logs:
+<pre>
+ /etc/init.d/courier-authdaemon restart ; /etc/init.d/courier-imap restart; /etc/init.d/courier-pop restart
+ tail -f /var/log/mail*
+</pre>
+
+If you are still having issues, try these troubleshooting tips:
+http://www.courier-mta.org/authlib/README.authdebug.html
+
+=== SMTP Authentication ===
+A good documentation : http://www.starbridge.org/spip/spip.php?article1
+
+Note to all users:
+
+ Changed do to postfix error: inet is not a smtpd_recipient_restriction
+ Any users that have used this before please remove inet from this setting
+    or postfix will not work
+
+ 
+In /etc/postfix/main.cf add
+<pre>
+
+smtpd_recipient_restrictions = reject_unauth_pipelining, permit_mynetworks, permit_sasl_authenticated, reject_non_fqdn_recipient, reject_unknown_recipient_domain reject_unauth_destination, check_policy_service inet:127.0.0.1:10023, permit
+smtpd_sender_restrictions = permit_sasl_authenticated, permit_mynetworks, reject_non_fqdn_sender, reject_unknown_sender_domain, reject_unauth_pipelining, permit
+smtpd_sasl_auth_enable = yes
+broken_sasl_auth_clients = yes
+smtpd_sasl_security_options = noanonymous
+smtpd_sasl_local_domain =
+</pre>
+In /etc/postfix/sasl/smtpd.conf
+<pre>
+pwcheck_method: auxprop
+auxprop_plugin: sql
+mech_list: plain login cram-md5 digest-md5
+sql_engine: mysql
+sql_hostnames: 127.0.0.1
+sql_user: postfix
+sql_passwd: yourpassword
+sql_database: postfix
+sql_select: select password from mailbox where username='%u@%r' and active = 1
+</pre>
+=== Web Access ===
+==== SquirrelMail ====
+<nowiki>[[Squirrelmail|SquirrelMail]]</nowiki> is a standards-based webmail package written in PHP. It includes built-in pure PHP support for the IMAP and SMTP protocols, and all pages render in pure HTML 4.0 (with no JavaScript required) for maximum compatibility across browsers. It has very few requirements and is very easy to configure and install. SquirrelMail has all the functionality you would want from an email client, including strong MIME support, address books, and folder manipulation.
+SUORCE: SquirrelMail home page
+<pre>
+$ sudo apt-get install squirrelmail
+</pre>
+==== Roundcube ====
+Roundcube is another webmail package free available in Ubuntu. The layout of Roundcube is more modern than that of SquirrelMail. The package can be installed using the instructions on the <nowiki>[[Roundcube]]</nowiki> page and the official website is location here: https://roundcube.net/.
+
+=== Refining the Setup ===
+
+== Amavisd-new ==
+Amavisd-new is a wrapper that controls virus scanning done by ClamAV and spam filtering by Spamassassin. The packages can be installed using the following command:
+<pre>
+$ sudo apt-get install amavisd-new spamassassin clamav-daemon
+</pre>
+
+The configuration files of Amavisd-new are stored in /etc/amavis/conf.d/ and they are loaded in sequence (i.e. 01-debian is loaded first and 50-user last). If a setting is written in 50-user, it will automatically overwrite the setting in the previous files.
+An overview of available configuration variables can be found in <nowiki>[[https://github.com/aosm/amavisd/blob/master/amavisd/amavisd-new-2.6.6/amavisd.conf-default]]</nowiki> and examples in <nowiki>[[https://github.com/aosm/amavisd/blob/master/amavisd/amavisd-new-2.6.6/amavisd.conf-sample]]</nowiki>.
+
+=== Enabling virus scanning and spam filtering in Postfix ===
+
+Virus scanning can be enabled by uncommenting the following lines in /etc/amavis/conf.d/15-content_filter_mode
+<pre>
+@bypass_virus_checks_maps = (
+   \%bypass_virus_checks, \@bypass_virus_checks_acl, \$bypass_virus_checks_re);
+</pre>
+
+Spam filtering can be enabled in the same way by uncommenting the following lines in /etc/amavis/conf.d/15-content_filter_mode
+<pre>
+@bypass_spam_checks_maps = (
+   \%bypass_spam_checks, \@bypass_spam_checks_acl, \$bypass_spam_checks_re);
+</pre>
+
+Amavisd-new needs to be restarted after the changes has been made:
+<pre>
+$ sudo service amavis restart
+</pre>
+
+Amavisd-new needs to be enabled in Postfix. Postfix will send all messages first to Amavisd-new before it delivers the messages to a mailbox. The following command can be used to add the Amavisd-new filter to Postfix (the following command adds a line to /etc/postfix/main.cf):
+<pre>
+$ sudo postconf -e "content_filter = smtp-amavis:[127.0.0.1]:10024"
+</pre>
+
+Next, /etc/postfix/master.cf must be expanded with the following lines. Add the following lines at the end of /etc/postfix/master.cf:
+<pre>
+smtp-amavis     unix    -       -       -       -       2       smtp
+        -o smtp_data_done_timeout=1200
+        -o smtp_send_xforward_command=yes
+        -o disable_dns_lookups=yes
+        -o max_use=20
+
+127.0.0.1:10025 inet    n       -       -       -       -       smtpd
+        -o content_filter=
+        -o local_recipient_maps=
+        -o relay_recipient_maps=
+        -o smtpd_restriction_classes=
+        -o smtpd_delay_reject=no
+        -o smtpd_client_restrictions=permit_mynetworks,reject
+        -o smtpd_helo_restrictions=
+        -o smtpd_sender_restrictions=
+        -o smtpd_recipient_restrictions=permit_mynetworks,reject
+        -o smtpd_data_restrictions=reject_unauth_pipelining
+        -o smtpd_end_of_data_restrictions=
+        -o mynetworks=127.0.0.0/8
+        -o smtpd_error_sleep_time=0
+        -o smtpd_soft_error_limit=1001
+        -o smtpd_hard_error_limit=1000
+        -o smtpd_client_connection_count_limit=0
+        -o smtpd_client_connection_rate_limit=0
+        -o receive_override_options=no_header_body_checks,no_unknown_recipient_checks
+</pre>
+
+Also add the following two lines immediately below the "pickup" transport service, this will prevent messages that are generated to report on spam from being classified as spam:
+<pre>
+         -o content_filter=
+         -o receive_override_options=no_header_body_checks
+</pre>
+
+Postfix needs to be reloaded to activate the changes:
+<pre>
+$ sudo service postfix reload
+</pre>
+
+=== Anti-Spam Configuration ===
+==== Bayes ====
+Spamassassin can learn from previous spam messages. If it encounters similar messages, it will add a score. This mechanism is called bayes. The bayes data can be stored in several ways. Below, only the MySQL variant is discussed.
+
+Add the following tables to a MySQL database (e.g. the Postfix database):
+<pre>
+CREATE TABLE `bayes_expire` (
+  `id` int(11) NOT NULL DEFAULT '0',
+  `runtime` int(11) NOT NULL DEFAULT '0',
+  KEY `bayes_expire_idx1` (`id`)
+) COMMENT='Spamassassin - Bayes expire';
+
+CREATE TABLE `bayes_global_vars` (
+  `variable` varchar(30) COLLATE utf8_bin NOT NULL DEFAULT '',
+  `value` varchar(200) COLLATE utf8_bin NOT NULL DEFAULT '',
+  PRIMARY KEY (`variable`)
+) COMMENT='Spamassassin - Bayes global vars';
+
+CREATE TABLE `bayes_seen` (
+  `id` int(11) NOT NULL DEFAULT '0',
+  `msgid` varchar(200) COLLATE utf8_bin NOT NULL DEFAULT '',
+  `flag` char(1) COLLATE utf8_bin NOT NULL DEFAULT '',
+  PRIMARY KEY (`id`,`msgid`)
+) COMMENT='Spamassassin - Bayes seen';
+
+CREATE TABLE `bayes_token` (
+  `id` int(11) NOT NULL DEFAULT '0',
+  `token` char(5) COLLATE utf8_bin NOT NULL DEFAULT '',
+  `spam_count` int(11) NOT NULL DEFAULT '0',
+  `ham_count` int(11) NOT NULL DEFAULT '0',
+  `atime` int(11) NOT NULL DEFAULT '0',
+  PRIMARY KEY (`id`,`token`),
+  KEY `bayes_token_idx1` (`id`,`atime`)
+) COMMENT='Spamassassin - Bayes token';
+
+CREATE TABLE `bayes_vars` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `username` varchar(200) COLLATE utf8_bin NOT NULL DEFAULT '',
+  `spam_count` int(11) NOT NULL DEFAULT '0',
+  `ham_count` int(11) NOT NULL DEFAULT '0',
+  `token_count` int(11) NOT NULL DEFAULT '0',
+  `last_expire` int(11) NOT NULL DEFAULT '0',
+  `last_atime_delta` int(11) NOT NULL DEFAULT '0',
+  `last_expire_reduce` int(11) NOT NULL DEFAULT '0',
+  `oldest_token_age` int(11) NOT NULL DEFAULT '2147483647',
+  `newest_token_age` int(11) NOT NULL DEFAULT '0',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `bayes_vars_idx1` (`username`)
+) COMMENT='Spamassassin - Bayes vars';
+</pre>
+
+Add the following lines to /etc/spamassassin/local.cf and change 'database_name', 'database_user' and 'database_password' to your own situation:
+<pre>
+use_bayes 1
+
+bayes_store_module Mail::SpamAssassin::BayesStore::MySQL
+bayes_sql_dsn      DBI:mysql:database_name:127.0.0.1:3306
+
+bayes_sql_username database_user
+bayes_sql_password database_password
+</pre>
+
+By default, bayes learns automatically from marked messages. The settings can be fine-tuned by adding the following lines to /etc/spamassassin/local.cf:
+<pre>
+bayes_auto_learn 1
+
+bayes_auto_learn_threshold_nonspam -2
+bayes_auto_learn_threshold_spam 9.0
+</pre>
+
+The bayes mechanism needs to learn from SPAM as well as HAM messages to work correctly. If only SPAM messages are provided, the chances of a false-positive will be high. A method to learn the mechanism, is by placing the SPAM messages in a separate mailbox as the HAM messages. In the next example, the mailbox of info@example.com has a separate Junk folder. The bayes mechanism learns from the messages in the Inbox and the Junk folder using the following commands:
+<pre>
+$ sa-learn --no-sync --spam /home/vmail/example.com/info/.Junk/{cur,new,tmp}
+$ sa-learn --no-sync --ham /home/vmail/example.com/info/{cur,new,tmp}
+$ sa-learn --sync
+</pre>
+
+==== Quarantine and Spam Management ====
+The quarantine and spam management will be configured in Amavisd-new. MySQL tables will be used to configure per user the spam/virus settings. Also, quarantined messages will be stored in the database. The database layout can be found on <nowiki>[[https://www.ijs.si/software/amavisd/README.sql-mysql.txt]]</nowiki> or the following sql code can be used to construct the tables:
+<pre>
+--
+-- Table structure for table `maddr`
+--
+CREATE TABLE `maddr` (
+  `partition_tag` int(11) DEFAULT '0',
+  `id` bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+  `email` varbinary(255) NOT NULL,
+  `domain` varchar(255) COLLATE utf8_unicode_ci NOT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `part_email` (`partition_tag`,`email`)
+) COMMENT='amavisd-new';
+
+--
+-- Table structure for table `msgrcpt`
+--
+CREATE TABLE `msgrcpt` (
+  `partition_tag` int(11) NOT NULL DEFAULT '0',
+  `mail_id` varbinary(16) NOT NULL,
+  `rseqnum` int(11) NOT NULL DEFAULT '0',
+  `rid` bigint(20) unsigned NOT NULL,
+  `is_local` char(1) COLLATE utf8_unicode_ci NOT NULL DEFAULT '',
+  `content` char(1) COLLATE utf8_unicode_ci NOT NULL DEFAULT '',
+  `ds` char(1) COLLATE utf8_unicode_ci NOT NULL,
+  `rs` char(1) COLLATE utf8_unicode_ci NOT NULL,
+  `bl` char(1) COLLATE utf8_unicode_ci DEFAULT '',
+  `wl` char(1) COLLATE utf8_unicode_ci DEFAULT '',
+  `bspam_level` float DEFAULT NULL,
+  `smtp_resp` varchar(255) COLLATE utf8_unicode_ci DEFAULT '',
+  PRIMARY KEY (`partition_tag`,`mail_id`,`rseqnum`),
+  KEY `msgrcpt_idx_mail_id` (`mail_id`),
+  KEY `msgrcpt_idx_rid` (`rid`)
+) COMMENT='amavisd-new';
+
+--
+-- Table structure for table `msgs`
+--
+CREATE TABLE `msgs` (
+  `partition_tag` int(11) NOT NULL DEFAULT '0',
+  `mail_id` varbinary(16) NOT NULL,
+  `secret_id` varbinary(16) DEFAULT '',
+  `am_id` varchar(20) COLLATE utf8_unicode_ci NOT NULL,
+  `time_num` int(10) unsigned NOT NULL,
+  `time_iso` char(16) COLLATE utf8_unicode_ci NOT NULL,
+  `sid` bigint(20) unsigned NOT NULL,
+  `policy` varchar(255) COLLATE utf8_unicode_ci DEFAULT '',
+  `client_addr` varchar(255) COLLATE utf8_unicode_ci DEFAULT '',
+  `size` int(10) unsigned NOT NULL,
+  `originating` char(1) COLLATE utf8_unicode_ci NOT NULL DEFAULT '',
+  `content` char(1) COLLATE utf8_unicode_ci DEFAULT NULL,
+  `quar_type` char(1) COLLATE utf8_unicode_ci DEFAULT NULL,
+  `quar_loc` varbinary(255) DEFAULT '',
+  `dsn_sent` char(1) COLLATE utf8_unicode_ci DEFAULT NULL,
+  `spam_level` float DEFAULT NULL,
+  `message_id` varchar(255) COLLATE utf8_unicode_ci DEFAULT '',
+  `from_addr` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT '',
+  `subject` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT '',
+  `host` varchar(255) COLLATE utf8_unicode_ci NOT NULL,
+  PRIMARY KEY (`partition_tag`,`mail_id`),
+  KEY `msgs_idx_sid` (`sid`),
+  KEY `msgs_idx_mess_id` (`message_id`),
+  KEY `msgs_idx_time_num` (`time_num`)
+) COMMENT='amavisd-new';
+
+--
+-- Table structure for table `policy`
+--
+CREATE TABLE `policy` (
+  `id` int(10) unsigned NOT NULL AUTO_INCREMENT,
+  `policy_name` varchar(32) COLLATE utf8_unicode_ci DEFAULT NULL,
+  `virus_lover` enum('N','Y') COLLATE utf8_unicode_ci NOT NULL DEFAULT 'N',
+  `spam_lover` enum('N','Y') COLLATE utf8_unicode_ci NOT NULL DEFAULT 'N',
+  `unchecked_lover` enum('N','Y') COLLATE utf8_unicode_ci NOT NULL DEFAULT 'N',
+  `banned_files_lover` enum('N','Y') COLLATE utf8_unicode_ci NOT NULL DEFAULT 'N',
+  `bad_header_lover` enum('N','Y') COLLATE utf8_unicode_ci NOT NULL DEFAULT 'N',
+  `bypass_virus_checks` enum('N','Y') COLLATE utf8_unicode_ci NOT NULL DEFAULT 'N',
+  `bypass_spam_checks` enum('N','Y') COLLATE utf8_unicode_ci NOT NULL DEFAULT 'N',
+  `bypass_banned_checks` enum('N','Y') COLLATE utf8_unicode_ci NOT NULL DEFAULT 'N',
+  `bypass_header_checks` enum('N','Y') COLLATE utf8_unicode_ci NOT NULL DEFAULT 'N',
+  `virus_quarantine_to` varchar(64) COLLATE utf8_unicode_ci DEFAULT NULL,
+  `spam_quarantine_to` varchar(64) COLLATE utf8_unicode_ci DEFAULT NULL,
+  `banned_quarantine_to` varchar(64) COLLATE utf8_unicode_ci DEFAULT NULL,
+  `unchecked_quarantine_to` varchar(64) COLLATE utf8_unicode_ci DEFAULT NULL,
+  `bad_header_quarantine_to` varchar(64) COLLATE utf8_unicode_ci DEFAULT NULL,
+  `clean_quarantine_to` varchar(64) COLLATE utf8_unicode_ci DEFAULT NULL,
+  `archive_quarantine_to` varchar(64) COLLATE utf8_unicode_ci DEFAULT NULL,
+  `spam_tag_level` float DEFAULT '-99' COMMENT 'No spam level will be written in the headers, if the spam level is below this value. Keep spam_subject_tag empty to keep the subject unchanged.',
+  `spam_tag2_level` float DEFAULT NULL COMMENT 'Related to spam_subject_tag2',
+  `spam_tag3_level` float DEFAULT NULL COMMENT 'Related to spam_subject_tag3',
+  `spam_kill_level` float DEFAULT NULL,
+  `spam_dsn_cutoff_level` float DEFAULT NULL,
+  `spam_quarantine_cutoff_level` float DEFAULT NULL,
+  `addr_extension_virus` varchar(64) COLLATE utf8_unicode_ci DEFAULT NULL,
+  `addr_extension_spam` varchar(64) COLLATE utf8_unicode_ci DEFAULT NULL,
+  `addr_extension_banned` varchar(64) COLLATE utf8_unicode_ci DEFAULT NULL,
+  `addr_extension_bad_header` varchar(64) COLLATE utf8_unicode_ci DEFAULT NULL,
+  `warnvirusrecip` char(1) COLLATE utf8_unicode_ci DEFAULT NULL,
+  `warnbannedrecip` char(1) COLLATE utf8_unicode_ci DEFAULT NULL,
+  `warnbadhrecip` char(1) COLLATE utf8_unicode_ci DEFAULT NULL,
+  `newvirus_admin` varchar(64) COLLATE utf8_unicode_ci DEFAULT NULL,
+  `virus_admin` varchar(64) COLLATE utf8_unicode_ci DEFAULT NULL,
+  `banned_admin` varchar(64) COLLATE utf8_unicode_ci DEFAULT NULL,
+  `bad_header_admin` varchar(64) COLLATE utf8_unicode_ci DEFAULT NULL,
+  `spam_admin` varchar(64) COLLATE utf8_unicode_ci DEFAULT NULL,
+  `spam_subject_tag` varchar(64) COLLATE utf8_unicode_ci DEFAULT NULL COMMENT 'Related to spam_tag_level',
+  `spam_subject_tag2` varchar(64) COLLATE utf8_unicode_ci DEFAULT NULL COMMENT 'Related to spam_tag2_level',
+  `spam_subject_tag3` varchar(64) COLLATE utf8_unicode_ci DEFAULT NULL COMMENT 'Related to spam_tag3_level',
+  `message_size_limit` int(11) DEFAULT NULL,
+  `banned_rulenames` varchar(64) COLLATE utf8_unicode_ci DEFAULT NULL,
+  `disclaimer_options` varchar(64) COLLATE utf8_unicode_ci DEFAULT NULL,
+  `forward_method` varchar(64) COLLATE utf8_unicode_ci DEFAULT NULL,
+  `sa_userconf` varchar(64) COLLATE utf8_unicode_ci DEFAULT NULL,
+  `sa_username` varchar(64) COLLATE utf8_unicode_ci DEFAULT NULL,
+  PRIMARY KEY (`id`)
+) COMMENT='amavisd-new';
+
+--
+-- Table structure for table `quarantine`
+--
+CREATE TABLE `quarantine` (
+  `partition_tag` int(11) NOT NULL DEFAULT '0',
+  `mail_id` varbinary(16) NOT NULL,
+  `chunk_ind` int(10) unsigned NOT NULL,
+  `mail_text` blob NOT NULL,
+  PRIMARY KEY (`partition_tag`,`mail_id`,`chunk_ind`)
+) COMMENT='amavisd-new';
+</pre>
+
+Add a database connection to Amavisd-new in /etc/amavis/conf.d/50-user and change the ''database_name'', ''database_user'' & ''database_password'' accordingly:
+<pre>
+@lookup_sql_dsn = (
+    ['DBI:mysql:database=database_name;host=localhost;port=3306',
+     'database_user',
+     'database_password']);
+@storage_sql_dsn = @lookup_sql_dsn;
+</pre>
+Policies about spam filtering and virus checking are stored in the table 'policy'. Those policies needs to be coupled to the emailaddresses, so Amavisd-new knows which policy needs to be applied to which emailaddress. The table 'alias' was created in chapter <nowiki>[[#Create_the_Alias_table|Create the Alias table]]</nowiki>. The table needs to be expanded with a column to couple a policy to an emailadress and (optionally) a priority column, so Amavisd-new knows which row it has to take in case of multiple results (e.g. a catch-all and a normal address):
+<pre>
+ALTER TABLE `alias` ADD `policy_id` INT UNSIGNED NOT NULL DEFAULT '1' COMMENT 'id from Amavisd-new policy table' AFTER `active` ;
+ALTER TABLE `alias` ADD `priority` smallint(5) unsigned NOT NULL DEFAULT '7' COMMENT 'Amavisd-new uses this to sort in case of multiple results' AFTER `policy_id` ;
+</pre>
+Add to following lines to /etc/amavis/conf.d/50-user, so Amavisd-new knows how to select a policy (the other SELECT and INSERT statements can be found by searching for '''%sql_clause''' on <nowiki>[[https://github.com/aosm/amavisd/blob/master/amavisd/amavisd-new-2.6.6/amavisd.conf-default]]</nowiki>):
+<pre>
+$sql_select_policy = 'SELECT *,alias.id AS email FROM alias,policy' .
+		' WHERE (alias.policy_id=policy.id) AND (alias.address IN (%k))' .
+		' ORDER BY alias.priority DESC';
+
+$spam_quarantine_method = 'sql:';
+</pre>
+
+A note can be added to the subject of a message, if the spam level is greater than 'spam_tag_level' of table 'policy'. The note that needs to be added is stored in column 'spam_subject_tag' of the same table ('spam_tag2_level' is related to 'spam_subject_tag2', etc.). Amavisd-new/Spamassassin will also add headers to the message that contain the spam level, but it will not add these headers if the spam level is below the value of 'spam_tag_level'. Detailed information about the spam levels can be obtained by adding the following line to /etc/amavis/conf.d/50-user:
+<pre>
+$allowed_added_header_fields{lc('X-Spam-Report')} = 1;
+</pre>
+
+A message will be quarantined, if the spam level is greater than the 'spam_kill_level' in the table 'policy'. Quarantined messages are marked in table 'msgs' with a 'Q' in column 'quar_type'.
+
+If a HAM message is accidentally quarantined, the message can be released and send to the original recipient. Messages can be released using the 'amavisd-release' Perl script in /usr/sbin/. By default, a UNIX socket is used, but that socket is difficult to set-up. It is easier to change the socket to an INET TCP socket. Add the following lines to /etc/amavis/conf.d/25-amavis_helpers:
+<pre>
+$unix_socketname = undef; #disable to unix socket
+
+$inet_socket_port = [10024,9998];
+$interface_policy{'9998'} = 'AM.PDP-INET';
+
+$policy_bank{'AM.PDP-INET'} = {
+  protocol => 'AM.PDP',  # select Amavis policy delegation protocol
+  inet_acl => [qw( 127.0.0.1 [::1] )],  # restrict access to these IP addresses
+  auth_required_release => 0,  # don't require secret_id for amavisd-release
+};
+</pre>
+A message can be released using the 'mail_id' and/or 'secret_id' of table 'msgs'. The secret_id is only needed when auth_required_release is set to '1'. Use the following command to release a message:
+<pre>
+$ /usr/sbin/amavisd-release mail_id secrect_id
+</pre>
+==== Auto and Per-Recipient White/Black Lists ====
+==== Amavis/Spamassassin UI ====
+==== GreyListing ====
+==== Distributed and Collaborative Networks ====
+
+=== Anti-Virus Configuration ===
+
+==== Configuring for ClamAV ====
+
+== Log Analyzer ==
+
+=== Install and Configure AWStats ===
+
+== Wrapping it Up ==
+
+== Final Changes and Troubleshooting ==
+
+== Other links ==
+Until this article will be finished, you can find very similiar one here:
+
+ <nowiki>[[http://flurdy.com/docs/postfix]]</nowiki> created by Ivar Abrahamsen
+
+Howto created by: ChinthakaDeshapriya.
+----
+CategoryEmail

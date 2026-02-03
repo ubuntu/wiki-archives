@@ -1,0 +1,243 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+This page is missing a diagnostic guide to be sure that the problem described here ''is'' what is happening to a specific system. If you know how to test for this issue please add such a diagnostic guide.
+
+=== Introduction ===
+Some Notebooks don't display the battery status. This HOWTO will show you how to fix this annoying problem.
+I am aware there are a lot of forum posts on this but none show you how to easily fix the problem.
+
+'''Note:''' The Ubuntu kernel already contains the patch that is needed for this to work, so no recompiling
+of the kernel is needed in this HOWTO!
+
+=== Prerequisites ===
+We need to compile some stuff along the way, so we need the package ''build-essential''.
+We also need the packages ''flex-old'' (which will replace flex) and ''bison''.
+<pre>
+sudo apt-get install build-essential bison flex-old
+</pre>
+
+=== The DSDT for your notebook ===
+The DSDT (Differentiated System Description Table) sits in your BIOS and gives Linux all the information on
+your computer. Yours is obviously messed up, so we have to get a new one.
+
+Go to the <nowiki>[[http://acpi.sf.net|ACPI page]]</nowiki> at sourceforge and in the menu on the left click on DSDT and View. 
+Here you can select your manufacturer, model and BIOS version. On the page you will get then, you can download
+a fixed DSDT for your notebook. If there is none for you notebook, see the links at the end of this document.
+If there is no DSDT for you BIOS version, update your BIOS (which in fact might already fix the problem).
+
+So copy the download address (to paste it to the console) and in your $HOME do:
+<pre>
+mkdir acpi
+cd acpi
+wget http://acpi.sourceforge.net/dsdt/tables/Manufacturer/Model/DSDT.asl.gz
+gzip -d DSDT.asl.gz
+</pre>
+(the link after ''wget'' has to be replaced with the link to your DSDT)
+
+=== Obtaining Intel's iasl compiler ===
+The DSDT has to be compiled. For this we need a special compiler from Intel. Download there Unix source
+<nowiki>[[http://www.acpica.org/downloads/|here]]</nowiki>. You might have to replace the download
+link in the following.
+<pre>
+tar zxf acpica-unix-20050624.tar.gz
+cd acpica-unix-20050624/compiler
+make
+cp iasl ../..
+cd ../..
+</pre>
+If the make didn't work I can only assume that ''bison'' is not installed or you still have the ''flex'' instead
+of ''flex-old''.
+
+=== Compiling your DSDT ===
+Since the 2005 versions of iasl are more restrictive than older versions your DSDT might not compile. You can
+either try to find an older version of iasl (I couldn't) or fix the DSDT by yourself (I will explain this).
+<pre>
+cp yourdsdtfile.asl dsdt.asl # backup
+./iasl -tc dsdt.asl          # compiling
+</pre>
+If this works you should get 0 errors, a couple of warnings and two new files. A .hex and a .aml file. If it
+doesn't you will have alot of error messages telling you a <code>ResourceSource</code> string is missing. These
+errors are easy to fix. Keep the windows with the compile errors open, since we will need the line numbers.
+
+What the errors might look like:
+<pre>
+dsdt.asl  1028:                     0x0100, 0x00)
+Error    1094 -                                 ^ Missing ResourceSource string (required)
+
+dsdt.asl  1034:                     0x00000CF8, 0x00)
+Error    1094 -                                     ^ Missing ResourceSource string (required)
+
+dsdt.asl  1041:                     0x0000F300, 0x00)
+Error    1094 -                                     ^ Missing ResourceSource string (required)
+</pre>
+
+Lets open the .asl file and look at line 1028.
+<pre>
+gedit dsdt.asl&
+</pre>
+
+It looks like this:
+<pre>
+1023  WordBusNumber (ResourceProducer, MinFixed, MaxFixed, PosDecode,
+1024      0x0000, /* Address Space Granularity */
+1025      0x0000, /* Address Range Minimum */
+1026      0x00FF, /* Address Range Maximum */
+1027      0x0000, /* Address Translation Offset */
+1028      0x0100, 0x00)
+</pre>
+
+What we have to do is simply remove the <code>0x00</code> so that line 1028 looks like
+<pre>
+1028      0x0100)
+</pre>
+Do this for all <code>missing ResourceSource string</code> errors (they should all be in the same place), save the
+file and close gedit. Now compile again with <code>./iasl -tc dsdt.asl</code> and watch the magic.
+
+=== Some backups ===
+As we don't want to mess with your working system we'll work on a backup and add that backup to your bootloader.
+<pre>
+sudo -s -H   # followed by user pw
+cp /boot/initrd.img-2.6.10-5-686 /boot/initrd.img-2.6.10-5-386.acpi
+cp /boot/vmlinuz-2.6.10-5-686 /boot/vmlinuz-2.6.10-5-386.acpi
+exit
+</pre>
+To be able to boot from this kernel-copy we need to add a section for it to the grub bootloader.
+<pre>
+gedit /boot/grub/menu.lst&
+</pre>
+Add a section that looks like this (see other sections in your menu.lst for comparison)...
+<pre>
+title           Ubuntu, kernel 2.6.10-5-386 Battery
+root            (hd0,3)
+kernel          /boot/vmlinuz-2.6.10-5-386.acpi root=/dev/hda4 ro quiet splash
+initrd          /boot/initrd.img-2.6.10-5-386.acpi
+savedefault
+boot
+</pre>
+...and place it where you want it to appear in the bootmenu.
+
+=== Putting your DSDT into initrd ===
+What remains is to actually add the DSDT to your initrd.
+There are 2 ways of doing this. The first one is to patch the initrd.img file, so that
+the initrd.img will include the DSDT.
+(NOTE: if you are a BREEZY user the second method is prefered):
+<pre>
+echo -n "INITRDDSDT123DSDT123" >> /boot/initrd.img-2.6.10-5-386.acpi
+cat dsdt.asl >> /boot/initrd.img-2.6.10-5-386.acpi
+</pre>
+
+The alternative option is to add the DSDT.aml file in a specific place so that
+the default initrd image will search for it and load it on boot. As a bonus, with every kernel update
+the DSDT will be loaded. Beware that if the DSDT is incorrect it may lead to a kernel
+panic.
+
+If you are using HOARY or below:
+Once you have the DSDT compiled, copy the DSDT.aml in /etc/mkinitrd/DSDT (without the extension,
+I don't know if this is necessary):
+<pre>
+sudo cp dsdt.aml /etc/mkinitrd/DSDT
+</pre> 
+Then reconfigure the kernel package you are using: 
+<pre>
+sudo dpkg-reconfigure linux-image-$(uname -r)
+</pre>
+
+If you are using BREEZY or DAPPER, the location to put the DSDT.aml file has changed, it's:
+<pre>
+/etc/mkinitramfs/DSDT.aml
+</pre>
+WITH the extension! it's necessary. Then reconfigure the kernel package 
+as before:
+<pre>
+sudo dpkg-reconfigure linux-image-$(uname -r)
+</pre>
+
+If you are using EDGY, the location to put the DSDT.aml file has changed, it's:
+<pre>
+/etc/initramfs-tools/DSDT.aml
+</pre>
+WITH the extension! it's necessary. Then reconfigure the kernel package 
+as before:
+<pre>
+sudo dpkg-reconfigure linux-image-$(uname -r)
+</pre>
+
+That's it. Reboot your computer and pick the newly created bootoption. If it all works out you
+can savely remove the $HOME/acpi directory and modify the bootmenu as you like (i.e. make the new
+bootoption default).
+
+=== Links ===
+<nowiki>[[http://acpi.sourceforge.net|acpi.sf.net]]</nowiki> - ACPI Homepage<<BR>>
+<nowiki>[[http://forums.gentoo.org/viewtopic.php?t=122145|Gentoo Forums]]</nowiki> - How to fix a DSDT yourself<<BR>>
+<nowiki>[[http://www.intel.com/technology/IAPC/acpi/downloads.htm|Intel ACPI]]</nowiki> - Download iasl compiler<<BR>>
+<nowiki>[[http://gaugusch.at/kernel.shtml|gaugusch.at]]</nowiki> - the kernel patch to make this work
+
+=== Another possible solution (workaround) ===
+
+If fixing your DSDT file like suggested avove doesn't solve your battery monitoring problem, you can try the folowing simple workaround.
+
+In my case, it seems that if I unload and reload the "battery" module, everything works fine after. But before unloading the battery module, I need to unload the smart battery module (acpi_usb).
+ 
+
+* '''How to determine if this solution works for you:'''
+ 
+To try this solution, do the following:
+ 
+Open a terminal and enter the following commands, in this order:
+
+{{{ 
+sudo rmmod acpi_sbs
+sudo rmmod battery
+sudo modprobe battery
+}}}
+ 
+Then, enter this command:
+
+<pre>
+sudo acpi -V
+</pre>
+ 
+if you see someting like this:
+
+{{{ 
+Battery 1: charging, 100%
+Thermal 1: ok, 56.0 degrees C
+AC Adapter 1: on-line
+}}}
+ 
+Then, voila, your battery is now detected and monitored and you now know that this solution works in your case.
+ 
+If you don't see any reference to the battery after issuing the "acpi -V" command, the problem may be more complex...
+
+ 
+* '''Fixing the problem in a permanent way with this workaround''':
+ 
+I have created special init scripts that I put in /etc/init.d and /etc/acpi/resume.d in order to unload-reload battery module at each boot and resume after hibernation.
+ 
+In a more detailed way, here's what I did and what you can do (at your own risk!):
+ 
+1. Using a text editor, put the following content in a file and save it:
+
+{{{ 
+rmmod acpi_sbs
+rmmod battery
+modprobe battery
+}}}
+
+2. Make a copy of this file, name it "modules-load-battery", make it executable (in a console, you can use the command "sudo chmod a+x modules-load-battery") and put this file in /etc/init.d 
+ 
+3. Use the Ksysv editor (or whatever it is called in K menu/system or in the "System settings"/System Administration/System services), in order to make this script run at each boot time (you can make it run just before the "kdm" script; it works for me).
+ 
+4. Make another copy of this file, name it "37-modules-load-battery.sh", make it executable (in a console, you can use the command "sudo chmod a+x 37-modules-load-battery.sh"), and put this file in /etc/acpi/resume.d; it will run at each resume from hibernate state.
+
+----
+CategoryLaptop CategoryHardware

@@ -1,0 +1,77 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== Creating your own image ==
+
+There are a few different ways one can create his own image.
+
+=== Eucalyptus procedure ===
+
+The Eucalyptus project is proposing an <nowiki>[[http://open.eucalyptus.com/wiki/EucalyptusUserImageCreatorGuide_v1.5|alternate guide to create images]]</nowiki>
+
+=== Using vmbuilder ===
+
+If you would want to author your own image, you can use the vmbuilder utility utility to create an image that will run in Eucalyptus. First, create a partition description file called 'part'. The contents describe the size, types, and mount points of your VM disk partitions:
+ <pre>
+$ cat > part <<EOF
+root 400
+/mnt/ephemeral 2000 /dev/sda2 
+swap 1 /dev/sda3
+EOF
+</pre>
+
+Next, create a simple script called 'firstboot' that will be executed the first time your image boots inside Eucalyptus to install an ssh daemon. In a file called 'firstboot' create the shell script:
+ <pre>
+$ cat >firstboot <<EOF
+apt-get -y install openssh-server 
+EOF
+</pre>
+
+Then, create the image with vmbuilder passing the name of the script file as an argument so that it can be installed. Note that even though we are asking vmbuilder to create a 'xen' image (this simply just means that the output format of the image is a disk partition), the resulting image will boot in Eucalyptus using KVM.
+ <pre>
+sudo vmbuilder xen ubuntu --part ./part --firstboot ./firstboot
+</pre>
+
+Next, you will need to bundle, upload and register a kernel, ramdisk and finally your image. Using the EC2 API tools, perform the following steps:
+ <pre>
+mkdir kernel
+euca-bundle-image --image /boot/vmlinuz-$(uname -r) \
+  --destination ./kernel --kernel true
+euca-upload-bundle --bucket kernel \
+  --manifest ./kernel/vmlinuz-$(uname -r).manifest.xml
+EKI=`euca-register kernel/vmlinuz-$(uname -r).manifest.xml | awk '{print $2}'`
+echo $EKI
+
+mkdir ramdisk
+sudo sh -c 'grep -q acpiphp /etc/initramfs-tools/modules ||
+   printf "#acpiphp needed for ebs\nacpiphp\n" > /etc/initramfs-tools/modules'
+sudo mkinitramfs -o ./ramdisk/initrd.img-$(uname -r)
+euca-bundle-image --image ./ramdisk/initrd.img-$(uname -r) \
+   --destination ./ramdisk --ramdisk true
+euca-upload-bundle --bucket ramdisk \
+   --manifest ramdisk/initrd.img-$(uname -r).manifest.xml
+ERI=`euca-register ramdisk/initrd.img-$(uname -r).manifest.xml | awk '{print $2}'`
+echo $ERI
+
+mkdir image 
+euca-bundle-image --image ubuntu-xen/root.img \
+   --destination ./image --kernel $EKI --ramdisk $ERI
+euca-upload-bundle --bucket image --manifest ./image/root.img.manifest.xml
+EMI=`euca-register image/root.img.manifest.xml | awk '{print $2}'`
+echo $EMI
+</pre>
+
+Note the shell variables that have been set in the above code snippets. They will be used to test the installation in the steps below. Now, your kernel, ramdisk and image will have been uploaded into Eucalyptus and should be ready to run. To confirm, run the following command:
+ <pre>
+euca-describe-images
+</pre>
+You should see a registered kernel, ramdisk and image and they should be marked as 'available'.
+
+Please note: if you are preparing the bundle on a machine that uses encrypted filesystems be aware that you cannot bundle the machine ramdisk for your AMI. This is because your local ramdisk includes routines to decrypt your local encrypted filesystem and these will make the instance crash at boot (as the encrypted filesystem does not exist).

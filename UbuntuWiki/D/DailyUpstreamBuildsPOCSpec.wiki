@@ -1,0 +1,205 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+* '''Launchpad Entry''': UbuntuSpec:daily-upstream-builds-poc
+* '''Created''': 2009-02-03
+* '''Contributors''': JamesWestby, MarkShuttleworth, MattZimmerman
+* '''Packages affected''': Those chosen for the PoC, but no changes to the archive
+
+=== Summary ===
+
+Packages that represent the latest code from a project lower the barrier to contribution to the project. They allow users and distribution developers to follow the latest code without having to build themselves from Bazaar.
+
+Vanilla packages of the latest code also provides an opportunity for confirming of bugs in conditions that will be most useful to upstream. This can ease the flow of bugs from distributions to upstream.
+
+Making it easy for people to set-up daily builds of the latest code will lead to more projects offering them.
+
+=== Release Note ===
+
+This doesn't really have a place in the release notes as it doesn't change the distribution as such.
+
+=== Rationale ===
+
+Testing the HEAD of upstream's VCS can be very valuable, but building it is not easy for users, and is tedious to do regularly. Automatically producing these packages every day will alleviate some of this, but we would not have the resources to do this for every package currently. In order to investigate the complexities involved in doing it we will select a few packages and build a proof-of-concept that produces daily packages for them.
+
+=== Use Cases ===
+
+** Ryan runs an exciting new project, and wants to provide packages of the latest code to users in the easiest way possible. He doesn't want them to have to build from bzr every day, and would prefer to stay inside the packaging system so that dependencies can be easily satisfied for instance. He sets up a daily build of his code for Ubuntu and avertises it on the project page as the best way to get the code.
+** Brian is triaging a bug and believes it is an upstream problem, but the package the user is using is some way behind upstream's HEAD, and upstream like bugs to be tested against HEAD. Brian knows that there is a vanilla daily build of the package available, and so he asks the user to test with that. When the user confirms that it still happens the user files a helpful bug report upstream, and tests the fix the day after it lands.
+** Mary packages a fast moving project, and wants to keep on top of the changes upstream while Ubuntu is frozen for release. She installs the daily build packages in a test environment, and can test the changes and provide feedback to upstream so that the project is in good shape for the next Ubuntu release. She can also monitor for problems building the package to become aware of things like patches being merged upstream, and the required versions of dependencies changing.
+
+=== Assumptions ===
+
+=== Design ===
+
+The tool will work based on Bazaar branches, so that it can take advantage of bzrlib to do the heavy lifting.
+
+A "recipe" will specify the parts that go together to make up the source, including the addition of the packaging, and any patches that need to be applied.
+It will be a fairly simple format, specifying branches to merge (and optionally specific revisions of them). There will be a second permitted operation,
+"nesting" that will allow composite packages to be assembled from different branches.
+
+The tool will take a recipe file as input, and will follow the steps that it specifies, producing a source package, which will then be optionally signed
+and uploaded to a PPA. This then allows the command to be placed in cron to run every day, with modifications done to the recipe, or to the branches it specifies as needed.
+
+As part of its operation the tool should generate a "manifest" and store it in the source packages. The manifest will show the exact revisions used from each branch, so that the package can be recreated later.
+
+There are a few other pieces of information that are needed at certain points in the operation of the tool, for instance the GPG key id to sign the package if that stage is needed. This information could live in the recipe, or in a separate info file.
+
+Often there will be no need to build the package if none of the branches have changed, but sometimes it may be desired to do this anyway, so that any problems caused by changes in the dependencies can be caught. There should be a way to specify which behaviour is wanted for each build.
+
+In order to provide the facility to not build the package if none of the branches have changed then the tool needs to have some way to know what revisions the branches were at in the previous build. Copies of the branches that were used in the last build would allow you to do this easily, however they could take up a significant amount of diskspace, and would constrain you to always building on the same machine. The alternative is to then keep around, or make available, the revisions that were used in the last build.
+
+The tool must generate at least part of the version number such that they increment on every build. Usually a base version will be specified, such as the version number that upstream is working towards in the branch that is being followed. The tool will then append to this the generated part. For daily builds the current date could be used, but it would be good to support multiple builds in a day for faster moving projects. In these cases some combination of the date and the revision number of each branch could be used, as long as builds weren't done if nothing has changed. Alternatively the time could be included, as well as the date, this would work for any scheme.
+
+Some projects will require certain commands to be run at certain points in the build, e.g. autoreconf. There are a few possible solutions to this. Firstly, this could be a branch that is merged, but this would quickly get out of date and so cause build failures, which could be automatically solved. Secondly the package could be changed to do this at build time instead, but this may not work for every use case. Thirdly, we could support commands in the recipe, which will be executed as the recipe is processed. This does allow arbitrary code execution, but this can already be done in the clean target of debian/rules.
+
+=== Implementation ===
+
+The recipe will be a simple text file, for example
+
+<pre>
+branch lp:firefox
+merge lp:~fta/firefox/fix-build
+merge lp:~mozillateam/firefox/ubuntu.jaunty
+merge lp:~asac/firefox/fix-installation
+branch lp:xulrunner xulrunner
+merge lp:~asac/xulrunner/embed
+</pre>
+
+where there are two operations, "branch" and "merge". It reads and works similar to a list of bzr commands, but there are some small differences. The main one is that "merge" is done in to the most recent "branch" target, not in to the root.
+
+This is a more complex example. A basic recipe for most packages would just be
+
+<pre>
+branch lp:project
+merge lp:ubuntu/jaunty/project
+</pre>
+
+with the more complex example showing how fixes can be applied where needed for the daily build.
+
+The extra "branch" in the example shows how nesting can be used. In this case it embeds a copy of xulrunner in to the package, and then merges a branch that makes it suitable for embedding. This should be rarely used, but allows for more packages to be done in such a scheme.
+
+Specific revisions of the branches can be specified like so:
+
+<pre>
+branch lp:project
+merge lp:ubuntu/jaunty/project -r<revision>
+</pre>
+
+where "revision" is any bzr revision specifier.
+
+The manifest will then simply be a recipe with revisions specified. For instance running the tool with the the second example may lead to the following manifest.
+
+<pre>
+branch lp:project -rrevid:foo@bar.com-12345
+merge lp:ubuntu/jaunty/project -rrevid:fta@ubuntu.com-q2434fr
+</pre>
+
+This means that the manifest can then be fed back in to the tool to reproduce the original steps.
+
+If given the the manifest of the previous run the tool can also detect whether there are changes in any of the branches. The manifest could either be stored somewhere known, or the tool could possibly extract it from the source package if it knows where to find it (e.g. in a PPA).
+
+==== Version numbers ====
+
+Most version numbers will be constructed from a base version number, with a generated part appended. A simple way to do this would be to have the base version specified in the recipe.
+
+<pre>
+base-version 5.1~
+</pre>
+
+with the generated part being
+
+<pre>
+200902111429-1
+</pre>
+
+when these are concatenated you would end up with
+
+<pre>
+5.1~200902111429-1
+</pre>
+
+It would be possible to extend this to include information about the revision numbers of the various branches, but the above scheme should function well enough.
+
+==== Supporting commands ====
+
+Adding another possible operation to the recipe, "command" would allow extra commands to be run at certain points, e.g.
+
+<pre>
+branch lp:project
+command autoreconf -f -i -v
+merge lp:ubuntu/jaunty/project
+</pre>
+
+The command would be run in the target directory of the last "branch" operation, and would be passed through the shell, allowing more flexibility.
+
+This will not be supported. Allowing commands to be run makes the results of the tool unreproducible. The manifest
+allows you to reproduce the parts from combining branches, but running commands would break that.
+
+Any commands that need to be run should be run at build time, even if this means modifying the packaging.
+
+=== Test/Demo Plan ===
+
+In order to test the tool a few daily builds will be set-up and maintained. In addition to making sure the tool works well it will also show how much work is required to maintain daily builds, which is interesting information.
+
+There is no need to have a contingency plan, as this work does not affect the distribution itself. The earliest the tool itself would end up in Ubuntu is in Juanty+1, and the daily-built packages won't go in to the repositories.
+
+=== Unresolved issues ===
+
+* Is there extra information needed about the recipe than just the steps, e.g. desired source package name, GPG key to sign with? Should this live in the recipe somewhere?
+* Is the described recipe format flexible enough? Is it possible to unambiguously talk about a location in the file to add extra steps?
+
+=== Gobby Notes from UDS Karmic Session 1 ===
+'Expanding and Socializing the Daily Builds Concept & Capability'
+
+https://blueprints.edge.launchpad.net/ubuntu/+spec/foundations-karmic-daily-builds
+
+* PPAs wanted for stable, beta, nightly builds
+* moving parts
+** apport should understand what's going wrong
+** bug reports against ppas
+** bzr package branches
+** machine/job to run all this
+* Fabien?? working on daily builds of Chromium and Firefox, about 2-5k users already
+* issue of choosing the right version number that will fit between the Ubuntu version and the next upstream release
+** apparently hard to standardize, but can have standard suggestions
+* issue of branches holding just the debian/ directory vs the whole tree - 
+** somewhat handled by bzr-builddeb
+** would also be nice to handle through bzr nested trees
+* issue of building untrusted code - don't want to duplicate what's in Soyuz
+* need to automatically build a tarball branch, maybe to automatically run 'make dist' equivalent
+* <sab> done well if by karmic's release there are 4-500 packages maintained by 40-50 people
+
+* issue of parallel installs - if people are going to try nightly builds they want either parallel installs or to easily back out - also if you're using the PPA you don't necessarily want to follow the bleeding edge for ever
+* want to give good feedback to upstream authors on what's broken or not, including when it's built with new dependencies
+* display the most-interesting PPAs in some kind of wiki organization
+* problem of builds for multiple distro releases
+** duplicate information in the name of the branch and the name in the changelog file
+** is this something soyuz is working on?
+* avoid munging changelogs!
+* apport impact
+** want to file the bug in the upstream bugtracker
+** push into Launchpad and ask it to push upstream from there
+** <pre>
+<sab> I think we need to have bugs for PPAs
+<bigjools> this is commonly requested
+<liw> as a user of a PPA, I'd like to subscribe to all bugs in that PPA
+</pre>
+* where are we on creating "crash reports" as distinct from bugs? not done yet.  wbn. 
+* currently no relation between a PPA and an upstream "official PPAs"
+** mapping of (package,distro) to upstream package can change over time
+* PPA download counts - should be done in the next release
+* <sabdfl> there are already thousands of packages in ppas not in ubuntu
+* <kiko> I'd now like to see a plan for how to get there
+** open concern about how we let people come in and garden these branches - should not be a free-for-all, but should let people come in
+
+----
+CategorySpec

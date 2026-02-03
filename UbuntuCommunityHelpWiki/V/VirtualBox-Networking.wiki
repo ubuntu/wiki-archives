@@ -1,0 +1,262 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+VirtualBox 2.0 and onwards provides straightforward networking allowing IP address assignment and internet access using NAT, the default network option. Read below for more sophisticated setups.
+
+Version 2.1 has reimplemented some of its networking. Bridging a virtual machine can now be done entirely from the graphical user interface. 
+
+Note:  
+For users behind a proxy server, you will have to specify your proxy settings in File -> Preferences -> Proxy.
+
+=== NAT over PPPoE ===
+Some ISPs check the value of the TTL field of the IP packets coming from your computer.
+TTL is a number associated with every IP packet that is decremented at every hop encountered on it's way. When the TTL gets to zero, the IP packet gets discarded.
+
+TTLs start at various numbers (see http://members.cox.net/~ndav1/self_published/TTL_values.html) usually 128 or 64.
+
+Using this information, some ISPs decided to limit the number of computers connected on a network by discarding packets with that originate from the host and have a TTL different from what they expect (64, 128, etc.) and to change the TTL of all packets destined to the host to 1. This way, if there's another computer ''X'' behind the one that is connected ''A'', its TTL will be decremented by the ''A'' when sending it on the internet. The ISP will detect that an unexpected TTL was received (63, 127, etc.) and will drop the packet. Similarly, when the ISP must forward a packet to the host ''A'', it sets the TTL to 1. This way if the packet was really destined to ''X'', ''A'' will decrement the TTL, will see that it's zero and will drop it before sending it to the computer.
+
+The same things apply when ''X'' is a virtual machine running on the host ''A''.
+
+To enable the internet connection on Virtualbox virtual machines in such conditions you need to alter the TTL:
+* increment the TTL of packets as soon as they come in on the interface ''ppp0'' (the default internet connection, this may but ''eth0'', ''eth1'', ''wlan0'', etc.)
+<pre>
+sudo iptables -t mangle -A PREROUTING -i ppp0 -j TTL --ttl-inc 1
+</pre>
+* alter the packets as they are about to get out
+<pre>
+sudo iptables -t mangle -A POSTROUTING -j TTL --ttl-set 64
+</pre>
+
+=== Host Networking ===
+
+Connecting a virtual machine through NAT will allow the guest to connect to systems on the network (including the host or some website). A machine on the network will not be able to initiate a connection to the guest though.
+
+But typically, one might want to connect from the host to the guest (as is the case when the guest runs a web server or an ssh server). For this use case, bridging can be used (one must be aware that bridging will make a virtual machine visible to the network so it must be secured beforehand)
+
+==== Host Networking with VirtualBox 2.1 and later versions ====
+
+Open the settings of the virtual machine. Go to the network section. Pick "Bridge network" in the list of "Attach to" options. Choose the network interface you want to bridge with. Most of the time, this will be "eth0" for a wired network. As noted in the <nowiki>[[http://download.virtualbox.org/virtualbox/3.1.2/UserManual.pdf|documentation (§6.4 Bridged networking)]]</nowiki>, only IPv4 is supported for wireless interfaces.
+
+==== Host Networking in Ubuntu 9.04 ====
+
+You just need to load the "vboxnetflt" modules if it isn't loaded yet, and adjust the networking type in the VirtualBox Guest Network Settings to Attach to "Host Interface".
+<pre>
+sudo modprobe vboxnetflt
+</pre>
+
+'''Note:''' This is now available for the OSE version as well, contrary to the report regarding 8.10 below
+
+==== Host Networking in Ubuntu 8.10 ====
+
+You just need to load the "vboxnetflt" modules if it isn't loaded yet.
+<pre>
+sudo modprobe vboxnetflt
+</pre>
+
+'''Note:''' This does not work by default with virtualbox-ose, as the vboxnetflt module doesn't seem to be included in the package. Fix unknown.
+
+==== Host Networking in Ubuntu 8.04 and older ====
+
+To configure Host Networking you need to configure network bridging, you basically go through four steps on the '''host''' machine:
+* install necessary packages
+* declare bridge and real network interface you add to it
+* declare virtual interfaces
+* set permissions on /dev/net/tun
+
+===== Install necessary packages =====
+First you need to install bridge-utils to be able to create network bridges:
+<pre>
+$ sudo apt-get install bridge-utils
+</pre>
+
+===== Declare bridge =====
+Before you begin, back up the current interfaces file with a copy that has the current date in its name:
+<pre>
+$ sudo cp /etc/network/interfaces /etc/network/interfaces.`date +%F~%T` 
+</pre>
+
+You have to edit /etc/network/interfaces on the '''host''' machine to declare the bridge, this procedure is slightly different if your host use static or dynamic IP.
+
+If you have dynamic IP, on the '''host''' machine:
+<pre>
+$ sudo nano /etc/network/interfaces
+auto eth0
+iface eth0 inet manual
+
+auto br0
+iface br0 inet dhcp
+   bridge_ports eth0 vbox0
+
+auto lo
+iface lo inet loopback
+</pre>
+
+"eth0" is the name of your interface, it can be different depending on your machine.
+
+"br0" is an arbitrary name for the bridge.
+
+"vbox0" is an arbitrary name for the device VirtualBox will use, if you want more devices, you just add then like:
+<pre>
+    bridge_ports eth0 vbox0 vbox1 vbox2 vbox3 vbox4
+</pre>
+and so on. Don't forget you will need to declare this devices on another file, this will be explained later on, keep reading.
+
+If you are using static IP addresses modify the interfaces like this:
+<pre>
+$ sudo nano /etc/network/interfaces
+auto eth0
+iface eth0 inet manual
+
+auto br0
+iface br0 inet static
+    address 192.168.0.100
+    netmask 255.255.255.0
+    gateway 192.168.0.1
+    bridge_ports eth0 vbox0 vbox1
+
+auto lo
+iface lo inet loopback
+</pre>
+Replace 192.168.0.100 with your IP, 255.255.255.0 with your netmask and 192.168.0.1 with your gateway. If you are using static IP addresses for eth0, eth1, etc; you will need to configure the br0 interface using the same settings! Otherwise your system will request an IP address via DHCP. You may add as many vbox# interfaces as you wish as long as they are also declared in /etc/vbox/interfaces; keep reading for details.
+
+You need to restart networking for the changes to take effect:
+<pre>
+$ sudo /etc/init.d/networking restart
+</pre>
+You can ignore the messages complaining about the "vbox#" devices.
+
+===== Declare virtual interfaces which will be used by VirtualBox =====
+To declare the virtual interfaces used by VirtualBox you need to edit /etc/vbox/interfaces on the '''host''' machine:
+<pre>
+$ sudo nano /etc/vbox/interfaces
+vbox0 <your user name> br0
+vbox1 <your user name> br0
+...
+</pre>
+"vbox#" is an arbitrary name. You may declare here as many virtual interfaces as you wish, as long as they have been properly declared in /etc/network/interfaces. In this specific article, we declared two vbox interfaces in /etc/network/interfaces, then finished setting them up in /etc/vbox/interfaces.
+
+To take the modifications into account, restart the VirtualBox host networking script.
+If you installed VirtualBox OSE:
+<pre>
+$ sudo /etc/init.d/virtualbox-ose restart
+</pre>
+If you installed the pre-compiled proprietary version:
+<pre>
+$ sudo /etc/init.d/vboxnet restart
+</pre>
+The virtual interfaces are now created and added to the bridge.
+
+That's it! Now the different scripts will take care of cleanly create/configure/remove bridges and virtual interfaces when you boot and shut your system down.
+
+===== Set permissions on /dev/net/tun =====
+You need to have read/write permissions on the file /dev/net/tun to be able to use the bridge, to set permissions:
+<pre>
+$ sudo chown root:vboxusers /dev/net/tun
+$ sudo chmod g+rw /dev/net/tun
+</pre>
+This file is created with the default permissions every time the system restarts, to make the new permissions permanent you have to edit the file /etc/udev/rules.d/20-names.rules and change:
+<pre>
+KERNEL=="tun",                          NAME="net/%k"
+</pre>
+to
+<pre>
+KERNEL=="tun",                          NAME="net/%k",  GROUP="vboxusers",     MODE="0660"
+</pre>
+
+==== Configure networking in VirtualBox ====
+Once you have everything ready, you can start the VirtualBox management interface on the '''host''' machine, configure the network of your virtual machine, and by selecting "host networking", enter the name of one of the virtual adapter you have configured. Start your virtual machine, it gets a network card presented, that you can set up as you wish (static IP address, DHCP) using the network configuration tools inside the virtual machine.
+
+=== Wireless Networking ===
+
+Setting up a normal bridged network generally doesn't work if you're bridging from a wireless card to VirtualBox. A simple script that utilises the parprouted tool will allow your VM full access to the wireless network.
+
+You will require parprouted to do this:
+
+<pre>
+sudo apt-get install parprouted
+</pre>
+
+Next, using your favorite text editor, create and edit the script, for example:
+
+<pre>
+sudo nano /etc/network/if-up.d/vbox_network
+</pre>
+
+Then, enter the script (replacing $USER with your username (or whoever you intend to run virtualbox as)). Replace wlan0 with the name of your wireless interface. Use an available IP address on your network for tap0 (I have used 192.168.1.100 in this case):
+
+<pre>
+sysctl net.ipv4.ip_forward=1
+VBoxTunctl -b -u $USER
+ip link set tap0 up
+ip addr add 192.168.1.100/24 dev tap0
+parprouted wlan0 tap0
+</pre>
+
+Finally, make sure the new file is executable by root:
+
+<pre>
+sudo chmod 700 /etc/network/if-up.d/vbox_network
+</pre>
+
+Now your networking script is installed, the virtual interface tap0 will be available on boot for VirtualBox. Rather than reboot, let's just run the script now:
+
+<pre>
+sudo /etc/network/if-up.d/vbox_network
+</pre>
+
+The final thing to do is tell VirtualBox to use the new virtual device tap0. Open VirtualBox, highlight a VM and click settings. Now choose the network option and select Host Interface on the 'attached to' drop down menu. In the Interface Name text box, enter: tap0
+
+Click ok and start your VM. The VM should now behave as though it was another physical machine on your network!!
+
+==== Using DHCP in the Guest VM ====
+
+It was possible to get DHCP to work on the guest virtual machine. Instructions were taken from <nowiki>[[http://www.savvyadmin.com/virtualbox-wireless-bridging-with-dhcp/|here]]</nowiki>. Because parprouted does not relay multicast, we need to use an additional helper daemon to manage this. I tried dhcp-helper and bcrelay, and had the most success with bcrelay.
+
+Use it as follows:
+
+<pre>
+sudo apt-get install bcrelay
+sudo bcrelay -i tap0 -o wlan0
+</pre>
+
+At this point, my /etc/network/if-up.d/vbox_network is as follows:
+
+<pre>
+# !/bin/sh
+sysctl net.ipv4.ip_forward=1
+VBoxTunctl -b -u jacob
+ip link set tap0 up
+ip addr add 192.168.1.200/32 dev tap0
+parprouted tap0 wlan0  &
+route add -net 192.168.1.0 netmask 255.255.255.0 tap0
+bcrelay -i tap0 -o wlan0 &
+</pre>
+
+It seems that I have to start the script by hand after boot. Other than that, host networking now seems to work fine (this issue should be solved by adding the "#!/bin/sh" line just at the beginning of the script.
+
+=== Cloning Pitfalls Between Different Hosts ===
+
+When cloning a VirtualBox guest operating system and using it between different host computers, one common pitfall for Debian/Ubuntu guest OSes is the MAC address.  
+
+If it differs from the one set for it by the host that created it, you will likely have problems with the networking adapter '''eth0''' remaining in the DOWN state when looking at the output of ''ip addr'' from the CLI.
+
+Here's the steps to fix this:
+# Open VirtualBox on both host machines you're using the VirtualBox image on.
+# On the host that you used to create the VirtualBox image on, select the virtual machine ''(make sure it's not running)'' and go to the settings.
+# Click on the '''''Network''''' settings and then expand the ''Advanced'' section.
+# Now copy the '''Mac Address'''.
+# Follow steps 1-3 on the second host machine and then replace the Mac Address on the second host machine with the Mac Address from the first host machine.
+
+You should be able to start your VirtualBox guest OS now and use the eth0 adapter just fine.
+If not, double-check the Mac Address again.
+
+Further discussion on debugging this can be found at <nowiki>[[http://www.virtualbox.org/ticket/660]]</nowiki>.
+''This worked when tested between Ubuntu 10.04 Lucid Desktop and Windows 7 with the guest OS Ubuntu 10.04 Server 32-bit.  Both host OSes are 64-bit.''

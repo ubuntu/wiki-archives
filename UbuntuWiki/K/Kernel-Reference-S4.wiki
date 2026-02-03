@@ -1,0 +1,340 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+== Power Management S4 Tricks and Tips ==
+
+{| class="wikitable"
+|-
+| <tablebgcolor="#f1f1ed" tablewidth="40%" tablestyle="margin: 0pt 0pt 1em 1em; float: right; font-size: 0.9em;"style="padding: 0.25em;"><<BR>>
+|}
+
+=== S4 Hibernate/Resume ===
+
+This document will describes ways how hibernation works and steps
+required to investigate hibernation/resume bugs.
+
+S4 is more complex than S3 but generally more reliable.  It's more complex
+than S3 because the kernel has to generate a hibernate image and save/restore
+this to work correctly.  It's more reliably than S3 because the machine resumes 
+from a cleanly booted machine state.  
+
+==== 1. Hibernatation Sleep ====
+
+Hibernation  involves the following steps:
+
+===== Freezing processes =====
+
+The kernel has to successfully freeze kernel threads and user space processes successfully before hibernating. If freezing succeeds you will always find the
+following kernel message:
+
+{{{ 
+Freezing remaining freezable tasks: done
+}}}
+
+Failure to find this message means a freeze failure. This generally is not
+the cause of most hibernate issues and hence there are no known tricks to
+help debug this.
+
+Relevant Sources: kernel/power/process.c
+
+===== Freezing devices =====
+
+The kernel needs to freeze devices. The kernel will emit the following messages
+if the device freezing is successful:
+
+<pre>
+PM: freeze of devices complete
+PM: late freeze of devices complete
+</pre>
+
+There are two phases of device freeze, early and late. [ Need more info ].
+
+Generally if a device freeze fails the usual approach is to put debug into
+the freeze routine to see which device fails to freeze and then debug the
+appropriate device driver.  This however does not generally happen, most
+device drivers seem to behave fairly well nowadays.
+
+Relevant Sources: drivers/base/power/main.c
+
+===== Allocating free space to generate the hibernate image =====
+
+The kernel has to allocate enough memory to generate a hibernate image before
+it can write it to swap.  If this fails, you will NOT see the following string
+in the kernel log:
+
+<pre>
+PM: Allocated * kbytes
+</pre>
+
+where * is some number of bytes allocated for the image size.
+
+There are two things to consider: physical memory to build an image
+before writing to disk and also available swap to do the write.
+
+The kernel generates an memory image of the frozen system before writing
+it to disk.  Any pages in the zone regions that can be freed are freed. I believe this includes pages that are cached but not dirty (i.e. don't need writing back to disk).
+
+Next, each zone is scanned an the number of present pages are totalled up, excluding the "nosave memory" (see later).  You can see the zone info in /proc/zoneinfo, the "present" field has the number of total pages present. The total excludes the "nosave memory" regions - this info can be seen by:
+
+<pre>
+dmesg |grep "PM: Registered nosave memory:"
+</pre>
+
+..this tells you the nosave regions. These are pages that are marked in
+specific regions that do not need saving. These need to be turned into
+page sizes and taken from the "present" field from the zone info to give
+you an idea of how many pages need dumping in the final hibernate image.
+
+However, the kernel calculates all of this in two sweeps, first the
+low-mem pages then the high-mem pages. It's rather complex to say the
+least.
+
+Also, one needs to add in page meta information. This is calculated as:
+number of image pages * 8 and rounded up to the nearest page. In other
+words, for every 1M, we have 256 pages, and hence 2K of meta page info.
+So for a 1GB image, we have 2M of meta data too.
+
+That's the image size. However, one needs to be able to allocate a hunk
+of memory for this image in physical memory before dumping to disk, and
+also have enough page space on swap for this image too.
+
+Instead of getting the calculator out and figuring out how big the swap
+needs to be, one can get a feel for the size by just doing a successful
+syspend and grepping through the output from dmesg and look for: "PM:
+Need to copy". This will tell you how many pages needed to be copied.
+However, this is only sensible for the desktop scenario you just
+hibernated. Some users may overload their system with many apps, in
+which case the hibernation image will be huge, in fact, there may not be
+enough free physical memory to generate an internal image before dumping
+it to swap.
+
+The kernel will report the size of the hibernation image too, which can
+be grepped for. Look for "PM: Hibernation image created".
+
+There may be mileage in shrinking the working set down by forcibly
+dropping pages, e.g.:
+
+<pre>
+sync
+sleep 1
+sync
+echo 1 > /proc/sys/vm/drop_caches
+echo 2 > /proc/sys/vm/drop_caches
+echo 3 > /proc/sys/vm/drop_caches
+</pre>
+
+But this maybe redundant. I've not experimented. And dropping caches is
+painful and if you don't sync it will/may cause data loss.
+
+Relevant Sources: kernel/power/swap.c
+
+===== Saving the hibernate image to swap correctly =====
+
+Once the kernel has generated a hibernate image it has to then write it
+to swap. Unfortantely the kernel is rather stupid, it will first generate 
+an image and then find that there isn't a swap partition, and then bail out, 
+rather than checking first if swap isn't sane.
+
+There are three classes of swap related hibernate issues:
+ 
+* No swap. If the kernel cannot find a swap device it will issue the error:
+
+<pre>
+PM: Cannot find swap device, try swapon -a
+</pre>
+
+* Swap too small.  The general rule is to have a swap partition sized 2 times the amount of physical memory on the machine.  A user may install Ubuntu on a machine an later add more physical RAM to a machine which makes hibernation impossible because the original swap size is now too small to write the hibernation image.  When there is not enough swap one will see the following kernel message:
+
+<pre>
+PM: Not enough free swap
+</pre>
+
+* Failure to write image to swap (hardware write failure). This only happens if one gets physical hardware failures or a device driver fails to write swap to the disc. In which case one generally sees a kernel write error messages.
+
+===== Shutting down =====
+
+This requires the ACPI method _PTS (Prepare To Sleep) and optional method _GTS (Go To Sleep) to work correctly. If a machine cannot shutdown it is generally because _PTS is buggy.  Section 7.3.2 of the version 4.0 describes _PTS in full detail.  _PTS takes a sleep state as an argument and transistions the machine into this state, normally by calling into the BIOS using a SMI. This can go wrong, opr may be incorrectly implemented.  Generally, if _PTS is broken then suspend (S3), hibernate (S4) and shutdown (S5) fail to work.
+
+To check the _PTS method, first extract the ACPI tables using:
+
+<pre>
+sudo acpidump > tables.dat
+sudo acpixtract -a tables.dat
+iasl -d DSDT.dat
+</pre>
+
+..and look for the _PTS method in the DSDT.dsl disassembled source. Ensure it's handling the 1st argument correctly and acting on the state change parameter.  If it looks sane, it's worth then debugging acpi_enter_sleep_state_prep() to see if it the call to acpi_evaluate_object() on _PTS is acting sanely.  One may need to debug the ACPI driver.
+
+Relevant Sources: drivers/acpi/acpica/hwsleep.c, drivers/acpi/sleep.c
+
+==== 2. Hibernation Resume ====
+
+The machine fortunately starts from a clean state, so it's generally less
+error prone that resume from S3 since we are booting from a clean state. However it can fail in the BIOS before we load grub or the kernel resume image can fail too.
+
+The resume from hibernate works as follows:
+
+* Machine boot failure
+* BIOS POST checks and eventually loads grub
+* Grub loads the kernel
+* Kernel detects swap contains a hibernate image
+* Hibernate image is loaded in
+* Kernel jumps into the hibernated image
+* Kernel continues in original kernel executing the hibernate code path, this time it unfreezes the tasks and comes out of S4
+
+Below are some methods to diagnose resume from hibernate:
+
+===== Machine Boot Failure =====
+
+Problems can occur when the BIOS fails to boot correctly and hence cannot load grub or the kernel.  One needs to make verify that the hang occurs in the BIOS and not grub or the kernel. Unfortunately grub boots silently, so one should always ensure that the timeout setting in grub is set to a large non-zero time (e.g. 10 seconds) so one can see grub load. If grub does not load then the issue is most probably with the BIOS.
+
+It has been known for a BIOS to work correctly for most hibernate/resumes, but fail very occasionally. In this scenario it's good to record a video of a correclty and working hibernate/resume and compare it to a video of a failing hibernate resume.  One can sometimes see BIOS messages by single stepping through the video frame by frame - in one bug it was observed that an Option ROM was not emitting a message on a failed boot+hibernate/resume so it was clear that the hang was occurring in the BIOS and not when grub or the kernel was being loaded.
+
+===== Checking kernel boots =====
+
+When debugging any hibernate/resume bug make sure that the kernel is booting with kernel boot parameter: no_console_suspend. 
+
+To see kernel messages (such as panics in early resume), switch to a console using:
+
+<pre>
+sudo chvt 1
+</pre>
+
+and drive the hibernate using either:
+
+<pre>
+sudo pm-hibernate 
+</pre>
+
+or 
+
+<pre>
+sudo fwts s4
+</pre>
+
+===== Failure to load hibernate image =====
+
+If the BIOS is working correctly and the kernel loads, then next source of failure is the hibernate image not loading correctly.  In these cases, I suggest reformatting the swap, making sure /etc/fstab has the correct UUID for the newly formatted swap and then repeating the testing. 
+
+The kernel marks the swap device with a magic header string, either "SWAP-SPACE" or "SWAPSPACE2".  Failure to find these will result in the kernel error message:
+
+<pre>
+PM: Swap header not found!
+</pre>
+
+If the kernel finds a suitable hibernate image in the swap device, you will see the kernel messages:
+
+<pre>
+PM: Loading image data pages (xxx pages) ...
+PM: Image successfully loaded
+</pre>
+
+where xxx is the number of pages in the saved image.
+
+If the image fails to be read, you will see the following kernel error:
+
+<pre>
+PM: Error X resuming
+</pre>
+
+where X is error number, e.g. -ENODATA.
+
+Relevant Sources: kernel/power/swap.c 
+
+===== Weird CPU cache/TLB issues =====
+
+Another failure point is when the kernel loads in the hibernated image and the kernel is not restored correctly.   It has been known for subtle processor caching issues to break the loading of the image.  The kernel may pagesplit 4M/4K pages as it's loading and remapping the resume image.  Caching issues cause weird
+page fault errors and oopsing in bizarre and random places. You may have to run many tens of hibernate/resumes to catch the oops messages and it is worth capturing as many oopses as possible to see if the error occurs at specific locations or on certain page boundaries to help characterise the breakage.
+
+It is also worth checking S4 works correctly multiple times. Use the firmware test suite to run 100+ S4 cycles as follows:
+
+<pre>
+sudo fwts s4 --s4-multiple=100 -p
+</pre>
+
+..and leave this to run for several hours.
+
+Relevant sources: kernel/power/hibernate.c
+
+===== Unfreezing issues =====
+
+After loading in and remapping the hibernate image the boot kernel does some magic. It jumps from the boot kernel into the kernel that was saved in the hibernate image and continues executing the tail end of the hibernate code which is now responsible for unfreezing devices and then unfreezing tasks.
+
+Badly written device drivers may unfreeze incorrectly, however, this generally is not an issue and rarely happens.
+
+Finally, kernel threads and user space processes are unfrozen - again, this rarely goes wrong, and if it does, one needs to insert debug into thaw_tasks() over each thawed process.
+
+A successful unfreeze of tasks will emit the kernel message:
+
+<pre>
+Restarting tasks ... done.
+</pre>
+
+Sources: kernel/power/process.c
+
+==== S4 sanity checks ====
+
+Check that /sys/kernel/debug/tracing/buffer_size_kb is set low. If it is too
+high then the kernel cannot allocate enough memory for the hibernate image. When debugging S4 issues set /sys/kernel/debug/tracing/buffer_size_kb to 1 to ensure that this is not the reason for failed memory allocation issues.
+
+==== S4 debugging test modes ====
+
+There are three modes of tests using the /sys/power/pm_test mechanism:
+
+* "devices" test mode in "platform" mode of hibernation
+* "core" test mode in "platform" mode of hibernation
+* "core test mode in "reboot" mode of hibernation. 
+
+The test modes are as follows:
+ 
+* core: test the freezing of processes, suspending of devices, platform global control methods, the disabling of nonboot CPUs and suspending of platform/system devices 
+* devices: test the freezing of processes and suspending of devices 
+
+It's worth running through these three modes to identify where hibernate breaks using the following commands (as root):
+
+Run device specific test mode:
+
+<pre>
+echo devices > /sys/power/pm_test
+echo platform > /sys/power/disk
+echo disk > /sys/power/state
+dmesg > /tmp/dmesg-devices-platform.txt
+</pre>
+
+Run core hibernate test mode:
+
+<pre>
+echo core > /sys/power/pm_test
+echo platform > /sys/power/disk
+echo disk > /sys/power/state
+dmesg > /tmp/dmesg-core-platform.txt
+</pre>
+
+Run core reboot test mode:
+
+<pre>
+echo core > /sys/power/pm_test
+echo reboot > /sys/power/disk
+echo disk > /sys/power/state
+dmesg > /tmp/dmesg-core-reboot.txt
+</pre>
+
+Kernel documentation: Documentation/power/basic-pm-debugging.txt
+
+==== S3/S4 graphics issues ====
+
+More often than not, video fails to work when resuming which makes debugging unpleasant.  One recommended trick is to install ssh and ssh into the machine over ethernet (or wifi, but this can be less reliable).  If one can get the machine to resume then one can still interact and debug the machine over ssh. 
+
+Alternatively, if ethernet and wifi does not work, one can use a serial/USB dongle and use a serial tty connection to remotely debug the machine after resume.
+
+==== And finally ====
+
+Always have a digital camera handy.  Try to run tests in the console and where necessary take digital photos of any oops messages to capture failure messages.

@@ -1,0 +1,157 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+
+== How to deploy Ubuntu Touch images to the device ==
+
+=== Modes of deployment ===
+
+There are two main ways of deploying Ubuntu Touch build artifacts, the same that are used in the Android world:
+* Device dependent direct flashing (via fastboot and other custom flashers) of .img files (regular or sparse filesystem images)
+* The more generic zip updates via the recovery image. (zip file with manifest describing which file goes where)
+
+Ubuntu Touch uses the boot, recovery and userdata partitions. The system partition that Android uses for the root filesystem is not used as it is usually not large enough.
+
+=== The image types ===
+
+There are several independent build artifacts (images) that make up a running Ubuntu Touch: a boot image, a recovery image, an Ubuntu system image and an Android system image.
+
+Those built daily for the devices officially supported by Ubuntu can be found here
+http://cdimage.ubuntu.com/ubuntu-touch/daily-preinstalled/current/
+
+Except the Ubuntu file system image, all are device dependent as can be seen from the device names (mako, grouper, etc) included in their filenames. Another component of the filenames reveal the ARM calling conventions used by executable inside that image: those built from Ubuntu sources use the armhf ABI, whereas those built from the source Android tree and those shipped in binary format only in the Android image use the armel ABI. As an aside, the mismatch that arises when executables using the two different calling conventions interact across the Ubuntu/Android boundary is solved by the libhybris layer.
+
+==== The boot image ====
+
+Usually called boot.img this is flashed to the boot partition and is given control by the bootloader in ROM.
+This is a device dependent image containing the kernel and the initramfs needed to boot Ubuntu. The initramfs userland bits follow the armhf ABI since it is built from Ubuntu sources. The kernel is ABI agnostic since it does not use floating point functionality. 
+
+Example: trusty-preinstalled-boot-armhf+mako.img
+
+==== The recovery image ====
+
+Optional for running the device but necessary for OTA upgrades and also usually a good first step when porting Android to a device. This is a Clockworkmod Recovery image with Ubuntu patches, so it is built from the Android tree.
+
+Example: trusty-preinstalled-recovery-armel+mako.img
+
+==== The Android system image ====
+
+This is built from the Android source tree and contains only the bare minimum needed for Ubuntu (Android HAL, initramfs, bionic, vendor blobs and daemons). Building Android apps, assets and the Dalvik runtime are disabled among other things.
+
+This image is mounted inside an LXC container in the Ubuntu host filesystem and it contains the Android proprietary drivers and is running the Android helper daemons needed to have proper support for all the hardware peripherals that are not natively supported by Ubuntu and open source drivers. Executables in this image use the armel ABI.
+
+Example: trusty-preinstalled-system-armel+mako.img
+
+trusty-preinstalled-touch-armel+mako.zip has the same content but it is to be deployed via the zip method if you prefer that.
+
+==== The Ubuntu root file system image ====
+
+This is a device independent image containing the Ubuntu Touch userland, the closes equivalent to a regular Ubuntu Desktop filesystem. This gets booted to, and in turn mounts and runs the Android system image inside an LXC container. This is built from the official Ubuntu package archives and by adding a few prebuilt Click packages.
+
+Example:trusty-preinstalled-touch-armhf.zip . Deployed via the zip method.
+
+=== Deploying your own full images ===
+
+This section describes how to flash a combined Ubuntu/Android image to a device for which you have built a boot.img and a system.img out of your Android source tree.
+
+Due to unfortunate naming choices in the past, both the Android system image and the Ubuntu root file system image are named system.img on the final deployed device. The Ubuntu one resides at /userdata/system.img while the Android one found inside the Ubuntu one when loopmounted, at /var/lib/lxc/android/system.img
+
+First we also need the Ubuntu root filesystem that can be downloaded from https://system-image.ubuntu.com/. The Android tree contains the script build/tools/get-tarball-url.py that prints the full URL of the latest full image available. In the following we will refer to the downloaded file as ubuntu-rootfs.tar.xz.
+
+Now we start by allocating a huge sparse file and create an ext2 filesystem on it. Then we loop-mount the new image on directory system. Note that we can make it quite big with little cost, we can shrink it later. As of January 2014 an Ubuntu rootfilesystem takes up about 1.3Gb.
+
+<pre>
+fallocate -l 2G system.img
+mke2fs -F system.img
+mkdir system
+sudo mount -o loop system.img system
+</pre>
+
+The following steps are all run as root using sudo, so all permissions are preserved and new files are created as root.
+We need to extract the Ubuntu root filesystem and drop the Android system image at the right place within it.
+Make sure your Android system.img is a mountable ext4 filesystem and not a sparse one:
+
+https://wiki.ubuntu.com/Touch/Deploying#Convert_to_a_mountable_ext4
+
+<pre>
+sudo tar --numeric-owner -xaf ubuntu-xxxx.tar.xz system
+sudo cp path/to/androidtree/out/target/product/$DEVICE/system.img system/var/lib/lxc/android/system.img
+</pre>
+
+Now is the time to add the device-specific configuration files (if you have any) or do any customisations and changes to the root filesystem. Make sure, they are also created by user root.
+
+Finally unmount and remove the working directory:
+
+<pre>
+sudo umount system
+rmdir system
+</pre>
+
+==== Optional filesystem size changes ====
+
+We can shrink the new 2 GB filesystem to its minimal size.
+<pre>
+e2fsck -yf system.img
+resize2fs -M system.img
+e2fsck -yf system.img
+</pre>
+So far we have reduced the size of the filesystem, but not the size of the image file itself.
+
+Run dumpe2fs and look for the values "Block size" and "Block count". Their product is the minimum image SIZE in bytes, we need for truncating the image file.
+
+<pre>
+dumpe2fs system.img | less
+truncate -s SIZE system.img
+</pre>
+
+The system.img is now fine for read-only mounting, but leaves no headroom for creating or editing files. If we want to mount the system image writable in "developer mode", we should add some free space to it, say 500 MB:
+
+<pre>
+truncate -s +500M system.img
+resize2fs system.img
+e2fsck -yf system.img
+</pre>
+
+You may notice these shrinking and growing operations more or less cancel out, so unless really necessary due to space constraints, leaving the image at 2.0G is recommended.
+
+==== Flashing ====
+Now you can flash the boot.img mentioned above to the boot partition and and our new Ubuntu system.img to the system.img file on the userdata partition. Then reboot, and Ubuntu Touch should come up fine.
+
+=== Deploying only the Android image ===
+
+When you have an existing working Ubuntu rootfilesystem (such as downloaded from the Ubuntu servers) flashed to the device, you may want to only update the Android image within it.
+This can be done by booting into recovery mode, loopmounting the Ubuntu system.img found at /data/system.img and copying the Android system.img at the right path at /var/lib/lxc/android/system.img
+
+==== Convert to a mountable ext4 ====
+
+First make sure the image is a proper ext4 filesysitem. The build creates a sparse ext4 image that is suitable for fastboot downloads but not understood by regular mount otherwise. Either install android-tools-fsutils or make sure androidtree/out/host/linux-x86/bin is in your PATH in order to run simg2img.
+
+<pre>
+ IMG=path/to/androidtree/out/target/product/$DEVICE/system.img
+file $IMG | grep ": data" >/dev/null && simg2img $IMG $IMG.tmp && resize2fs -M $IMG.tmp && mv $IMG.tmp $IMG
+</pre>
+
+==== Deploy ====
+
+With the device in recovery mode do
+
+<pre>
+adb shell mkdir /a
+adb shell mount /data/system.img /a
+adb push $IMG /a/var/lib/lxc/android/system.img
+adb reboot
+</pre>
+
+Now the new Android system.img should have replaced the previous one. With Ubuntu booted you can check to see whether it is advertised as one you built locally.
+
+<pre>
+adb shell grep build.version.incremental system/build.prop
+</pre>

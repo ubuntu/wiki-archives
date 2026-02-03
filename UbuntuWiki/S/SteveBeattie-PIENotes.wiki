@@ -1,0 +1,264 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== Notes about enabling PIE by default in gcc for amd64 ==
+
+The following is my notes about landing PIE in 16.04.
+
+In the gcc-5, there are two additional patches added to enable this, the first is applying the patch H.J. Lu landed in gcc trunk (https://gcc.gnu.org/viewcvs/gcc?view=revision&revision=223796), which allows gcc to be configured with <code>-pie</code> on by default (and adds the disabling option <code>-no-pie</code>). The second patch changes the arguments passed to the linker (ld) to enable <code>-z now</code> (aka Immediate Binding) when <code>-pie</code> is enabled on amd64.
+
+Patches are available in https://code.launchpad.net/~sbeattie/+junk/pie-amd64-patches .
+
+=== Build Testing ===
+
+A first round of building testing was done in the <nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64 | gcc-pie-amd64 PPA]]</nowiki>, attempting to build most of main that has architecture specific components (i.e. build architecture 'all' or 'amd64'). The vast majority of packages succeeded to build.
+
+(I also enabled the ppa in a xenial desktop VM and basic testing showed no problems.)
+
+I'll capture the failures I see and the solutions to them
+
+==== PIE+ASLR issue for kernels in vivid (3.19) and older ====
+
+In build testing, one of the issues discovered is an (as yet unknown) issue with the kernel's handling of PIE+aslr binaries for kernels older than 4.2 (i.e. vivid and older). This manifests when bash is built with pie enabled and then is used to build some other packages; frequently an error like:
+
+<pre>
+   bash: xmalloc: .././locale.c:81: cannot allocate 2 bytes (0 bytes allocated)
+</pre>
+
+is seen in the build logs. Unfortuantely, the buildds are running a mix of 3.13 and 3.19 kernels. Building with bash reverted to non-pie works around the issue. I verified that it's a kernel issue by reproducing the issue locally in an sbuild with bash+pie on a host running trusty, reproducing the build failure and then rebooting into the linux-lts-wily kernel, redoing the build, and seeing it succeed.
+
+This issue affects the following package build failures (from below)
+
+* aalib
+* cdebconf-terminal
+* cloog-ppl
+* cpio
+* cwidget
+* dbus-c++
+* ecryptfs-utils
+* elfutils
+* evolution-data-server
+* firefox
+* git
+* glade
+* libmnl
+* p11-kit
+* shadow
+* util-linux
+
+This has been filed as LP: #Bug:1518483
+
+A workaround that I'm testing that at least succeeded for cpio is rebuild bash with pie disabled, and then rebuild the failing package. But it leaves the possibility that other build programs may trip over it in perhaps less obvious ways. 
+
+==== Incompatible relocation R_X86_64_32 ====
+
+* camlp5
+* findlib
+* netcfg
+
+These are due to the static libraries they're linking against (/usr/lib/ocaml/libcamlrun.a for campl5 and findlib, /usr/lib/gcc/x86_64-linux-gnu/5/../../../x86_64-linux-gnu/libcheck.a for netcfg) not being built in PIC mode. To resolve, build the package that provides the static library with <code>-pie</code> first, then rebuild the failing package.
+
+==== incremental linking via ld -r (incompatible with -pie) ====
+
+Often shows up with go modules and for other oddballs.
+
+* grub2
+* lxd
+* qemu
+
+==== miscellaneous test case failures and other oddities ====
+
+A few packages have tests that check that they either identify a binary executable properly, or verify that the did some operation on an executable that does not mess it up. These will need to be patched:
+
+* cmake (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8321434 | amd64]]</nowiki>)
+** looks like a test case fails that tries to ensure that it bundled an executable properly
+** Upstream patch: https://cmake.org/gitweb?p=cmake.git;a=commit;h=fe558718b30da989db8b880374012a0e580574e6
+* qtbase-opensource-src (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8315122 | amd64]]</nowiki>)
+** Fails in mimetype test because it's looking for an executable type, but the pie binaries look like shared libraries
+
+Hardening-wrapper needs to be taught about -pie and -no-pie
+
+** hardening-wrapper (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8317371 | amd64]]</nowiki>)
+** fails in no-hardening testcase, needs to know about pie by default and no-pie
+
+Others have random failures due to <code>-pie</code> and likely need a patch to disable it.
+
+* emacs24
+** builds fine with -no-pie; <nowiki>[[https://lists.gnu.org/archive/html/bug-gnu-emacs/2014-10/msg00896.html | known issue with emacs ]]</nowiki>
+* linux
+* --(erlang)-- (it's a documentation build failure)
+** FTBFS without <code>-pie</code> compiler and also with <code>--pie</code> but <code>--no-pie</code> passed to it
+** fop fails when building a piece of documentation with a java traceback of <code>Exception in thread "main" java.lang.NoSuchMethodError: org.apache.xmlgraphics.xmp.Metadata.mergeInto(Lorg/apache/xmlgraphics/xmp/Metadata;)V</code>
+** Could be the same issue as https://bugzilla.redhat.com/show_bug.cgi?id=1194369 ; may need to merge newer fop for erlang build (but not related to <code>-pie</code>
+* golang-race-detector-runtime (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8320885 | amd64]]</nowiki>)
+** <code>==5011==ERROR: ThreadSanitizer failed to allocate 0x4000 (16384) bytes at address 1fc448bf40000 (errno: 12)</code>
+** not sure why this is happening, but disabling <code>-pie</code> (and making compilation of the test program honor it when it's set) works around it. Need to test with the package to confirm it's not broken afterward.
+* --(keyutils)-- (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8311124 | amd64]]</nowiki>)
+** unknown test failure (endianness test issue?)
+** new sync from debian addressed the issue
+
+==== raw list of build failures (w/arches) ====
+
+* checkbox (both)
+** non-pie related testcase failures
+* click (both)
+** non-pie related testcase failures
+* cmake (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8321434 | amd64]]</nowiki>)
+** lookslike a test case fails that tries to ensure that it bundled an executable properly
+* corosync (i386)
+** <code>/usr/bin/ld.bfd.real: BFD (GNU Binutils for Ubuntu) 2.25.51.20151113 assertion fail ../../bfd/elf32-i386.c:5297</code> o.0
+* emacs24 (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8316260 | amd64]]</nowiki>)
+** unknown problem with pie (fails with wily build host, too)
+** rebuilt okay with <code>-no-pie</code>
+* erlang (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8322516 | amd64]]</nowiki>)
+** unknown error occurs in documentation build
+* fcitx-qt5 (both)
+** <code>dpkg-gensymbols</code> failure (both arches)
+* golang (both)
+** https://github.com/golang/go/issues/13114
+* golang-race-detector-runtime (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8320885 | amd64]]</nowiki>)
+** <code>==5011==ERROR: ThreadSanitizer failed to allocate 0x4000 (16384) bytes at address 1fc448bf40000 (errno: 12)</code>
+* gparted (both)
+** <code>../include/Win_GParted.h:28:31: fatal error: sigc++/class_slot.h: No such file or directory</code>
+* grantlee (both)
+** <code>dpkg-gensymbols</code> failure
+* grep (i386)
+** non-pie testcase failure
+* grub2 (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8323689 | amd64]]</nowiki>)
+** <code>/usr/bin/ld: -r and -pie may not be used together</code>
+* hardening-wrapper (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8317371 | amd64]]</nowiki>)
+** fails in no-hardening testcase, needs to know about pie by default and no-pie
+* ibus (both)
+** <code>SyntaxError: invalid syntax Makefile:765: recipe for target 'org.freedesktop.ibus.gschema.xml.in' failed</code>
+* keyutils (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8311124 | amd64]]</nowiki>)
+** unknown test failure (endianness test issue?)
+* libcmis (both)
+** depwait on a specific lib version <code>Missing dependencies: libcppunit-dev (= 1.13.2-2.1) </code>
+* libprelude (both)
+** <code>perl/libpreludecpp-perl.i:1: Error: Unknown SWIG preprocessor directive: Exception (if this is a block of target language code, delimit it with %{ and %}) </code>
+* libreoffice (both)
+* libxdmcp (both)
+** <code>dh_install: libxdmcp-dev missing files (usr/share/doc/libXdmcp/*.txt), aborting</code>
+* libxfont (both)
+** <code>dh_install: libxfont-dev missing files (../../build-main/doc/*.txt), aborting</code>
+* libxi (both)
+** <code>dh_install: libxi-dev missing files (usr/share/doc/libXi/*.txt), aborting</code>
+* lxd (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8320771 | amd64]]</nowiki>)
+** <code>/usr/bin/ld: -r and -pie may not be used together</code> during go module build
+* phonon-backend-gstreamer (both)
+** cmake error
+* procps (both)
+** <code>Running ./pmap.test/pmap.exp ... FAIL: pmap X with unreachable process FAIL: pmap XX with unreachable process</code>
+* qemu (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8321367 | amd64]]</nowiki>)
+** kernel aslr issue
+** with non-pie bash, build gets farther, but hits <code>/usr/bin/ld: -r and -pie may not be used together</code> issue
+* qtbase-opensource-src (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8315122 | amd64]]</nowiki>)
+** Fails in mimetype test because it's looking for an executable type, but the pie binaries look like shared libraries
+* qtsvg-opensource-src (both)
+** <code>dpkg-gensymbols: error: thunk is not a valid version</code>
+* sendmail (both)
+** <code>*** debian/control was updated, aborting, please restart your build ***</code>
+* shim (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8312005 | amd64]]</nowiki>)
+** <code>/usr/include/efi/x86_64/efibind.h:86:24: fatal error: stdint.h: No such file or directory</code> ?
+* sosreport (both)
+** non-pie testcase failures
+* subversion (both)
+** unknown SWIG preprocess directives
+* syslinux (both)
+** <code>objcopy -O binary -S ldlinux.elf ldlinux.raw</code> fails on both aches
+* ubuntu-app-launch (both)
+** deprecated api warning with -Werror
+* ubuntu-drivers-common (both)
+** <code>test_system_device_drivers_detect_plugins</code> test fail
+* unity (i386)
+** still FTBFS after cmake dep is addressed
+* whois (both)
+** <code>Invalid version number in debian/changelog</code>
+
+===== build successful after static lib dependency was rebuilt with -pie (to get -fPIC) =====
+
+* camlp5 (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8319830 | amd64]]</nowiki>)
+** <code>/usr/bin/ld: /usr/lib/ocaml/libasmrun.a(roots.o): relocation R_X86_64_32 against `caml_frametable' can not be used when making a shared object; recompile with -fPIC</code>
+** build succeeded after ocaml was rebuilt with -pie
+* findlib (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8319337 | amd64]]</nowiki>)
+** <code>/usr/bin/ld: /usr/lib/ocaml/libcamlrun.a(stacks.o): relocation R_X86_64_32 against `.rodata.str1.8' can not be used when making a shared object; recompile with -fPIC</code>
+** build succeeded after ocaml was rebuilt with -pie
+* netcfg (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8318560 | amd64]]</nowiki>)
+** <code>/usr/bin/ld: /usr/lib/gcc/x86_64-linux-gnu/5/../../../x86_64-linux-gnu/libcheck.a(check.o): relocation R_X86_64_32 against `.rodata.str1.1' can not be used when making a shared object; recompile with -fPIC</code>
+** not sure what package build fixed this, truthfully
+
+===== kernel aslr failures, worked around by building with non-pie bash =====
+
+* aalib (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8318357 | amd64]]</nowiki>)
+* cdebconf-terminal (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8318255 | amd64]]</nowiki>))
+* cloog-ppl (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8320817 | amd64]]</nowiki>)
+* cpio(amd64)
+* cwidget (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8319269 | amd64]]</nowiki>)
+* dbus-c++ (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8319031 | amd64]]</nowiki>
+* ecryptfs-utils (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8309400 | amd64]]</nowiki>)
+* elfutils (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8321377 | amd64]]</nowiki>)
+* evolution-data-server (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8321188 | amd64]]</nowiki>)
+* firefox (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8317569 | amd64]]</nowiki>)
+* git (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8309416 | amd64]]</nowiki>)
+* glade (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8321016 | amd64]]</nowiki>)
+* gnome-desktop3 (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8320598 | amd64]]</nowiki>)
+* gnome-vfs (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8320610 | amd64]]</nowiki>)
+* graphviz (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8321884 | amd64]]</nowiki>)
+* gtk+2.0 (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8321464 | amd64]]</nowiki>)
+* gtkmm2.4 (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8320983 | amd64]]</nowiki>)
+* gtkspell (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8318419 | amd64]]</nowiki>)
+* icu (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8321877 | amd64]]</nowiki>)
+* indent (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8318952 | amd64]]</nowiki>)
+* jack-audio-connection-kit (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8317844 | amd64]]</nowiki>)
+* libbit-vector-perl (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8317872 | amd64]]</nowiki>)
+* libhybris (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8319520 | amd64]]</nowiki>)
+* liblangtag (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8319261 | amd64]]</nowiki>)
+* libmnl (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8311130 | amd64]]</nowiki>)
+* libreoffice
+* librevenge (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8319253 | amd64]]</nowiki>)
+* libunwind (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8320651 | amd64]]</nowiki>)
+* libvigraimpex
+
+* libxml-libxml-perl (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8318426 | amd64]]</nowiki>)
+* mono (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8322492 | amd64]]</nowiki>)
+* nmap (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8321585 | amd64]]</nowiki>)
+* openipmi (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8320717 | amd64]]</nowiki>)
+* p11-kit (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8308996 | amd64]]</nowiki>)
+* pidgin (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8320947 | amd64]]</nowiki>)
+* python-cryptography (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8318313 | amd64]]</nowiki>)
+* qtgraphicaleffects-opensource-src (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8321596 | amd64]]</nowiki>)
+* qtsensors-opensource-src (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8320715 | amd64]]</nowiki>)
+* rpm (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8321414 | amd64]]</nowiki>)
+* shadow (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8308281 | amd64]]</nowiki>)
+* swedish (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8317810 | amd64]]</nowiki>)
+* systemtap (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8321058 | amd64]]</nowiki>)
+* util-linux (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8323813 | amd64]]</nowiki>)
+* xfsprogs (<nowiki>[[https://launchpad.net/~sbeattie/+archive/ubuntu/gcc-pie-amd64/+build/8320607 | amd64]]</nowiki>)
+
+===== i386 failures due to amd64 FTBFS =====
+
+Some i386 builds failed because they had a dependency on an arch all package built from a source that had FTBFS on amd64; after fixing the amd64 failure, rebuilding the i386 package succeeded.
+
+====== cmake ======
+
+* kde4libs (i386)
+* libssh (i386)
+* libvigraimpex
+* mir (i386, depends on arch all package from cmake)
+* oxide-qt (i386, depends on arch all package from cmake)
+* unity (i386, depends on all arch from cmake)
+
+====== gnome-desktop3 ======
+* evolution (i386, lib-gnome-desktop3-dev dependency)
+* gnome-control-center (i386, dependency issue on libgnome-desktop-3-dev) 
+* gnome-settings-daemon (i386)
+* nautilus (i386, depends on libgnome-desktop-3-dev)
+* telepathy-glib (i386)
+* totem (i386)

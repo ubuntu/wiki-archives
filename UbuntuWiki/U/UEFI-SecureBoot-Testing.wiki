@@ -1,0 +1,880 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== Testing Secure Boot ==
+
+Much of this is based on the UEFI work:
+* https://wiki.ubuntu.com/UEFI
+* https://wiki.ubuntu.com/UEFI/EDK2
+* https://wiki.ubuntu.com/UEFI/OVMF
+* https://wiki.ubuntu.com/UEFI/SecureBoot
+
+Testing infrastructure uses the security team's <nowiki>[[SecurityTeam-TestingEnvironment|TestingEnvironment]]</nowiki>.
+
+=== Introduction ===
+In brief, Secure Boot works by placing the root of trust in firmware. While other implementations are possible, in practice the chain of trust is achieved via x509 certificates. A root CA is embedded in firmware such that it can then validate the signed bootloader, the signed bootloader can then validate the signed kernel or signed 2nd stage boot loader, and so on. Various key databases are used to provide flexibility and maintain strong security:
+* DB (aka, 'signature database'): contains the trusted keys used for authenticating any applications or drivers executed in the UEFI environment
+* DBX (aka, 'forbidden signature database' or 'signature database blacklist'): contains a set of explicitly untrusted keys and binary hashes. Any application or driver signed by these keys or matching these hashes will be blocked from execution.
+* KEK (key exchange keys database): contains the set of keys trusted for updating DB and DBX
+* PK (platform key - while PK is often referred to simply as a single public key, it could be implemented as a database). Only updates signed with PK can update the KEK database. 
+
+The suggested implementation by UEFI:
+* OEM key in PK
+* OS vendor keys in KEK and DB. OEM may also have a key in KEK and DB
+
+Systems shipping with Windows 8 will typically use the following:
+* OEM key in PK
+* 'Microsoft Corporation KEK CA' key in KEK
+* 'Microsoft Windows Production PCA' and 'Microsoft Corporation UEFI CA' keys in DB (note, the 'Microsoft Corporation UEFI CA' is not guaranteed to be present in DB-- while recommended, this is EFI firmware vendor/OEM dependent)
+
+In order to boot on the widest range of systems, Ubuntu uses the following chain of trust:
+# Microsoft signs Canonical's 'shim' 1st stage bootloader with their 'Microsoft Corporation UEFI CA'. When the system boots and Secure Boot is enabled, firmware verifies that this 1st stage bootloader (from the 'shim-signed' package) is signed with a key in DB (in this case 'Microsoft Corporation UEFI CA')
+# The second stage bootloader (grub-efi-amd64-signed) is signed with Canonical's 'Canonical Ltd. Secure Boot Signing' key. The shim 1st stage bootloader verifies that the 2nd stage grub2 bootloader is properly signed.
+# The 2nd stage grub2 bootloader boots an Ubuntu kernel (as of 2012/11, if the kernel (linux-signed) is signed with the 'Canonical Ltd. Secure Boot Signing' key, then grub2 will boot the kernel which will in turn apply quirks and call !ExitBootServices. If the kernel is unsigned, grub2 will call !ExitBootServices before booting the unsigned kernel)
+# If signed kernel modules are supported, the signed kernel will verify them during kernel boot
+
+Since the above gives the ability to control boot to the OEM and Microsoft, users may want to:
+* install their own key in PK, KEK and DB, then re-sign grub2 and use it without shim (and optionally sign the kernel with their own key)
+* install their own key in PK and KEK, Canonical's 'Canonical Ltd. Master Certificate Authority' key in KEK and DB and Microsoft's keys in KEK (for updates to DBX). This gives some control of boot to Canonical, but allows for the grub-efi-amd64-signed and linux-signed packages and any DB/DBX updates from Microsoft and Canonical to work without re-signing.
+* install their own key in shim's own keyring, when testing only Canonical- or user-signed grub2 and/or kernel and modules.
+
+When testing, a minimum of shim boot, Canonical-signed grub2 boot and user-signed grub2 boot should be covered.
+
+'''IMPORTANT:''' Canonical's Secure Boot implementation in Ubuntu is primarily about hardware-enablement and this page focuses on how to test Secure Boot for common hardware-enablement configurations, not for enabling Secure Boot to harden your system. If you want to use Secure Boot as a security mechanism, an appropriate solution would be to use your own keys (optionally enrolling additional keys, see above) and update the bootloader to prohibit booting an unsigned kernel. Ubuntu 16.04 LTS is planned to enable enforcing secure boot (see <nowiki>[[https://bugs.launchpad.net/bugs/1401532|LP: #1401532]]</nowiki> for details).
+
+=== VM installation and preparation ===
+ 0. Obtain an OVMF image capable of performing Secure Boot by either:
+** Install the 'ovmf' package
+** <nowiki>[[https://wiki.ubuntu.com/UEFI/EDK2|Compiling it yourself]]</nowiki>
+** <nowiki>[[http://people.canonical.com/~jamie/ovmf/|Downloading a precompiled bios.bin]]</nowiki>
+# Verify the symlink from /usr/share/ovmf/OVMF.fd to /usr/share/qemu/OVMF.fd and use a relative path to OVMF.fd for now (see <nowiki>[[https://bugs.launchpad.net/ubuntu/+source/virt-manager/+bug/1074207|LP: #1074207]]</nowiki>)
+# Install Ubuntu using the Secure Boot capable UEFI OVMF firmware (downloaded as bios.bin):<pre>
+$ uvt new --loader=OVMF.fd --with-ovmf-uefi xenial amd64 sb
+</pre>
+ This can also be performed with a virt-install command:<pre>
+$ virt-install --connect=qemu:///system --name=sb-xenial-amd64 --arch=x86_64 --ram=2048 \
+--disk=path=<path to>/sb-xenial-amd64.qcow2,size=8,format=qcow2,bus=ide,sparse=True \
+--virt-type=kvm --accelerate --hvm --cdrom=<path to>/xenial-desktop-amd64.iso \
+--os-type=linux --os-variant=generic26 --graphics=vnc --network=network=default,model=virtio \
+--video=cirrus --noreboot --boot=loader=OVMF.fd
+</pre>
+
+Both of the above commands creates the `sb-xenial-amd64` machine. Note that when using `uvt` there is a limitation in that a preseeded ISO cannot be used. `uvt` will skip the postinstall phase and you will have to perform the install manually. You will know that you are using the OVMF EFI image if the machine comes up with 'Try Ubuntu' (ie, not the graphical install). Using the manual partitioner to create a 250M EFI partition as the first partition and then setting up a '/' and swap partition is known to work.
+
+Caveats:
+* The installer doesn't reboot after install without pressing 'Enter'
+* On Ubuntu releases earlier than 16.04: on reboot and all boots, you must go into the efi config screen to boot from a file off the disk. Eg, from the main EFI configure screen:<pre>
+ - Boot Maintenance Manager ->
+   - Boot From File ->
+     - NO VOLUME LABEL,[!PciRoot(0x0)/Pci(0x1,0x1)/Ata(Primary,Master,0x0)/HD(1,GPT,...)] ->
+       - <EFI> ->
+         - <ubuntu> ->
+           - grubx64.efi
+</pre>
+ This behavior can be changed by doing booting into the VM and then copying the appropriate files to /boot/efi/EFI/BOOT/BOOTX64.EFI. Eg, for just grub2, copy /boot/efi/EFI/ubuntu/grubx64.efi to /boot/efi/EFI/BOOT/BOOTX64.EFI. For shim, copy /boot/efi/EFI/ubuntu/shimx64.efi to /boot/efi/EFI/BOOT/BOOTX64.EFI and then copy /boot/efi/EFI/ubuntu/grubx64.efi and grub.cfg into /boot/efi/EFI/BOOT. '''Note''': this document assumes that you are using the 'Boot From File' method.
+* Because the postinstall isn't run via `uvt`, after install, you may want to:
+** `sudo apt-get install openssh-server screen vim gnome-panel`
+** Use `ssh-copy-id` to copy your key over
+** Optionally update sources.list for your mirror
+* When using `uvt`, the intial pristine snapshot is not created. After setting up, use `uvt snapshot sb-quantal-amd64`
+* Because the firmware needs to be able to interact with the hardware and is limited in what it supports, the following are used when using `uvt`:
+** IDE disks (ie, can't use virtio)
+** cirrus video driver
+ Currently the virtio network driver is used-- if you want to try out PXE booting via EFI, this will likely also need to change.
+
+See https://wiki.ubuntu.com/UEFI/OVMF for other ways of using the OVMF file.
+
+==== EFI Shell ====
+Sometimes it might be desirable to go into the EFI shell. This can be done by adjusting the Boot Order in Boot options. Ie:<pre>
+ - Boot Maintenance Manager ->
+   - Boot Options ->
+     - Change Boot Order ->
+       - Highlight the list, press Enter, go to 'EFI Internal Shell' then press
+         '+' until it is above 'EFI Hard Drive'. Press Enter, then select
+         Commit Changes and Exit
+</pre>
+
+At this point, press 'Esc' until you get to the main EFI configuration menu and click 'Continue'. This will boot the shell. Use 'exit' to return to the EFI Configuration menu. Useful commands:
+* `Shell> ls fs0:\` (directory listing corresponding to /boot/efi)
+* `Shell> ls fs0:\EFI\ubuntu\` (directory listing of where our bootloaders are)
+* `Shell> fs0:\EFI\ubuntu\grubx64.efi` (launch grub2 bootloader)
+* `Shell> fs0:\EFI\ubuntu\shimx64.efi` (launch shim bootloader)
+* `Shell> fs0:\EFI\ubuntu\efilinux.efi -f 0:\EFI\ubuntu\vmlinuz initrd=0:\EFI\ubuntu\initrd root=/dev/sda3 quiet splash` (launch eflinux bootloader)
+
+'''Note''': after booting the system via the EFI shell as above, the OVMF firmware will default to EFI Hard Drive and not allow access to the shell. You will have to do a cold reboot to enter the shell again.
+
+==== Maintenance ====
+`uvt update` does not work because the boot process requires manual intervention. As such, keeping the VM up to date consists of:
+# <code>$ sudo start [-rf] <vmname></code>
+# Selecting the image to boot
+# <code>$ uvt cmd -r -p <vmprefix> 'apt-get update && apt-get -y --force-yes dist-upgrade && apt-get autoremove --purge'</code>
+# <code>$ uvt stop <vmname></code>
+# <code>$ uvt snapshot <vmname></code>
+
+=== Manual Secure Boot VM setup ===
+
+=== Assisted Secure Boot VM setup ===
+
+==== Bootloader signed with user key ====
+This emulates a configuration where a user or enterprise is using its own keys in PK, KEK and DB and follows the procedures in http://jk.ozlabs.org/docs/sbkeysync-maintaing-uefi-key-databases/. This configuration allows the greatest flexibility in testing as we control PK and KEK, so we can update all aspects of Secure Boot as needed. The key database is configured with (each entry in firmware has the same GUID):
+* User key in PK
+* User key in KEK
+* User key in DB
+
+Steps to configure:
+# Boot an OVMF virtual UEFI machine (see above)
+# Install some packages:<pre>
+$ sudo apt-get install sbsigntool openssl grub-efi-amd64-signed fwts linux-signed-generic
+</pre>
+ 0. Install the signed bootloader:<pre>
+$ sudo grub-install --uefi-secure-boot
+</pre>
+# Reboot the VM and 'Boot from File' as above (continue to use 'grubx64.efi')
+# Download <nowiki>[[https://git.launchpad.net/qa-regression-testing/tree/notes_testing/secure-boot|sb-setup and keys/]]</nowiki> from https://git.launchpad.net/qa-regression-testing/tree/notes_testing/secure-boot/ to `/tmp/sb-setup` and `/tmp/keys`
+# Enroll the user keys (output may vary):<pre>
+$ /tmp/sb-setup enroll
+Creating keystore...
+  mkdir '/etc/secureboot/keys'
+  mkdir '/etc/secureboot/keys/PK'
+  mkdir '/etc/secureboot/keys/KEK'
+  mkdir '/etc/secureboot/keys/db'
+  mkdir '/etc/secureboot/keys/dbx'
+done
+
+Creating keys... done
+
+Generating key updates for PK...
+  using GUID=1d5bd2fb-f597-4315-b3bc-dfe84b594ce7
+  creating EFI_SIGNATURE_LIST (test-cert.der.siglist)...
+  creating signed update (test-cert.der.siglist.PK.signed)...
+done
+Generating key updates for KEK...
+  using GUID=1d5bd2fb-f597-4315-b3bc-dfe84b594ce7
+  creating EFI_SIGNATURE_LIST (test-cert.der.siglist)...
+  creating signed update (test-cert.der.siglist.KEK.signed)...
+done
+Generating key updates for db...
+  using GUID=1d5bd2fb-f597-4315-b3bc-dfe84b594ce7
+  creating EFI_SIGNATURE_LIST (test-cert.der.siglist)...
+  creating signed update (test-cert.der.siglist.db.signed)...
+done
+Initializing keystore...
+  adding to /etc/secureboot/keys/PK/
+  adding to /etc/secureboot/keys/KEK/
+  adding to /etc/secureboot/keys/db/
+done
+
+Filesystem keystore:
+  /etc/secureboot/keys/db/test-cert.der.siglist.db.signed [2116 bytes]
+  /etc/secureboot/keys/KEK/test-cert.der.siglist.KEK.signed [2116 bytes]
+  /etc/secureboot/keys/PK/test-cert.der.siglist.PK.signed [2116 bytes]
+firmware keys:
+  PK:
+  KEK:
+  db:
+  dbx:
+filesystem keys:
+  PK:
+    /CN=test-key
+     from /etc/secureboot/keys/PK/test-cert.der.siglist.PK.signed
+  KEK:
+    /CN=test-key
+     from /etc/secureboot/keys/KEK/test-cert.der.siglist.KEK.signed
+  db:
+    /CN=test-key
+     from /etc/secureboot/keys/db/test-cert.der.siglist.db.signed
+  dbx:
+New keys in filesystem:
+ /etc/secureboot/keys/db/test-cert.der.siglist.db.signed
+ /etc/secureboot/keys/KEK/test-cert.der.siglist.KEK.signed
+ /etc/secureboot/keys/PK/test-cert.der.siglist.PK.signed
+Commit to keystore? (y|N) y
+Filesystem keystore:
+  /etc/secureboot/keys/db/test-cert.der.siglist.db.signed [2116 bytes]
+  /etc/secureboot/keys/KEK/test-cert.der.siglist.KEK.signed [2116 bytes]
+  /etc/secureboot/keys/PK/test-cert.der.siglist.PK.signed [2116 bytes]
+firmware keys:
+  PK:
+  KEK:
+  db:
+  dbx:
+filesystem keys:
+  PK:
+    /CN=test-key
+     from /etc/secureboot/keys/PK/test-cert.der.siglist.PK.signed
+  KEK:
+    /CN=test-key
+     from /etc/secureboot/keys/KEK/test-cert.der.siglist.KEK.signed
+  db:
+    /CN=test-key
+     from /etc/secureboot/keys/db/test-cert.der.siglist.db.signed
+  dbx:
+New keys in filesystem:
+ /etc/secureboot/keys/db/test-cert.der.siglist.db.signed
+ /etc/secureboot/keys/KEK/test-cert.der.siglist.KEK.signed
+ /etc/secureboot/keys/PK/test-cert.der.siglist.PK.signed
+Inserting key update /etc/secureboot/keys/db/test-cert.der.siglist.db.signed into db
+Inserting key update /etc/secureboot/keys/KEK/test-cert.der.siglist.KEK.signed into KEK
+Inserting key update /etc/secureboot/keys/PK/test-cert.der.siglist.PK.signed into PK
+Signing '/boot/efi/EFI/ubuntu/grubx64.efi'
+warning: overwriting existing signature
+</pre>
+ 0. Reboot and verify Secure Boot is enabled:<pre>
+ - Device Manager ->
+   - Secure Boot Configuration ->
+     - Verify 'Attempt Secure Boot' is selected and 'Secure Boot Mode' is in
+       'Standard Mode' ('Custom Mode' is also ok)
+     - Change 'Secure Boot Mode' to 'Custom Mode' by highlighting 'Standard
+       Mode' and pressing 'Enter'
+     - Select Custom Boot Options ->
+       - PK Options ->
+         - Verify 'Enroll PK' is grayed out. Delete PK should have '[ ]' (or
+           possibly a GUID).
+         - Press Esc
+       - KEK Options ->
+         - Delete KEK ->
+           - Verify GUID from sb-setup is listed
+           - Press 'Esc', twice
+       - DB Options
+         - Delete signature ->
+           - Verify GUID from sb-setup is listed
+           - Press 'Esc', twice
+       - DBX Options
+         - Delete signature ->
+           - Verify no GUIDs are listed
+           - Press 'Esc', twice
+</pre>
+# Press 'Esc' until at the main EFI configure screen, then 'Boot from File' normally (notice now there is a grubx64.efi.bak listed-- this is the grubx64.efi as installed by 'sudo grub-install --uefi-secure-boot'. Ie, the one signed with Canonical's key)
+# Verify the machine booted with Secure Boot (note, can also use `sbsigdb` from newer versions of sbsigntool if it is available):<pre>
+$ sudo fwts uefidump - | grep Secure
+Name: SecureBoot.
+  Value: 0x01 (Secure Boot Mode On).
+</pre>
+
+In the above, a CA is setup in /etc/secureboot/key-material (private key: test-key.rsa, public pem: test-cert.pem, public der: test-cert.der). A keystore is created in /etc/secureboot/keys/ and signed updates (using the keys in /etc/secureboot/key-material) are created for PK, KEK and DB.
+
+==== Shim bootloader signed with Microsoft key ====
+This is the expected configuration for new machines with default hardware and has Microsoft keys in KEK and DB (user key still in PK and KEK). The key database configuration is with (user key in PK and KEK has the same GUID, each Microsoft key has a different GUID):
+* User key in PK
+* User key and 'Microsoft Corporation KEK CA' key in KEK
+* 'Microsoft Corporation UEFI CA' key and 'Microsoft Windows Production PCA' key in DB
+
+Steps to configure:
+# Boot an OVMF virtual UEFI machine (see above)
+# Install some packages:<pre>
+$ sudo apt-get install sbsigntool openssl grub-efi-amd64-signed fwts shim-signed linux-signed-generic
+</pre>
+ 0. Install the signed bootloader:<pre>
+$ sudo grub-install --uefi-secure-boot
+</pre>
+# Reboot the VM and 'Boot from File' as above, except choose 'shimx64.efi' instead of 'grubx64.efi'
+# Download <nowiki>[[https://git.launchpad.net/qa-regression-testing/tree/notes_testing/secure-boot|sb-setup and keys/]]</nowiki> from https://git.launchpad.net/qa-regression-testing/tree/notes_testing/secure-boot/ to `/tmp/sb-setup` and `/tmp/keys`
+# Enroll the keys (output may vary):<pre>
+$ /tmp/sb-setup enroll microsoft
+Creating keystore...
+  mkdir '/etc/secureboot/keys'
+  mkdir '/etc/secureboot/keys/PK'
+  mkdir '/etc/secureboot/keys/KEK'
+  mkdir '/etc/secureboot/keys/db'
+  mkdir '/etc/secureboot/keys/dbx'
+done
+
+Creating keys... done
+
+Generating key updates for PK...
+  using GUID=2b6a3c26-eeca-405d-bdc1-1e8c133253e1
+  creating EFI_SIGNATURE_LIST (test-cert.der.siglist)...
+  creating signed update (test-cert.der.siglist.PK.signed)...
+done
+Generating key updates for KEK...
+  using GUID=2b6a3c26-eeca-405d-bdc1-1e8c133253e1
+  creating EFI_SIGNATURE_LIST (test-cert.der.siglist)...
+  creating signed update (test-cert.der.siglist.KEK.signed)...
+done
+Generating key updates for KEK...
+  using GUID=dc072709-eb81-4b97-b1c1-3c48dc4202e1
+  creating EFI_SIGNATURE_LIST (microsoft-kekca-public.der.siglist)...
+  creating signed update (microsoft-kekca-public.der.siglist.KEK.signed)...
+done
+Generating key updates for db...
+  using GUID=7fbf5694-f148-4051-8bd2-f36794ee2a54
+  creating EFI_SIGNATURE_LIST (microsoft-pca-public.der.siglist)...
+  creating signed update (microsoft-pca-public.der.siglist.db.signed)...
+done
+Generating key updates for db...
+  using GUID=68386fb9-f8a6-4bfa-8868-adfd534a628a
+  creating EFI_SIGNATURE_LIST (microsoft-uefica-public.der.siglist)...
+  creating signed update (microsoft-uefica-public.der.siglist.db.signed)...
+done
+Initializing keystore...
+  adding to /etc/secureboot/keys/PK/
+  adding to /etc/secureboot/keys/KEK/
+  adding to /etc/secureboot/keys/db/
+done
+
+Filesystem keystore:
+  /etc/secureboot/keys/db/microsoft-pca-public.der.siglist.db.signed [2850 bytes]
+  /etc/secureboot/keys/db/microsoft-uefica-public.der.siglist.db.signed [2907 bytes]
+  /etc/secureboot/keys/KEK/test-cert.der.siglist.KEK.signed [2116 bytes]
+  /etc/secureboot/keys/KEK/microsoft-kekca-public.der.siglist.KEK.signed [2867 bytes]
+  /etc/secureboot/keys/PK/test-cert.der.siglist.PK.signed [2116 bytes]
+firmware keys:
+  PK:
+  KEK:
+  db:
+  dbx:
+filesystem keys:
+  PK:
+    /CN=test-key
+     from /etc/secureboot/keys/PK/test-cert.der.siglist.PK.signed
+  KEK:
+    /C=US/ST=Washington/L=Redmond/O=Microsoft Corporation/CN=Microsoft Corporation KEK CA 2011
+     from /etc/secureboot/keys/KEK/microsoft-kekca-public.der.siglist.KEK.signed
+    /CN=test-key
+     from /etc/secureboot/keys/KEK/test-cert.der.siglist.KEK.signed
+  db:
+    /C=US/ST=Washington/L=Redmond/O=Microsoft Corporation/CN=Microsoft Corporation UEFI CA 2011
+     from /etc/secureboot/keys/db/microsoft-uefica-public.der.siglist.db.signed
+    /C=US/ST=Washington/L=Redmond/O=Microsoft Corporation/CN=Microsoft Windows Production PCA 2011
+     from /etc/secureboot/keys/db/microsoft-pca-public.der.siglist.db.signed
+  dbx:
+New keys in filesystem:
+ /etc/secureboot/keys/db/microsoft-pca-public.der.siglist.db.signed
+ /etc/secureboot/keys/db/microsoft-uefica-public.der.siglist.db.signed
+ /etc/secureboot/keys/KEK/test-cert.der.siglist.KEK.signed
+ /etc/secureboot/keys/KEK/microsoft-kekca-public.der.siglist.KEK.signed
+ /etc/secureboot/keys/PK/test-cert.der.siglist.PK.signed
+Commit to keystore? (y|N) y
+Filesystem keystore:
+  /etc/secureboot/keys/db/microsoft-pca-public.der.siglist.db.signed [2850 bytes]
+  /etc/secureboot/keys/db/microsoft-uefica-public.der.siglist.db.signed [2907 bytes]
+  /etc/secureboot/keys/KEK/test-cert.der.siglist.KEK.signed [2116 bytes]
+  /etc/secureboot/keys/KEK/microsoft-kekca-public.der.siglist.KEK.signed [2867 bytes]
+  /etc/secureboot/keys/PK/test-cert.der.siglist.PK.signed [2116 bytes]
+firmware keys:
+  PK:
+  KEK:
+  db:
+  dbx:
+filesystem keys:
+  PK:
+    /CN=test-key
+     from /etc/secureboot/keys/PK/test-cert.der.siglist.PK.signed
+  KEK:
+    /C=US/ST=Washington/L=Redmond/O=Microsoft Corporation/CN=Microsoft Corporation KEK CA 2011
+     from /etc/secureboot/keys/KEK/microsoft-kekca-public.der.siglist.KEK.signed
+    /CN=test-key
+     from /etc/secureboot/keys/KEK/test-cert.der.siglist.KEK.signed
+  db:
+    /C=US/ST=Washington/L=Redmond/O=Microsoft Corporation/CN=Microsoft Corporation UEFI CA 2011
+     from /etc/secureboot/keys/db/microsoft-uefica-public.der.siglist.db.signed
+    /C=US/ST=Washington/L=Redmond/O=Microsoft Corporation/CN=Microsoft Windows Production PCA 2011
+     from /etc/secureboot/keys/db/microsoft-pca-public.der.siglist.db.signed
+  dbx:
+New keys in filesystem:
+ /etc/secureboot/keys/db/microsoft-pca-public.der.siglist.db.signed
+ /etc/secureboot/keys/db/microsoft-uefica-public.der.siglist.db.signed
+ /etc/secureboot/keys/KEK/test-cert.der.siglist.KEK.signed
+ /etc/secureboot/keys/KEK/microsoft-kekca-public.der.siglist.KEK.signed
+ /etc/secureboot/keys/PK/test-cert.der.siglist.PK.signed
+Inserting key update /etc/secureboot/keys/db/microsoft-pca-public.der.siglist.db.signed into db
+Inserting key update /etc/secureboot/keys/db/microsoft-uefica-public.der.siglist.db.signed into db
+Inserting key update /etc/secureboot/keys/KEK/test-cert.der.siglist.KEK.signed into KEK
+Inserting key update /etc/secureboot/keys/KEK/microsoft-kekca-public.der.siglist.KEK.signed into KEK
+Inserting key update /etc/secureboot/keys/PK/test-cert.der.siglist.PK.signed into PK
+Skipping bootloader signing for 'microsoft'
+</pre>
+ 0. Reboot and verify Secure Boot is enabled and configured like 'Bootloader signed with user key' above, except with:
+** 2 different keys in KEK (should match GUIDs for KEK from sb-setup)
+** 2 different keys in db (should match GUIDs for db from sb-setup)
+# 'Boot from File' normally (notice shimx64.efi and grubx64.efi are listed-- this is the grubx64.efi as installed by 'sudo grub-install --uefi-secure-boot'. Ie, the one signed with Canonical's key)
+# Verify the machine booted with Secure Boot (note, can also use `sbsigdb` from newer versions of sbsigntool if it is available):<pre>
+$ sudo fwts uefidump - | grep Secure
+Name: SecureBoot.
+  Value: 0x01 (Secure Boot Mode On).
+</pre>
+ 0. Reboot and try to boot grubx64.efi (Ie, the one signed with Canonical's key). This should fail to boot (ie, when you press 'Enter' to select it, nothing happens).
+
+==== Bootloader signed with Canonical key ====
+This emulates a configuration which supports machines with Canonical's key in KEK and DB (user key still in PK and KEK). The key database is configured with (user key in PK and KEK has the same GUID, Canonical key in KEK and db has the same GUID):
+* User key in PK
+* User key and 'Canonical Ltd. Master Certificate Authority' key in KEK
+* 'Canonical Ltd. Master Certificate Authority' key in DB
+
+Steps to configure:
+# Boot an OVMF virtual UEFI machine (see above)
+# Install some packages:<pre>
+$ sudo apt-get install sbsigntool openssl grub-efi-amd64-signed fwts linux-signed-generic
+</pre>
+ 0. Install the signed bootloader:<pre>
+$ sudo grub-install --uefi-secure-boot
+</pre>
+# Reboot the VM and 'Boot from File' as above
+# Download <nowiki>[[https://git.launchpad.net/qa-regression-testing/tree/notes_testing/secure-boot|sb-setup and keys/]]</nowiki> from https://git.launchpad.net/qa-regression-testing/tree/notes_testing/secure-boot/ to `/tmp/sb-setup` and `/tmp/keys`
+# Enroll the keys (output may vary):<pre>
+$ /tmp/sb-setup enroll canonical
+  mkdir '/etc/secureboot/keys'
+  mkdir '/etc/secureboot/keys/PK'
+  mkdir '/etc/secureboot/keys/KEK'
+  mkdir '/etc/secureboot/keys/db'
+  mkdir '/etc/secureboot/keys/dbx'
+done
+
+Creating keys... done
+
+Generating key updates for PK...
+  using GUID=55077d9d-6ca8-427a-9291-c60425c676e2
+  creating EFI_SIGNATURE_LIST (test-cert.der.siglist)...
+  creating signed update (test-cert.der.siglist.PK.signed)...
+done
+Generating key updates for KEK...
+  using GUID=55077d9d-6ca8-427a-9291-c60425c676e2
+  creating EFI_SIGNATURE_LIST (test-cert.der.siglist)...
+  creating signed update (test-cert.der.siglist.KEK.signed)...
+done
+Generating key updates for KEK...
+  using GUID=6a43e12f-b589-40c3-a332-a15eac86e3f5
+  creating EFI_SIGNATURE_LIST (canonical-master-public.der.siglist)...
+  creating signed update (canonical-master-public.der.siglist.KEK.signed)...
+done
+Generating key updates for db...
+  using GUID=6a43e12f-b589-40c3-a332-a15eac86e3f5
+  creating EFI_SIGNATURE_LIST (canonical-master-public.der.siglist)...
+  creating signed update (canonical-master-public.der.siglist.db.signed)...
+done
+Initializing keystore...
+  adding to /etc/secureboot/keys/PK/
+  adding to /etc/secureboot/keys/KEK/
+  adding to /etc/secureboot/keys/db/
+done
+
+Filesystem keystore:
+  /etc/secureboot/keys/db/canonical-master-public.der.siglist.db.signed [2431 bytes]
+  /etc/secureboot/keys/KEK/canonical-master-public.der.siglist.KEK.signed [2431 bytes]
+  /etc/secureboot/keys/KEK/test-cert.der.siglist.KEK.signed [2116 bytes]
+  /etc/secureboot/keys/PK/test-cert.der.siglist.PK.signed [2116 bytes]
+firmware keys:
+  PK:
+  KEK:
+  db:
+  dbx:
+filesystem keys:
+  PK:
+    /CN=test-key
+     from /etc/secureboot/keys/PK/test-cert.der.siglist.PK.signed
+  KEK:
+    /CN=test-key
+     from /etc/secureboot/keys/KEK/test-cert.der.siglist.KEK.signed
+    /C=GB/ST=Isle of Man/L=Douglas/O=Canonical Ltd./CN=Canonical Ltd. Master Certificate Authority
+     from /etc/secureboot/keys/KEK/canonical-master-public.der.siglist.KEK.signed
+  db:
+    /C=GB/ST=Isle of Man/L=Douglas/O=Canonical Ltd./CN=Canonical Ltd. Master Certificate Authority
+     from /etc/secureboot/keys/db/canonical-master-public.der.siglist.db.signed
+  dbx:
+New keys in filesystem:
+ /etc/secureboot/keys/db/canonical-master-public.der.siglist.db.signed
+ /etc/secureboot/keys/KEK/canonical-master-public.der.siglist.KEK.signed
+ /etc/secureboot/keys/KEK/test-cert.der.siglist.KEK.signed
+ /etc/secureboot/keys/PK/test-cert.der.siglist.PK.signed
+Commit to keystore? (y|N) y
+Filesystem keystore:
+  /etc/secureboot/keys/db/canonical-master-public.der.siglist.db.signed [2431 bytes]
+  /etc/secureboot/keys/KEK/canonical-master-public.der.siglist.KEK.signed [2431 bytes]
+  /etc/secureboot/keys/KEK/test-cert.der.siglist.KEK.signed [2116 bytes]
+  /etc/secureboot/keys/PK/test-cert.der.siglist.PK.signed [2116 bytes]
+firmware keys:
+  PK:
+  KEK:
+  db:
+  dbx:
+filesystem keys:
+  PK:
+    /CN=test-key
+     from /etc/secureboot/keys/PK/test-cert.der.siglist.PK.signed
+  KEK:
+    /CN=test-key
+     from /etc/secureboot/keys/KEK/test-cert.der.siglist.KEK.signed
+    /C=GB/ST=Isle of Man/L=Douglas/O=Canonical Ltd./CN=Canonical Ltd. Master Certificate Authority
+     from /etc/secureboot/keys/KEK/canonical-master-public.der.siglist.KEK.signed
+  db:
+    /C=GB/ST=Isle of Man/L=Douglas/O=Canonical Ltd./CN=Canonical Ltd. Master Certificate Authority
+     from /etc/secureboot/keys/db/canonical-master-public.der.siglist.db.signed
+  dbx:
+New keys in filesystem:
+ /etc/secureboot/keys/db/canonical-master-public.der.siglist.db.signed
+ /etc/secureboot/keys/KEK/canonical-master-public.der.siglist.KEK.signed
+ /etc/secureboot/keys/KEK/test-cert.der.siglist.KEK.signed
+ /etc/secureboot/keys/PK/test-cert.der.siglist.PK.signed
+Inserting key update /etc/secureboot/keys/db/canonical-master-public.der.siglist.db.signed into db
+Inserting key update /etc/secureboot/keys/KEK/canonical-master-public.der.siglist.KEK.signed into KEK
+Inserting key update /etc/secureboot/keys/KEK/test-cert.der.siglist.KEK.signed into KEK
+Inserting key update /etc/secureboot/keys/PK/test-cert.der.siglist.PK.signed into PK
+Skipping bootloader signing for 'canonical'
+</pre>
+ 0. Reboot and verify Secure Boot is enabled and configured like 'Bootloader signed with user key' above, except with:
+** 2 different keys in KEK (should match GUIDs for KEK from sb-setup)
+** 2 different keys in db (should match GUIDs for db from sb-setup)
+# 'Boot from File' normally (notice only grubx64.efi listed-- this is the grubx64.efi as installed by 'sudo grub-install --uefi-secure-boot'. Ie, the one signed with Canonical's key)
+# Verify the machine booted with Secure Boot (note, can also use `sbsigdb` from newer versions of sbsigntool if it is available):<pre>
+$ sudo fwts uefidump - | grep Secure
+Name: SecureBoot.
+  Value: 0x01 (Secure Boot Mode On).
+</pre>
+
+==== efilinux bootloader ====
+
+/!\ It is highly recommended to use shim and grub2 instead of efilinux for the bootloader.
+
+In theory, should be able to do:<pre>
+$ sudo apt-get install efilinux efilinux-signed
+$ sudo cp /usr/lib/efilinux/efilinux.efi /boot/efi/EFI/ubuntu
+$ sudo cp /boot/vmlinuz-3.5.0-19-generic.efi.signed /boot/efi/EFI/ubuntu/vmlinuz
+$ sudo cp /boot/initrd-3.5.0-19-generic /boot/efi/EFI/ubuntu/initrd
+$ sudo cp /usr/lib/efilinux-signed/efilinux.efi.signed /boot/efi/EFI/ubuntu/efilinux-signed.efi
+$ sudo sh -c 'cat > /boot/efi/EFI/ubuntu/efilinux.cfg << EOM
+EFILINUX MENU
+Ubuntu EFILINUX
+0:\EFI\ubuntu\vmlinuz initrd=0:\EFI\ubuntu\initrd root=... ...
+EOM
+'
+</pre>
+
+Then reboot, select one of 'efilinux.efi' or 'efilinux-signed.efi' from Boot From File and get a menu. Unfortunately, with current OVMF images, this does not work (though it apparently <nowiki>[[https://wiki.ubuntu.com/USBStickUEFIHowto|works on USB install images]]</nowiki>).
+
+Shim should try to boot anything named grubx64.efi, so we can play a trick on shim by naming efilinux.efi.signed as grubx64.efi, like so:
+# Boot an OVMF virtual UEFI machine (see above)
+# Install some packages:<pre>
+$ sudo apt-get install sbsigntool openssl grub-efi-amd64-signed fwts shim-signed linux-signed-generic efilinux-signed
+</pre>
+ 0. Install the signed bootloader (shim and grub2):<pre>
+$ sudo grub-install --uefi-secure-boot
+</pre>
+ 0. Backup grub2:<pre>
+$ sudo cp /boot/efi/EFI/ubuntu/grubx64.efi /boot/efi/EFI/ubuntu/grubx64-orig.efi
+</pre>
+ 0. Install the signed efilinux bootloader as grubx64.efi:<pre>
+$ sudo cp /usr/lib/efilinux-signed/efilinux.efi.signed /boot/efi/EFI/ubuntu/efilinux-signed.efi
+$ sudo cp /usr/lib/efilinux-signed/efilinux.efi.signed /boot/efi/EFI/ubuntu/grubx64.efi
+$ sudo cp /boot/vmlinuz-3.5.0-19-generic.efi.signed /boot/efi/EFI/ubuntu/vmlinuz
+$ sudo cp /boot/initrd-3.5.0-19-generic /boot/efi/EFI/ubuntu/initrd
+$ sudo sh -c 'cat > /boot/efi/EFI/ubuntu/efilinux.cfg << EOM
+EFILINUX MENU
+Ubuntu text boot
+0:\EFI\ubuntu\vmlinuz initrd=0:\EFI\ubuntu\initrd root=/dev/sda3
+Ubuntu graphical boot
+0:\EFI\ubuntu\vmlinuz initrd=0:\EFI\ubuntu\initrd root=/dev/sda3 quiet splash
+Ubuntu recovery
+0:\EFI\ubuntu\vmlinuz initrd=0:\EFI\ubuntu\initrd root=/dev/sda3 single
+EOM
+'
+</pre>
+ 0. Reboot the VM and 'Boot from File' as above, except choose 'shimx64.efi' instead of 'grubx64.efi'
+
+Unfortunately, this doesn't work either and it seems to be a bug in the OVMF implementation. Copying efilinux-signed.efi to /boot/efi/EFI/BOOT/BOOTX64.EFI (and efilinux.cfg in /boot/efi/EFI/BOOT) also doesn't work. With the above configuration, you can boot efilinux via the EFI shell like so:<pre>
+Shell> fs0:\EFI\ubuntu\efilinux-signed.efi
+</pre>
+
+However, you can't setup Secure Boot using sb-setup since it requires a reboot and you aren't able to boot into the EFI shell with a warm reboot and a cold reboot resets the Secure Boot configuration. It should be possible to enlist the keys manually by copying the DER files into /boot/efi somewhere and manually enlisting them via the EFI configuration (but even then, it is only good for that one boot).
+
+=== Miscellaneous ===
+==== Disabling Secure Boot ====
+If you already committed your changes to the keystore (which enrolls PK and toggles Secure Boot to enabled) and want to disable Secure Boot, you can reboot and go into the Device Manager/Secure Boot Configuration in the EFI firmware configuration, then 'Unenroll PK' (highlight '[ ]' and press Enter). You can then delete the signatures in KEK, DB and DBX. You should also be able to unenroll PPK and disable Secure Boot with:<pre>
+$ /tmp/sb-setup reset
+</pre>
+
+==== Disabling Secure Boot validation in shim ====
+
+With the VM installed, you can start a terminal and run the following commands, which will ask you to choose a password:
+<pre>
+$ sudo mokutil --disable-validation
+</pre>
+
+To enable validation again use:
+<pre>
+$ sudo mokutil --enable-validation
+</pre>
+
+Reboot, and you will be starting in MokManager, a blue screen with prompts that will walk you through enabling or disabling validation. You will need to type in some of the characters of the password again.
+
+==== Resetting the keystore ====
+The keystore and key material are stored in /etc/secureboot. If you have not committed your changes to the keystore, you can:<pre>
+$ sudo rm -rf /etc/secureboot
+$ /tmp/sb-setup enroll ...
+</pre>
+ If you have committed your changes to the keystore, disable Secure Boot (see above) and empty all the key databases in firmware.
+* '''Enabling Secure Boot after unenrolling PK''': if you unenrolled PK, then you can re-enable it again with (uses existing keys):<pre>
+$ /tmp/sb-setup enroll microsoft
+</pre>
+
+==== Converting a DER formatted certificate to PEM ====
+sbverify takes a PEM formatted certificate. You can convert the Canonical master DER formatted certificate like so:<pre>
+$ openssl x509 -inform DER -in ~/keys/canonical-master-public.der \
+               -outform PEM -out ~/keys/canonical-master-public.pem
+</pre>
+
+and the Microsoft one:<pre>
+$ openssl x509 -inform DER -in ~/keys/microsoft-uefica-public.der \
+               -outform PEM -out ~/keys/microsoft-uefica-public.pem
+</pre>
+
+==== Creating a PEM certificate chain from DER formatted certificates ====
+To create a PEM certificate chain suitable for use with sbverify, you convert all the DER certificates to PEM, then concatenate them in one certificate. Eg, to create the Canonical certificate chain file: <pre>
+$ openssl x509 -inform DER -in ~/keys/canonical-master-public.der \
+               -outform PEM -out ~/keys/canonical-master-public.pem
+$ openssl x509 -inform DER -in ~/keys/canonical-signing-public.der \
+               -outform PEM -out ~/keys/canonical-signing-public.pem
+$ cat ~/keys/canonical-master-public.pem ~/keys/canonical-signing-public.pem \
+      > ~/keys/canonical-master-signing-public-chain.pem
+</pre>
+
+==== Verifying the signature on a signed PE/COFF or signed kernel image ====
+* To verify Microsoft's signature on the signed shim bootloader (must first create the PEM certificate, above):<pre>
+$ sbverify --cert ~/keys/microsoft-uefica-public.pem /boot/efi/EFI/ubuntu/shimx64.efi
+Signature verification OK
+</pre>
+* To verify Canonical's signature on the signed grub bootloader (must first create the PEM certificate, above):<pre>
+$ sbverify --cert ~/keys/canonical-master-public.pem /boot/efi/EFI/ubuntu/grubx64.efi
+Signature verification OK
+</pre>
+* To verify Ubuntu signature on the signed kernel, you must first extract the signature from the kernel image, then use sbverify to verify the image with the detached signature (must first create the PEM certificate chain, above): <pre>
+$ sbattach --detach /tmp/vmlinuz-3.5.0-27-generic.efi.signature \
+  /boot/vmlinuz-3.5.0-27-generic.efi.signed
+$ sbverify --cert ~/keys/canonical-master-signing-public-chain.pem \
+           --detached /tmp/vmlinuz-3.5.0-27-generic.efi.signature \
+           /boot/vmlinuz-3.5.0-27-generic.efi.signed 
+Signature verification OK
+</pre>
+
+=== Updating key databases ===
+
+==== Inserting keys in shim's keyring ====
+
+To insert your own keys in shim's keyring, use:
+<pre>
+$ sudo mokutil --import <path to cert in DER format>
+</pre>
+
+==== Removing an enrolled key from shim's keyring ====
+
+You can remove certificates from shim's keyring if you still have access to the DER-format certificate by using:
+<pre>
+$ sudo mokutil --delete <path to DER cert>
+</pre>
+
+If you don't have access to the certificate, your other option is to completely reset shim's keyring:
+<pre>
+$ sudo mokutil --reset
+</pre>
+
+==== Certificates ====
+To create an entry for a key database:
+# create a signature list variable with the thing you want to blacklist using sbsiglist
+# sign the signature list variable with a key pair that is in KEK or PK using sbvarsign
+# add the signed update to a keystore
+# use sbkeysync to add the signed update to the key database
+
+Eg, if using the user key generated above, we can add create a signed update to the blacklist database (dbx) for the Microsoft Corporation UEFI CA like so:<pre>
+$ guid=$(uuidgen)
+$ sbsiglist --owner $guid --type x509 \
+            --output microsoft_uefica_dbx-test.siglist \
+            ~/keys/microsoft-uefica-public.der
+$ sbvarsign --key /etc/secureboot/key-material/test-key.rsa \
+            --cert /etc/secureboot/key-material/test-cert.pem \
+            --output microsoft_uefica_dbx-test.siglist.signed \
+            dbx \
+            microsoft_uefica_dbx-test.siglist
+
+$ ls -1
+microsoft_uefica_dbx-test.siglist
+microsoft_uefica_dbx-test.siglist.signed
+$ sudo cp microsoft_uefica_dbx-test.siglist.signed /etc/secureboot/keys/dbx
+$ sudo sbkeysync --verbose
+</pre>
+
+If you have the secureboot-db package installed, you can copy to the system wide updates keystore:<pre>
+$ sudo cp microsoft_uefica_dbx-test.siglist.signed /usr/share/secureboot/updates/dbx
+$ sudo dpkg-reconfigure secureboot-db
+Filesystem keystore:
+  /usr/share/secureboot/updates/dbx/microsoft_uefica_dbx-test.siglist.signed [2907 bytes]
+firmware keys:
+  PK:
+    /CN=test-key
+  KEK:
+    /C=US/ST=Washington/L=Redmond/O=Microsoft Corporation/CN=Microsoft Corporation KEK CA 2011
+    /CN=test-key
+  db:
+    /C=US/ST=Washington/L=Redmond/O=Microsoft Corporation/CN=Microsoft Corporation UEFI CA 2011
+    /C=US/ST=Washington/L=Redmond/O=Microsoft Corporation/CN=Microsoft Windows Production PCA 2011
+  dbx:
+filesystem keys:
+  PK:
+  KEK:
+  db:
+  dbx:
+    /C=US/ST=Washington/L=Redmond/O=Microsoft Corporation/CN=Microsoft Corporation UEFI CA 2011
+     from /usr/share/secureboot/updates/dbx/microsoft_uefica_dbx-test.siglist.signed
+New keys in filesystem:
+ /usr/share/secureboot/updates/dbx/microsoft_uefica_dbx-test.siglist.signed
+Inserting key update /usr/share/secureboot/updates/dbx/microsoft_uefica_dbx-test.siglist.signed into dbx
+</pre>
+
+==== sha256 hashes ====
+'''TODO (needs sbtools support)''': Ultimately this should be in `sbsign` since the hash of PE/COFF image is the has of everything except the embedded signature. We'd like to do something like this, but it doesn't work because it doesn't exclude the embedded signature (and if it wasn't signed, there is no point blacklisting it):<pre>
+$ echo -n "0x`sha256sum grubx64.efi | cut -d ' ' -f 1`" |
+          | xxd -r -g 1 -c 64 > /tmp/sha256.bin
+</pre>
+
+Then would create a signed update with:<pre>
+$ sbsiglist --owner $guid --type sha256 \
+            --output /tmp/sha256.bin.siglist \
+            /tmp/sha256.bin
+$ sbvarsign --key /etc/secureboot/key-material/test-key.rsa \
+            --cert /etc/secureboot/key-material/test-cert.pem \
+            --output /tmp/sha256.bin.siglist.signed \
+            dbx \
+            /tmp/sha256.bin.siglist
+</pre>
+
+=== Testing signed updates via secureboot-db ===
+Updates to db and dbx will need to be performed as keys are rotated and things are blacklisted. This will be handled by the secureboot-db package. In essence, secureboot-db will ship a keystore in /usr/share/secureboot/updates for updating db and dbx and then in package postinst run:<pre>
+}}}
+
+`sbkeysync` will only add new updates so management of secureboot-db is simple and updates primarily consist of adding the signed updates to the keystore. Please see debian/README.source and debian/README.Debian for details.
+
+Notes:
+* '''IMPORTANT''' improperly updating secureboot-db could result in all systems with Secure Boot enabled failing to boot.
+* As mentioned, when Secure Boot is enabled, updates to DB and DBX must be signed by something that verifies via the chain of trust to something in KEK. As a result, when testing secureboot-db, expect sbkeysign to complain when adding a signed update from Microsoft on a machine that does not have the Microsoft key in KEK but does have Secure Boot enabled.
+* `sbkeysync` (and therefore secureboot-db) will add the updates to DB and DBX unconditionally when Secure Boot is disabled
+
+=== Test cases ===
+
+==== Functional tests ====
+* Booting with Secure Boot disabled
+** for each of grub2-signed only and shim-signed
+** install bootloader
+** reboot and verify the machine boots with Secure Boot disabled
+* Booting with Secure Boot enabled
+** for each of linux-generic (unsigned) and linux-signed-generic
+** for each of microsoft/shim-signed, canonical/grub2-signed and user signed
+*** verify vendor's (or when test user keys, user's) keys are in KEK and DB and Secure Boot is enabled
+*** reboot and verify the machine still boots
+*** install updated secureboot-db, verifying:
+*** package installation succeeded
+*** secureboot-db properly used 'Breaks' and pulled in necessary packages
+*** the updates were added to firmware (check EFI configuration, as well as output from sbkeysync)
+*** reboot and verify the machine still boots
+
+==== Verification tests ====
+Additionally, with Secure Boot enabled with shim and using Microsoft keys:
+* shim validation (tests firmware properly verifies our signed shim):
+** TODO: add a dbx entry for an old shim and try booting (should fail)
+** add a dbx entry for the 'Microsoft Corporation UEFI CA' and try booting (should fail):{{{
+$ guid=$(uuidgen)
+$ sbsiglist --owner $guid --type x509 \
+            --output microsoft_uefica_dbx-test.siglist \
+            ~/keys/microsoft-uefica-public.der
+$ sbvarsign --key /etc/secureboot/key-material/test-key.rsa \
+            --cert /etc/secureboot/key-material/test-cert.pem \
+            --output microsoft_uefica_dbx-test.siglist.signed \
+            dbx \
+            microsoft_uefica_dbx-test.siglist
+$ sudo cp microsoft_uefica_dbx-test.siglist.signed /etc/secureboot/keys/dbx
+$ sudo sbkeysync --verbose
+</pre>
+  Now try to 'boot from file' shimx64.efi (succeed if sb disabled, fail if enabled). To reset back to a working signed grub2, delete the signature from the DBX database in firmware, and then on reboot:<pre>
+$ sudo rm -f /etc/secureboot/keys/dbx/*signed
+</pre>
+** replace shim with unsigned shim (should fail):<pre>
+$ sudo apt-get install shim
+$ sudo cp /usr/lib/shim/shim.efi /boot/efi/EFI/ubuntu/
+  }}}
+  Now try to 'boot from file' shim.efi (succeed if sb disabled, fail if enabled)
+** replace shim with signed shim using a key not in DB (should fail):{{{
+$ sudo apt-get install shim
+$ sudo sbsign --key /etc/secureboot/key-material/test-key.rsa \
+              --cert /etc/secureboot/key-material/test-cert.pem \
+              --output /boot/efi/EFI/ubuntu/shim_user-signed.efi \
+              /usr/lib/shim/shim.efi
+  }}}
+  Now try to 'boot from file' shimx64.efi (succeed if sb disabled, fail if enabled)
+** OPTIONAL: replace signed shim with a bit-flipped/fuzzed shim (should fail)
+* grub2 validation (tests shim properly verifies our bootloader):
+** try to boot grub2 directly, without shim (should fail)
+** TODO: add a dbx entry for an old grub2 and try booting (should fail)
+** add a dbx entry for the 'Canonical Ltd. Master Certificate Authority' and try booting (should fail):{{{
+$ guid=$(uuidgen)
+$ sbsiglist --owner $guid --type x509 \
+            --output canonical_ca_dbx-test.siglist \
+            ~/keys/canonical-master-public.der
+$ sbvarsign --key /etc/secureboot/key-material/test-key.rsa \
+            --cert /etc/secureboot/key-material/test-cert.pem \
+            --output canonical_ca_dbx-test.siglist.signed \
+            dbx \
+            canonical_ca_dbx-test.siglist
+$ sudo cp canonical_ca_dbx-test.siglist.signed /etc/secureboot/keys/dbx
+$ sudo sbkeysync --verbose
+</pre>
+  Now try to 'boot from file' shim_user-signed.efi (succeed if sb disabled, fail if enabled). To reset back to a working signed grub2, delete the signature from the DBX database in firmware and then on reboot:<pre>
+$ sudo rm -f /etc/secureboot/keys/dbx/*signed
+</pre>
+** add a dbx entry for the 'Canonical Ltd. Secure Boot Signing' key and try booting (should fail):<pre>
+$ guid=$(uuidgen)
+$ sbsiglist --owner $guid --type x509 \
+            --output canonical_signing_dbx-test.siglist \
+            ~/keys/canonical-signing-public.der
+$ sbvarsign --key /etc/secureboot/key-material/test-key.rsa \
+            --cert /etc/secureboot/key-material/test-cert.pem \
+            --output canonical_signing_dbx-test.siglist.signed \
+            dbx \
+            canonical_signing_dbx-test.siglist
+$ sudo cp canonical_signing_dbx-test.siglist.signed /etc/secureboot/keys/dbx
+$ sudo sbkeysync --verbose
+</pre>
+  Now try to 'boot from file' shimx64.efi (succeed if sb disabled, fail if enabled). To reset back to a working signed grub2, delete the signature from the DBX database in firmware, and then on reboot:<pre>
+$ sudo rm -f /etc/secureboot/keys/dbx/*signed
+</pre>
+** replace grub2 with unsigned grub2 (should fail):<pre>
+$ sudo grub-install --no-uefi-secure-boot
+</pre>
+  Try to 'boot from file' shimx64.efi (succeed if sb disabled, fail if enabled). Run the following to reset to working signed grub2:<pre>
+$ sudo grub-install --uefi-secure-boot
+  }}}
+** replace grub2 with signed grub2 using a key not in DB (should fail):{{{
+$ sudo grub-install --uefi-secure-boot
+$ sudo sbsign --key /etc/secureboot/key-material/test-key.rsa \
+              --cert /etc/secureboot/key-material/test-cert.pem \
+              --output /boot/efi/EFI/ubuntu/grubx64.efi \
+              /usr/lib/grub/x86_64-efi-signed/grubx64.efi.signed
+</pre>
+  Try to 'boot from file' shimx64.efi (succeed if sb disabled, fail if enabled). Run the following to reset to working signed grub2:<pre>
+$ sudo grub-install --uefi-secure-boot
+</pre>
+** OPTIONAL: replace signed grub2 with a bit-flipped/fuzzed grub2 (should fail)
+* kernel (tests grub2 verification of kernel and fallback mechanism)
+** TODO: add a dbx entry for an old kernel and try booting (should fail)
+** replace kernel with unsigned kernel (should succeed):<pre>
+$ sudo apt-get remove --purge linux-signed*
+</pre>
+  Try to 'boot from file' shimx64.efi (succeeds if sb disabled or enabled). Run the following to reset to working signed kernel:<pre>
+sudo apt-get install linux-signed-generic
+</pre>
+** replace kernel with signed kernel using a key not in DB (should succeed):<pre>
+$ sudo cp /boot/vmlinuz-<version>-generic.efi.signed \
+          /boot/vmlinuz-<version>-generic.efi.signed.bak
+$ sudo sbsign --key /etc/secureboot/key-material/test-key.rsa \
+              --cert /etc/secureboot/key-material/test-cert.pem \
+              --output /boot/vmlinuz-<version>-generic.efi.signed \
+              /boot/vmlinuz-<version>-generic.efi.signed.bak
+</pre>
+  Try to 'boot from file' shimx64.efi (succeeds if sb disabled or enabled). Run the following to reset to working signed kernel:<pre>
+$ sudo apt-get remove --purge linux-signed*
+$ sudo apt-get install linux-signed-generic
+</pre>
+** OPTIONAL: replace signed kernel with a bit-flipped/fuzzed kernel (should fail)

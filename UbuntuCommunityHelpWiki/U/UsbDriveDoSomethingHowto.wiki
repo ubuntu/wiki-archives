@@ -1,0 +1,140 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+
+=== Introduction ===
+
+This article describes how to automatically run a script when a USB drive is inserted. 'Hot-plugging' means inserting/removing a drive while a computer is turned on. To hotplug, in System/Preferences/Removal Drives and Media,   Storage tab must be set to "mount removal drives when hot-plugged".
+
+Often, you may want to automate things when connecting a USB drive (USB Stick, external USB harddisk) to your computer. Typical use cases are:
+
+* you want to copy images from a flash drive to your photo collection, delete them on the usb drive, and show them automatically
+* you connect a USB harddisk to the computer and the computer should backup some data to it
+* you connect an encrypted usb store and want the system to mount the encrypted harddisk
+
+This used to be done with '''hotplug''' but in Ubuntu 6.06 (Dapper Drake) and later is done using '''udev and module-init-tools'''.
+
+What you need to do is setup a script that is triggered when the device is plugged in.
+
+'''THIS HOWTO DOES NOT WORK YET. The scripts are broken. '''
+
+=== Related Information ===
+* <nowiki>[[http://forums.gentoo.org/viewtopic.php?t=113911|gentoo forums]]</nowiki> a thread on self-made automounter scripts based on hotplug. Don't follow their steps, udev makes things much easier, this shows how awkward this topic can get.
+* <nowiki>[[http://www.internettablettalk.com/forums/archive/index.php/t-1728.html|script for keyboard]]</nowiki> a udev script that is run when plugging in a keyboard, close but not exactly what we want.
+* <nowiki>[[http://reactivated.net/writing_udev_rules.html|writing udev rules]]</nowiki> a howto on udev
+* <nowiki>[[http://tlug.dnho.net/?q=smeserver_udev_automated_backups|automated backups]]</nowiki> with udev and usb disks. '''this is going to be the main inspiration for this howto'''
+
+=== Method Overview ===
+To have something triggered we need to:
+* identify your device (serial number, something unique)
+* add a rule to udev so that it triggers a script when your device is plugged in
+* write the script
+
+=== Setting up a trigger when your USB device is connected ===
+First you need to identify your usb drive. You need to plug the device in.
+
+Run dmesg to learn if your device was really plugged in:
+<pre>
+$dmesg
+...
+[17197212.184000] usb 5-6: new high speed USB device using ehci_hcd and address 2
+[17197212.420000] Initializing USB Mass Storage driver...
+[17197212.420000] scsi2 : SCSI emulation for USB Mass Storage devices
+[17197212.420000] usb-storage: device found at 2
+[17197212.420000] usb-storage: waiting for device to settle before scanning
+[17197212.420000] usbcore: registered new driver usb-storage
+[17197212.420000] USB Mass Storage support registered.
+[17197217.420000]   Vendor: WDC WD32  Model: 00JB-00KFA0       Rev: 0811
+[17197217.420000]   Type:   Direct-Access                      ANSI SCSI revision: 00
+[17197217.436000] usb-storage: device scan complete
+[17197217.464000] Driver 'sd' needs updating - please use bus_type methods
+[17197217.472000] SCSI device sda: 625142448 512-byte hdwr sectors (320073 MB)
+[17197217.472000] sda: assuming drive cache: write through
+[17197217.520000] SCSI device sda: 625142448 512-byte hdwr sectors (320073 MB)
+[17197217.520000] sda: assuming drive cache: write through
+[17197217.520000]  sda: sda1
+[17197217.528000] sd 2:0:0:0: Attached scsi disk sda
+[17197217.540000] sd 2:0:0:0: Attached scsi generic sg0 type 0
+</pre>
+So our device is at '''sda'''. If you want to know more, <code>lsusb</code> does list more information. What you need to know is the device name, it is something like '''/dev/sda1'''. My device is located as /dev/sda1 so I am using it now.
+
+Get more information:
+<pre>
+udevadm info --attribute-walk --name /dev/sda1
+
+...
+... the interesting parts are...
+...
+follow the "device"-link to the physical device:
+  looking at the device chain at '/sys/devices/pci0000:00/0000:00:1d.7/usb5/5-6/5-6:1.0/host2/target2:0:0/2:0:0:0':
+    BUS=="scsi"
+    ID=="2:0:0:0"
+    DRIVER=="sd"
+    SYSFS{device_blocked}=="0"
+    SYSFS{iocounterbits}=="32"
+    SYSFS{iodone_cnt}=="0x27"
+    SYSFS{ioerr_cnt}=="0x0"
+    SYSFS{iorequest_cnt}=="0x27"
+    SYSFS{max_sectors}=="64"
+    SYSFS{model}=="00JB-00KFA0     "         <------------------- model
+    SYSFS{queue_depth}=="1"
+    SYSFS{queue_type}=="none"
+    SYSFS{rev}=="0811"
+    SYSFS{scsi_level}=="3"
+    SYSFS{state}=="running"
+    SYSFS{timeout}=="30"
+    SYSFS{type}=="0"
+    SYSFS{vendor}=="WDC WD32"                <------------------- vendor
+...
+}}
+
+For the rest of the howto, we are assuming that we use the following data for identification:
+{{{
+    SYSFS{model}=="00JB-00KFA0     "         <------------------- model
+    SYSFS{vendor}=="WDC WD32"                <------------------- vendor
+</pre>
+
+We need to create a rule file in <code>/etc/udev/rules.d/</code>. I choose a high file number, perhaps not disturbing existing services.
+
+<pre>
+$ sudo vi /etc/udev/rules.d/91-backuptousbdrivetrigger.rules
+
+... enter this text:
+ACTION=="add", SUBSYSTEM=="usb", SYSFS{model}=="00JB-00KFA0     ",SYSFS{vendor}=="WDC WD32", RUN+="/usr/local/bin/backuptousbdrive.sh"
+</pre>
+
+=== The script that is triggered ===
+The important thing about these scripts is: they have to detach themselves. They are run by the udev service and the service is blocked until the script returns, so you may wreck your udev service if your script takes too long.
+
+Edit the script:
+<pre>
+sudo vi /usr/local/bin/backuptousbdrive.sh
+</pre>
+
+First, I recommend doing a debugging version of the script, to check if all is working. It logs a message to /var/log/backuptousbdrive.log.
+<pre>
+if [ "${ACTION}" = "add" ] && [ -f "${DEVICE}" ]
+then
+    echo ${DEVICE} >> /var/log/backuptousbdrive.log
+fi
+</pre>
+
+Change the execution bit of the file:
+<pre>
+sudo chmod +x /usr/local/bin/backuptousbdrive.sh
+</pre>
+you can look whats happening using <code>tail -f /var/log/backuptousbdrive.log</code>.
+
+Test the script by plugging the usb device in and out.
+=== Notes about users and superuser ===
+If you want your script to run under a certain user account or as root, you have to .....
+----
+CategoryUsb

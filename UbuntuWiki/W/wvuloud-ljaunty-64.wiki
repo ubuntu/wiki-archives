@@ -1,0 +1,110 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+=== LOUD on 64-bit architecture ===
+
+There are certain things that have to be done to run LOUD on 64-bit platforms as native 64-bit.  Luckily, since most of LOUD's packages are configuration packages and therefore have no real architecture, the process is simplified somewhat.
+
+==== Fix Mirror Archive Structure ====
+
+In your mini-dinstall.conf file, the directive archive_style must be set as follows:
+<pre>
+ archive_style = simple-subdir
+</pre>
+This allows mini-dinstall to create subdirectories in the repository according to your architecture.  You will also have to change the lines in your /etc/apt/sources.list file to reflect this change.  An example follows:
+<pre>
+# # APT Multi-arch Example
+ deb http://mirror.where.ever/loud ljaunty/$(ARCH)/
+ deb http://mirror.where.ever/loud ljaunty/all/
+ deb-src http://mirror.where.ever/loud ljaunty/source/
+</pre>
+The $(ARCH) allows for Apt to automatically select the repository for your current architecture.  Note that this does not work in preseeds; you'll need to specify the repository manually if you're doing something like the following example: 
+{{{ 
+preseed preseed/late_command string \
+    fsck.ext3 -n /dev/sda2; \
+    if [ $? -eq 8 ]; then \
+      mkfs.ext3 -jq /dev/sda2; \
+    fi; \
+    mkdir /target/srv/cache; \
+    mount /dev/sda2 /target/srv/cache; \
+    sed -i 's/\/media\/sda2/\/srv\/cache/' /target/etc/fstab; \
+    sed -i 's/-y/-y --force-yes -o Dpkg::Options::=--force-confnew/' /bin/apt-install; \
+    echo -e "deb http://fireball-mirror.phys.wvu.edu/loud/ lg-hardy/amd64/" >> /target/etc/apt/sources.list; \
+    echo -e "deb http://fireball-mirror.phys.wvu.edu/loud/ lg-hardy/i386/" >> /target/etc/apt/sources.list; \
+    echo -e "deb http://fireball-mirror.phys.wvu.edu/loud/ lg-hardy/all/" >> /target/etc/apt/sources.list; \
+    echo -e "deb http://fireball-mirror.phys.wvu.edu/loud/ lhardy/" >> /target/etc/apt/sources.list; \
+    in-target apt-get update; \
+    apt-install lg-apt; \
+    in-target apt-get update; \
+    apt-install lg-base lg-courseware lg-dput;      \
+    in-target apt-get update; \
+    apt-install lg-desktop;
+}}}
+Note how each possible architecture is included.  You might be able to do something more elegant (note lack of parentheses):
+<pre>
+    echo -e "deb http://fireball-mirror.phys.wvu.edu/loud/ lg-hardy/$ARCH/" >> /target/etc/apt/sources.list; \
+    echo -e "deb http://fireball-mirror.phys.wvu.edu/loud/ lg-hardy/all/" >> /target/etc/apt/sources.list; \
+    echo -e "deb http://fireball-mirror.phys.wvu.edu/loud/ lhardy/" >> /target/etc/apt/sources.list; \
+</pre>
+but you'd have to define <code>$ARCH=`uname -m`</code> or something similar earlier in the preseed.
+
+==== Build 64-bit Packages ====
+Packages that require 64-bit (read: anything that does not have <code>Architecture: all</code> in debian/control) will need to be built on 32-bit and 64-bit.  That's not too hard; the biggest issue is the initial build before you have a 64-bit LOUD system, adn you can get around that by just installing 64-bit vanilla Jaunty (or Hardy, or whatever) and building the package there (this is where VMs are handy :).  List of packages in LOUD for Jaunty that require this treatment follows:
+* loud-usplash-theme
+* novell-groupwise-gwclient (requires some special massaging, see below)
+
+===== Groupwise (Sucks!) =====
+Groupwise needs some massaging before it will work properly on a 64-bit host.  You'll need 32-bit GTK1.2 libraries installed.  They weren't available in the 64-bit Hardy repos, so I put them in a package and stuck it on my mirror.  I'll upload it to Launchpad bazaar later.  ('''EDIT:''' See https://code.launchpad.net/~adorsey/+junk/lib32-gtk1.2)  You also have to do some tricks with the scripts that start Groupwise:
+* Make a file called gw64.sh that contains the following:
+ <pre>
+export JRE_HOME=/usr/lib/jvm/ia32-java-6-sun/jre
+export LD_LIBRARY_PATH=$JRE_HOME/lib/i386:$JRE_HOME/lib/i386/client:$LD_LIBRARY_PATH
+/opt/novell/groupwise/client/bin/groupwise.old "$@" 
+</pre>
+* debian/control looks like this (note extra stuff in binary package section):
+ {{{
+Source: novell-groupwise-gwclient
+Section: net
+Priority: optional
+Maintainer: John Eckersberg <johnny@csee.wvu.edu>
+Uploaders: David A. Riggs <driggs@mix.wvu.edu>
+Build-Depends: debhelper (>= 5.0.0), cdbs, ia32-libs [amd64], libstdc++5 [i386]
+Standards-Version: 3.6.2
+
+Package: novell-groupwise-gwclient
+Architecture: i386 amd64
+Depends: sun-java6-jre, libstdc++5, ${shlibs:Depends}, libgtk1.2, ia32-libs [amd64], lib32-gtk1.2 [amd64], ia32-sun-java6-bin [amd64]
+Description: Novell Groupwise Client
+ Linux i386 build of Novell Groupwise Client
+ }}}
+* novell-groupwise-gwclient.install looks like this:
+ {{{
+novell opt/
+novell/groupwise/client/gwclient.desktop usr/share/applications/
+gw64.sh opt/novell/groupwise/client/bin
+ }}}
+* novell-groupwise-gwclient.postinst looks like this (this is where the magic happens):
+ {{{
+
+if <nowiki>[[ `uname -m` == "x86_64" || `uname -m` == "amd64" ]]</nowiki>; then 
+  cp /opt/novell/groupwise/client/bin/groupwise /opt/novell/groupwise/client/bin/groupwise.old
+  cp /opt/novell/groupwise/client/bin/gw64.sh /opt/novell/groupwise/client/bin/groupwise
+  ln -fs /usr/lib/jvm/ia32-java-6-sun /opt/novell/groupwise/client/jre
+else
+  ln -fs /usr/lib/jvm/java-6-sun/jre /opt/novell/groupwise/client/jre
+fi
+ }}}
+And that should take care of Groupwise, except if it doesn't.
+
+=== Dependency Hell ===
+A lot of stuff that loud-courseware, loud-research, etc. depends on simply does not have 64-bit ports.
+* loud-java: No longer an issue, Jaunty provides 64-bit sun-java6-plugin (finally).
+* loud-cs310: depends on smlnj which is not present in 64-bit repositories.  Debian has an amd64 package upstream, however.
+* loud-mit-scheme: depends on mit-scheme.  Replaced by mit-scheme-doc.

@@ -1,0 +1,185 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== Обзор ==
+
+Ниже приводится краткий список того, что требуется, чтобы делать ежедневные сборки программного обеспечения с помощью Launchpad.
+
+* Исходный код, загруженный на Launchpad (используйте либо code.launchpad.net либо импортируйте исходный код)
+* Выбрать ветвь, используемую для ежедневных сборок
+* Написать скрипт
+* Протестировать процесс сборки локально
+* trigger builds via launchpadlib
+
+== Prerequisites ==
+=== Код на Launchpad ===
+Система Launchpad Daily Builds работает только с <nowiki>[[https://help.launchpad.net/Code|кодом, загруженным на Launchpad]]</nowiki>. Разместить код можете <nowiki>[[https://help.launchpad.net/Code/UploadingABranch|вы сами, через Launchpad Code]]</nowiki> (что легче всего), либо вы можете настроить Launchpad на <nowiki>[[https://help.launchpad.net/Code/Imports|импорт кода откуда-либо ещё]]</nowiki>.
+
+=== Packaging ===
+Somebody needs to have packaged your software before. If your software for example is in Ubuntu or Debian, you are sorted out. If there's another branch in Launchpad, that contains packaging for your software, you are sorted out. With the "recipe" (more on the topic below), you can sort-of-merge the packaging into your daily branch.
+
+If nobody ever attemped to package your software for Debian or Ubuntu, you might want to have a look at <nowiki>[[PackagingGuide-PackagingOverview]]</nowiki> to get your initial packaging set up.
+
+Make sure that the build process in your packaging can deal with what's in your branch. For example, if you work on a C project with autotools, you might have to run `autoreconf -i` at some stage during the build to make sure that all the auto-generated files (which are not in version control) are present.
+
+== Recipe ==
+"recipes" are descriptions of the steps needed to construct a package from the various bzr branches. It relies on a certain format that specifies
+* where to use the code from (trunk branch, beta branch, etc.), where to get the packaging from (separate branch? ubuntu branch?)
+* the correct package version (so users will still be able to upgrade to the stable version of the distro once it gets released)
+* what to modify to make the source build properly
+
+In this first step, just write it in a text editor. Later on, you'll test it locally, then enable it in Launchpad.
+
+=== Writing it ===
+The start of the file always looks similar to <pre>
+}}}
+
+The `# bzr-builder format 0.2` is the same for each, and just specifies the version of the format in use. The current format is `0.2`, and is increased as the format changes.
+
+`deb-version 1.0+{time}` specifies the version to use for the generated package. `{time}` here is a substitution variable, more information on those will be given later.
+
+The next line specifies the branch to base the package on: {{{
+lp:bzr
+</pre>
+
+This says that we will use the trunk of the `bzr` project.
+
+Then there is any number of other lines to specify other branches to include. The usual way to do this is to use the `merge` keyword to specify a simple merge of the branch. <pre>
+merge fix-build lp:~bzr/bzr/fix-build
+</pre>
+
+`fix-build` is the id of the branch within this file, it doesn't have to be the same as any part of the branch URL, but it has to be unique within the file. `lp:~bzr/bzr/fix-build` is again the location of the branch. What we are doing here is merging in a branch that we know we need in order to fix the build, but that hasn't landed
+in `lp:bzr` yet.
+
+The other way to include code is to use the `nest` keyword. <pre>
+nest pyfoo lp:pyfoo foo
+</pre>
+
+The `nest` keyword will get the contents of one branch put inside another branch, instead of merging it. In this case we are nesting `lp:pyfoo` in to `lp:bzr`. We are using `pyfoo` to refer to it in the file, and we want it nested in the `foo` directory, so we specify that last.
+
+It is possible to act on the nested branch in the same way as with the main branch. Any lines that are indented by two spaces under a `nest` line will act on the nested branch, e.g. <pre>
+  merge branding lp:~bob/pyfoo/ubuntu-branding
+</pre>
+
+would merge the `ubuntu-branding` branch in to `foo`.
+
+The resulting branch needs to already have the `debian` directory in place with the packaging in it, as it can't be auto-generated. Therefore you will often need to merge one or more packaging branches: <pre>
+merge packaging lp:~bzr/bzr/packaging
+</pre>
+
+In total this recipe would look like <pre>
+lp:bzr
+merge fix-build lp:~bzr/bzr/fix-build
+nest pyfoo lp:pyfoo foo
+  merge branding lp:~bob/pyfoo/ubuntu-branding
+merge packaging lp:~bzr/bzr/packaging
+</pre>
+
+==== Specifying revisions ====
+
+Sometimes you want to specify a specific revision of a branch to use, rather than the tip. You can do this by including a revision specifier at the end of any branch line, e.g. <pre>
+merge packaging lp:~bzr/bzr/packaging revno:2355
+</pre>
+
+or, for the first branch line <pre>
+lp:bzr tag:1.0
+</pre>
+
+would mean that every time the recipe was used it would use the "1.0" tag from that branch.
+
+==== Номера версий ====
+
+The `deb-version` specifier allow you to specify a version number for the resulting package, but it's not very useful if it is only ever a single version number, as you need it to increase.
+
+The example above (`1.0+{time}`), use a substitution variable. This will be replaced when the version number is needed with the current date and time (UTC). This will ensure that later packages get higher version numbers.
+
+There is a second variable that you can use as well: `{revno}`. This will be replaced with the revision number of the revision that was used from the primary branch. You can use the revision number of any branch by using `{revno:<branch id>}`.
+
+You can use as many substitution variables as you like, e.g. <pre>
+  deb-version 1.0+{revno}-0ubuntu0+{revno:packaging}+{time}
+</pre>
+
+Which would expand to something like <pre>
+  deb-version 1.0+4264-0ubuntu0+2145+200907201627
+</pre>
+
+* `{time}` will be substituted with the current date and time, such as 200908191512.
+* `{revno}` will be the revno of the base branch (the first specified).
+* `{revno:<branch name>}` will be substituted with the revno for the branch named <branch name> in the recipe.
+* `{debupstream}` will be replaced by the upstream portion of the versionnumber taken from `debian/changelog` in the final tree. If when the tree is built the top of `debian/changelog` has a version number of "1.0-1" then this would evaluate to "1.0".
+
+=== Локальное тестирование ===
+==== Локальное тестирование скрипта ====
+
+'''It's very important to test your recipe locally, else your build might fail in Launchpad over and over again without you noticing. Also might the package versioning be broken. Make sure you test locally first!'''
+
+Save your recipe file to `<project>.recipe`.
+
+* If you run Windows or Mac, check out how to <nowiki>[[https://help.ubuntu.com/community/VirtualBox|run Ubuntu in a virtual]]</nowiki> machine for the test.
+* If you want to test on a specific version, check out <nowiki>[[UbuntuDevelopment-UsingDevelopmentReleases|this documentation]]</nowiki> for how to do that in a safe and sane manner.
+
+Once you're happy with the specific Ubuntu version you want to test this in, please install
+* `bzr-builder` from the archive if available or
+* from https://launchpad.net/~dailydebs-team/+archive/bzr-builder
+
+In order to build the recipe you need to use the `bzr dailydeb` command. <pre>
+$ bzr dailydeb package.recipe working-dir
+</pre>
+
+This will perform the steps specified in `<project>.recipe`. It will create `working-dir` and put the resulting source tree and the source package there.
+
+==== Тестирование сборки ====
+Now we have a source package. Now let's test the build process.
+
+First we set up `pbuilder`, a tool that sets up a clean, minimal environment for the build, so we can be sure it builds everywhere.
+
+# `sudo apt-get install pbuilder`
+# edit `~/.pbuilderrc` and add <pre>
+COMPONENTS="main universe multiverse restricted"}}}
+ 1. sudo pbuilder create
+
+To kick off the test-build, run {{{
+sudo pbuilder build <working-dir>/<project>_<version>.dsc
+</pre>
+
+If the build succeeds, you can test-install the resulting package from `/var/cache/pbuilder/result/`.
+
+== Setting up the recipe in Launchpad ==
+Now that you confirmed the recipe to work, the rest is very simple. 
+
+<nowiki>[[File:create-recipe.png]]</nowiki>
+
+Browse to the branch you want to build in Launchpad. Click on "(+) Create packaging recipe".
+
+Now fill in all the necessary details:
+
+* ''Name:'' simple name of the recipe. Remember: you might want more than one.
+* ''Description:'' please make it clear what users of this build sign up for.
+* ''Owner:'' select who drives these builds.
+* ''Source Package Name:'' if the package exists in Ubuntu, make the right connection here.
+* ''Default Distribution Series:'' select all the Ubuntu releases you want to build the package for. Make sure all these builds work before you sign up for them!
+* ''Recipe text:'' paste your recipe in here.
+
+== Сборка ==
+=== Через Launchpad API ===
+
+To trigger builds regularly, you can use this simple <nowiki>[[http://launchpad.net/+apidoc|launchpadlib]]</nowiki> snippet: {{{#!python
+person = launchpad.people["person-who-owns-the-recipe"]
+recipe = person.getRecipe(name="name-of-the-recipe")
+ubuntu = launchpad.distributions["ubuntu"]
+ppa    = person.getPPAByName("name-of-ppa")
+for series in ubuntu.current_series:
+    recipe.requestBuild(archive=ppa, distroseries=series, pocket="Release")
+}}}
+
+=== Через Web UI ===
+Also, you can use Launchpad's Web UI.
+
+<nowiki>[[File:request-build.png]]</nowiki>

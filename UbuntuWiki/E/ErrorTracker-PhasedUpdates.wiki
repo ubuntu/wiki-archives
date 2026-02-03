@@ -1,0 +1,72 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+=== Rationale ===
+
+We want to be able to slowly phase updates of software packages. If we increase the percentage of systems that can install such an update and it becomes clear from data harnessed from errors.ubuntu.com that the update is less reliable than the one which proceeded it, we should programmatically stop the phasing.
+
+=== When do we stop a phased update? ===
+
+There are three conditions under which we want to consider stopping the phasing of an update:
+
+# New buckets since the previous version of a package.
+# The rate of crashes for the package increases.
+# Updates that purport to fix an issue, which do not.
+
+Updates that do not actually fix an issue are worth notifying a developer about, but it is not worth stopping the phasing of an update over them. They will not be considered further here.
+
+=== New buckets since the previous version of a package ===
+
+* We will create an AMQP pub/sub queue for modified bucket notifications.
+* We will keep track of the systems that report into a bucket.
+
+Every time a problem is bucketed, we'll check to see if the earliest version of this bucket is the same as the version we are examining or if the bucket does not exist at all.  (If the bucket is new then it first occurred with this version of the package.)  If either case is true, we'll upate the BucketSystems column family with the bucket and system.  Then we will get the first X+1 columns in the BucketSystems column family for the key of the bucket. If we get exactly X+1 results back, an alert will be fired, provided the bucket is for an official version of an Ubuntu package.
+
+Thus, if the number of systems reporting any new problem exceeds X, where X is initially set to 3, an alert will be fired.
+
+=== The rate of crashes for the package increases ===
+
+This is a periodic check. At every interval, the system will check if the standard deviation of the number of crashes for each day in the past two weeks is less than the number of crashes seen today. If it is, an alert will be fired.
+
+This algorithm will likely require modification as it will likely only exceed the standard deviation at or near the end of the day.  One idea possible way to deal with this is by dividing both quantities of crashes by the number of hours that have passed in the day. However, this assumes that errors receives similar amounts of crashes throughout the day.
+
+This algorithm may require tuning to account for the population size increasing dramatically around milestones and release day.
+
+This will require a new counter-based column family where we increment a counter for the row of release:package and the column name of the YYYYMMDD date.
+
+This may also be useful for packages not under going phased updates, i.e. for finding out if a new version of a package is crashier than the previous one.
+
+2013-03-06 - while 1 is more than 0 for the new buckets since the previous version we require at least 3 reports shouldn't the same be true of this check?
+
+=== Stopping of a phased update ===
+
+An API call will need to be provided by errors.ubuntu.com for Launchpad to check so that it can determine whether or not to increment the Update Percentage.
+
+Additionally, when errors recommends stopping a phased update an e-mail should be sent to the ubuntu-release team so that they are notified the phasing of the update has stopped.  There should be a way for members of ubuntu-release or ubuntu-archive to override the stopping of a phased update.
+
+=== Tying it all together ===
+
+Build a script in ubuntu-archive-tools that gets called at the end of archive-reports. This script will call getPublishedSources with a created_since field of the current date minus three weeks (more if we find there's not a lot of time when we consider crashes first appearing several days in). For each source package, it will first see if the source, version, and problem tuple exists in the whitelist. If it is not whitelisted, it will look up the delta of the rate of crashes in the Errors API, as well as the list of new buckets for the version. If the rate of crashes has increased or the list of new buckets is not empty, it will set the phase to 0, mail the uploader (or the signer and uploader in the case of sponsored uploads), and publish a web report for the release team.
+
+* bdmurray - initially we'd said two weeks and it is worth noting that the rate crashes check also uses a period of two weeks to compare if there is an increase
+
+Decide what the curve from 0% up to 100% looks like.
+
+This script always evaluates non-whitelisted source packages, even if they're already phased at 100%. It does this because we may have a problem that is only triggered after several days of use.
+
+The phased_update_percentage for packages in -proposed will immediately be set to 100% and this will need to decrease to 10% (or something) when the package is copied from -proposed to -updates.
+
+Because we will potentially flip some phased updates from 100% back down to 0, we need a mechanism to force updates, such as critical security bugs, at 100%. We already have the whitelist for forcing after the upload, but we don't have it at the time of upload. Therefore, we'll respect a high urgency field in the upload's changelog, always treating these at 100% phasing. (update-manager work)
+
+There should be a client side setting which will ignore phased_update_percentage and will effectively set 'no really install everything now'.  (This exists in the underlying update-manager code (ALWAYS_INCLUDE_PHASED_UPDATES); need to add UI http://launchpad.net/bugs/1186376)
+
+We should try to find a way to understand the time it takes to propagate a phased update, to help us understand how quickly security updates should be phased.
+
+We should treat Firefox specially, keeping it at a low phasing for five days, then giving it to everyone.

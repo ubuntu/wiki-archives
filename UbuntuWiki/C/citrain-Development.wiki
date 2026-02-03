@@ -1,0 +1,185 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+=== Preparation! You will need ===
+
+# <nowiki>[[https://wiki.canonical.com/InformationInfrastructure/IS/CanonicalOpenstack|Canonistack]]</nowiki> credentials from Enigma
+# Permission to branch lp:canonical-mojo-specs (ask #webops for this)
+# You must create at least 2 PPAs owned by you, named <code>stable-phone-overlay</code> and <code>landing-000</code>. Feel free to create more <code>landing-NNN</code> if you need to do a lot of testing.
+
+=== Detailed Deployment Instructions ===
+
+==== Ask Yourself, Is This Really Worth It? ====
+
+The following instructions are a colossal pain, and there are many (many, many, many, many) cases in which it's completely irrelevant to ever do this. So ask yourself if you really need your own deployment:
+
+# Are you just editing some web/json bits of lp:bileto? Bileto can be run locally without a deployment, just run <code>run.py</code>.
+# Are you making some rather simple changes? In a lot of cases the unit tests are so good that you can just make your change, write a new test that ensures your change is good, and then go straight to testing in the staging instance in wendigo, which is always deployed and never requires this outrageous deployment hassle.
+# Unless you're doing a sprint and a lot of people are vying for access to the staging instance, there's really no need for you to endure the pain that follows.
+
+==== Install Mojo & Codetree ====
+
+So, mojo and codetree aren't packaged for xenial as far as I can tell, so I'll be giving instructions on how to install them from source. In theory it's possible to do this from inside a xenial chroot, but just be aware that mojo depends on deploying an lxc (even if you're deploying to openstack), and lxc doesn't play nice inside of a chroot for whatever stupid reason (I spent days banging my head against this without success). Fun times!
+
+Do this on xenial, as many packages are not available in trusty.
+
+{{{#!highlight bash
+sudo apt-get install -y python-dev python-jinja2 python-novaclient python-swiftclient python-stevedore python-oslo.config python-debtcollector python-oslo.i18n python-oslo.serialization python-cinderclient python-concurrent.futures python-setuptools juju-deployer juju  lxc debootstrap
+sudo apt-get install -y --no-install-recommends bzr
+for project in codetree mojo; do 
+    bzr branch lp:$project
+    cd $project
+    sudo python setup.py install
+    cd ..
+done
+bzr branch lp:canonical-mojo-specs
+}}}
+
+==== Bootstrap Juju ====
+
+{{{#!highlight bash
+unzip ~/Downloads/canonistack-credentials.zip
+. novarc
+nova list
+swift list
+juju init
+}}}
+
+Now you need to decide whether you want to roll out into Canonistack (or a different Openstack cloud) or juju-local.
+
+* For Openstack, do
+
+ {{{#!highlight bash
+juju switch openstack
+juju bootstrap
+juju destroy-environment openstack --force  # when the bootstrap fails
+juju bootstrap
+}}}
+
+ Bootstrapping takes, like, an hour, so go get some coffee at this point. Also, this doesn't always succeed on the first try, so try bootstrapping a few times before asking for help.
+
+* For juju-local, you need to disable the `basenode` charm from your `lp:canonical-mojo-spec` branch, as that does not work in juju-local. <nowiki>[[http://paste.ubuntu.com/14871205/|patch this out]]</nowiki>, '''make sure to''' `bzr commit` this (it will be ignored otherwise), and run
+
+ {{{#!highlight bash
+sudo apt-get install -y juju-local
+echo "lxc.aa_profile = unconfined" | sudo tee /usr/share/lxc/config/common.conf.d/unconfined.conf
+juju switch local
+juju bootstrap
+}}}
+ 
+ Bootstrapping should only take a few minutes.
+
+==== Setup Mojo ====
+
+{{{#!highlight bash
+sudo addgroup mojo
+sudo adduser $USER mojo
+newgrp mojo  # or log out and back in
+cat > mojorc <<EOF
+export MOJO_PUBLISHER_USERNAME=$OS_USERNAME
+export MOJO_STAGE=ue/mojo-ue-ci-train/devel/
+export MOJO_DOWNLOADER_AUTH_URL=$OS_AUTH_URL
+export MOJO_WORKSPACE=devel
+export MOJO_PUBLISHER_PASSWORD=$OS_PASSWORD
+export MOJO_PROJECT=mojo-stg-ue-ci-train
+export MOJO_PUBLISHER_TENANT_NAME=$OS_TENANT_NAME
+export MOJO_SERIES=trusty
+EOF
+. mojorc
+sudo install -o root -g root -m 0440 ./mojo/contrib/99-mojo-sudoers /etc/sudoers.d
+mojo project-new --series $MOJO_SERIES $MOJO_PROJECT
+sudo chown -R $USER:mojo /srv/mojo/$MOJO_PROJECT/$MOJO_SERIES/ROOTFS/srv/mojo/$MOJO_PROJECT/$MOJO_SERIES
+sudo chown $USER:mojo /srv/mojo/$MOJO_PROJECT
+sudo chmod 750 /srv/mojo/$MOJO_PROJECT
+sudo chown $USER:mojo /srv/mojo/$MOJO_PROJECT/$MOJO_SERIES
+sudo chmod 750 /var/lib/lxc/$MOJO_PROJECT.$MOJO_SERIES
+sudo chgrp mojo /var/lib/lxc/$MOJO_PROJECT.$MOJO_SERIES
+sudo mkdir -p /srv/mojo/LOCAL/$MOJO_PROJECT
+sudo chown $USER:mojo /srv/mojo/LOCAL/$MOJO_PROJECT
+sudo chmod 750 /srv/mojo/LOCAL/$MOJO_PROJECT
+sudo chgrp mojo /var/lib/lxc
+sudo chmod 750 /var/lib/lxc
+mojo workspace-new ~/canonical-mojo-specs/ $MOJO_WORKSPACE --stage $MOJO_STAGE
+}}}
+
+==== Setup Creds ====
+
+The deployment needs the ssh & gpg keys you have registered with your launchpad account. '''WARNING: Only passwordless GPG keys will work if you intend to actually build MPs in your deployment. So you'll either need to create one of those and associate it with your lp account, or create a throw-away lp account for this purpose if you're a security-minded person.'''
+
+{{{#!highlight bash
+LOCAL_DIR=/srv/mojo/LOCAL/$MOJO_PROJECT/$MOJO_STAGE
+mkdir -p $LOCAL_DIR/keys
+cp ~/.gnupg/pubring.gpg $LOCAL_DIR/keys/gpg.pub
+cp ~/.gnupg/secring.gpg $LOCAL_DIR/keys/gpg.sec
+cp ~/.ssh/id_rsa* $LOCAL_DIR/keys/
+touch $LOCAL_DIR/amqp.uri
+}}}
+
+Oh, and you need an oauth token, too!
+
+{{{#!highlight bash
+bzr branch lp:cupstream2distro
+./cupstream2distro/token_generator.py  # Follow prompts in browser
+cp ~/.launchpad.credentials $LOCAL_DIR/keys/launchpad.credentials
+}}}
+
+Generate self-signed SSL cert:
+{{{#!highlight bash
+cd /srv/mojo/mojo-stg-ue-ci-train/trusty/devel/local/
+openssl req -x509 -nodes -newkey rsa:2048 -keyout requests.ci-train.ubuntu.com.key -out requests.ci-train.ubuntu.com.crt -days 365
+ln -s requests.ci-train.ubuntu.com.crt requests.ci-train.ubuntu.com_chain.crt
+}}}
+
+==== Ok, Deploy! ====
+
+{{{#!highlight bash
+mojo run ~/canonical-mojo-specs/ devel  # Might have to run this a couple times; may take hours
+juju set ci-train launchpad-user="$(bzr launchpad-login)" ppa-team="$(bzr launchpad-login)"
+}}}
+
+==== Fudge DNS ====
+
+At this point you should be able to access just bileto by IP.
+
+{{{#!highlight bash
+IP=$(juju status apache2 | sed -n 's#^ \+public-address: \(.\+\)$#\1#p' | uniq)
+firefox $IP
+}}}
+
+Due to the nature of apache2 being a reverseproxy for two different services, you'll need to add entries to /etc/hosts in order to access the jenkins unit.
+
+{{{#!highlight bash
+echo $IP ci-train.staging.ubuntu.com | sudo tee -a /etc/hosts
+}}}
+
+Make sure to undo this when you're done or you'll never be able to access the real staging server again! ;-)
+==== Use Your Code ====
+
+Once you have a working deployment you can inject your experimental branches according to <nowiki>[[https://wiki.canonical.com/UbuntuEngineering/CI/Playbook/StagingTrain#push_your_branch|the staging instructions]]</nowiki>.
+
+=== Candidate bugs ===
+
+This buglist is for potential fixing during Feb 2016 Bileto Sprint.
+
+Easy (probably 20 lines of code or less):
+* bdmurray - https://bugs.launchpad.net/bileto/+bug/1488956 (pre-fill 'landers' field with user's IRC name instead of lp nick)
+* bdmurray - https://bugs.launchpad.net/cupstream2distro/+bug/1530870 (record series as well as version number when publishing)
+* barry - https://bugs.launchpad.net/bileto/+bug/1513649 (warn user about differences between SRU / publishing to vivid overlay)
+* pitti - https://bugs.launchpad.net/bileto/+bug/1538717 (log rotation)
+
+Medium (requires significant new scripts/modules):
+* https://bugs.launchpad.net/bileto/+bug/1538716 (create clickable index of britney files)
+* https://bugs.launchpad.net/cupstream2distro/+bug/1273759 (comment on MPs when building & publishing silos)
+* https://bugs.launchpad.net/bileto/+bug/1538718 (unit tests for iterate.py / britney)
+
+Hard (requires architectural shifts, probably):
+* https://bugs.launchpad.net/cupstream2distro/+bug/1539212 (upload diffs to swift for persistent storage)
+* https://bugs.launchpad.net/bileto/+bug/1539270 (automatically close click/tarball tickets)

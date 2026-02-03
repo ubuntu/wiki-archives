@@ -1,0 +1,875 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+== Introduction ==
+
+This page lists some procedures for testing the various applications that use and depend on '''ClamAV''' anti-virus software.  These procedures are in somewhat a rough shape used to minimally configure any particular package and shouldn't be used as a production guide.
+
+This page is part of the <nowiki>[[MOTU-Clamav]]</nowiki> update/backport effort.
+
+'''NOTES:'''
+* testing shouldn't be done on a production machine (obviously)
+* it's always a good idea to purge remove the packages and start from scratch when testing/retesting)
+
+== amavisd-new ==
+
+* install amavis and postfix (configure it as Internet site)
+<pre>
+}}}
+* edit ''/etc/amavis/conf.d/15-content_filter_mode'' uncomment: 
+
+{{{
+@bypass_virus_checks_maps = (
+   \%bypass_virus_checks, \@bypass_virus_checks_acl,
+   \$bypass_virus_checks_re);
+</pre>
+* edit ''/etc/amavis/conf.d/15-av_scanners'', make sure clamd is configured as primary, clamscan as backup scanner, comment the rest out to be sure
+* also make sure that clamd socket points to the correct filename
+<pre>
+ ['ClamAV-clamd',
+   \&ask_daemon, ["CONTSCAN {}\n", "/var/run/clamav/clamd.ctl"],
+   qr/\bOK$/m, qr/\bFOUND$/m,
+   qr/^.*?: (?!Infected Archive)(.*) FOUND$/m ],
+</pre>
+* edit ''/etc/amavis/conf.d/50-user'', add a valid hostname:
+<pre>
+$myhostname = "example.com";
+</pre>
+* edit ''/etc/postfix/master.cf'' add: 
+<pre>
+smtp-amavis     unix    -       -       -       -       2       smtp
+        -o smtp_data_done_timeout=1200
+        -o smtp_send_xforward_command=yes
+        -o disable_dns_lookups=yes
+        -o max_use=20
+
+127.0.0.1:10025 inet    n       -       -       -       -       smtpd
+        -o content_filter=
+        -o local_recipient_maps=
+        -o relay_recipient_maps=
+        -o smtpd_restriction_classes=
+        -o smtpd_delay_reject=no
+        -o smtpd_client_restrictions=permit_mynetworks,reject
+        -o smtpd_helo_restrictions=
+        -o smtpd_sender_restrictions=
+        -o smtpd_recipient_restrictions=permit_mynetworks,reject
+        -o smtpd_data_restrictions=reject_unauth_pipelining
+        -o smtpd_end_of_data_restrictions=
+        -o mynetworks=127.0.0.0/8
+        -o smtpd_error_sleep_time=0
+        -o smtpd_soft_error_limit=1001
+        -o smtpd_hard_error_limit=1000
+        -o smtpd_client_connection_count_limit=0
+        -o smtpd_client_connection_rate_limit=0
+        -o receive_override_options=no_header_body_checks,no_unknown_recipient_checks
+</pre>
+* also add the following two lines immediately below the "pickup" transport service (lines need to start with a whitespace/tab!)
+<pre>
+        -o content_filter=
+        -o receive_override_options=no_header_body_checks
+</pre>
+* edit ''/etc/postfix/main.cf'' add the following line to the end:
+<pre>
+content_filter = smtp-amavis:[127.0.0.1]:10024
+</pre>
+* add ''clamav'' user to the ''amavis'' group:
+<pre>
+}}}
+* verify that ''/etc/clamav/clamd.conf'' has:
+{{{
+AllowSupplementaryGroups true
+</pre>
+* (re)start everything that's changed:
+<pre>
+}}}
+* send a message through with a virus attachment, check '''/var/log/mail.log''' for something similar to:
+{{{
+Sep 30 22:53:57 utest-lls32 amavis[7207]: (07207-01) Blocked INFECTED (Eicar-Test-
+Signature(44d88612fea8a8f36de82e1278abb02f:68)), LOCAL [172.16.21.1] [172.16.21.1] <gimre@example.com> ->
+<gimre@example.com>, quarantine: 1/virus-1-BWG7Fdyonr, Message-ID: <20100930195357.45CD419F8B9@voy>,
+mail_id: 1-BWG7Fdyonr, Hits: -, size: 1409, 181 ms
+</pre>
+* stop clamav-daemon to test backup scanner (which should be clamscan), send an email and check the logs:
+<pre>
+Sep 30 22:57:11 utest-lls32 amavis[7206]: (07206-01) (!)ClamAV-clamd: Can't connect to UNIX socket 
+/var/run/clamav/clamd.ctl: 2, retrying (2)
+Sep 30 22:57:17 utest-lls32 amavis[7206]: (07206-01) (!)ClamAV-clamd av-scanner FAILED: run_av error: Too many 
+retries to talk to /var/run/clamav/clamd.ctl (Can't connect to UNIX socket /var/run/clamav/clamd.ctl: No such 
+file or directory) at (eval 115) line 373.\n
+Sep 30 22:57:17 utest-lls32 amavis[7206]: (07206-01) (!!)WARN: all primary virus scanners failed, considering 
+backups
+Sep 30 22:57:22 utest-lls32 amavis[7206]: (07206-01) Blocked INFECTED (Eicar-Test-Signature), LOCAL 
+[172.16.21.1] [172.16.21.1] <gimre@example.com> -> <gimre@example.com>, quarantine: 2/virus-2PXuTWKdFjk6,
+Message-ID: <20100930195710.0498619F8B9@voy>, mail_id: 2PXuTWKdFjk6, Hits: -, size: 1409, 11889 ms
+</pre>
+
+== avscan ==
+
+* sudo apt-get install avscan
+* /usr/bin/avscan
+* Scan a file. 
+
+== clamassassin ==
+
+* install clamassassin and procmail (also postfix and clamav-daemon)
+<pre>
+}}}
+* configure postfix as ''Internet site''
+* in ''/etc/postfix/main.cf'' change the MDA (mail delivery agent) to procmail (just append the following line then restart postfix)
+{{{
+mailbox_command = /usr/bin/procmail
+</pre>
+* create a test user and put a ''.procmailrc'' file in his home:
+<pre>
+}}}
+* copy-paste the following code in .procmailrc to enable clamassassin:
+{{{
+MAILDIR=$HOME/Maildir
+
+:0fw
+| /usr/bin/clamassassin
+
+:0:
+* ^X-Virus-Status: Yes
+.virus/
+</pre>
+* create the user's Maildir:
+<pre>
+}}}
+* make sure clamd is running and the virus databases are up-to-date (in /var/lib/clamav)
+* get the test virus file from http://eicar.org/85-0-Download.html, and send a mail to testuser
+* the mail should be delivered in the ''.virus/new'' subfolder in ''/home/testuser/Maildir''
+* open the mail and look for similar lines in the header:
+{{{
+X-Virus-Report: Eicar-Test-Signature FOUND 
+X-Virus-Checker-Version: clamassassin 1.2.4 with clamscan / ClamAV 0.97.2/13453/Thu Aug 18 07:34:24 2011
+</pre>
+
+Clamassassin can be configured to use clamdscan/clamav-daemon for scanning email which is preferred over clamscan as it is much faster.
+* edit ''/etc/default/clamassassin'' and change the scanner
+<pre>
+CLAMSCAN=clamdscan
+</pre>
+* make sure clamd is running and using a local (Unix) socket and not TCP socket (in ''/etc/clamav/clamd.conf'')
+* after sending the email with the virus, look at the header, now it should say 'clamdscan':
+<pre>
+X-Virus-Report: Eicar-Test-Signature FOUND 
+X-Virus-Checker-Version: clamassassin 1.2.4 with clamdscan / ClamAV 0.97.2/13453/Thu Aug 18 07:34:24 2011
+</pre>
+
+== clamcour ==
+
+* sudo apt-get install courier-mta
+* sudo apt-get install clamcour
+* Edit /etc/courier/smtpaccess/default change: 
+
+<pre>
+192.168.0     allow,RELAYCLIENT
+</pre>
+
+* Configure a valid DNS domain.
+* Configure a Postfix' on another host to send the messsages. Using Mutt won't work.
+* Edit /etc/courier/locals' add the domain.
+* Edit /etc/courier/defaultdomain set it to host.domain.org
+* sudo makesmtpaccess
+* sudo makehosteddomains
+* sudo /etc/init.d/courier-mta restart
+** Should now maybe be able to send a message through courier
+* sudo filterctl start clamcour
+* Send a virus through the system and it should be logged to /var/log/mail.log. 
+
+== clamfs ==
+
+* install clamfs
+<pre>
+}}}
+* create a temporary folder to be the mountpoint for ''/tmp'' (default is /clamfs/tmp)
+{{{
+</pre>
+* get ''eicar.com'' file from http://eicar.org/85-0-Download.html, copy it to ''/tmp''
+* run clamfs with the example conf from the package (make sure clamav-daemon is running)
+** this will mount /tmp to /clamfs/tmp (check with mount)
+<pre>
+22:28:59 (clamfs.cxx:963) ClamFS v1.0.1
+22:28:59 (clamfs.cxx:964) Copyright (c) 2007,2008 Krzysztof Burghardt <krzysztof@burghardt.pl>
+22:28:59 (clamfs.cxx:965) http://clamfs.sourceforge.net/
+22:28:59 (clamfs.cxx:1050) chdir to our 'root' (/tmp)
+22:28:59 (clamfs.cxx:1091) ScanCache initialized, 16384 entries will be kept for 10800000 ms max.
+22:28:59 (clamfs.cxx:1102) Statistics module initialized
+22:28:59 (rlog.cxx:84) logs goes to syslog
+clamfs on /clamfs/tmp type fuse.clamfs (rw,nosuid,nodev,allow_other,default_permissions)
+</pre>
+* try to read ''/clamfs/tmp/eicar.com'', should get 'operation not permitted' message
+* check syslog for clamfs message:
+<pre>
+Aug 18 22:31:13 utest-nns32 clamfs: (root:16714) (root:0) /eicar.com: forced anti-virus scan because extension
+blacklisted 
+Aug 18 22:31:13 utest-nns32 clamfs: (cat:16714) (root:0) /tmp/eicar.com: Eicar-Test-Signature FOUND
+</pre>
+
+== clamsmtp ==
+
+* install clamsmtp and postfix
+<pre>
+}}}
+* configure Postfix to use clamsmtp as a content scanner (taken from http://thewalter.net/stef/software/clamsmtp/postfix.html)
+* add the following lines to the end of ''/etc/postfix/master.cf'':
+{{{
+scan      unix  -       -       n       -       16      smtp
+        -o smtp_send_xforward_command=yes
+        -o smtp_enforce_tls=no
+
+127.0.0.1:10025 inet  n -       n       -       16      smtpd
+        -o content_filter=
+        -o receive_override_options=no_unknown_recipient_checks,no_header_body_checks
+        -o smtpd_helo_restrictions=
+        -o smtpd_client_restrictions=
+        -o smtpd_sender_restrictions=
+        -o smtpd_recipient_restrictions=permit_mynetworks,reject
+        -o mynetworks_style=host
+        -o smtpd_authorized_xforward_hosts=127.0.0.0/8
+</pre>
+'''NOTE:''' stock clamsmtpd in Ubuntu listens on 10026 and forwards scanned mail to 10025, this is where postfix should listen (check /etc/clamsmtpd.conf), above guide does it the other way around
+* edit ''/etc/postfix/main.cf'', append the following line to it
+<pre>
+content_filter = scan:[127.0.0.1]:10026
+</pre>
+* sudo /etc/init.d/postfix restart
+* sudo /etc/init.d/clamsmtp restart
+* send a mail through the system with a virus attachment
+* should see the message being rejected and the virus name in ''/var/log/mail.log''
+<pre>
+Aug 18 22:44:10 utest-nns32 postfix/smtp[18073]: 51301149F4: to=<gimre@utest-nns32.narancs.net>,
+relay=127.0.0.1[127.0.0.1]:10026, delay=0.12, delays=0.07/0/0.04/0, dsn=2.0.0, status=sent
+(250 Virus Detected; Discarded Email)
+Aug 18 22:44:10 utest-nns32 postfix/qmgr[18065]: 51301149F4: removed
+Aug 18 22:44:10 utest-nns32 clamsmtpd: 100000: from=gimre@utest-nns32.narancs.net,
+to=gimre@utest-nns32.narancs.net, status=VIRUS:Eicar-Test-Signature
+</pre>
+
+== clamtk ==
+
+* install clamtk
+<pre>
+}}}
+* start clamtk and scan a file (downloaded from http://eicar.org/85-0-Download.html)
+
+== dansguardian ==
+
+* install dansguardian and squid proxy:
+{{{
+</pre>
+* to enable dansguardian, edit ''/etc/dansguardian/dansguardian.conf'', comment out ''"UNCONFIGURED"'' at the beginning of the file
+* set up squid to listen on ''127.0.0.1:3128'', for this edit ''/etc/squid/squid.conf'', search for ''http_port'' and change it to:
+<pre>
+http_port 127.0.0.1:3128
+</pre>
+
+Depending on which part of clamav you are testing, you need to enable a content scanner in ''/etc/dansguardian/dansguardian.conf''
+* for testing libclamav, uncomment the following:
+<pre>
+}}}
+* for testing clamdscan/clamav-daemon, uncomment:
+{{{
+</pre>
+'''NOTE''': there are some extra steps to be taken when using clamdscan:
+* clamav-daemon needs to be installed and running (obviously)
+* the ''clamav'' user needs to be in ''dansguardian'' group for clamd to be able to scan dansguardian's temporary files, this can be achieved with the following commands:
+<pre>
+}}}
+* restart squid and (re)start dansguardian:
+{{{
+</pre>
+* set your browser to use dansguardian as a proxy server (on port 8080), then try to download a test virus file, like one of these: http://eicar.org/85-0-Download.html
+* it should get blocked with a warning and there should be an entry in ''/var/log/dansguardian/access.log'' similar to this:
+<pre>
+2011.8.17 21:43:34 - 172.16.21.1 http://eicar.org/download/eicar.com.txt *INFECTED* *DENIED* Virus or bad
+content detected. Eicar-Test-Signature GET 68 0 Content scanning 1 403 application/octet-stream   -
+</pre>
+
+== dspam ==
+
+* sudo apt-get install dspam
+* Download dspamit shell script from dspamit_wrapper
+* Save it in /usr/local/bin/dspamit
+* sudo chmod 755 /usr/local/bin/dspamit
+* Edit /etc/dspam/dspam.conf uncomment and change: 
+
+<pre>
+TrustedDeliveryAgent "/usr/sbin/sendmail"
+
+ClamAVPort      3310
+ClamAVHost      127.0.0.1
+ClamAVResponse accept
+
+Opt out
+</pre>
+
+* Edit /etc/clamav/clamd.conf add: 
+
+<pre>
+TCPSocket 3310
+TCPAddr 127.0.0.1
+</pre>
+
+* sudo /etc/init.d/clamav-daemon restart
+* Edit /etc/postfix/master.cf add: 
+
+<pre>
+smtp      inet  n       -       n       -       -       smtpd
+  -o content_filter=dspam:
+dspam     unix  -       n       n       -       10      pipe
+  flags=Rhqu user=dspam argv=/usr/local/bin/dspamit ${sender} ${recipient}
+</pre>
+
+* Edit /etc/postfix/main.cf add: 
+
+<pre>
+dspam_destination_recipient_limit = 1
+</pre>
+
+* Edit /etc/default/dspam change no to yes: 
+
+<pre>
+START=yes
+</pre>
+
+* sudo /etc/init.d/postfix restart
+* Send a virus through shouldn't come through, and should be logged to /var/log/clamav/clamav.log 
+
+== exim4 ==
+
+* install and configure exim4 (select 'Split configuration')
+<pre>
+}}}
+* should be able to send mail at this point
+* edit ''/etc/exim4/conf.d/main/02_exim4-config_options'', enable:
+{{{
+av_scanner = clamd:/var/run/clamav/clamd.ctl
+</pre>
+* create new file ''/etc/exim4/conf.d/main/00_localmacros'', add:
+<pre>
+CHECK_DATA_LOCAL_ACL_FILE = /etc/exim4/local_acl
+</pre>
+* create new file ''/etc/exim4/local_acl'' and add the following:
+<pre>
+deny message = Serious MIME defect detected ($demime_reason)
+demime = *
+condition = ${if >{$demime_errorlevel}{2}{1}{0}}
+deny message = This domain has a policy of not accepting certain types \
+               of attachments in mail as they may contain a virus.  \
+               \
+               This mail has a file with a .$found_extension attachment and \
+               is not accepted. \
+               \
+               If you have a legitimate need to send this attachment, send it \
+               in a compressed archive, and it will then be forwarded to the \
+               recipient.
+demime = vbs:bat:pif:scr
+.ifdef TEERGRUBE
+   delay = TEERGRUBE
+.endif
+deny message = This message contains a virus ($malware_name) and has been rejected
+malware = *
+</pre>
+* restart exim
+<pre>
+}}}
+* you may need to add clamav user to debian-exim group (on Natty at least)
+{{{
+</pre>
+* send a virus through the system and you should see a rejection message from ClamAV in ''/var/log/exim4/mainlog''
+<pre>
+2011-08-19 00:14:08 1Qu9ui-0005bU-4s H=voy (voy.localdomain) [172.16.21.1] F=<gimre@localhost> rejected after
+DATA: This message contains a virus (Eicar-Test-Signature) and has been rejected
+</pre>
+
+== gurlchecker ==
+
+* sudo apt-get install gurlchecker
+* Execute /usr/bin/gurlchecker
+* Enable Virii scanning in Security section.
+* Check a site with a virus.
+* Should see virus name on console. 
+
+== havp ==
+
+* install havp
+<pre>
+}}}
+* havp listens only on ''localhost'' by default, you may need to change that in ''/etc/havp/havp.config''
+** comment out the line:
+{{{
+BIND_ADDRESS 127.0.0.1
+</pre>
+* don't forget to restart havp
+* change browser connection settings to use proxy on port 8080 (havp default) and clear browser cache
+* browse to a page with a virus (ie: http://eicar.org/85-0-Download.html), and try downloading a file
+* page should be blocked by havp and the virus should be logged to ''/var/log/havp/access.log'':
+<pre>
+17/08/2011 21:58:25 172.16.21.1 GET 200 http://eicar.org/download/eicar.com.txt 314+68 VIRUS
+ClamAV: Eicar-Test-Signature
+</pre>
+
+'''NOTE''': havp uses libclamav by default but it can be configured to use clamd for scanning, you might want to test that
+* change ''/etc/havp/havp.config'' to use clamd and not libclamav:
+<pre>
+ENABLECLAMLIB false
+ENABLECLAMD true
+CLAMDSOCKET /var/run/clamav/clamd.ctl
+</pre>
+* clamav-daemon needs to be installed and running (obviously)
+* the ''clamav'' user needs to be in ''havp'' group for clamd to be able to scan havp's temporary files, this can be achieved with the following commands:
+<pre>
+}}}
+* logfile should reflect that scanning was performed using clamd:
+{{{
+17/08/2011 22:09:13 172.16.21.1 GET 200 http://eicar.org/download/eicar.com.txt 314+68 VIRUS
+Clamd: Eicar-Test-Signature
+</pre>
+
+== klamav ==
+
+* install klamav (you will need a running graphical environment for this)
+<pre>
+}}}
+* start it and scan a file (downloaded from http://eicar.org/85-0-Download.html)
+NOTE: by default, ''/var/lib/clamav'' is used as the database folder which cannot be updated by a normal user. To test with latest signatures you can change the database directory to ''/home/<user>/.klamav/database'' in the 'Update' tab.
+
+== kmail ==
+
+* install postfix + dovecot (for POP3), clamav-daemon and kmail
+{{{
+</pre>
+* start kmail, configure a local POP3 email account, make sure it works
+* in the menu go to ''Tools / Anti-Virus Wizard...''
+* clamd should appear in the list, select it, click ''Next''
+* select the first two options (''Check messages using the anti-virus tool'' and ''Move to selected folder'')
+* select ''Local Folders/trash'' and click ''Finish''
+* go to ''Settings / Configure Filters...'' and check that the antivirus filters got added (there should be two, one for scanning and marking the email in the header, the other one to move the email if virus found)
+* send a test email with virus attached to the account, then ''Check Mail'' and see the message moved automatically to the ''trash'' folder
+
+== libclamav-client-perl ==
+
+<pre>
+}}}
+* create a new file (say ''/tmp/test.pl''), copy-paste the following perl code:
+{{{
+
+use ClamAV::Client;
+
+$scanner = ClamAV::Client->new(
+    socket_name     => '/var/run/clamav/clamd.ctl'
+);
+
+die("ClamAV daemon not alive")
+    if not defined($scanner) or not $scanner->ping();
+
+my $version = $scanner->version;
+print "$version\n";
+
+my ($path, $result) = $scanner->scan_path('/tmp/eicar.com');
+if (defined($result)) {
+    print "Virus found in $path: $result\n";
+}
+else {
+    print "No virus found.\n";
+}
+</pre>
+* running the script should result the following output:
+<pre>
+root@utest-nns32:/tmp# perl /tmp/test.pl 
+ClamAV 0.97.2/13454/Thu Aug 18 18:32:54 2011
+Virus found in /tmp/eicar.com: Eicar-Test-Signature
+</pre>
+
+== mailscanner ==
+
+* sudo apt-get install mailscanner
+* Edit /etc/postfix/main.cf add: 
+
+<pre>
+header_checks = regexp:/etc/postfix/header_checks
+</pre>
+
+* Create /etc/postfix/header_checks add: 
+
+<pre>
+/^Received:/ HOLD
+</pre>
+
+* Edit /etc/MailScanner/MailScanner.conf change: 
+
+<pre>
+Run As User = postfix
+Run As Group = postfix
+ 
+Incoming Queue Dir = /var/spool/postfix/hold
+Outgoing Queue Dir = /var/spool/postfix/incoming
+MTA = postfix
+
+Virus Scanners = clamav
+</pre>
+
+* Change permissions on MailScanner directories: 
+
+<pre>
+sudo chown -R postfix.postfix /var/spool/MailScanner/
+sudo chown -R postfix.postfix /var/lib/MailScanner/
+sudo chown -R postfix.postfix /var/run/MailScanner/
+sudo chown -R postfix.postfix /var/lock/subsys/MailScanner/
+</pre>
+
+* Edit /etc/default/mailscanner uncomment: 
+
+<pre>
+run_mailscanner=1
+</pre>
+
+* sudo /etc/init.d/mailscanner restart
+* sudo /etc/init.d/postfix restart
+* Send a message through with a virus attached should see it logged to /var/log/mail.log. 
+
+== mediawiki ==
+
+* sudo apt-get install apache2 libapache2-mod-php5 mysql-server
+* sudo apt-get install mediawiki clamav
+* configure MySQL to listen on IP Address:
+* edit /etc/mysql/my.cnf: 
+<pre>
+bind-address     = 192.168.0.10
+</pre>
+* create a database for the wiki and give access rights to wikiuser
+** mysql -u root
+<pre>
+create database wikidb
+grant all on wikidb.* to wikiuser@'192.168.0.10' identified by 'password';
+</pre>
+* configure Apache:
+** sudo cp /etc/mediawiki/apache.conf /etc/apache2/sites-available/mediawiki.conf
+** sudo a2ensite mediawiki.conf
+** sudo /etc/init.d/apache2/reload
+* setup the wiki using a browser pointed to http://server/mediawiki to make sure it works
+* edit /etc/mediawiki/LocalSettings.php and enable file uploads, by searching for and uncommenting the following line:
+<pre>
+}}}
+* edit /etc/mediawiki/LocalSettings.php and add the following to the end, enabling scanning uploaded zip files with clamav:
+{{{
+$wgAntivirus = 'clamav';
+$wgFileExtensions[] = 'zip';
+</pre>
+* get the test virus file from http://www.eicar.org/anti_virus_test_file.htm (eicar_com.zip further down the page)
+* try to upload the file to mediawiki, you should see the following error message:
+<pre>
+Upload warning
+The file contains a virus! Details: Eicar-Test-Signature FOUND
+</pre>
+
+== mimedefang ==
+
+* install mimedefang and sendmail
+<pre>
+}}}
+* edit ''/etc/mail/sendmail.mc'', change: 
+{{{
+DAEMON_OPTIONS(`Family=inet,  Name=MTA-v4, Port=smtp, Addr=172.18.100.50')dnl
+DAEMON_OPTIONS(`Family=inet,  Name=MSP-v4, Port=submission, Addr=172.18.100.50')dnl
+INPUT_MAIL_FILTER(`mimedefang', `S=unix:/var/spool/MIMEDefang/mimedefang.sock, F=T, T=S:5m;R:5m')dnl
+</pre>
+* add clamav to groups
+<pre>
+}}}
+* edit ''/etc/mail/mimedefang-filter'' add the following to the top: 
+{{{
+$Features{'Virus:CLAMD'} = 1;
+$ClamdSock  = "/var/run/clamav/clamd.ctl";
+</pre>
+* restart everything:
+<pre>
+}}}
+* send virus through the system and it should be logged to ''/var/log/mail.log''
+{{{
+Aug 19 02:04:31 utest-nns32 mimedefang.pl[4544]: MDLOG,p7IN4UXO005515,virus,Eicar-Test-Signature,172.16.21.1,
+<gergelyimre@gmail.com>,<gimre@utest-nns32.narancs.net>,[TESTMAIL] eicar test mail
+Aug 19 02:04:31 utest-nns32 mimedefang.pl[4544]: Discarding because of virus Eicar-Test-Signature
+Aug 19 02:04:31 utest-nns32 mimedefang.pl[4544]: filter: p7IN4UXO005515:  discard=1
+Aug 19 02:04:31 utest-nns32 mimedefang[4543]: p7IN4UXO005515: Discarding because filter instructed us to
+Aug 19 02:04:31 utest-nns32 sm-mta[5515]: p7IN4UXO005515: Milter: data, discard
+Aug 19 02:04:31 utest-nns32 sm-mta[5515]: p7IN4UXO005515: discarded
+</pre>
+
+== nautilus-clamscan ==
+
+Nautilus-clamscan is a Nautilus extension for scanning files for viruses easily by right-clicking on them. See https://launchpad.net/nautilus-clamscan for more information.
+<pre>
+}}}
+* logout/login for the extension to get loaded
+* download a testfile from http://eicar.org/85-0-Download.html to the Desktop
+* right-click on the file and select ''Scan for viruses...''
+* a ''File manager'' popup should appear with scanning progress bar, saying that it found 1 infected file
+
+== p3scan ==
+
+* install dovecot, clamav-daemon and p3scan
+{{{
+</pre>
+* enable plain POP3 protocol in dovecot (''/etc/dovecot/dovecot.conf''):
+<pre>
+protocols = pop3 imap imaps
+</pre>
+* add the clamav user to p3scan group:
+<pre>
+uid=110(clamav) gid=110(clamav) groups=110(clamav),114(p3scan)
+</pre>
+* configure clamav-daemon to listen on TCP port 3310 (''/etc/clamav/clamd.conf'')
+<pre>
+TCPSocket 3310
+TCPAddr 127.0.0.1
+</pre>
+
+NOTE: p3scan uses clamav-daemon either by calling clamdscan or communicating with clamd directly through TCP socket
+
+* edit ''/etc/p3scan/p3scan.conf'' and set the following options:
+(for scanning with '''clamdscan''')
+<pre>
+scanner = /usr/bin/clamdscan --no-summary
+virusregexp = .*: (.*) FOUND
+</pre>
+(for scanning directly with '''clamd''' through '''TCP socket''')
+<pre>
+scannertype = clamd
+scanner = 127.0.0.1:3310
+virusregexp = .*: (.*) FOUND
+</pre>
+* '''IMPORTANT!''' restart everything that changed
+<pre>
+}}}
+* redirect the POP3 port ''110'' to ''8110'' (p3scan default) using iptables:
+{{{
+</pre>
+* send an email with virus attachment through the system then try opening the mail using POP3
+<pre>
+Trying 172.16.21.183...
+Connected to utest-nns32.narancs.net.
+Escape character is '^]'.
++OK Dovecot ready.
+user gimre
++OK
+pass *****
++OK Logged in.
+retr 1
++OK P3Scan'ing...
+</pre>
+* should get an email body stating something like:
+<pre>
+This message body was generated automatically from P3Scan, which runs on
+utest-nns32.(none) for scanning all incoming email.
+
+It replaces the body of a message sent to you that contained a VIRUS!
+[...]
+</pre>
+* p3scan should then quarantine the message in ''/var/spool/p3scan''
+* if the above step is not working and p3scan crashes, make sure that clamav-daemon is running and it's in the p3scan group
+
+== php5-clamav ==
+
+Install php5-clamav package (only available since Lucid, replaces php{4,5}-clamavlib)
+* sudo apt-get install php5-clamav
+* sudo /etc/init.d/apache2 restart
+Create a test script:
+* vi /var/www/vir.php
+
+<pre>
+<?php
+
+print cl_info()."<br/>";
+$virname = '';
+$file = '/tmp/eicar_com.zip';
+
+$ret = cl_scanfile($file,$virname); 
+print "<br/>"; 
+if ($ret) {
+  print "Virus found in $file: $virname .<br/>";
+}
+else {
+  print "No virus found in $file.<br/>";
+}
+?>
+</pre>
+
+Browse to the script, should see virus details if a virus is found.
+
+For more details see /usr/share/doc/php5-clamav/README.Debian included with the package.
+
+== php5-clamavlib ==
+
+* sudo apt-get install php5-clamavlib
+* sudo /etc/init.d/apache2 restart
+
+Create a test script: 
+
+<pre>
+<?php 
+
+print cl_info()."<br/>"; 
+$ret = cl_scanfile('/path/to/virus_file'); 
+print "<br/>"; 
+
+print $ret; 
+print "<br/>"; 
+print "<br/>"; 
+
+echo cl_info() . "<br>"; 
+
+$file = "/path/to/virus_file"; 
+cl_scanfile_ex($file, CL_SCAN_STDOPT, $virus, $retcode);
+if ($retcode == CL_VIRUS) 
+    echo $file . " returns: " . cl_pretcode($retcode) . " virus name: " . $virus . "<br>"; 
+else 
+    echo $file . " returns: " . cl_pretcode($retcode) . "<br>"; 
+
+?>
+</pre>
+
+* Place the script under the web root.
+* Browse to the script, should see virus details if a virus is scanned. 
+* If php5-clamavlib is broken it usually causes an Apache error and it won't start with PHP enabled.
+
+== php4-clamavlib ==
+
+* sudo apt-get install php4-clamlib
+* Edit /etc/php4/apache2/php.ini remove -e from the extension statement: 
+
+<pre>
+extension=clamav.so
+</pre>
+
+* sudo /etc/init.d/apache2 restart
+* Create a test script: 
+
+<pre>
+<?php 
+
+print cl_info()."<br/>"; 
+$ret = cl_scanfile('/path/to/virus_file'); 
+print "<br/>"; 
+
+print $ret; 
+print "<br/>"; 
+print "<br/>"; 
+
+echo cl_info() . "<br>"; 
+
+$file = "/path/to/virus_file"; 
+cl_scanfile_ex($file, CL_SCAN_STDOPT, $virus, $retcode);
+if ($retcode == CL_VIRUS) 
+    echo $file . " returns: " . cl_pretcode($retcode) . " virus name: " . $virus . "<br>"; 
+else 
+    echo $file . " returns: " . cl_pretcode($retcode) . "<br>"; 
+
+?>
+</pre>
+
+* Place the script under the web root.
+* Browse to the script, should see virus details if a virus is scanned. 
+
+* If '''php4-clamavlib''' is broken it usually causes an Apache error and it won't start with PHP enabled.  
+
+'''Note:''' php4-clamavlib is '''not''' available on new Ubuntu releases.  See php5-clamavlib above or php-clamav (it support Clamav 0.95.x).
+
+== pyclamd ==
+
+* apt-get install python-pyclamd
+* get a test virus file from http://eicar.org/85-0-Download.html
+* make sure the file is readable by clamav-daemon
+<pre>
+}}}
+* fire up python and copy-paste the commands below (the lines starting with >>>)
+{{{
+Python 2.7.1+ (r271:86832, Apr 11 2011, 18:05:24) 
+[GCC 4.5.2] on linux2
+Type "help", "copyright", "credits" or "license" for more information.
+>>> import pyclamd
+>>> pyclamd.init_unix_socket(filename='/var/run/clamav/clamd.ctl')
+>>> print pyclamd.version()
+ClamAV 0.97.2/13455/Thu Aug 18 23:04:32 2011
+>>> ret = pyclamd.scan_file('/tmp/eicar.com')
+>>> print ret
+{'/tmp/eicar.com': 'Eicar-Test-Signature'}
+>>> ret = pyclamd.scan_stream(open('/tmp/eicar.com').read())
+>>> print ret
+{'stream': 'Eicar-Test-Signature(44d88612fea8a8f36de82e1278abb02f:68)'}
+</pre>
+
+== python-clamav ==
+
+* install python-clamav package:
+<pre>
+}}}
+* create a python test script, say in ''/tmp/test.py'' with the following content:
+
+{{{
+import pyclamav
+
+print pyclamav.get_numsig()
+
+print pyclamav.get_version()
+print pyclamav.version()
+
+scan_file = pyclamav.scanfile('/tmp/eicar.com.txt')
+print scan_file
+</pre>
+NOTE: download a test file from http://eicar.org/85-0-Download.html and change path to the file (ie: ''/tmp/eicar.com.txt'')
+* execute the script, you should see version and virus information printed to console
+<pre>
+1021013
+('0.97.2', 13450, 1313597786)
+0.4.1
+(1, 'Eicar-Test-Signature')
+</pre>
+
+== qpsmtpd ==
+
+* install qpsmtpd and postfix
+<pre>
+}}}
+* reconfigure qpsmtpd
+{{{
+</pre>
+* answer the following:
+** Enable qpsmtpd startup at boot time: '''Yes'''
+** Addresses on which to listen for incoming SMTP connections: 172.18.100.50 '''(remove 127.0.0.1!)'''
+** Queueing method for accepted mail: '''Postfix'''
+** Destination domain(s) to accept mail for (blank for none): '''some_test_domain''' localhost.localdomain localhost 
+* configure postfix to listen on localhost only (''/etc/postfix/main.cf''), then restart postfix:
+<pre>
+inet_interfaces = 127.0.0.1
+</pre>
+
+NOTE: qpsmtpd can use either clamscan or clamdscan for scanning incoming emails, configure ''/etc/qpsmtpd/plugins'' accordingly
+
+(for testing with '''clamscan''')
+<pre>
+virus/clamav clamscan_path=/usr/bin/clamscan action=reject max_size=209715 tmp_dir=/tmp/qpsmtpd.clam
+</pre>
+(for testing with '''clamdscan''')
+<pre>
+virus/clamdscan clamd_socket /var/run/clamav/clamd.ctl deny_viruses yes
+</pre>
+* add clamav to qpsmtpd group and fix permissions on qpsmtpd spool (only needed for testing with clamdscan):
+<pre>
+}}}
+* restart qpsmtpd
+* send an email with virus attachment through and it should be logged in ''/var/log/qpsmtpd/qpsmtpd.log''
+{{{
+Thu Aug 18 12:12:32 2011 utest-nns32[16174]: Virus found: Eicar-Test-Signature
+Thu Aug 18 12:12:32 2011 utest-nns32[16174]: 552 Virus found: Eicar-Test-Signature
+</pre>

@@ -1,0 +1,523 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+* '''Launchpad Entry''': https://launchpad.net/distros/ubuntu/+spec/replacement-init
+* '''Created''':  by JaneWeideman
+* '''Contributors''': ScottJamesRemnant
+* '''Packages affected''': `sysvinit`, `at`, `cron`, `anacron`, `netkit-inetd`, `udev`, `acpid`, `apmd`, `ifupdown`, `module-init-tools`.
+
+=== Summary ===
+
+This specification proposes the replacement of the various traditional
+BSD and System V daemons that handle the jobs of booting the machine,
+starting and stopping services and running user tasks with a single
+daemon that combines and extends their functionality.
+
+Compatibility is an extremely high priority for this specification, it
+should not be necessary for other packages or user habits to change
+until they want to take advantage of the newer features.
+
+The newer features provide a new approach to looking at, and dealing
+with services and tasks.  Rather than iterating them in a linear
+fashion at a particular time, services and tasks are started as a
+result of events and themselves cause more events to occur.
+
+For example, instead of mounting devices listed in `/etc/fstab` at a
+point in the boot process where we believe that all devices should
+have been detected, we instead mount each device when the hardware is
+detected; mounting the last device listed in `/etc/fstab` would
+trigger an event that would then start any services or tasks that were
+waiting on the "entire filesystem mounted" event.
+
+=== Rationale ===
+
+The current version of Ubuntu includes several daemons that all
+arguably perform the same kind of job, yet each is configured in a
+different way and each imposes different restrictions on the tasks
+that can be performed.
+
+Each of these daemons also reimplements much of the job of actually
+starting a service, and none of them do it exactly the same way.  Most
+do not correctly sanitise the environment, or provide a method for the
+developer or administrator to customise it.
+
+In addition, there are many other non-traditional daemons that also
+start services or run user tasks in addition to performing other jobs,
+e.g. `acpid`.  These daemons should not have to provide such
+functionality, and instead should be able to trigger an event that
+causes another daemon to perform the task.
+
+The change from a linear-startup to an event-based model is driven by
+requirement; with the increased proliferation of "modern" hardware
+buses that support hotpluggable devices and unlimited length chains of
+devices, it's simply not possible to declare a point in the boot
+sequence where "all connected hardware has been found".
+
+These leaves the boot sequence fragile, when it should be robust.
+
+The reason for replacing `init` rather than adding a new daemon that
+could adopt these duties is to provide reliable service supervision.
+Process #1 is special, it is the parent of all processes that have let
+their own parents die; i.e. daemons.  This means that `init` receives
+`SIGCHLD` when daemons die.
+
+=== Use cases ===
+
+* Fabian is a power user who wishes to use a USB disk for part of his
+   filesystem.  This currently frequently fails because the USB disk
+   sometimes takes longer to initialise than the boot process takes to
+   get to the point where it mounts the filesystem.  He would rather
+   the boot process was robust, and the disk was mounted when
+   initialised.
+
+* Karl is the administrator of a number of servers, and has problems
+   with certain daemons that frequently crash.  He would prefer the
+   daemons to be automatically restarted if this happens, to avoid
+   loss of service.
+
+* Mark owns an iPod and uses a popular piece of software to download
+   podcasts onto it.  He currently has to start the software when he
+   plugs his iPod in, and remember to stop it afterwards.  He would
+   rather the system started and stopped the software automatically
+   based on the prescence of his iPod.
+
+* Steve is a software developer.  He has a script that he wishes to
+   run hourly, provided that the script is not still running from
+   before.  He would rather the task scheduler could take care of that
+   for him, than have to reinvent a lock around the task.
+
+* Stuart is a database administrator.  He wishes the database to be
+   automatically backed up whenever the server is shutdown, whether
+   for upgrade or system reboot.  There is currently no way for him to
+   set a task to be run when a service is stopped.
+
+* Paul is an orindary user with a low-end system.  He would rather
+   services and hardware handlers were started only when needed,
+   rather than on all systems.
+
+* David is a system administrator.  He needs to be able to tell which
+   services failed to start on boot, examine why, and see which
+   services are currently running.
+
+* Hugo is an ordinary user and has to frequently reboot his
+   computer.  He would prefer that shutting down and booting up took
+   as little time as possible.
+
+* Thomas is a system administrator.  He frequently gets frustrated
+   that there is no consistency to how tasks are added to the system.
+   A script to perform a task at shutdown must be written and
+   activated completely differently to one performed when the system
+   is shut down.
+
+* Martin is a security consultant.  He has discovered several
+   problems with processes that run task scripts not providing a
+   consistent environment, including potential problems such as
+   leaving file descriptors open.
+
+* James is an experienced UNIX user, with multiple years of
+   experience.  He does not wish to have to relearn that which he has
+   learned already, and would rather contunue using the tools that he
+   is used to and only learn the newer ones when necessary.
+
+* Colin is a distribution developer who maintains several packages
+   that provide services or perform tasks.  He does not want to have
+   to update his packages until he is ready to take advantage of new
+   features or abilities, his existing scripts should continue to work
+   unmodified in their original locations.
+
+=== Scope ===
+
+While this specification is targeted for the Edgy Eft release of
+Ubuntu, it is not intended to be soley implemented there.  Dialogue
+has been opened with both Debian and Fedora to propose this as a new
+Linux standard.
+
+=== Existing Implementations ===
+
+This section of this specification is non-normative, and covers why
+existing implementations were not chosen.
+
+==== file-rc ====
+
+This is a simple replacement for the standard System V `init` that
+uses a single configuration file listing the scripts that should be
+run for each runlevel, rather than using directories of symlinks.
+
+Otherwise it is not much different in scope to the existing
+`sysvinit` and seems like changing a configuration format with no
+benefit other than percieved ease of configuration.
+
+==== runit ====
+
+http://smarden.org/runit/
+
+This is a djb-inspired `init` replacement that aims to provide service
+supervision for services started at boot time.
+
+The configuration of this system is obtuse, even by djb-style
+standards, and it makes no attempt to retain any compatibility with
+existing systems.
+
+Service management is performed using a small wrapper process, which
+means it relies on daemons not forking into the background.
+
+==== minit ====
+
+http://www.fefe.de/minit/
+
+This is an interesting executable-centric take on services and tasks,
+a task is defined by the executable that needs to be run and various
+parameters, etc. given to it.
+
+Also somewhat djb-like in configuration.
+
+Has a really cute feature where any arguments on the kernel command
+line that are services it knows about are started.
+
+Largely incomplete and sadly seems abandoned by the author.
+
+==== serel ====
+
+http://www.fastboot.org/
+
+Utilities to be added to existing init scripts to provide
+synchronisation and dependencies to them, does not replace `init`.
+
+Requires that scripts be modified to co-operate.
+
+Seems abandoned by the author, no activity since 2002!
+
+==== DMD ====
+
+http://directory.fsf.org/GNU/DMD.html
+
+Apparently this is intended for the Hurd, and is written in Guile.  No
+useful documentation could be found, and it also appears abandoned by
+the author.
+
+==== SystemServices ====
+
+http://www.gnome.org/~seth/blog/2003/Sep/27
+
+This is just an idea posted on somebody's blog, there is no actual
+code for this, however it is interesting because of its use and
+reliance of dbus.
+
+I must say that I'm not on the dbus train, I don't understand why
+GNOME people seem to think that dbus has to be the core architecture
+of whatever designs they come up with.  It's just IPC.
+
+However the ability to enquire through IPC about the state of any
+service, and issue commands to start and stop them would be highly
+useful.  There should probably at least be a dbus gateway for this.
+
+==== monit ====
+
+http://www.tildeslash.com/monit/index.php
+
+Monit isn't a replacement for init, instead it's a daemon that tests
+and monitors the running system and can perform actions if tests fail.
+
+For example a typical test might be that a pid named in
+`/var/run/cron.pid` must exist, and if not,  `cron` needs starting
+through its usual init script.
+
+The tests and monitoring it can perform are quite complex, including
+connecting to TCP/IP sockets and talking protocol.
+
+This is a highly useful piece of software, however I don't think it
+fulfils our use cases directly; it's certainly a useful add-on for
+servers though.
+
+==== Solaris SMF ====
+
+http://opensolaris.org/os/community/smf/
+
+And now we come to the big hitters, SMF (Service Management Framework)
+was first introduced in Solaris 10 and has already been adopted by the
+NexentaOS derivative of that and Ubuntu.
+
+It's not directly an init replacement, instead it is a daemon that
+takes care of starting "services" leaving init to take care of the
+other jobs of booting a system.
+
+It has a decent set of command-line tools for communicating with the
+daemon and discovering what services are running, which are in
+maintenance mode, etc. as well as starting and stopping services.
+
+Services are described by an XML file and can include dependencies,
+other services that need to be started if this one is to be.  These
+provide both start ordering and simply the ability to start a service
+and have it bring up everything else it needs.  It also keeps services
+running if they should fail.
+
+The fact that it doesn't replace init causes a problem for service
+management though, it requires that everything be modified to run in
+the foreground and not daemonise.  Not a low barrier to deployment.
+
+It is licenced under the CDDL, which while generally considered to be
+fairly free, is not GPL-compatible.  The licence has this and other
+issues that will likely stiffle its adoption elsewhere, Fedora appear
+to have rejected it, for example.
+
+'''Damian Wojsław:''' This summary is incorrect in at least two areas: 
+
+* SMF isn't a init replacement, it's a /etc/rc*.d replacement,
+
+* placing daemonised services within SMF does not require any change to them and sure does not requie "foregrounding" them.
+
+SMF manifest can also describe properties for a service, like user that service runs as, resource constrains and other properties that service relies on. Said properties can be inspected and changed later with proper commands. A service can have many different instances - configurations. Ie. PostgreSQL service configuration is delivered in two versions: 32bit and 64bit. Depending on which one is enabled, proper architecture binary is being executed.
+XML files are used for initial service configuration, after service configuration is imported, it is kept in sqlite database.
+Thank you, please go on. (Damian Wojsław)
+
+==== Apple launchd ====
+
+http://developer.apple.com/macosx/launchd.html
+
+Apple's answer to the same problem space as SMF is launchd, which is
+their service management framework.  Unlike SMF, launchd is designed
+to be started by the kernel as an init-replacement.
+
+It uses XML configuration files (what is it with people and using XML
+in this way?) to describe services, which are started when necessary
+and kept running until they are not needed.
+
+Two particularly interesting traits of launchd are worth mention.
+
+One is that it is not dependency-based, instead applications are
+expected to deal with their dependencies being missing by waiting for
+them.  An application that needs a writable filesystem should just
+spin until there is one.
+
+The second interesting thing is its focus on "demand", a service is
+only running if it is "needed".  The example often given is that the
+mail queue daemon will only be running while there are files in the
+queue, and will stop afterwards.
+
+Like SMF it has licence issues; the APSL is considered to be fairly
+free, but not GPL-compatible.  It also has particular clauses that
+cause issues if you even read the source code.  Again, for this
+reason, it is likely not to be adopted elsewhere.
+
+==== init-ng ====
+
+http://www.initng.org/
+
+Which brings us finally to initNG, a self-described "next-generation
+init system" with a damned clever logo.  Seriously, I like the logo.
+
+As it's name suggests, it's aiming directly as an init replacement.
+And like SMF, it is dependency-based, so that services are started
+after their dependencies.
+
+It's designed around a plugin architecture, so that almost all of the
+functionality is actually provided by loadable `.so` modules.  In
+theory this makes it quite customisable.
+
+Plugins include such commonly desired features as restarting services
+should they fail, setting resource limits and even communication over
+dbus.
+
+So it would appear to have a lot going for it, not just a great logo!
+
+However there's a problem.  And it comes down to this entire idea of
+dependency-based init.
+
+In SMF, all services that are not in maintenance mode are started when
+the system boots.  It's assumed that you wouldn't have left a service
+installed if you didn't want it started.  Dependencies are used simply
+to get it in the right order, and arrange stopping properly.
+
+'''Damian Wojsław:''' And again, this is wrong. SMF services can be in few states, two main are:
+
+* disabled
+
+* enabled
+
+A service to become ''enabled'' someone has to put it in this state by running svcadm enable FMRI. Obviously, a installed system needs at least few services to be of any use, so during the first boot xml files are bing imported into services database and all dependencies for multi-user-server are being enabled. 
+On a working OpenSolaris system command: ''svcs -a | grep disabled | wc -l'' shows 91 disabled services.
+Services can be disabled permamently (they stay that way after reboot) or temporarily (they come back online after reboot). The same can be done for enabling them. 
+A out of the box services configuration contains a tree of dependency, so that proper services are enabled by SMF if they are needed by explicitly enabled service. 
+Thank you, please go on. (Damian Wojsław)
+
+This isn't the way initNG implements things, instead it will only
+start a service when it has to.  It's more like the way dpkg installs
+packages, the dependencies are used to bring up the service you
+wanted.  If you didn't want the service, they aren't started either.
+
+Obviously you need to start ''some'' services on boot, so initNG has
+goals, lists of services that should be started.  Obviously first off
+there is a maintenance problem here, every time you add a new service,
+you have to add it to the goal.  There's scripts to do this, but in
+reality we're no better off than `/etc/rc2.d` symlinks.
+
+And then there's the second problem with dependency-based init.  It
+works very well in the situation where the machine owner is a
+power-user and can take the time to customise the list of dependencies
+to match the other services that they have installed.
+
+However it does not work well in the desktop distribution world where
+we need to support every possible situation out of the box.
+
+My common example here is `gdm`, obviously it depends on having
+writable filesystems.  However on some systems it might depend on a
+kernel module being loaded for the X driver (e.g. `nvidia`), in a
+desktop distribution it's probably also reasonable for it to depend on
+ALSA being initialised.
+
+Except we can't ship it like that, having `gdm` refuse to start
+because the user isn't using the `nvidia` binary drivers or hasn't got
+a sound card is ... brittle.
+
+While there ways around this, I think it shows that while
+dependency-based init is an interesting idea, it isn't the ''right'' idea.
+
+''Would it be possible to augment initNG to allow a service to declare itself a goal ?  And to allow a service A to specify "if service B is installed then A should start after B is running; otherwise A can start without B" ?  That would solve a couple of these problems, I think.  -iwj''
+
+''Perhaps a deb package style dependancy. For example `gdm` requires a `video` service, which could be provided by `nvidia` binary drivers, `ati` binary drivers, or even `vesa` video drivers? -pd''
+
+=== Design ===
+
+So after reviewing all of the available options, none of them seemed
+to fit the use cases or offer a truly better solution than what we
+have today.  So one option was simply to decide that what we have
+today is clearly good enough, and move on.
+
+However I don't think what we have today is good enough, so this
+specification propose that if we can't find what we need elsewhere, we
+implement it ourselves.
+
+The proposed implementation here is able to implement all of the use
+cases, including providing complete backwards compatibility with what
+we have today and even other systems.
+
+==== Events ====
+
+The proposed system is event-driven, rather than dependency based.
+Services are started because of events, which can be triggered by
+anything from system startup to a network device being unplugged.
+
+Events come in three basic forms:
+
+* An edge event, such as the system starting or a button being
+   pushed.  Services and tasks can be started by any of a list of
+   events, and also stopped by them too.
+
+* A level event, which is an event with a value.  These include such
+   things as the state of a network interface.  Services and tasks can
+   be started or stopped because a level event has reached a certain
+   value, or because it has simply changed.
+
+* A temporal event, which occurs because a specified amount of time
+   since another event, or just a time period, has passed.
+
+The init daemon records all of the edge events that have occurred so
+far, and the current value of all level events.  Temporal events are
+tracked internally also, and it is able to notice if they are missed.
+
+All known services have companion events that other services may wait
+on, e.g. "on apache2 start".
+
+==== init ====
+
+The core of any init-replacement is clearly the init process itself;
+these actually turn out to be relatively tiny and trivial to write.
+
+The daemon needs to know about all available services, which may be
+obtained from native configuration files, existing init.d directories,
+crontabs, etc.
+
+Each service can then exist in one of three states; "waiting",
+"running" or "dead".
+
+A service in the waiting state is waiting for any one of the listed
+events to occur, at which point it is started and moved into the
+"running" state.
+
+A service in the running state is waiting for any of the listed stop
+events to occur, or the supervised service to die, at which point is
+moved into the "dead" state.
+
+Services in the "dead" state are restarted and moved back to "running"
+or cleaned up and moved to "waiting".
+
+==== Companion tools ====
+
+Companion tools for the daemon will be written to allow the state of
+any service to be queries, services to be started and stopped
+manually, and any event to be triggered by hand.
+
+Also an additional set of tools will be written that provide the same
+interfaces as existing UNIX tools such as `crontab`, `at`, `shutdown`,
+etc. while interfacing with the new daemon.
+
+=== Implementation ===
+
+==== Plan ====
+
+This plan allows for the new system to be implemented without
+requiring ''any'' changes to other packages until they wish to take
+advantage of the new features.
+
+This retains maximum compatibility while making the implementation
+realistically possible within the edgy timeframe.
+
+* '''Step 1''': Replace the `sysvinit` init binary with the new
+   daemon.  The configuration will be such that the new daemon simply
+   runs the existing `/etc/init.d/rc` on boot; the only difference is
+   that process #1 is a different binary.
+
+* '''Step 2''': Begin replacing the core `initscripts` package with
+   new purely event-driven `startup-tasks`.  Retain execution of
+   `/etc/init.d/rc` so that no other package need be modified.
+
+* '''Step 3''': Replace other system tools such as `cron`, `atd`,
+   etc. with the frontend tools that register the jobs with the new
+   daemon.  Users should not notice this, nor should any other
+   package.
+
+* '''Step 4''': Send events from other binaries such as `udev`,
+   `apmd`, `acpid`, etc. instead of trying to run scripts themselves.
+   Make sure that the existing directories such as `/etc/apm` are
+   supported by the new daemon.
+
+* '''Step 5''': Begin migration of other packages on an individual
+   basis, and ONLY if they need to take advantage of new features
+   offered (e.g. the ability to respawn, etc.)
+
+==== Code ====
+
+VilleLindholm: Couldn't Init-ng still be used, since the source looks
+incredibly modular? Haven't had a good look at it, but maybe it's
+somewhat useful?
+
+==== Data preservation and migration ====
+
+=== Outstanding issues ===
+
+=== BoF agenda and discussion ===
+
+''The reason for replacing init rather than adding a new daemon that could adopt these duties is to provide reliable service supervision. Process #1 is special, it is the parent of all processes that have let their own parents die; i.e. daemons. This means that init receives SIGCHLD when daemons die.''
+
+Actually, this is not quite relevant.  If a daemon can be persuaded not to "daemonise" (which includes explicitly forking and having the parent exit) then the process that spawned it will get SIGCHLD in the normal way.  Many daemons have a suitable "do not daemonise" option which is normally intended to facilitate debugging.  On the other hand, if a daemon ''cannot'' be persuaded not to daemonise it is hard to know its pid reliably: a process 1 supervisor will get told that pid such-and-such died and here is its wait status, but it will have very little coherent way of identifying which daemon it was.
+
+Since these latter kind of daemons don't in any case have a way to reliably restart them when they die (and this isn't something that the current system provides) I think it would be quite all right to have the new daemon supervisor only provide the new features for non-daemonise-capable daemons, particularly given how easy it is to add that feature to an existing daemon (it amounts to just disabling that code).
+
+There are also other reasons why in any replacement system daemons should not daemonise: 1. this loses their stdout and stderr, which is bad because on a unix system processes sometimes die in the runtime printing a message to stderr, etc.; 2. some daemons would benefit from availability of a controlling tty and being able to have daemons with a controlling tty managed and (de)multiplexed by the daemon supervisor (in a somewhat screen-like fashion) would make it much easier to make trivial daemons.
+
+-iwj
+
+I would really only like to make one request - is it possible that we could use some kind of parallel init scheme rather than the serial paradigm in use now?
+
+I ask this because as it is, you have to wait an eternity for something to timeout before init will continue with the bootup process.  Yes, you can Ctrl-C, but that's a workaround, not a fix.  In Breezy this was dazzlingly annoying when it would sit and hang on configuring network interfaces that were disconnected  or not configured correctly.  Even Windows doesn't do this. -- Starkruzr
+
+----
+CategorySpec

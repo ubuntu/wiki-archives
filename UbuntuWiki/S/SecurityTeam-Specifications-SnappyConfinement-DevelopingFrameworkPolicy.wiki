@@ -1,0 +1,196 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+This page only applies to Ubuntu Core 15.04. For series 16, see https://github.com/snapcore/snapd/wiki/Security
+
+=== Security policy for framework services and binaries ===
+See https://developer.ubuntu.com/en/snappy/guides/security-policy/ for information on security policy in snaps.
+
+==== package.yaml ====
+<nowiki>[[https://developer.ubuntu.com/en/snappy/guides/frameworks/|Framework]]</nowiki> services and binaries often need additional privileges if they are going to be of use to other snaps. These services and binaries will typically use `security-policy` in their yaml to specify the files that contain the raw security policy.
+
+For example,<pre>
+name: foo
+version: 0.1
+vendor: "Some Person <some.person@example.com>"
+type: framework
+...
+services:
+  - name: bar
+    start: bin/bar
+    bus-name: com.example.foo
+    security-policy:
+      apparmor: meta/bar.apparmor
+      seccomp: meta/bar.seccomp
+</pre>
+
+'`bus-name`' gives the DBus connection name for the `bar` service while '`apparmor`' and '`seccomp`' specify the hand-crafted apparmor and seccomp policy files, respectively.
+
+==== AppArmor ====
+Snappy provides several !AppArmor variables that make maintenance easier and best practice dictates that handcrafted policy start with <nowiki>[[http://bazaar.launchpad.net/~snappy-dev/snappy-hub/snappy-examples/files/head:/framework-template/meta/|boilerplate policy]]</nowiki>. A portion of the <nowiki>[[http://bazaar.launchpad.net/~snappy-dev/snappy-hub/snappy-examples/view/head:/framework-template/meta/svc.apparmor.boilerplate|AppArmor boilerplate]]</nowiki> is excerpted here:<pre>
+
+## include <abstractions/base>
+## include <abstractions/openssl>
+
+  ...
+
+## 
+## DBus rules: only needed for DBus services (ie, when specifying 'bus-name'
+## in the yaml)
+## 
+
+## include <abstractions/dbus-strict>
+## Allow requesting a connection name and also releasing it
+  dbus (send)
+     bus=system
+     path=/org/freedesktop/DBus
+     interface=org.freedesktop.DBus
+     member={Request,Release}Name
+     peer=(name=org.freedesktop.DBus),
+
+## Allow binding the service to the requested connection name. Adjust
+## accordingly based on 'bus-name' from yaml
+  dbus (bind)
+    bus=system
+    name="com.example.foo",
+
+## Allow receiving traffic to our path and interface with any method. Adjust
+## accordingly based on 'bus-name' from yaml
+  dbus (receive)
+    bus=system
+    path=/com/example/foo/**
+    interface=com.example.foo.*,
+
+## 
+## end DBus rules
+## 
+
+## Read-only for the install directory
+  @{CLICK_DIR}/@{APP_PKGNAME}/                   r,
+  @{CLICK_DIR}/@{APP_PKGNAME}/@{APP_VERSION}/    r,
+  @{CLICK_DIR}/@{APP_PKGNAME}/@{APP_VERSION}/**  mrklix,
+
+## Read-only home area for other versions
+  owner @{HOMEDIRS}/*/apps/@{APP_PKGNAME}/                  r,
+  owner @{HOMEDIRS}/*/apps/@{APP_PKGNAME}/@{APP_VERSION}/   r,
+  owner @{HOMEDIRS}/*/apps/@{APP_PKGNAME}/@{APP_VERSION}/** mrkix,
+
+## Writable home area for this version.
+  owner @{HOMEDIRS}/*/apps/@{APP_PKGNAME}/@{APP_VERSION}/   w,
+  owner @{HOMEDIRS}/*/apps/@{APP_PKGNAME}/@{APP_VERSION}/** wl,
+
+## Read-only system area for other versions
+  /var/lib/apps/@{APP_PKGNAME}/   r,
+  /var/lib/apps/@{APP_PKGNAME}/** mrkix,
+
+## Writable system area only for this version
+  /var/lib/apps/@{APP_PKGNAME}/@{APP_VERSION}/   w,
+  /var/lib/apps/@{APP_PKGNAME}/@{APP_VERSION}/** wl,
+
+## The ubuntu-core-launcher creates an app-specific private restricted /tmp
+## and will fail to launch the app if something goes wrong. As such, we can
+## simply allow full access to /tmp.
+  /tmp/   r,
+  /tmp/** mrwlkix,
+
+## Miscellaneous accesses
+  ...
+
+## 
+## Framework service/binary specific rules below here
+## 
+}
+</pre>
+
+Notice the following to ease maintenance:
+* `###VAR###`: this is expanded on framework install to framework-specific !AppArmor variables
+* `###PROFILEATTACH###`: this is expanded on framework install to framework-specific value to match the `APP_ID`
+* `@{CLICK_DIR}`: this is set for snappy-specfic directories
+* `@{APP_PKGNAME}`: this is set to the top-level `name` from the package.yaml. Eg, '`foo`'
+* `@{APP_VERSION}`: this is set to the `version` from the package.yaml. Eg, '`0.1`'
+* `@{APP_APPNAME}` (not shown in the above boilerplate): this is set to the `name` of the service/binary. Eg '`bar`'
+
+With the above example yaml, save the above as '`meta/bar.apparmor`' and adjust as needed.
+
+==== Seccomp ====
+Seccomp is much simpler than !AppArmor when expressing policy-- it is a simple list of allowed syscalls. Easiest is to start with the <nowiki>[[http://bazaar.launchpad.net/~snappy-dev/snappy-hub/snappy-examples/view/head:/framework-template/meta/svc.seccomp.boilerplate|seccomp]]</nowiki> portion of the <nowiki>[[http://bazaar.launchpad.net/~snappy-dev/snappy-hub/snappy-examples/files/head:/framework-template/meta/|boilerplate policy]]</nowiki>.
+
+If you want to start with an existing template, you can simply do:<pre>
+$ sed 's/^deny/# EXPLICITLY DENY/' /usr/share/seccomp/templates/ubuntu-core/15.04/default > meta/bar.seccomp
+</pre>
+
+and adjust as needed.
+
+==== Development tips ====
+When fine-tuning !AppArmor policy, it is often easiest to install the snap then modify the !AppArmor policy in place on the target system, then copying it back. Eg, these steps might be:
+# snappy build .
+# copy `./foo_0.1.snap` to your target device
+# login to target device and install the snap
+# test, monitoring /var/log/syslog for denials
+ 0.
+** 15.04, modify profile in `/var/lib/apparmor/profiles/...`, then do: `sudo apparmor_parser -r /var/lib/apparmor/profiles/...`
+** 16.04, modify profile in `/var/lib/snappy/apparmor/profiles/...`, then do: `sudo apparmor_parser -r /var/lib/snappy/apparmor/profiles/...`
+# '`sudo systemctl stop <unit>`', '`sudo systemctl start <unit>`', etc
+# repeat until satisfied
+# finally, copy any changes you to `/var/lib/snappy/apparmor/profiles` (`/var/lib/apparmor/profiles/...` on 15.04) on your target machine to your packaging directory (eg, `meta/bar.apparmor`). If you simply copy the file over, be sure to put `###VAR###` and `###PROFILEATTACH###` back into your packaging file.
+
+The same is true for seccomp-- the profile is located in `/var/lib/snappy/seccomp/profiles/...`. Unlike !AppArmor, you do not have to load the policy in a separate step (this is handled by the launcher); just modify the file in place and retest
+
+In addition to the above, here are two useful techniques when debugging/developing policy:
+# specify `@unrestricted` in the seccomp policy and this will allow all syscalls
+# replace your restrictive !AppArmor policy with the <nowiki>[[http://bazaar.launchpad.net/~snappy-dev/snappy-hub/snappy-examples/view/head:/framework-template/meta/svc.apparmor.unconfined|framework-template unconfined policy]]</nowiki> (which is the same as the policy in the unconfined 'security-template').
+
+Also see:
+* https://developer.ubuntu.com/en/snappy/guides/security-policy/ (Debugging section towards the end)
+* https://wiki.ubuntu.com/SecurityTeam/Specifications/SnappyConfinement#Debugging
+
+=== framework-policy for apps to use the framework ===
+See https://developer.ubuntu.com/en/snappy/guides/frameworks/ for high-level information on frameworks and framework-policy. Often a framework need not ship any framework-policy templates and instead only ship a framework-policy `cap` or two for apps to be able to use with this framework. Eg, with the above yaml and !AppArmor policy for the DBus service `bar`, then `meta/framework-policy/apparmor/policygroups/client` might contain:<pre>
+
+dbus (send)
+  bus=system
+  path=/com/example/foo/**
+  interface=com.example.foo.*
+  member=Method
+  peer=(label=foo_bar_*),
+</pre>
+
+and `meta/framework-policy/seccomp/policygroups/client` might contain:<pre>
+
+connect
+getsockname
+recvmsg
+send
+sendto
+sendmsg
+socket
+</pre>
+
+Conveniently, other framework services may specify framework-policy in security policy. So if the `foo` framework is adjusted to ship the '`baz`' binary, and '`baz`' needs to use the '`client`' `cap` from `foo`'s framework-policy, then the package.yaml might be updated to contain:<pre>
+name: foo
+version: 0.1
+vendor: "Some Person <some.person@example.com>"
+type: framework
+...
+services:
+  - name: bar
+    start: bin/bar
+    bus-name: com.example.foo
+    security-policy:
+      apparmor: meta/bar.apparmor
+      seccomp: meta/bar.seccomp
+binaries:
+  - name: baz
+    exec: bin/baz
+    caps:
+      - foo_client
+</pre>
+
+Also notice the '`Usage: common`' metadata in the framework policy. You may specify either `common` or `restricted`. `common` means that the framework functionality exposed via this policy is considered safe for any app to use. `restricted` means that apps are not generally allowed to specify this policy group in their `caps` or `security-template` and if they do, then the app will need to be manually reviewed when uploaded to the store. `restricted` framework-policy might be useful for the framework's own services/binaries.

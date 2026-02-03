@@ -1,0 +1,304 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+Xen
+
+== Introduction ==
+{| class="wikitable"
+|-
+| <tablestyle="float:right; font-size: 0.9em; width:40%; background:#F1F1ED; margin: 0 0 1em 1em;" style="padding:0.5em;"><<BR>>
+|}
+
+Xen is a type 1, bare-metal virtual machine monitor (or hypervisor), which provides the ability to run one or more operating system instances on the same physical machine. Xen, like other types of virtualization, is useful for many use cases such as server consolidation and isolation of production and development environments (e.g. corporate and personal environments on the same system).
+
+As of Ubuntu 11.10 (Oneiric), the default kernel included in Ubuntu can be used directly with the Xen hypervisor as the management (or control) domain (Dom0 or Domain0 in Xen terminology). 
+
+The rest of this guide gives a basic overview of how to set up a basic Xen system and create simple guests.  Our example uses LVM for virtual disks and network bridging for virtual network cards.  It also assumes Xen 4.1 (the version available in 12.10) and the xend toolstack.  It assumes a familiarity with general virtualization issues, as well as with the specific Xen terminology.  Please see the <nowiki>[[http://wiki.xen.org/wiki/Xen_Overview|Xen wiki]]</nowiki> for more information.
+
+== During installation of Ubuntu ==
+
+During the install of Ubuntu for the Partitioning method choose "Guided - use the entire disk and setup LVM". Then, when prompted to enter "Amount of volume group to use for guided partitioning:" Enter a value just large enough for the Xen Dom0 system, leaving the rest for virtual disks.  Enter a value smaller than the size of your installation drive. For example 10 GB or even 5 GB should be large enough for a minimal Xen Dom0 system.  Entering a percentage of maximum size (e.g. 25%) is also a reasonable choice. 
+
+== Installing Xen ==
+Install a 64-bit hypervisor.  (A 64-bit hypervisor works with a 32-bit dom0 kernel, but allows you to run 64-bit guests as well.)
+<pre>
+sudo apt-get install xen-hypervisor-amd64
+</pre>
+Modify GRUB to default to booting Xen:
+<pre>
+sudo sed -i 's/GRUB_DEFAULT=.*\+/GRUB_DEFAULT="Xen 4.1-amd64"/' /etc/default/grub
+sudo update-grub
+</pre>
+Set the default toolstack to xm (aka <code>xend</code>):
+<pre>
+sudo sed -i 's/TOOLSTACK=.*\+/TOOLSTACK="xm"/' /etc/default/xen
+</pre>
+Now reboot:
+<pre>
+sudo reboot
+</pre>
+And then verify that the installation has succeeded:
+<pre>
+sudo xm list
+Name                                        ID   Mem VCPUs	State	Time(s)
+Domain-0                                     0   945     1     r-----      11.3
+</pre>
+
+== Network Configuration ==
+
+This section describes how to set up linux bridging in Xen.  It assumes eth0 is both your primary interface to dom0 and the interface you want your VMs to use.  It also assumes you're using DHCP.
+
+{{{ 
+sudo apt-get install bridge-utils
+}}}
+
+Note if you are working with a desktop install, disable Network Manager.
+
+<pre>
+sudo update-rc.d network-manager disable
+sudo /etc/init.d/network-manager stop
+</pre>
+
+Edit ''/etc/network/interfaces'', and make it look like this:
+<pre>
+auto lo
+iface lo inet loopback
+
+auto xenbr0
+iface xenbr0 inet dhcp
+    bridge_ports eth0
+
+auto eth0
+iface eth0 inet manual
+</pre>
+
+Restart networking to enable xenbr0 bridge:
+<pre>
+sudo /etc/init.d/networking restart
+</pre>
+
+The brctl command is useful for providing addition bridge information. See: '''man brctl'''
+
+== Creating vms ==
+
+There are many options for installing guest images:
+* <nowiki>[[xen-tools.org|xen-tools]]</nowiki>: A set of scripts for creating various PV guests 
+* <nowiki>[[virt-manager|virt-manager.org]]</nowiki>: A management system using libvirt
+* Converting an existing installation
+* Downloading pre-build guest images (e.g. http://wiki.xen.org/wiki/Guest_VM_Images)
+
+Or you can manually create one, as described below.
+
+=== Manually creating a PV Guest VM ===
+
+In this section we will focus on Paravirtualized (or PV) guests. PV guests are guests that are made Xen-aware and therefore can be optimized for Xen. 
+
+As a simple example we'll create a PV guest in LVM logical volume (LV) by doing a network installation of Ubuntu (other distros such as Debian, Fedora, and CentOS can be installed in a similar way).
+
+<pre>
+sudo pvs
+</pre>
+
+choose your VG
+
+create LV
+<pre>
+sudo lvcreate -L 4G -n ubuntu /dev/<VG>
+</pre>
+
+get netboot images
+
+choose an archive mirror
+https://launchpad.net/ubuntu/+archivemirrors
+
+<pre>
+sudo mkdir -p /var/lib/xen/images/ubuntu-netboot
+cd /var/lib/xen/images/ubuntu-netboot
+sudo wget <mirror>/ubuntu/dists/precise/main/installer-amd64/current/images/netboot/xen/initrd.gz
+sudo wget <mirror>/ubuntu/dists/precise/main/installer-amd64/current/images/netboot/xen/vmlinuz
+</pre>
+
+With a specific mirror chosen:
+<pre>
+sudo mkdir -p /var/lib/xen/images/ubuntu-netboot
+cd /var/lib/xen/images/ubuntu-netboot
+sudo wget http://mirror.anl.gov/pub/ubuntu/dists/precise/main/installer-amd64/current/images/netboot/xen/initrd.gz
+sudo wget http://mirror.anl.gov/pub/ubuntu/dists/precise/main/installer-amd64/current/images/netboot/xen/vmlinuz
+</pre>
+
+Set up the initial guest configuration: /etc/xen/ubuntu.cfg
+<pre>
+name = "ubuntu"
+
+memory = 256
+
+disk = ['phy:/dev/<VG>/ubuntu,xvda,w']
+vif = [' ']
+
+kernel = "/var/lib/xen/images/ubuntu-netboot/vmlinuz"
+ramdisk = "/var/lib/xen/images/ubuntu-netboot/initrd.gz"
+extra = "debian-installer/exit/always_halt=true -- console=hvc0"
+</pre>
+
+Start the VM and connect to console (-c):
+<pre>
+sudo xm create -c /etc/xen/ubuntu.cfg
+</pre>
+
+Do the install.
+
+Once installed, we can use pygrub as the bootloader.
+
+<pre>
+sudo ln -s /usr/lib/xen-4.1/bin/pygrub /usr/bin/pygrub
+</pre>
+
+Once the install is done, the VM will shutdown. Next change the guest config, /etc/xen/ubuntu.cfg:
+
+<pre>
+name = "ubuntu"
+memory = 256
+disk = ['phy:/dev/<VG>/ubuntu64,xvda,w']
+vif = [' ']
+
+bootloader = "pygrub"
+
+</pre>
+
+Start the VM and connect to console (-c):
+<pre>
+sudo xm create /etc/xen/ubuntu.cfg -c
+</pre>
+
+=== Manually installing an HVM Guest VM ===
+
+Download Install ISO.
+
+http://www.ubuntu.com/download/desktop
+
+<pre>
+sudo pvs
+</pre>
+
+choose your VG
+
+Create a LV
+
+<pre>
+sudo lvcreate -L 4G -n ubuntu-hvm /dev/<VG>
+</pre>
+
+Create a guest config file /etc/xen/ubuntu-hvm.cfg
+<pre>
+builder = "hvm"
+name = "ubuntu-hvm"
+memory = "512"
+vcpus = 1
+vif = ['']
+disk = ['phy:/dev/<VG>/ubuntu-hvm,hda,w','file:/root/ubuntu-12.04-desktop-amd64.iso,hdc:cdrom,r']
+vnc = 1
+boot="dc"
+</pre>
+
+<pre>
+xm create /etc/xen/ubuntu-hvm.cfg
+vncviewer localhost:0 
+</pre>
+
+After the install you can optionally remove the CDROM from the config and/or change the boot order.
+
+For example /etc/xen/ubuntu-hvm.cfg:
+
+<pre>
+builder = "hvm"
+name = "ubuntu-hvm"
+memory = "512"
+vcpus = 1
+vif = ['']
+disk = ['phy:/dev/<VG>/ubuntu-hvm,hda,w']
+vnc = 1
+boot="c"
+</pre>
+
+== Xen Toolstack Choices ==
+
+http://wiki.xen.org/wiki/Choice_of_Toolstacks
+
+=== Xen and xl ===
+
+As of Xen 4.2, xend/xm will be deprecated. To test xl, do the following:
+
+<pre>
+sudo sed -i 's/TOOLSTACK=.*\+/TOOLSTACK="xl"/' /etc/default/xen
+sudo reboot
+sudo /etc/init.d/xend stop
+sudo xl list
+</pre>
+
+xl and xm are very similar with a few notable exceptions:
+http://wiki.xen.org/wiki/XL
+
+=== Xen and Libvirt ===
+
+Make the following change to the xend configuration in /etc/xen/xend-config.sxp:
+
+<pre>
+(xend-unix-server yes)
+</pre>
+
+Restart xend:
+<pre>
+/etc/init.d/xend restart
+</pre>
+
+<pre>
+sudo apt-get install virtinst
+</pre>
+
+<pre>
+sudo virt-install --name ubuntu --ram 256 --disk <path to LV or disk image> --location  http://mirror.clarkson.edu/fedora/linux/releases/16/Fedora/x86_64/os/
+</pre>
+
+=== Xen and XAPI ===
+
+* http://packages.ubuntu.com/precise/xcp-xapi
+* http://manpages.ubuntu.com/manpages/precise/man1/xapi.1.html
+* http://manpages.ubuntu.com/manpages/precise/man1/xe.1.html
+
+=== Other tips and tricks ===
+
+Create and format disk image file
+<pre>
+sudo mkdir -p /var/lib/xen/images
+sudo dd if=/dev/zero of=/var/lib/xen/images/ubuntu-guest.img bs=1M seek=3096 count=0
+sudo mkfs.ext4 -F /var/lib/xen/images/ubuntu-guest.img
+</pre>
+
+== See Also ==
+
+* http://wiki.xen.org/wiki/XenPCIpassthrough
+* http://wiki.xen.org/wiki/Xen_VGA_Passthrough
+
+== External Links ==
+
+* http://wiki.xen.org/wiki/Debian_Guest_Installation_Using_Debian_Installer - Netboot installation of PV guests
+
+* http://wiki.xen.org/wiki/HostConfiguration/Networking - Networking configuration details from Xen.org wiki
+
+* http://libvirt.org/uri.html#URI_file - Libvirt xend configuration
+ 
+* http://wiki.xen.org/wiki/Xen_Man_Pages - Xen Man pages
+
+* http://xenbits.xen.org/docs/unstable/man/xmdomain.cfg.5.html - xm config options
+
+* http://xenbits.xen.org/docs/unstable/man/xl.cfg.5.html xl config options
+
+* http://xenbits.xen.org/docs/unstable/misc/xl-disk-configuration.txt  xl disk configuration
+* http://serverfault.com/questions/390373/xen-4-1-host-dom0-with-blktap-disks-tapaio-not-connecting blktap issues and fixes.

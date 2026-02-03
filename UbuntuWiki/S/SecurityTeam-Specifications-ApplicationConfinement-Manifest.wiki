@@ -1,0 +1,305 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== Manifest file - security ==
+
+http://bazaar.launchpad.net/~click-hackers/click/trunk/view/head:/doc/file-format.rst
+discusses the manifest file format for click packages in general. This page
+discusses the format of the security JSON manifest used by '''aa-easyprof'''
+and how to integrate these easyprof manifests into click and traditional
+packaging. The '''aa-easyprof''' manifest contains a toplevel 'security' key,
+and the 'security' object is a dictionary with currently only one key defined:
+'profiles'. The profiles object is a dictionary each of its keys being the name
+of a profile object (also a dictionary). The aa-easyprof tool looks at the
+security dictionary of the manifest to generate an AppArmor profile. For more
+details on aa-easyprof, see man 8 aa-easyprof. An example manifest
+representing all possible keys is:<pre>
+{
+  "security": {
+    "profiles": {
+      "com.example.foo": {
+        "abstractions": [
+          "audio",
+          "gnome"
+        ],
+        "author": "Your Name",
+        "binary": "/opt/foo/**",
+        "comment": "Unstructured single-line comment",
+        "copyright": "Unstructured single-line copyright statement",
+        "name": "My Foo App",
+        "policy_groups": [
+          "networking",
+          "user-application"
+        ],
+        "policy_vendor": "somevendor",
+        "policy_version": 1.0,
+        "read_path": [
+          "/tmp/foo_r",
+          "/tmp/bar_r/"
+        ],
+        "template": "user-application",
+        "template_variables": {
+          "APP_PKGNAME": "foo",
+          "APP_VERSION": "0.1",
+          "VAR1": "bar",
+          "VAR2": "baz"
+        },
+        "write_path": [
+          "/tmp/foo_w",
+          "/tmp/bar_w/"
+        ]
+      }
+    }
+  }
+}
+</pre>
+
+=== Security keys ===
+'''aa-easyprof''' is a general purpose tool and all of the keys within a
+profile object are optional.
+* '''profile name''': keys to the 'profiles' dictionary are the profile names for each profile object. Therefore in the above example, "com.example.foo" is the profile name and the contents of the "com.example.foo" dictionary represent the profile. The profile name may specify the normalized absolute path to the binary (with AARE (see `apparmor.d(8)`) or an name that consists only of lower case letters (a-z), upper case letters (A-Z), digits (0-9), plus (+) and minus (-) signs, periods (.), colons (:), underscores (_) and tildes (~) (essentially a combination of the allowed characters for Ubuntu package names and versions, plus underscores)
+* '''binary''': path to binary for this policy when using path-based attachment. Should not be specified when the profile name is an absolute path
+* '''author''': author of the policy
+* '''comment''': comment for the policy
+* '''copyright''': copyright of the policy
+* '''name''': name of policy. If not specified, use the name of the binary. Note, this is not the !AppArmor profile name.
+* '''policy_vendor''': vendor of policy groups and templates ([a-zA-Z_0-9\-\.])
+* '''policy_version''': version of the vendor policy (float)
+* '''template''': template to use ([a-zA-Z_0-9\-\.])
+* '''template_variables''': list of template variable assignments. Supported template variables are template-specific
+* '''abstractions''': list of !AppArmor abstractions to include (typically from /etc/apparmor.d)
+* '''policy_groups''': list of !AppArmor policy groups to include ([a-zA-Z_0-9\-\.])
+* '''read_path''': list of paths to allow read access
+* '''write_path''': list of paths to allow write access
+
+== Use in Ubuntu ==
+=== Click ===
+Click packages in Ubuntu are required to run under application confinement and therefore the click manifest file must contain a security manifest for each application. This is accomplished by using an !AppArmor hook in the toplevel hooks object of the click manifest. The hooks object is a dictionary with keys that specify application names. These keys are themselves dictionaries with keys for each type of hook, such as `"apparmor": "apparmor/myapp.json"`.  For example, the click manifest might contain:<pre>
+  {
+    "name": "com.ubuntu.developer.username.myapp",
+    "version": "0.1",
+    ...
+    "hooks": {
+      "myapp": {
+        "apparmor": "apparmor/myapp.json",
+        ...
+      },
+      "myapp-camera": {
+        "apparmor": "apparmor/myapp-camera.json",
+        ...
+      }
+    }
+  }
+</pre>
+
+In this manner the apparmor hook specifies a separate security JSON manifest file associated with a specific application name (ie, 1 to 1 mapping such that the myapp application uses the apparmor/myapp.json security manifest and the myapp-camera uses the apparmor/myapp-camera.json security manifest). The click !AppArmor hook looks at these separate security JSON manifests to generate !AppArmor profiles via the '''aa-clicktool''' and '''aa-easyprof''' tools.
+
+The click security manifests differ somewhat from the JSON format that would be given directly to the `aa-easyprof` tool. Specifically, the click !AppArmor hook will setup some `aa-easyprof` fields automatically (such as policy_vendor). As such, some fields are required, some handled automatically, some unused and some are technically supported but dangerous and will red flag the package for manual review.
+
+* Required fields for each security manifest:
+** '''policy_groups''' - these are used to grant permissions to the app, such as networking, online accounts, content picking, etc. See `aa-easyprof --policy-vendor=ubuntu --policy-version=1.0 --list-policy-groups` for a complete list
+** '''policy_version''' should be set. '''1.0''' is the first supported Ubuntu policy version. For other versions, see /usr/share/apparmor/easyprof/templates/ubuntu/ and /usr/share/apparmor/easyprof/policygroups/ubuntu/
+** '''template''' - automatically set to '''ubuntu-sdk''' if not specified. See `aa-easyprof --policy-vendor=ubuntu --policy-version=1.0 --list-templates` (using the appropriate vendor version) for a list of other templates. NOTE: an "unconfined" template exists that provides very wide permissions to support special-case applications (ie, trusted applications that have been manually reviewed). Applications developers should not use this template (the upload will be rejected).
+** '''policy_vendor''' - automatically set to '''ubuntu'''
+* Automatically set for each security manifest:
+** '''template_variables''' (should not be set in the security manifest)
+** '''APP_PKGNAME''' - set to '''name''' from the toplevel click manifest (eg, '''"APP_PKGNAME": "com.ubuntu.developer.username.myapp"''')
+** '''APP_VERSION''' - set to '''version''' from the toplevel click manifest (eg, '''"APP_VERSION": "0.1"''')
+** '''APP_ID_DBUS''' - set to a DBUS-compatible string derived from the AppArmor profile name (see below)
+** '''CLICK_DIR''' - set by '''aa-clicktool''' during click package installation
+
+  These template variables are used to differentiate application paths. Eg, the resulting !AppArmor policy will have something like:<pre>
+ @{APP_PKGNAME}="com.ubuntu.developer.username.myapp"
+ @{APP_VERSION}="0.1"
+ @{APP_ID_DBUS}="com_2eubuntu_2edeveloper_2eusername_2emyapp_5fmyapp_5f0_2e1"
+ ...
+   @{CLICK_DIR}/@{APP_PKGNAME}/@{APP_VERSION}/    r,
+   @{CLICK_DIR}/@{APP_PKGNAME}/@{APP_VERSION}/**  r,
+</pre>
+* Unused/ignored
+** JSON profile object (ie, the '''profile name''' key and its corresponding dictionary, see below)
+** name
+** author
+** comment
+** copyright
+* Red-flagged for manual review (use should actively be discouraged with updates made to policy groups and templates)
+** abstractions
+** read_path
+** write_path
+** In the future, binary may be set as a recursive glob on the toplevel installation directory. Eg, if the app is installed to `/opt/com.ubuntu.developer/com.ubuntu.developer.username.myapp`, then binary could be legitimately set to `/opt/com.ubuntu.developer/com.ubuntu.developer.username.myapp/**`. Not typically necessary
+** template set to "unconfined". This almost always will result in rejection of the package
+
+Furthermore, because separate security manifests are used per application, the toplevel security, profiles and profile name objects are omitted from the security manifest.
+
+'''NOTE''': click supports multiple versions of the application to be installed on the system such that one user may have one version installed and another user may have another version installed. Because we need versioned profile names and filenames for the profiles, the !AppArmor click hook will generate a versioned profile name in the form of: `$name_$application_$version`. Therefore, with the above example click manifest, the two profile names are:
+* com.ubuntu.developer.username.myapp_myapp_0.1
+* com.ubuntu.developer.username.myapp_myapp-camera_0.1
+such that when the application is installed, the click apparmor hook will create two profiles in the !AppArmor profiles directory (/var/lib/apparmor/profiles) with these names. This preserves namespacing in the kernel profile names and the profile filenames while reducing complexity in the manifest file itself. See <nowiki>[[https://wiki.ubuntu.com/AppStore/Interfaces/ApplicationId|the appstore definition of ApplicationId]]</nowiki> for more information.
+
+'''NOTE''': click supports <nowiki>[[https://wiki.ubuntu.com/Click/Frameworks|framework definitions]]</nowiki> and these are specified in the click manifest (ie, not the click security manifest). click-apparmor will make sure that the policy_version specified in the security manifest makes sense for the installed framework on the system.
+
+Unconfined apps are supported via the "unconfined" template.
+
+==== Putting it all together ====
+The process for adding !AppArmor to your click package (a reqirement for inclusion in the appstore) is straightforward. The Ubuntu SDK will help with some or all of these steps, but to perform them manually:
+ 0. Create the apparmor directory (optional, but standard practice) in your toplevel source:<pre>
+ $ mkdir ./apparmor
+</pre>
+ 0. Create the click security manifest(s). While not strictly required, the convention is to name the file after your desktop file. For example, if your app's desktop file is 'myapp.desktop', then your click security manifest should be named 'myapp.json' in the 'apparmor/' directory created above. Eg:<pre>
+ $ cat apparmor/myapp.json
+ {
+   "policy_groups": [
+     "networking"
+   ],
+   "policy_version": 1.0
+ }
+</pre>
+ Once supported by Unity (initially, only one desktop file is supported per click package), you'll be able to specify different security manifests for different desktop files. Eg:<pre>
+ $ cat apparmor/myapp-camera.json
+ {
+   "policy_groups": [
+     "camera",
+     "location"
+   ],
+   "policy_version": 1.0
+ }
+</pre>
+ 0. Update the click manifest (the default is `manifest.json` in the toplevel source) to tell the click !AppArmor hooks to use the security manifests. Eg:<pre>
+ $ cat ./manifest.json
+ {
+   "name": "com.ubuntu.developer.username.myapp",
+   "version": "0.1",
+   ...
+   "hooks": {
+     "myapp": {
+       "apparmor": "apparmor/myapp.json",
+       "desktop": "myapp.desktop"
+     },
+     "myapp-camera": {
+       "apparmor": "apparmor/myapp-camera.json",
+       "desktop": "myapp-camera.desktop"
+     }
+   }
+ }
+</pre>
+
+That's it! Now to test your package, do:
+ 0. Build the click package (note, this will include every file in your source tree. Creating a clean build directory and telling click to build a package for that directory. '''NOTE''': the Ubuntu SDK will handle this step for you):<pre>
+ $ click build ./
+</pre>
+ 0. Install the click package (`pkcon` is generally preferred):
+** with `pkcon` (needs `packagekit-tools` and `packagekit-plugin-click`):<pre>
+ $ pkcon -p install-local ./com.ubuntu.developer.username.myapp_0.1_all.click
+</pre>
+** with `click install`:<pre>
+ $ sudo click install --user=$USER ./com.ubuntu.developer.username.myapp_0.1_all.click
+</pre>
+# Launch the application via the Dash (search for 'myapp', the launch it)
+# See if the !AppArmor profile is loaded and confining your app:<pre>
+ $ sudo aa-status | grep myapp
+    com.ubuntu.developer.username.myapp_myapp_0.1
+    com.ubuntu.developer.username.myapp_myapp_0.1 (15286)
+</pre>
+ The first shows the profile is loaded in the kernel, and the second shows that pid 15286 is running under this profile
+ 0. Test your application under !AppArmor. You may need to add additional policy groups to your click security manifest (they can be seen with `aa-easyprof --list-policy-groups --policy-vendor=ubuntu --policy-version=1.0`). See <nowiki>[[https://wiki.ubuntu.com/DebuggingApparmor|DebuggingApparmor]]</nowiki> for details. Remember the policy for click packages is stored in /var/lib/apparmor/profiles, not /etc/apparmor.d. If you had to add policy to the profile to <nowiki>[[https://wiki.ubuntu.com/DebuggingApparmor#Fixing_profile_bugs|fix profile bugs]]</nowiki>, please <nowiki>[[https://bugs.launchpad.net/ubuntu/+source/apparmor/+filebug|file a bug]]</nowiki>.
+
+==== Debugging ====
+ 0. Copy your click manifest and click security manifest (see above) somewhere in a manner that aa-clicktool can use (note, `$name_$application_$version` needs to match with what is in the manifests). Eg: <pre>
+$ mkdir -p /tmp/debug/com.ubuntu.developer.username.myapp/0.1/apparmor /tmp/debug/com.ubuntu.developer.username.myapp/0.1/.click/info
+$ cp apparmor/myapp.json /tmp/debug/com.ubuntu.developer.username.myapp/0.1/apparmor/
+$ cp ./manifest.json /tmp/debug/com.ubuntu.developer.username.myapp/0.1/.click/info/com.ubuntu.developer.username.myapp.manifest
+$ ln -s /tmp/debug/com.ubuntu.developer.username.myapp/0.1/apparmor/myapp.json /tmp/debug/com.ubuntu.developer.username.myapp_myapp_0.1.json
+</pre>
+ 0. Run `aa-clicktool` on it:<pre>
+$ aa-clicktool -o /tmp/debug/easyprof.json /tmp/debug/com.ubuntu.developer.username.myapp_myapp_0.1.json
+$ cat /tmp/debug/easyprof.json
+{
+  "profiles": {
+    "com.ubuntu.developer.username.myapp_myapp_0.1": {
+      "policy_groups": [],
+      "policy_vendor": "ubuntu",
+      "policy_version": 1.0,
+      "template": "ubuntu-sdk",
+      "template_variables": {
+        "APP_ID_DBUS": "com_2eubuntu_2edeveloper_2eusername_2emyapp_5fmyapp_5f0_2e1",
+        "APP_PKGNAME": "com.ubuntu.developer.username.myapp",
+        "APP_VERSION": "0.1",
+        "CLICK_DIR": "/tmp/debug"
+      }
+    }
+  }
+}
+</pre>
+ 0. Generate the apparmor profile with `aa-easyprof`:<pre>
+$ aa-easyprof -m /tmp/debug/easyprof.json > /tmp/debug/profile
+</pre>
+ 0. load the profile in the usual way:<pre>
+$ sudo apparmor_parser -r /tmp/debug/profile
+</pre>
+
+To run an app under confinement, it is easiest to install the click package and rerun the hooks. However you can adjust @{APP_VERSION} and @{CLICK_DIR} accordingly in /tmp/debug/profile then run the app directly:<pre>
+$ sudo apparmor_parser -r /tmp/debug/profile # reload it after making the above change
+$ aa-exec -p com.ubuntu.developer.username.myapp_myapp_0.1 -- qmlscene <path to>/myapp.qml
+</pre>
+
+=== Traditional packaging ===
+Traditional packaging can also leverage aa-easyprof, but the process is slightly more involved. In general, the following need to happen (see `man dh_apparmor` for details):
+* the security manifest file should use the standard `aa-easyprof` structure (ie, with the security, profile and profile name dictionaries). It should be added to debian/. Because traditional packaging has different governance rules for including in a distribution, the manifest may contain any of the supported fields. For example:<pre>
+ {
+   "security": {
+     "profiles": {
+       "traditional-app1": {
+         "abstractions": [
+           "nameservice"
+         ],
+         "policy_groups": [
+           "user-application"
+         ],
+         "template": "user-application",
+         "template_variables": {
+           "APP_PKGNAME": "traditional-app1"
+         }
+       }
+     }
+   }
+ }
+</pre>
+* aa-easyprof is given the manifest file to generate a profile
+* the profile is installed into a package
+* the postinst loads the !AppArmor policy into the kernel
+
+The process is made easier with `dh_apparmor`. Create a manifest file following the above instructions for required fields (note that you must fill in the automatic ones yourself when not using click packaging) then:
+# put the manifest file in debian/manifest.json
+# adjust debian/control to Build-Depends on `dh-apparmor >= 2.8.0-0ubuntu14`
+# update debian/rules to call dh_apparmor. Eg:<pre>
+override_dh_install:
+        dh_apparmor -p<deb binary> --profile-name=<profile name from the manifest> --manifest=security-manifest.json
+        dh_install
+</pre>
+ and then to clean up:<pre>
+override_dh_clean:
+        dh_clean
+        rm -rf debian/apparmor
+</pre>
+ 0. install the files. Eg, add to `debian/<deb binary>.install`:<pre>
+debian/apparmor/<profile name> etc/apparmor.d
+</pre>
+
+The remaining consideration is making sure that the app runs confined. You'll know you have it right if when the application is running, the output of `aa-status` shows that the application is confined. If the application provides an executable (eg, ELF binary, executable python script), then specifying the 'binary' in the manifest is enough. If instead a helper such as qmlscene is being used, there are several choices:
+* use the new Ubuntu application lifecycle and start the application via an Upstart job (preferred, pending but not available as of 2013/07/12)
+* add `X-Ubuntu-AppArmor-Profile=<profile name>` to the .desktop file until Ubuntu application lifecycle is finished (not available as of 2013/07/12)
+* update the .desktop file so use `aa-exec -p <profile name> ...` in the Exec line. This will work once <nowiki>[[https://bugs.launchpad.net/qtubuntu/+bug/1200437|LP: #1200437]]</nowiki> is fixed (done as of 2013-07-23)
+* Create a shell script to use `aa-exec -p <profile name> ...` and have the .desktop file use `Exec=<path to shell script>`
+
+== Bugs ==
+When filing bugs dealing with the manifest file or resulting permissions, please use one of the below and use the 'application-confinement' tag:
+* <nowiki>[[https://bugs.launchpad.net/ubuntu/+source/apparmor-easyprof-ubuntu/+filebug|Bugs against AppArmor policy for SDK applications]]</nowiki>
+* <nowiki>[[https://bugs.launchpad.net/ubuntu/+source/apparmor/+filebug|General bugs against aa-easyprof]]</nowiki>
+* <nowiki>[[https://bugs.launchpad.net/ubuntu-qtcreator-plugins/+filebug|Policy bugs that should be resolved in the SDK]]</nowiki>

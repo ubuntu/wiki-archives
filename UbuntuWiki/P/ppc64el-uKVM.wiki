@@ -1,0 +1,175 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+=== How to use Ubuntu as a hypervisor? ===
+ {{{#!wiki note
+'''Note'''
+Recommended 14.10 or later
+}}}
+
+Ubuntu is able to be used as a hypervisor, as an alternative to PowerKVM. Just install in bare metal (NV) it following the steps in Running Ubuntu non-virtualized on POWER8
+After the installation you need:
+ 1. Install the missing virtualization packages:
+ <code># sudo apt-get install qemu-kvm qemu-user qemu-utils cloud-image-utils qemu-system-ppc qemu-slof libvirt-bin numactl</code>
+
+ 1. Add the users that would be able to run virtual machines into the kvm group:
+ <code># sudo usermod -a -G kvm <user></code>
+
+ 1. Disable the SMT:
+ <code># sudo ppc64_cpu --smt=off</code>
+ You can disable it on every boot, changing <code>/etc/rc.local</code>, something as:
+
+{{{#!python
+
+ppc64_cpu --smt=off
+
+exit 0
+}}}
+
+=== Troubleshooting ===
+
+ 1. If you kvm_HV module is not loaded automatically, enable KVM module in the kernel (Add a line "kvm_hv" in /etc/modules in order to automatically load it after a reboot).
+
+ 1. If you hit "failed to parse default acl file `/etc/qemu/bridge.conf", you need to edit (or create) file /etc/qemu/bridge.conf and add:
+ <code>allow br0</code>
+ 1. If you hit "failed to create tun device: Operation not permitted", you need to set the setuid attribute:
+ <code># chmod u+s /usr/lib/qemu/qemu-bridge-helper</code>
+
+=== PCI hot plug of devices that require 64-bit DMA window ===
+
+Problem: Guest PCI device, which require 64-bit DMA window, hot plug causes guest to throw kernel fault and gets rebooted.
+
+Solution: In order to perform hot plugging of PCI devices that use 64-bit DMA window to a KVM guest, make sure that the guest is started with a XHCI USB device.
+
+For example, XML clause to add to libvirt guest XML is as follows:
+
+    <controller type='usb' index='0' model='nec-xhci'>
+    </controller>
+
+If you are using the QEMU interface directly, please add below device option while booting the QEMU instance:
+
+  -device nec-usb-xhci,id=u0
+
+=== Enable 256 memory slots ===
+
+In '''Ubuntu 17.04''', when trying to increase the number of memory slots from 32 to 256, only 63 slots were available even though 256 slots was specified in the guest xml.
+
+Machine Type = POWER8
+
+Even though 256 slots are supported in QEMU 2.8, distributed with Ubuntu 17.04, there is an implicit limit coming from the vhost backend, limiting the  number of max memory slots that are supported.
+
+The work around is to increase the vhost mem slots by reloading the vhost module in the guest:
+
+[root@localhost ~]# modprobe -r vhost
+[root@localhost ~]# modprobe vhost max_mem_regions=512
+[root@localhost ~]# cat /sys/module/vhost/parameters/max_mem_regions
+512
+
+=== p8compat mode ===
+If you are using a old Ubuntu version on a POWER9 hardware guest, you might want to enable p8compat mode, where the guest machine will behave as a POWER8.
+
+In order to do so, you can either configure the the libvirt XML or the qemu.
+
+<pre>
+ <cpu mode='host-model' check='partial'>
+    <model fallback='forbid'>power8</model>
+    <topology sockets='1' cores='16' threads='1'/>
+  </cpu>
+</pre>
+
+If you are starting the qemu manually, you can use '''-machine pseries, max-cpu-compat=power8'''
+
+=== Limitation in migrating POWER8 guest from POWER8 host to POWER9 host ===
+
+POWER8 host (Ubuntu 16.04.4) have older Qemu 2.5 (< Qemu 2.10) that boots the guest in raw mode, where as POWER9 host (Ubuntu 18.04) that have newer Qemu 2.11 which boots the guest in target
+(with -incoming) in architected mode during migration and cause it to fail with below error,
+
+''Example:''
+
+<pre>
+Migration: [ 99 %]
+
+error: internal error: qemu unexpectedly closed the monitor: <Timestamp>
+qemu-system-ppc64: error while loading state for instance 0x0 of device 'cpu'
+qemu-system-ppc64: load of migration failed: Operation not permitted
+
+</pre>
+To work around this limitation, POWER8 guest have to be booted with explicit
+compat settings configured in guest xml on a POWER8 host,
+<pre>
+<domain>
+...
+  <cpu mode='host-model'>
+   <model>power8</model>
+  </cpu>
+...
+</domain>
+</pre>
+With this compat setting newer Qemu (since Qemu 2.10) boots the guest in target
+(with -incoming) using explicit compat mode on POWER9 host for the migration
+to succeed.
+
+=== Issue while backward migrating Ubuntu 16.04.4 POWER8 guest from Ubuntu 18.04.1 POWER9 host to Ubuntu 16.04.4 POWER8 host ===
+
+Backward migration of Ubuntu 16.04.4 POWER8 guest from Ubuntu 18.04.1 POWER9 host to Ubuntu 16.04.4 POWER8 host fails with below error:
+
+<pre>
+Migration: [ 99 %]error: internal error: early end of file from monitor, possible problem: <timestamp> qemu-system-ppc64: error while loading state for instance 0x0 of device 'cpu'
+<timestamp> qemu-system-ppc64: load of migration failed: Invalid argument
+</pre>
+
+The issue is that there is an incompatibility on how the CPU model is defined in QEMU 2.5 available in Ubuntu 16.04.4 (-cpu host,compat=power8) and QEMU 2.11 available in Ubuntu 18.04.1 (-machine max-cpu-compat=power8).
+
+There is no known workaround for this issue. It has been fixed upstream by the following patches, which were then back ported to QEMU 2.11.2 from community:
+
+<pre>
+0550b1206a (tag: ppc-for-2.13-20180504) spapr: don't advertise radix GTSE if max-compat-cpu < power9
+aef19c04bf spapr: don't migrate "spapr_option_vector_ov5_cas" to pre 2.8 machines
+bce009645b target/ppc: always set PPC_MEM_TLBIE in pre 2.8 migration hack
+</pre>
+
+This is currently being tracked by <nowiki>[[https://bugs.launchpad.net/ubuntu/+source/qemu/+bug/1809083|Launchpad issue #1809083]]</nowiki>.
+
+=== Ubuntu 18.04 and POWER9 CPU hot plug Limitation ===
+
+Original Ubuntu 18.04 and POWER9 has a limitation on KVM Hot plug CPU which has been fixed by <nowiki>[[https://bugs.launchpad.net/ubuntu/+source/linux/+bug/1759723|Launchpad issue #1759723]]</nowiki> starting on linux 4.15.0-24.26.
+
+If for some reason you are using a linux version older than 4.15.0-24.26 and you cannot update to the latest version available in Ubuntu 18.04, it is not recommended to run the CPU with extra CPU to be ''hotplugged'' later. This should be fixed soon, but this is a near term limitation.
+
+We basically lose the ability to hotplug/unplug CPUs into virtual machines. Considering that blk-mq enqueue tasks using 'for_each_present_cpu()' (that iterates over CPUs in systems that don't support CPU hotplug - refer to those patches for technical details) we can also have problems if tasks are scheduled to CPUs present but not online.
+
+So I suggest to '''not''' run VMs with extra CPUs to be hotplugged later, like:
+
+----
+<code>-smp 8,sockets=1,cores=2,threads=8,maxcpus=16</code>
+
+or
+
+<code><vcpu placement='static' current='8'>16</vcpu></code>
+----
+
+If we want a guest with 16 CPUs it's better to define it beforehand, for instance:
+
+----
+<code>-smp 16,sockets=1,cores=2,threads=8</code>
+
+or
+
+<code><vcpu placement='static'>16</vcpu></code>
+----
+
+=== PCI pass-through with QEMU-KVM on Ubuntu 16.04 using kernel 4.4 ===
+
+Running PCI pass-through with Ubuntu 16.04 kernel 4.4 and stock QEMU packages (not from UCA) will lead to DI issues as soon as I/O starts on the pass-through adapter bug. In such a case an update to a QEMU packages with DDW support is required. Such packages are available via <nowiki>[[https://launchpad.net/~ibmpackages/+archive/ubuntu/ddw|this PPA]]</nowiki>.
+
+=== Reference and additional material ===
+
+For more information about KVM on Power, please check <nowiki>[[https://www.ibm.com/developerworks/community/wikis/home?lang=en#!/wiki/W51a7ffcf4dfd_4b40_9d82_446ebc23c550/page/PowerKVM%203.1%20Known%20Issues%20and%20workarounds|here]]</nowiki>.

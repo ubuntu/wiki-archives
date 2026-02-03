@@ -1,0 +1,112 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+* '''Launchpad Entry''': https://launchpad.net/distros/ubuntu/+spec/auto-dist-upgrade-testing
+* '''Created''':  by MichaelVogt
+* '''Contributors''': MichaelVogt
+* '''Packages affected''': update-manager
+
+=== Summary ===
+
+Automatic non-interactive testing to see if upgrades from the current to the next release work.
+
+=== Rationale ===
+
+During the development of the ReleaseUpgrader it turned out that a lot of bugs were found by users (the hard way) that could have been found with automated testing. 
+
+=== Use cases ===
+
+* Package A overwrites files in package B without declaring a conflict. 
+* Package C has a failing postinst script on the edgy upgrade that only fails if the upgrade happens from the particular version in dapper.
+* If the package D is installed the upgrade can't be calculated because it declares bad dependencies.
+
+=== Scope ===
+
+The following class of bugs should be detected:
+* post-inst failing
+* file overwrite problems
+* bogus conffile prompts
+* dependency problems ($foo-desktop not installable/upgradable)
+* held-back packages (e.g. xserver-xorg-driver-$foo)
+
+=== Design ===
+
+The DistUpgrade code in update-manager is used for doinng the actual upgrade. A new `non-interactive` frontend is written which catches the above errors. Besides the automatic mode, there should be a way to quickly feed the application with a single package (or a selection of packages) to test upgradability of this particular set (quite useful to confirm bugreports).
+
+This test is done in a chroot with dpkg-diverted invoke-rc.d. First we build the edgy chroot and then it will automatically upgrade by coping the dist-upgrader to the chroot and run it there. After the upgrade the upgrade logs from $chroot/var/log/dist-upgrade/* are copied and stored. The result of the test is mailed to a new mailing list, `test-failures@lists.ubuntu.com`.
+
+We need to test the following cases:
+# {ubuntu,kubuntu,eduubuntu,xubuntu}-desktop upgrade (no other packages)
+# server mode
+# all of main (that we can possibly install, report what we can't install in parallel) 
+
+We do this testing for every release architecture. 
+
+Before each test we run a simulation with a faked status file and simulate the upgrade to see how it goes. This is much much quicker than the actual upgrade and we can perform more tests for obscure combinations.  We can do this using <code>python-apt</code> or <code>aptitude -s</code>.  This allows us to catch certain common cases of failure due to dependency problems before performing a time-consuming full upgrade test.
+
+We check for packages that were in main in edgy and installed but get removed by the upgrade (assuming that the removed packages are still in main for feisty). For the rare cases that this is not a bug we use a whitelist.
+
+The test results will be mailed to a new testing mailing list.
+
+In addition to the $dist->$dist+1 automatic test we should also test the following upgrades: 
+# $dist -> $dist-proposed
+# $dist -> $dist-updates
+# $dist -> $dist-security
+
+=== Implementation ===
+
+This will be implemented as an additional frontend to the ReleaseUpgrader + a tool which drives this by building the chroot, copying the right files into place and mailing the results. It will then be deployed on a machine in the datacenter were it will automatically run through a set of tests daily and report any errors as described.
+
+==== Code ====
+
+Coding started in the http://people.ubuntu.com/~mvo/bzr/update-manager/non-interactive/ branch. It will be merged into the main dist-upgrader branch eventually.
+
+The algorithm that computes the maximum subset of main will work like this:
+<pre>
+cache = apt.Cache
+for pkg in cache:
+    if not blacklisted(pkg) and pkg.candidateOrigin == "main":
+            current = set([p.name for p in cache if p.markedInstall])
+            pkg.markInstall()
+            new = set([p.name for p in cache if p.markedInstall])
+            if not pkg.markedInstall:
+                print "Can't install: %s" % pkg.name
+            if len(current-new) > 0:
+                print "Installing '%s' caused removals_ %s" % (pkg.name, current -new)
+print "We can install in parallel:"
+print "\n".join([pkg.name for pkg in cache if pkg.markedInstall])
+</pre>
+
+There are currently ~60 packages (including meta-packages like xubuntu-desktop and special builds like abiword-gtk) that causes conflicts in main. These will be investigated manually and a blacklist will be created based on this investigation. The resulting set will be used as the basis for main->main upgrades.
+
+With minimal fixup (keep ubuntu-desktop,ubuntu-minimal,ubuntu-standard) installed we can install ~4600 packages.
+
+A test run on all of main, restricted, universe and multiverse shows that we could install 18959 packages maximum. That is 14.3G download and 44.8G total diskspace.
+
+=== Future work ===
+
+The initial code uses a chroot to do the testing, but this has the disadvantage
+that we don't catch all error (e.g. because we have to divert some binaries
+like invoke-rc.d). So running it inside XEN is probably a good thing for the future.
+
+Additional tests for the future:
+* $foo-desktop + selection of popular packages from main (various permutations)
+* $foo-desktop + selection of popular packages from main+universe 
+* iwj suggests that we randomly choose a uesr's PopularityContest data instead of just a random package
+
+More upgrade scenarios could be auto-tested, like upgrades from stock installs (without any updates from -security, -updates). Upgrades with both -security, -updates. Upgrade with everything (security, updates, backports).
+
+We should consider adding a feature to simulate a upgrade with a users setup. This would perform a non-interactive dist-upgrade in a chroot with the users settings (package selections+/etc) as the base of the setup. We could then ask users for real-world testing without risking broken systems.
+
+The results could also be sent (via http POST) to the ScalableInstallTesting database.
+
+----
+CategorySpec

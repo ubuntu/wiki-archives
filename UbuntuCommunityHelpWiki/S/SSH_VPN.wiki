@@ -1,0 +1,280 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+This page details how to set up an SSH VPN.
+
+NB: You must be using OpenSSH version 4.3 or later to do this-- this means that this will not work with Ubuntu 6.06 or earlier's default packages -- it will only work with Ubuntu 6.10 or later, or with a locally compiled SSH version 4.3 or later.
+
+This page discusses using SSH to set up SSH-based point to point connections, which can then be used to create routes that create virtual private networks.
+
+Note that using SSH in this fashion is not the "best" way to create a permanent, stable VPN. Notably, SSH uses TCP, and TCP over TCP can provide abysmal performance under pathological conditions. See also <nowiki>[[http://openvpn.net/|OpenVPN]]</nowiki>, etc.
+
+You also need to have installed uml-utilities on the "calling" machine (the one that will ask for the tunnel). You can check by trying:
+<pre>
+sudo tunctl -u $USER
+</pre>
+
+== Introduction ==
+OpenSSH version 4.3 introduced a new feature: the ability to create on-the-fly "Virtual Private Networks" via the tunnel driver, or "tun" driver. This feature allows you to create a network interface that bridges two physically disparate network segments. A quick diagram:
+<pre>
+    +---------------+            OpenSSH 4.3           +---------------+
+    |   Machine A   | tun0 -- Tunnel Interface -- tun0 |   Machine B   |
+    |  Has a tunnel | <------------------------------->|  Has a tunnel |  
+    |  and ethernet | 10.0.0.100            10.0.0.200 |  and ethernet |
+    +-------+-------+     point to point connection    +-------+-------+
+       eth0 |                 creates a bridge                 | eth0  
+ 10.0.0.100 |               that plugs machine B               | 192.168.0.100
+   port 22  |                  into network A                  |          
+  forwarded |                                                  |
+    here    |                                                  |
+    +-------+-------+          +-~-~-~-~-~-~-~-+       +-------+-------+ 
+    |   Network A   |          |               |       |   Network B   |
+    |  10.0.0.1/24  | 1.2.3.4  |  The Internet |       | 192.168.0.1/24|
+    |  Has internet |<-------->|               |<----->|  Has internet |
+    |  NAT gateway  | Routable |               |       |  NAT gateway  |
+    +---------------+ Address  +-~-~-~-~-~-~-~-+       +---------------+
+</pre>
+What does this diagram represent? In this case, we have two machines, machine A and machine B. Machine A is connected to network A via ethernet, and machine B is connected to network B via ethernet. Machine A's IP address on Network A is 10.0.0.100, and Machine B's IP address on Network B is 192.168.0.100. Each network has an internet NAT gateway to allow for internet connectivity.
+
+In this example, we are connecting machine B to network A via an ssh tunnel interface. Machine A already has an IP addresses on network A: its ethernet interface address (10.0.0.100). Machine B must also be allocated one IP address on network A: its tunnel interface address (10.0.0.200).
+
+Also, Machine B must have some access to the ssh server on Machine A; the most direct way for this to happen is that Machine A must have either a globally routable address itself; or (as is diagramed), port 22 (or whatever port ssh is running on) must be forwarded to Machine A by the NAT system. There are other ways to allow Machine B access to Machine A's ssh server, but this is left as an exercise for the reader.
+
+Once the tunnel is set up, Machine B will be able to directly access Network A. In other words, Machine B would be "plugged in" to Network A via its tunnel with Machine A. Of couse, the devil's in the details: how do you set all this up?
+
+== IP forwarding ==
+Of course the first and most obvious thing is that you'd better have IP forwarding enabled.
+
+on Machine A (and it wouldn't hurt on B), execute:
+
+<pre>
+echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward
+</pre>
+
+== The SSH command ==
+The actual SSH command that gets the ball rolling is quite simple:
+
+on Machine B, execute:
+<pre>
+ sudo ssh -w 0:0 1.2.3.4
+</pre>
+
+Tip : Additional ssh options.
+
+<pre>
+sudo ssh -NTCf -w 0:0 1.2.3.4
+</pre>
+
+* -N Do not execute a remote command.  This is useful for just forwarding ports (or in this case tunnels).
+* -T Disable pseudo-tty allocation.
+* -C Requests compression of all data (including stdin, stdout, stderr, and data for forwarded X11 and TCP connections). Compress can speed up or potentially slow down your speed, so try with and without.
+* -f Requests ssh to go to background just before command execution.
+
+This command creates a tunnel interface named tun0 on both the client and server systems. In keeping with our diagram above, the server is Machine A (with a globally routable IP address of 1.2.3.4), and the client is Machine B.
+
+Note that you will need to have root access on both systems in order for ssh to be able to create these interfaces (see the security section below for security considerations and options to increase security). Additionally, you will need the following settings in your sshd_config on Machine A (the server):
+
+<pre>
+ PermitRootLogin yes
+ PermitTunnel yes
+</pre>
+----- 
+
+'''''Security considerations'''''
+
+To increase security, use ssh keys - see <nowiki>[[AdvancedOpenSSH]]</nowiki> for information on keys - and change `Permit Root Login yes` to :
+
+<pre>
+PermitRootLogin without-password
+</pre>
+
+Do not let that command fool you, `without-password` means root can not log in with a password (see man sshd). 
+
+Also, on the server, if you use a key, you do NOT need to set a root password and your can restrict what commands can be run with the key (to ssh tunnels only).
+
+See the "Single-purpose keys" section of <nowiki>[[http://pkeck.myweb.uga.edu/ssh/|this link]]</nowiki> .
+
+On the client side, again if you do not wish to give your user complete root access , configure sudo. See RootSudo or <nowiki>[[http://manpages.ubuntu.com/manpages/jaunty/en/man5/sudoers.5.html|sudoers man page]]</nowiki>.
+-----
+
+If no errors occur, then you should be able to see a tun0 interface on both systems as existing, but unconfigured:
+Machine A:
+<pre>
+ $ ip addr show tun0
+ 5: tun0: <POINTOPOINT,MULTICAST,NOARP,UP,LOWER_UP> mtu 1510 qdisc pfifo_fast state UNKNOWN qlen 500
+    link/none 
+</pre>
+($ represents the shell prompt and not a character to type)
+
+Machine B:
+<pre>
+ $ ip addr show tun0
+ 5: tun0: <POINTOPOINT,MULTICAST,NOARP,UP,LOWER_UP> mtu 1510 qdisc pfifo_fast state UNKNOWN qlen 500
+    link/none 
+</pre>
+
+== Configuring the interfaces ==
+At this point, we have got interfaces, but they are unconfigured. All we need to do to configure them is give them each an IP address (do this as root):
+
+Machine A:
+<pre>
+ ip link set tun0 up
+ ip addr add 10.0.0.100/32 peer 10.0.0.200 dev tun0
+</pre>
+
+Machine B:
+<pre>
+ ip link set tun0 up
+ ip addr add 10.0.0.200/32 peer 10.0.0.100 dev tun0
+</pre>
+
+Once each interface is configured, we have essentially got the VPN set up; it is just minor details from here. In fact, we can now ping from Machine B to Machine A:
+
+Machine B:
+<pre>
+ % ping 10.0.0.100
+ PING 10.0.0.100 (10.0.0.100) 56(84) bytes of data.
+ 64 bytes from 10.0.0.100: icmp_seq=1 ttl=64 time=74.8 ms
+ 64 bytes from 10.0.0.100: icmp_seq=2 ttl=64 time=73.6 ms
+ 64 bytes from 10.0.0.100: icmp_seq=3 ttl=64 time=74.3 ms
+
+ --- 10.0.0.100 ping statistics ---
+ 3 packets transmitted, 3 received, 0% packet loss, time 2001ms
+ rtt min/avg/max/mdev = 73.649/74.278/74.880/0.549 ms
+</pre>
+
+And of course we can also ping from Machine A back to Machine B:
+
+Machine A:
+<pre>
+ % ping 10.0.0.200
+ PING 10.0.0.200 (10.0.0.200) 56(84) bytes of data.
+ 64 bytes from 10.0.0.200: icmp_seq=1 ttl=64 time=75.2 ms
+ 64 bytes from 10.0.0.200: icmp_seq=2 ttl=64 time=74.0 ms
+ 64 bytes from 10.0.0.200: icmp_seq=3 ttl=64 time=74.0 ms
+
+ --- 10.0.0.200 ping statistics ---
+ 3 packets transmitted, 3 received, 0% packet loss, time 2002ms
+ rtt min/avg/max/mdev = 74.029/74.424/75.208/0.554 ms
+</pre>
+
+== Plugging into the network ==
+At this point, we've created the actual link that allows Machine B to be plugged into Network A, but we haven't set up any routing information to actually get packets back and forth between Machine B and Network A. The first thing we need to do is to tell Machine B about Network A:
+
+Machine B:
+<pre>
+ ip route add 10.0.0.0/24 via 10.0.0.200
+</pre>
+
+This allows us to send packets from Machine B to any IP address on Network A, via Machine A. However, to ensure that packets have a route back to Machine B, we need to set some things up on Machine A.
+
+Machine A:
+<pre>
+ sudo arp -sD 10.0.0.200 eth0 pub
+</pre>
+
+This ensures that other machines plugged into Network A will know to send packets destined for 10.0.0.200 to Machine A (so that it can forward them back to Machine B).
+
+At this point, we do have two way communication betweek Network A and Machine B. Therefore, we can ping another machine on Network A from Machine B:
+
+Machine B:
+<pre>
+ % ping 10.0.0.123
+ PING 10.0.0.123 (10.0.0.123) 56(84) bytes of data.
+ 64 bytes from 10.0.0.123: icmp_seq=1 ttl=127 time=74.3 ms
+ 64 bytes from 10.0.0.123: icmp_seq=2 ttl=127 time=74.3 ms
+ 64 bytes from 10.0.0.123: icmp_seq=3 ttl=127 time=74.5 ms
+
+ --- 10.0.0.123 ping statistics ---
+ 3 packets transmitted, 3 received, 0% packet loss, time 2001ms
+ rtt min/avg/max/mdev = 74.307/74.416/74.577/0.335 ms
+</pre>
+
+== Expanding the scope of the VPN ==
+
+At this point, we have successfully plugged Machine B into Network A, and Machine B can access Network A's resources and vice versa. However, what if we want to expand the scope of this VPN-- what if we want to pretend that Machine B's only network connection is through network A?
+
+If we did this, then all packets coming from or going to Machine B would route through Network A; this would complete Machine B's integration into the private network. So, how do we do this?
+
+Simple: we just switch Machine B's default gateway.
+
+However, first, we must create a host-based route to Machine A's globally routable IP address; all packets except for the packets that actually create the link must go through the tunnel, but of course the packets that create the tunnel cannot go through the tunnel.
+
+Machine B:
+<pre>
+ ip route add 1.2.3.4/32 via 192.168.0.1
+</pre>
+
+In this case, 192.168.0.1 is Machine B's current default gateway; it is the gateway on Network B that provides internet connectivity. Before we switch Machine B's default gateway away from Network B, we must set up this explicit route so that tunnel packets will continue to flow.
+
+After that route is in place, we can switch Machine B's default gateway:
+
+Machine B:
+<pre>
+ ip route replace default via 10.0.0.1
+</pre>
+
+In this case, again, 192.168.0.1 is Network B's default gateway, and 10.0.0.1 is Network A's default gateway. Since Machine B is now connected to Network A, we are telling it to use Network A's default gateway instead of its usual default gateway on Network B. At this point, the conversion is complete, and Machine B is now completely on Network A and has all the resources available to Network A, through the SSH tunnel. We can verify this by looking at the output of a tracepath:
+
+Machine B:
+<pre>
+ % tracepath example.com
+ 1:  10.0.0.200 (10.0.0.200)                                0.291ms pmtu 1500
+ 1:  10.0.0.100 (10.0.0.100)                              168.589ms
+ 2:  10.0.0.1 (10.0.0.1)                                  asymm  3  87.542ms
+ 3:  1.2.3.4 (1.2.3.4)                                    157.360ms
+</pre>
+
+== Automating it all with ifup/down ==
+At this point, we have successfully created a virtual private network using SSH 4.3's tunnels. Can we automate this process with ifup/down? The answer is: yes!
+
+Machine A:
+<pre>
+ iface tun0 inet static
+        pre-up sleep 5
+        address 10.0.0.100
+        pointopoint 10.0.0.200
+        netmask 255.255.255.0
+        up arp -sD 10.0.0.200 eth0 pub
+</pre>
+
+Machine B:
+<pre>
+ iface tun0 inet static
+        pre-up ssh -f -w 0:0 1.2.3.4 'ifdown tun0; ifup tun0'
+        pre-up sleep 5
+        address 10.0.0.200
+        pointopoint 10.0.0.100
+        netmask 255.255.255.255
+        up ip route add 10.0.0.0/24 via 10.0.0.200
+        up ip route add 1.2.3.4/32 via 192.168.0.1
+        up ip route replace default via 10.0.0.1
+        down ip route replace default via 192.168.0.1
+        down ip route del 10.0.0.0/24 via 10.0.0.200
+        down ip route del 1.2.3.4/32 via 192.168.0.1
+</pre>
+
+These example /etc/network/interface snippets show how you would, on Machine B, simply have to execute:
+
+Machine B:
+<pre>
+ sudo ifup tun0
+</pre>
+
+And the system would automatically make the ssh connection, set up the tunnel, and turn on the VPN. Additionally, the ifdown command can be used to put the routes back to normal, or turn off the VPN.
+
+Note that the sleep commands in the snippet are there to allow ssh time to set the tunnel interface up, as it will not be instantaneous.
+
+== Where do I go from here? ==
+There are many other possible ways to use SSH 4.3's tunnels besides creating a VPN to connect machine B to network A. For example, you could connect machine B to network A, and then route back on machine A to network B, creating a sort-of reverse VPN. Or you could connect machine B to network A, and then redirect traffic from network A to machine B to another system on network B. The possibilities are only limited by the amount of root access you have.
+
+----
+CategoryVPN

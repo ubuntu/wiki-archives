@@ -1,0 +1,125 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== State Introspection ==
+
+=== Introduction ===
+
+One of the things that would be great when either debugging a bug from a remote user or when making sweeping changes to the views of Unity would be to be able to get at the data that Unity is "seeing". This would be "model" of what the views inside unity are currently seeing and rendering.
+
+Ideally this could be used:
+
+* Internally for testing certain things as well as a service exported over D-Bus which would allow us to 
+* Connect to Apport to dump the state of unity and attach to a bug report
+* On a bug that says "I can't see Shotwell's menus in my panel", we could ask them to provide the output of `unity --dump-panel-info` in the bug report and we could then easily tell whether the issue is in the models (services or glue code) or the views (rendering).
+
+''''' This is not a replacement for ATK-based testing. Both can co-exist and provide testing for different parts and levels of the code '''''
+
+''''' Unity will NOT implement an interface that allows external programs to cause mouse or keyboard actions on it, this is the job of the ATK and input-method support  '''''
+
+=== Implementation ===
+
+I'd like to separate the idea of "this view can provide information about it's state" from the presentation of the state (JSON/XML/etc) as well as how to retrieve it (D-Bus/internal method/etc).
+
+Therefore I'd propose the following (pseudo code):
+
+<pre>
+
+unity::PropertyWriter { //abstract class
+
+  PushNode (const char *name) = 0;
+  AddProperty (const char *name, Value? value) = 0; // this can just be a bunch of AddProperty methods with different signatures
+  PopNode () = 0; // pops the topmost node
+}
+
+// UI elements implement this to have their state dumped.
+// The idea is that each UI element keeps track of its direct children. 
+// The top level shell would have (for all intensive purposes) a list of 3 items: the panel, the launcher, and the dash. 
+// When ToString was called on Unity-shell it would write out whatever state was specific to itself, 
+// and then to ToString on each of the items in GetChildren. This would repeat for all UI elements
+// until all state had been written
+unity::Introspectable { //abstract class
+
+  GetName () = 0;  
+  ToString (PropertyWriter *writer) = 0;
+  static std::list&<Introspectable> GetChildren () = 0;
+}
+
+</pre>
+
+With these objects, you can imagine that the panel can do this:
+
+* When ToString () is called on it, add it's own properties, and then iterate the indicator view's that it contains and ask them to do the same
+* The indicator views will then iterate on their indicator-entry-views and they will add their data
+
+A service inside Unity that allows external sources to dump this info could work like this:
+
+* When it receives the GetState () method call, it could either have an arg to identify who's state the caller wants, or dump everything if it's null (i.e. "panel", "launcher" or just "unity", which would also mean everything.
+* It would do PropertyWriter *json = new PropertyWriterJson ();
+* It would do Introspectable::GetChildren();
+* If would find the one(s) it wants and call foo->ToString (json) for it (them)
+* We return the recursively serialized tree as a dict <code>{sv</code>}, where the variant <code>v</code> is a recusive type <code>{s{s{s{s{...</code>}}}}}.
+* Both calling and service ends can use GVariants to handle these message and use <nowiki>[[http://library.gnome.org/devel/glib/2.26/glib-GVariant.html#g-variant-print|g_variant_print()]]</nowiki> and <nowiki>[[http://library.gnome.org/devel/glib/2.26/glib-GVariant.html#g-variant-parse|g_variant_parse()]]</nowiki> to convert to/from a human readable format
+
+In the same way, for internal testing, we could create a fake panel model and a memory-based PropertyWriter, and then validate that the Panel is seeing what we expect it to see by going through it's code-paths rather than the models.
+
+=== PropertyWriter - JSON example ===
+
+<pre>
+
+"panel": {
+    "backend": "remote-service",
+    "remote-service-address" : "/com/canonical/Unity/Panel/Service/324234243",
+    "launch-type" : "dbus",
+    "width" : 1024,
+    "height" : 24,
+    "theme" : "gtk",
+    "indicators" : {
+        "appmenu" : {
+            "model-name" : "com.canonical.Unity.Panel.Service.Indicators.appmenu.324234243",
+            "entries" : {
+                "0" : {
+                    "label" : "_File",
+                    "image" : "",
+                    "visible" : "true",
+                    "sensitive" : "true",
+                    "active" : "false",
+                    "width" : "34",
+                    "height" : "24"
+                },
+                "1" : {
+                    "label" : "_Edit",
+                    "image" : "",
+                    "visible" : "true",
+                    "sensitive" : "true",
+                    "active" : "false",
+                    "width" : "34",
+                    "height" : "24"
+                }
+            }
+        },
+        "appindicator" : {
+            "model-name" : "com.canonical.Unity.Panel.Service.Indicators.appindicator.324234243",
+            "entries" : {
+                "id" : "0",
+                "label" : "",
+                "image" : "transmission",
+                "visible" : "true",
+                "sensitive" : "true",
+                "active" : "false",
+                "width" : "24",
+                "height" : "24"
+            }
+        },
+     
+    }
+}
+   
+</pre>

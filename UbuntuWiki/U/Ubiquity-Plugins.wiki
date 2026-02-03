@@ -1,0 +1,239 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+This is the method for enabling drop-in plugins for Ubiquity and OEM-config.
+
+=== Requirements ===
+
+* Insert a page: The ability to add a page anywhere in the page sequence
+* Hide a page: The ability to stop a standard page from showing up (the combination of inserting/hiding lets you replace a page)
+* The ability to prevent going forward (say, a EULA page that requires an approval checkbox).  Might as well also allow preventing going back.
+* Let plugins be translatable
+* Let plugins execute code after user is done entering any info, to actually do what user asks
+* Let plugins offer gtk or kde UI (or debconf or noninteractive, etc if desired)
+
+==== Wants ====
+* Reduce plugin's exposure to Ubiquity internals, to make them more change-proof.
+* Allow plugins to be pure Python (no required shell)
+
+=== Design ===
+
+==== What a plugin looks like ====
+
+Bits of a standard gtk page:
+* A glade file
+* A debconf filter
+* Ask and apply scripts
+
+With the above, by providing the above files, we can do everything a normal page can in a plugin.  Assuming Ubiquity knows how to find the files.
+
+The asking can be provided by Ubiquity, as long as the plugin gives us a list of debconf questions to ask.  And the apply script could just be done by the filter by a special 'apply' method.  Then all a plugin needs is a filter and a UI file.
+
+We could additionally dumb down the python a plugin needs to provide by having them be 'filter lites' custom classes that didn't do everything a filter does.  But the filter parent classes already provide good default methods.  We should probably have a plugin parent class that sits between the debconf filter and the plugin, just to provide further default methods and any special configuration we need.
+
+==== How the plugin will talk to its own UI ====
+
+The plugin will have UI classes like '!PageGtk' or '!PageKde' or '!PageNoninteractive' which will be instantiated by Ubiquity and passed to the filter class.  If the right class for the current frontend isn't find, the plugin is ignored.
+
+For GUI frontends, certain member data and methods may be expected depending on which frontend is being used.  Any such member will be prefixed with 'plugin_'.  For example, with the GTK+ frontend, 'plugin_widgets' containing a list of pages and other information.  See below for more details.
+
+The plugin can install the UI files (.glade, .ui) anywhere it wants, because it is responsible for loading it.  The GTK and KDE frontends only want to see actual widgets.
+
+==== How the plugin is translated ====
+
+Plugins can use their own debconf template.  Ubiquity will do the translation for it, from its template.
+
+==== How to find the plugin ====
+
+Plugins drop python page files in /usr/lib/ubiquity/plugins/
+
+==== How to order/add/remove pages ====
+
+Plugins has a module-wide NAME field that specifies a name to use.  The recommended NAME for pages would be similar to the module name that defines the page.  For third-party plugins, using a namespace (e.g. 'foo-page' and 'foo-page2') is recommended.
+
+To insert your page into the sequence of pages, use AFTER or BEFORE fields.
+<pre>
+AFTER='goober-language'
+BEFORE=['language', None]
+</pre>
+
+Pages can be hidden from a HIDDEN field (a list would also work):
+<pre>
+HIDDEN='language'
+</pre>
+
+* If neither AFTER or BEFORE are specified, the page will not be used, but may still specify other plugin options, like HIDDEN.  (i.e. a page that only hides, and does not insert itself)
+* If AFTER or BEFORE is a list of names, the first component that Ubiquity recognizes is used.
+* If both AFTER and BEFORE are specified, Ubiquity will use AFTER if it recognizes it, else use BEFORE.
+* If Ubiquity still can't find a value that it recognizes, the page is ignored (and other plugin options like HIDDEN are '''not''' used -- it's likely this page is optional, pending installation of some package we don't have or was written for an older Ubiquity).
+* If AFTER's value is None or otherwise 'Python-false', it is inserted at the beginning of the page sequence.
+* If BEFORE's value is None or otherwise 'Python-false', it is inserted at the end of the page sequence.
+
+Ties (where two pages specify 'after language' for example) are broken by the attribute WEIGHT in the module.  If not defined, it is 0.  i.e. if both mypage (WEIGHT=10) and otherpage (WEIGHT=22) specify <code>AFTER=language</code>, otherpage would be first in the resulting sequence, then mypage.
+
+Most Ubiquity built-in plugins are around WEIGHT=10.
+
+==== PageGtk Design ====
+
+The !PageGtk class must provide an init that takes at least one argument.  Additional keyword arguments are allowed, but not currently used.
+
+This first argument is a 'controller' class, specified below.  This is how !PageGtk can provide feedback to the 'real' frontend.
+
+Here's a list of supported member fields:
+
+* '''plugin_widgets''': A GTK+ widget or a list of widgets to show as pages
+* '''plugin_optional_widgets''': A GTK+ widget or a list of widgets that aren't likely to be shown.  These widgets don't add to the step count in the bottom left of the UI (step X of Y), but can be shown via <code>plugin_get_current_page</code> as described below.
+* '''plugin_is_language''': Indicates that 'plugin_widgets' describes a page that will possibly change the language.  This is used to cache all possible translations for the widgets on the page.
+* '''plugin_prefix''': Indicates a debconf template prefix to use for widget names when translating.  Ubiquity will look up 'plugin_prefix/name' and use the string debconf gives as the UI translation.
+
+It may provide a method called <code>plugin_get_current_page(self)</code> that will return which of the widgets in '''plugin_widgets''' or '''plugin_optional_widgets''' should be shown now.  If not defined, the first in the lists will be used.
+
+==== PageKde Design ====
+
+The !PageKde class must provide an init that takes at least one argument.  Additional keyword arguments are allowed, but not currently used.
+
+This first argument is a 'controller' class, specified below.  This is how !PageKde can provide feedback to the 'real' frontend.
+
+Here's a list of supported member fields:
+
+* '''plugin_widgets''': A Qt widget or a list of widgets to show as pages
+* '''plugin_breadcrumb''': A debconf template key for the list of stages on the left of the UI.  Setting 'plugin_breadcrumb' to None indicates that you don't want the breadcrumb list visible for your page.
+* '''plugin_is_language''': Indicates that 'plugin_widgets' describes a page that will possibly change the language.  This is used to cache all possible translations for the widgets on the page.
+* '''plugin_prefix''': Indicates a debconf template prefix to use for widget names when translating.  Ubiquity will look up 'plugin_prefix/name' and use the string debconf gives as the UI translation.
+
+It may provide a method called <code>plugin_get_current_page(self)</code> that will return which of the widgets in '''widgets''' should be shown now.  If not defined, the first in the lists will be used.
+
+==== Controller Design ====
+
+The controller object passed to Page UI classes is a simple mechanism for talking to the main frontend.
+
+Here are the currently defined members:
+* dbfilter (lets you have access to your Page class)
+* oem_config
+* oem_user_config (flags for which mode we're in)
+
+And the methods:
+* add_builder(self, builder) (register a gtk.Builder instance created by the plugin; GTK frontend only)
+* translate(self, lang=None, just_me=True, reget=False) (retranslate the UI)
+* allow_go_forward(self, bool) (page starts with forward allowed)
+* allow_go_backward(self, bool) (page starts with backward allowed)
+* go_forward(self) (clicks forward)
+* go_backward(self) (clicks back)
+* go_to_page(self, page) (jumps to the given page)
+* toggle_top_level(self) (Hides or Shows the top level widget page)
+
+==== Applying the Page ====
+
+If your plugin wants to perform install-time work, it can define a <code>Install</code> class that derives from the <code>InstallPlugin</code> class.
+
+<code>InstallPlugin</code> is a <code>Plugin</code> and follows the same conventions -- it is a debconf filter that has <code>prepare</code> and <code>cleanup</code> methods.  But additionally and more relevantly for us, it adds an <code>install</code> method.
+
+<code>install</code> is passed a target directory (usually '/target' or '/'), a progress class (more on that below), and possibly some future arguments.  It's recommended that plugins use *args and **kwargs to gracefully handle future extensions.
+
+If <code>install</code> returns a Python-true value, it is considered an error (ala command line programs).  The error value (a string or a number) will be printed to syslog.
+
+===== Progress API =====
+
+<code>install</code> is passed a progress class that can provide updates on what your plugin is doing and query debconf.  Each plugin takes up 1% on the install progress bar.
+
+<pre>
+def info(self, title):
+    '''Sets the progress to a debconf text description'''
+    pass
+
+def get(self, question):
+    '''Retrieves a debconf question's answer'''
+    pass
+
+def substitute(self, template, substr, data):
+    '''Substitutes substr with data in template'''
+    pass
+</pre>
+
+===== Install Example =====
+
+<pre>
+def install(self, target, progress, *args, **kwargs):
+    progress.info('ubiquity/install/timezone')
+    return InstallPlugin.install(self, target, progress, *args, **kwargs)
+</pre>
+
+==== Example ====
+
+In <code>/usr/lib/ubiquity/plugins/foo.py</code>
+<pre>
+import os
+from ubiquity.plugin import *
+
+NAME='foo'
+AFTER='language'
+WEIGHT=30
+
+class PageGtk(PluginUI):
+    plugin_prefix = 'tcpd'
+    plugin_title = 'ubiquity/text/ready_details_label'
+
+    def __init__(self, controller, *args, **kwargs):
+        import gtk
+        self.controller = controller
+        self.page = gtk.CheckButton()
+        self.page.set_name("paranoid-mode")
+        self.plugin_widgets = self.page
+
+### Custom controls
+    def get_mode(self):
+        return self.page.get_active()
+    def set_mode(self, on):
+        self.page.set_active(on)
+
+class PageKde(PluginUI):
+### Just chosen because it's short and different.  You can use
+### any template name here -- it's not affected by prefix.
+    plugin_breadcrumb = 'ubiquity/text/ready_details_label'
+    plugin_prefix = 'tcpd'
+
+    def __init__(self, controller, *args, **kwargs):
+        from PyQt4.QtGui import QCheckBox
+        self.controller = controller
+        self.page = QCheckBox()
+        self.page.setObjectName("paranoid-mode")
+        self.plugin_widgets = self.page
+
+### Custom controls
+    def get_mode(self):
+        from PyQt4.QtCore import Qt
+        return self.page.checkState() == Qt.Checked
+    def set_mode(self, on):
+        from PyQt4.QtCore import Qt
+        self.page.setCheckState(Qt.Checked if on else Qt.Unchecked)
+
+class Page(Plugin):
+    def prepare(self, unfiltered=False):
+##### self.ui is PageGtk above
+        mode = self.db.get('tcpd/paranoid-mode')
+        self.ui.set_mode(mode == 'true')
+        return Plugin.prepare(self, unfiltered=unfiltered)
+
+    def ok_handler(self):
+        mode = self.ui.get_mode()
+        self.preseed_bool('tcpd/paranoid-mode', mode)
+        Plugin.ok_handler(self)
+
+class Install(InstallPlugin):
+    def install(self, target, progress, *args, **kwargs):
+        progress.info('tcpd/paranoid-mode') # not really appropriate, but just an example
+        cmd = 'touch' if self.db.get('tcpd/paranoid-mode') else 'rm'
+        rv = os.system('%s %s' % (cmd, os.path.join(target, '/etc/bar')))
+        import time
+        time.sleep(45) # just to give you time to see this in the progress bar
+        if rv:
+            return rv
+        return InstallPlugin.install(self, target, progress, *args, **kwargs)
+</pre>

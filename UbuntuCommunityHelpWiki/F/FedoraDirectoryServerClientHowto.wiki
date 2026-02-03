@@ -1,0 +1,268 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+== Introduction ==
+
+This howto is based on my FedoraDirectoryServer howto and I am going to tell you here how you are going to connect Ubuntu clients with Fedora-ds installed in another Ubuntu  server. I will stick to the the following example scenario. Change your setting appropriately. This howto can be used your own LDAP server as well.
+
+My test setup is like this:
+
+<nowiki>[[File:FosseduAutoHome.jpg]]</nowiki>
+
+== Installing LDAP Client Packages ==
+
+We need to install necessary client packages and setup them initially. To install all  packages:
+
+<pre>
+  sudo apt-get install libpam-ldap libnss-ldap
+</pre>
+
+During the installation it will ask few questions and don't worry about them but keep accepting the default settings since we are going to modify them manually later.
+
+== Configuring Configuring nsswitch.conf file ==
+
+The nsswitch.conf file is responsible for switching the authentication order in Linux and we need to setup to accept LDAP authentication. To edit the file:
+
+<pre>
+sudo vi /etc/nsswitch.conf
+</pre>
+
+Then we need change <code>compat</code> with <code>files ldap</code>. Use the following command in vi command mode
+<pre>
+%s/compat/files ldap/g
+</pre>
+
+Now your changes will reflect as follows in /etc/nsswitch.conf
+<pre>
+...
+passwd:         files ldap
+group:          files ldap
+shadow:         files ldap
+...
+</pre>
+
+The order <code>files ldap</code> will look <code>/etc/passwd</code>  file first and then look LDAP for authentication.
+
+== Modifying /etc/pam_ldap.conf file ==
+
+We now replace above file with our version of this file. To backup the original file   :
+
+<pre>
+cd /etc
+sudo mv pam_ldap.conf pam_ldap.conf.orig
+</pre>
+
+The open a new file and copy and paste the following contents the new file.
+(On Karmic (9.10) the file to edit is /etc/ldap.conf)
+<pre>
+sudo vi /etc/pam_ldap.conf
+</pre>
+
+Copy and paste the following code segment.
+
+<pre>
+host    10.0.0.1
+
+suffix          "dc=fossedu,dc=org"
+
+uri ldap://10.0.0.1
+pam_password exop
+
+ldap_version 3
+pam_filter objectclass=posixAccount
+pam_login_attribute uid
+pam_member_attribute memberuid
+nss_base_passwd ou=People,dc=fossedu,dc=org
+nss_base_shadow ou=People,dc=fossedu,dc=org
+nss_base_group  ou=Groups,dc=fossedu,dc=org
+
+scope one
+</pre>
+
+Replace <code>"dc=fossedu,dc=com"</code> with your own distinguished name of the search base. For example <code>dc=yourdoman,dc=com</code>
+
+== Configuring PAM ==
+
+The PAM configuration is split in 4 files: common-account, common-auth, common-password and common-session. Let us keep our original files back up in case we need a recovery again to our original setup. To backup original files:
+
+<pre>
+cd /etc/pam.d
+for name in `ls common-*` ; do sudo mv "$name" "$name".orig ; done
+mv 
+</pre>
+
+=== Setting common-account ===
+
+{{{ 
+sudo vi /etc/pam.d/common-account
+}}}
+
+Copy and paste the following code segment.
+
+<pre>
+account sufficient      pam_ldap.so
+account required        pam_unix.so
+</pre>
+
+=== Setting common-auth ===
+
+{{{ 
+sudo vi /etc/pam.d/common-auth
+}}}
+
+Copy and paste the following code segment
+
+<pre>
+auth    sufficient      pam_ldap.so
+auth    required        pam_unix.so nullok_secure use_first_pass
+</pre>
+
+=== Setting common-password ===
+
+{{{ 
+sudo vi /etc/pam.d/common-password
+}}}
+
+Copy and paste the following code segment.
+
+<pre>
+password        sufficient      pam_ldap.so
+password        required        pam_unix.so nullok obscure min=4 max=8 md5
+</pre>
+
+=== Setting common-session ===
+
+{{{ 
+sudo vi /etc/pam.d/common-session
+}}}
+
+Copy and paste the following code segment.
+
+<pre>
+session sufficient      pam_ldap.so
+session required        pam_unix.so
+</pre>
+
+=== Testing the Setup ===
+
+Let's test our setup now. To test LDAP connectivity:
+
+<pre>
+getent passwd fmaster
+</pre>
+
+Your output should be something like this:
+
+<pre>
+fmaster:x:1006:1006:Foss Master:/home/fsmaster:/bin/bash
+</pre>
+
+== Automatically Mounting User's Home Directory ==
+
+We need to mount user's home directory when they login to a system and we try to  manage our users as roaming users. Install following packages in all of your client system to enable this.
+
+=== Setup your server for NFS Exports ===
+
+In the Ubuntu server to which your have install Fedora-ds we need to export users home directories via NFS
+
+'''To install NFS server'''
+
+<pre>
+sudo apt-get install nfs-kernel-server
+</pre>
+
+To export the file system, setup <code>/etc/exports</code>.
+
+<pre>
+sudo vi /etc/exports
+</pre>
+
+Add the following code segment into the file.
+
+<pre>
+/ahome          10.0.0.0/24(rw,sync,root_squash)
+</pre>
+
+'''Export the file system'''
+
+<pre>
+sudo exportfs -arv
+</pre>
+
+Your output should look like:
+
+<pre>
+ exporting 10.0.0.0/24:/ahome
+</pre>
+
+'''To veryfiy nfs exports'''
+
+<pre>
+sudo exportfs -v
+</pre>
+
+Output:
+
+<pre>
+/home          10.0.0.0/24(rw,wdelay,root_squash)
+</pre>
+
+=== Setting up clients for NFS and autofs ===
+
+'''To install nfs clients and autofs'''
+
+<pre>
+sudo apt-get install autofs nfs-common
+</pre>
+
+=== Setting autofs ===
+
+'''Create auto.ahome file.'''
+
+<pre>
+sudo vi /etc/auto.ahome
+</pre>
+
+Add the following code segment to this file.
+
+<pre>
+* -fstype=nfs,rw,hard,intr,rsize=2048,wsize=2048,nosuid,nfsvers=3 10.0.0.1:/ahome/&
+</pre>
+
+'''Create a mount point for auto homes'''
+<pre>
+sudo mkdir /ahome
+</pre>
+
+'''Add auto.home file to /etc/auto.master'''
+
+<pre>
+sudo vi /etc/auto.master
+</pre>
+
+Add the the following code segment to the above file
+
+<pre>
+/ahome       /etc/auto.ahome      --timeout=120
+</pre>
+
+'''Restart autofs'''
+
+<pre>
+sudo /etc/init.d/autofs restart
+</pre>
+
+To test your setup login as <code>fmaster</code>
+
+If you  can login, Cheers !!!
+
+Howto created by: ChinthakaDeshapriya.
+----

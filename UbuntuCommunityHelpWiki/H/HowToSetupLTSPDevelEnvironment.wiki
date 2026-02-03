@@ -1,0 +1,354 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+{| class="wikitable"
+|-
+| <tablestyle="float:right; font-size: 0.9em; width:40%; background:#F1F1ED; margin: 0 0 1em 1em;" style="padding:0.5em;">
+|}
+
+{| class="wikitable"
+|-
+| <tablestyle="background:#ffffcc;border:1;">This page is specific to Ubuntu versions ?
+|}
+''If you find this information applicable to additional versions/releases, '''''please''''' edit this page and modify this header to reflect that. Please also include any necessary modifications for this information to apply to the additional versions.''
+----
+
+== Introduction ==
+This page will describe how to setup a developement environment for LTSP under Ubuntu. We will see : 
+
+* Setup KVM and virtual private network with NAT
+* Configure dnsmasq, dhcp server and apt-cacher
+* Create a virtual server and client
+* Prepare to build software
+
+You will need a workstation with flag vmx in order to get good performance with KVM. 
+
+The virtual private network is bridge br0. Each virtual machine have it's own tap interface, created on the fly and added to the bridge. Here is the network information for the setup. You can change network address to fit your needs. 
+
+* br0 : 172.16.0.1
+* server : 172.16.0.2
+* client : dhcp
+
+For the setup, the dhcp server runs on the host and listen on br0. This way, your setup will be useful to run other virtual machines with DHCP, even if the ltsp server is not started.
+
+dnsmasq and apt-cacher are not mandatory, but helpful. dnsmasq is useful to simplify the configuration of DNS in the guests, while apt-cacher will be useful to cache deb packages, that otherwise may be downloaded often. 
+
+=== Host installation ===
+
+* Install the latest release of Ubuntu. 
+* Create a new /etc/apt/sources.list, update, upgrade and reboot if required
+
+<pre>
+sudo -s
+export distro=$(lsb_release -c -s)
+cat << EOF > /etc/apt/sources.list
+deb http://archive.ubuntu.com/ubuntu $distro main restricted universe multiverse
+deb http://archive.ubuntu.com/ubuntu $distro-updates main restricted universe multiverse
+deb http://archive.ubuntu.com/ubuntu $distro-security main restricted universe multiverse
+EOF
+apt-get update
+apt-get upgrade
+</pre>
+
+* Install required software : 
+<pre>
+sudo apt-get install qemu kvm kvm-pxe bridge-utils uml-utilities ubuntu-vm-builder dnsmasq dhcp3-server apt-cacher
+</pre>
+
+* Configure kvm network script. By default, this script adds the tap interface of the vm to the real gateway interface, but in this setup, we use the bridge br0.
+
+<pre>
+sudo -s
+cat << EOF > /etc/kvm/kvm-ifup
+
+switch=br0
+/sbin/ip link set dev "$1" up
+/usr/sbin/brctl addif ${switch} $1
+exit 0
+
+EOF
+</pre>
+
+* Configure dhcp server for the virtual network. dhcp server will be started later. 
+
+<pre>
+cat << EOF > /etc/dhcp3/dhcpd.conf
+ddns-update-style none;
+
+option domain-name-servers 172.16.0.1;
+default-lease-time 600;
+max-lease-time 7200;
+log-facility local7;
+
+subnet 172.16.0.0 netmask 255.255.255.0 {
+  range 172.16.0.200 172.16.0.250;
+  option routers 172.16.0.1;
+  next-server 172.16.0.2;
+  filename "/ltsp/i386/pxelinux.0";
+  option root-path "/opt/ltsp/i386";
+}
+EOF
+
+cat << EOF > /etc/default/dhcp3-server
+INTERFACES="br0"
+EOF
+</pre>
+
+* Script to setup virtual network. Run this script before starting any vm. This script ask for the interface name to use for the gateway, setup bridge, NAT and restart dhcp server. Take care, it flushes all iptables rules, so you may have to adapt it to your needs. 
+
+<pre>
+cat << EOF > /usr/local/sbin/kvm-net
+
+echo "Setup of networking for vm's"
+
+echo -n "Gateway interface: "
+read gw
+
+bridge=br0
+LAN_IP="172.16.0.1"
+LAN_IP_NET="172.16.0.0/24"
+LAN_NIC=$bridge
+OUT_NIC=$gw
+
+echo "Bridge br0 setup"
+ip link set dev "$bridge" down
+brctl delbr $bridge
+sleep 1
+brctl addbr $bridge
+sleep 1
+
+ip addr add "$LAN_IP/24" dev "$bridge"
+
+echo "Setting up NAT"
+
+echo 1 > /proc/sys/net/ipv4/ip_forward
+iptables -F
+iptables -t nat -F
+
+iptables -t nat -A POSTROUTING -s $LAN_IP_NET -o $OUT_NIC -j MASQUERADE
+iptables -A FORWARD -j ACCEPT -i $LAN_NIC -s $LAN_IP_NET
+iptables -A FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
+/etc/init.d/dhcp3-server restart
+EOF
+chmod +x /usr/local/sbin/kvm-net
+sudo kvm-net
+</pre>
+
+* Setup apt-cacher. In this example, the ubuntu repository is cached. Change the parameter path_map :
+<pre>
+path_map = ubuntu archive.ubuntu.com/ubuntu
+</pre>
+* Restart apt-cacher : /etc/init.d/apt-cacher restart
+
+We are done with the host setup. 
+
+=== Setup virtual machines ===
+
+First, create a template virtual machine. This way, you will be able to create new virtual machines simply by copying the template.
+
+<pre>
+mkdir ~/vm
+cd ~/vm
+sudo vmbuilder kvm  ubuntu --suite $(lsb_release -c -s) -o --mirror http://localhost:3142/ubuntu
+</pre>
+
+A new directory that contain the vm image have been created. The run.sh script needs some minor modification in order to generate a macaddress on the fly. 
+
+<pre>
+cd ubuntu-kvm
+cat << EOF > run.sh
+
+ranmac=$(echo -n DE:AD:BE:EF ; for i in `seq 1 2` ; \
+do echo -n `echo ":$RANDOM$RANDOM" | cut -n -c -3` ;done)
+
+sudo kvm -m 128 -drive file=disk0.qcow2 -net nic,macaddr=$ranmac -net tap
+EOF
+chmod +x run.sh
+</pre>
+
+Then, run the run.sh script. The virutal machine will boot. Default username and password is "ubuntu".
+
+Copy this vm for the ltsp server, and start it. Then, configure it with theses commands.
+<pre>
+sudo -s
+export distro=$(lsb_release -c -s)
+cat << EOF > /etc/apt/sources.list
+deb http://172.16.0.1:3142/ubuntu $distro main restricted universe multiverse
+deb http://172.16.0.1:3142/ubuntu $distro-updates main restricted universe multiverse
+deb http://172.16.0.1:3142/ubuntu $distro-security main restricted universe multiverse
+EOF
+apt-get update
+apt-get upgrade
+apt-get install ltsp-server ubuntu-desktop
+ltsp-build-client
+</pre>
+
+This may take a while. Then, you can start a thin-client by following these steps : 
+<pre>
+mkdir thin-client
+cd thin-client
+cat << EOF > run.sh
+
+if [ ! -f terminal.img ]; then
+qemu-img create terminal.img 10M
+fi
+
+ranmac=$(echo -n DE:AD:BE:EF ; for i in `seq 1 2` ; \
+do echo -n `echo ":$RANDOM$RANDOM" | cut -n -c -3` ;done)
+
+sudo kvm -hda terminal.img \
+-boot n \
+-net nic,macaddr=$ranmac -net tap
+
+EOF
+chmod +x run.sh
+</pre>
+
+Then, execute run.sh and a thin-client will run PXE stack and boot. It seems to take few tries to get an ip address. 
+
+== Setup development environment ==
+
+In this procedure, we will install needed libraries and tools to start development of ltsp with ubuntu.
+
+Install software for general developement in Ubuntu :
+
+<pre>
+sudo apt-get install bzr dpkg-dev build-essential patch dh-make debhelper devscripts fakeroot gnupg lintian pbuilder debian-policy developers-reference
+</pre>
+
+=== Using NFS in replacement of NBD ===
+
+Warning : may need revision
+
+With NBD, every time you change the client root, the squashfs image must be rebuild to apply changes, and the thin-client needs to be rebooted. To speed up development, you can enable NFS root, then changes will be applied immediately.
+
+Here is a script to switch between NFS and NBD : 
+
+<pre>
+
+usage(){
+    echo "usage: $0 [ nbd | nfs ]"
+}
+
+if [ $# -ne 1 ]; then
+    echo " Error: this application takes exactly one parameter"
+    usage
+    exit 1
+elif [ "$1" != "nbd" ] && [ "$1" != "nfs" ]; then
+    usage
+    exit 1
+fi
+
+LTSPROOT=/opt/ltsp/i386
+
+update_kernels(){
+
+        mount -t proc none $LTSPROOT/proc
+        chroot $LTSPROOT update-initramfs -u
+        ltsp-update-kernels
+        umount $LTSPROOT/proc
+}
+
+case $1 in
+     nbd)
+        echo "enabling nbd"
+        sed -i 's/root_write_method=\(.*\)/root_write_method="unionfs"/g' $LTSPROOT/etc/default/ltsp-client-setup
+        if [ -f $LTSPROOT/etc/initramfs-tools/conf.d/ltsp ]; then
+            rm $LTSPROOT/etc/initramfs-tools/conf.d/ltsp
+        fi
+        update_kernels
+        echo "Clients can now boot by NBD."
+        ;;
+     nfs)
+        echo "enabling nfs"
+        apt-get install nfs-kernel-server
+        sed -i 's/root_write_method=\(.*\)/root_write_method="bind_mounts"/g' $LTSPROOT/etc/default/ltsp-client-setup
+        cat /etc/exports | grep -v LTSPROOT > /etc/exports.tmp
+        mv /etc/exports.tmp /etc/exports
+        echo '/opt/ltsp/i386     *(ro,no_subtree_check,no_root_squash) # LTSPROOT' >> /etc/exports
+        /etc/init.d/nfs-kernel-server restart
+        echo "BOOT=nfs" > $LTSPROOT/etc/initramfs-tools/conf.d/ltsp
+        update_kernels
+        echo "Clients can now boot by NFS."
+        ;;
+esac
+</pre>
+
+=== Using an NBD file-based "partition" ===
+To avoid running ltsp-update-image after each chroot change, you can use the following method instead of switching to NFS:
+<pre>
+sudo -i
+
+rm -f /opt/ltsp/images/i386.img
+
+dd if=/dev/zero of=/opt/ltsp/images/i386.img bs=$((1024*1024)) count=1024
+mkfs.btrfs /opt/ltsp/images/i386.img 
+
+mount -o loop,compress /opt/ltsp/i386.img /mnt
+rsync -a /opt/ltsp/i386/ /mnt/
+umount /mnt
+
+mv /opt/ltsp/i386 /opt/ltsp/i386.original
+mkdir /opt/ltsp/i386
+</pre>
+
+That's it, you should be able to boot your clients using your file-based NBD "partition". Every time you want to change something, do:
+<pre>
+service nbd-server stop
+mount -o loop,compress /opt/ltsp/images/i386.img /opt/ltsp/i386
+ltsp-chroot -m
+...
+umount /opt/ltsp/i386
+service nbd-server start
+</pre>
+
+Remember '''not''' to run ltsp-update-image afterwards.
+
+=== Connect to terminal by SSH ===
+
+It's realy useful to be able to start a shell on a thin-client when debugging or development. 
+
+First, install SSH in the chroot, enable the root account. You will need to rebuild the image if using nbd. 
+
+<pre>
+mount --bind /dev /opt/ltsp/i386/dev
+mount -t proc none /opt/ltsp/i386/proc
+cp /etc/resolv.conf /opt/ltsp/i386/etc/
+chroot /opt/ltsp/i386
+LTSP_HANDLE_DAEMONS=false apt-get install ssh
+passwd root
+ltsp-update-image
+</pre>
+
+It's also possible to install your public key in $CHROOT/root/.ssh/authorized_keys to connect to the terminal without using the root password. 
+
+=== See the content of the initramfs ===
+
+To debug initramfs, you may want to see files that it contains. First, copy the initrd.img file to a temp directory. Then, run this command :
+<pre>
+zcat initrd.img | cpio -div
+</pre>
+
+=== Getting the source ===
+
+Branches are hosted in launchpad : 
+* https://code.launchpad.net/ltsp/
+* https://code.launchpad.net/ltsp-cluster/
+
+In order to create a new branch, create an account on launchpad and upload your ssh public key. Then, you will be able to connect to the bazaar server and create your new branch. 
+
+== References ==
+
+* http://www.debuntu.org/how-to-set-up-a-repository-cache-with-apt-cacher
+* http://alien.slackbook.org/dokuwiki/doku.php?id=slackware:vde
+* https://help.ubuntu.com/community/JeOSVMBuilder
+
+----

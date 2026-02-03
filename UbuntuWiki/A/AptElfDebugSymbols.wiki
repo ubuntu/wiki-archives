@@ -1,0 +1,116 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+* '''Launchpad Entry''': https://launchpad.net/distros/ubuntu/+spec/apt-get-debug-symbols
+* '''Created''':  by MartinPitt
+* '''Contributors''': SimonLaw, MattWilson, MartinPitt, JeffBailey, SebastianDroge
+* '''Packages affected''': All binary packages containing compiled executables.
+
+=== Introduction ===
+
+In order to produce good backtraces, we need to extract and store debug symbols from standard builds, and store them in a centralized repository for use in analyzing these reports. (see AutomatedProblemReports)
+
+=== Rationale ===
+
+Currently it is very hard for a user to produce a good backtrace for a crash, so many times they just don't do it at all. This specification provides a basic need for AutomatedProblemReports.
+
+=== Scope ===
+
+This is performed implicitly for all packages in the archive without modifying source packages.
+
+=== Use cases ===
+
+For Edgy:
+* An Ubuntu core developer can reproduce a bug locally on her machine.  To make her work more efficient, she just downloads the debugging symbols for the appropriate packages, instead of rebuilding them from source with nostrip (as this might not even create valid debugging symbols for a the binary that reproduces the bug, or simply rebuilding in a slightly different environment may not reproduce the bug anymore).
+
+* An Ubuntu user reports a crash in an application. In the bug report we ask him to upgrade to the most recent version, install the debug symbols for that package, reproduce the crash, and provide us with a better stack trace.
+
+In the future:
+* We need to retain older versions of debug packages. We will retain them for a time determined by the amount of disk space which can be allocated for this purpose and the size of the data.
+
+* Once we have AutomatedProblemReports, we might offer the option to download the debug symbols to produce a nice stack trace locally, but this should not be the default case.
+
+* dpkg --blame using HCT and this tool.
+
+* With stack traces and valgrind and versioned debug symbols, this will let us find bugs even if the users who reported them drop off the face of the earth.
+
+=== Design ===
+
+`pkgbinarymangler` (formerly known as `pkgstriptranslations`) or a new package diverts `dh_strip` to provide a wrapper which builds debug symbol packages. `dehbelper` will not be modified for political reasons.
+
+`ddeb`s are used as container for debug symbols; similar to udebs, they have the same format as regular debs. Compared to flat files, they offer the following advantages:
+
+* They can be arranged in a proper pool structure with a Packages file etc., so that existing tools to mirror, download, and ship debs can be reused. 
+* Users can actually install them if they want to.
+* teach apt frontends to ignore ddebs (similar to ignoring udebs) because otherwise apt-cache and friends will spew garbage to users.
+
+=== Implementation ===
+
+==== Creating debug packages ====
+
+dh_strip already offers to generate a debug package with the extracted symbols. However, it requires the debug package to be mentioned in debian/control, which we do not want to do permanently. Since modifying debhelper is considered bad and we just eliminated a similar modification to dh_builddeb, we will create a new package `pkgstripdebug` (or merge `pkgstrip{translations,debug}` into `pkgbinarymangler`), which diverts `dh_strip` to change its behaviour. This package needs to be installed into the buildd chroots. The diverted `dh_strip` does the following:
+
+ 0. Create a debug package in debian/ for all packages `dh_strip` is asked to act on.
+** The package name is the original one plus `-dbgsym` appended, ending with `.ddeb`.
+** Packages which are `Architecture: all`, or end with `-dbg` are excluded.
+** Dependencies are `Depends: `''Original package name''` (= ${Source-Version})`.
+** If there already is a -dbg package, `Conflict:` and `Replaces:` on it.
+** Point out the purpose and the original package name in the package description.
+# Find all ELF files and call `objcopy --only-keep-debug` on them, and put the symbols into `/usr/lib/debug/`''original path'' into the -dbgsym package. `dh_strip` has a similar feature, but has a different semantics in different compatibility levels, and generally interacts too much with the packaging to use it in a robust and generic way.
+# Create a gnu_debuglink to the place of debug symbols
+# [future enhancement] Package Red Hat's debugedit and use it to modify dwarf paths to point to /usr/src/<packagename>/ (or similar), so that a future `apt-get source` extension would cause gdb to automatically find the source.
+# Create a deb (with .ddeb extension) and register it with `dpkg-distaddfile` with the same Section and Priority as the original package.
+# Call the original `dh_strip` with the same parameters.
+
+==== Soyuz changes ====
+
+* accept `.ddeb` files
+* handle .ddebs in a similar way than `.udeb`s
+* automatically add overrides if the corresponding `.deb` already has some.
+
+Using .ddeb will allow us to keep them in the same component as the original debs, which is a big advantage over putting them into a `-debug` component according to the archive admins.
+
+The Soyuz developers estimate 15 mandays for implementation and testing.
+
+==== apt changes ====
+
+An apt frontend will be provided to conveniently install debug symbols: e. g. `apt-get debug apache2` would install the -dbgsym ddebs for apache2 and all its dependencies. This will allow developers to actually install the .ddebs (rather than just downloading them in the crash handler, see AutomatedProblemReports).
+
+==== Future improvements ====
+
+* Fedora uses a similar process and apparently they developed something better than `objcopy`, which produces much smaller debug info files. This should be investigated, see <nowiki>[[https://launchpad.net/bugs/14484|Ubuntu #14484]]</nowiki> for some further information.
+* Diverting `dh_strip` has the same problem as modifying `dh_builddeb` for translation stripping - not all packages use `dh_strip`. As a quick idea for a cleaner solution:
+** Compile everything with `nostrip` (which is policy mandates to work) 
+** Adding hook support to `dpkg-deb`
+** Register `pkgstrip{translations,debug}` as `dpkg-deb` hooks
+
+==== Comments ====
+
+* CameronBraid : Provide a system to automatically install the debug symbols when a package is installed.   Could be a tick box in the 'Software Sources' interface like 'source code' 
+
+* KarlHegbloom : Here's a simple script that will fetch the dbgsym packages related to the packages given on the command line. Undoubtedly it could easily be rewritten slightly to have it perform a complete traversal of the dependency DAG below each, but for now, it only goes one level deep.
+
+<pre>
+\#!/bin/bash
+FETCH_LIST=()
+for PKG in $@
+do
+   for p in $PKG $(apt-cache depends $PKG | awk '{print $2}')
+   do
+       FETCH_LIST+=$(apt-cache rdepends $p | grep dbgsym)
+   done
+done
+apt-get install $(echo $(echo "$FETCH_LIST") | tr ' ' '\n' | sort -u)
+exit 0
+</pre>
+
+----
+CategorySpec

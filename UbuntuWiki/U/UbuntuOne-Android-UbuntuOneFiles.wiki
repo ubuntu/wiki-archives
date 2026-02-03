@@ -1,0 +1,198 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+Ubuntu One Files - Android application providing access to Ubuntu One cloud storage.
+
+== Sync ==
+
+This section is intended to document future sync logic of Ubuntu One Files B)
+
+''This section assumes locally cached file meta data is up-to-date, unless stated otherwise.''
+
+=== General settings ===
+
+* Allow different connection types to be used by sync
+** WiFi
+** Bluetooh
+** WiMAX
+** Mobile
+* Allow specifying max file size to sync.
+
+=== Note on auto-upload ===
+
+Ubuntu One Files comes with photo auto-upload feature. It's pretty complex in general, and will probably stay around for a while at least. We may extend it to video and audio auto-upload once resumable uploads have been implemented. As long as user does not explicitly cache/select for sync a location from where these files are auto-uploaded, auto-upload and sync should not collide. This, however, requires some further brainstorming.
+
+=== Device to Ubuntu One - local to remote sync ===
+
+{i} When talking about local to remote sync, you can use the ''sync-up'' term. Refers to all logic responsible for making server storage reflect local changes.
+
+Any .u1conflict creation needs to be notified to the user.
+
+==== New local file ====
+
+<pre>
+NEW LOCAL FILE [0]
+   |
+    --- Local file within cached/synced location?
+      /\ Yes
+     |  --- File under same path exist on the server already?
+     |    /\ Yes
+     |   |  --- Local file SHA1 matches cached remote file hash?
+     |   |    /\ Yes
+     |   |   |  --- Ignore/Mark as uploaded/Save last modification timestamp
+     |   |   | No
+     |   |    --- Move local file to local file .u1conflict.
+     |   | No
+     |    --- Upload local file.
+     | No
+      --- Ignore.
+</pre>
+
+[0] Because we don't sync all files, not all files in U1 cloud will be stored on the device. Thus, if we detect a ''new local file'' under an already existing resource path, we move that file to .u1conflict - the only exception here is matching SHA1, which would indicate app data was cleared (app could have been reinstalled).
+
+{X} How do we detect a local file is new? We would have to cache the state of the local file system to do that. -- <nowiki>[[LaunchpadHome:karni]]</nowiki> 
+==== Local file changed ====
+
+{i} We only scan for changes on files, that have been:
+* cached?
+* selected explicitly for sync?
+
+By Design team, files which have been downloaded should be kept in sync. That makes sense, but can't be easily generalized to directories. What if a new file appears within an not-synced directory, do we ignore that?
+
+<pre>
+LOCAL FILE CHANGED [0,1]
+   |
+    --- Does cached file hash match the server hash right now? [2]
+      /\ Yes
+     |  --- Overwrite remote file with local file.
+     | No
+      --- Move local file to .u1conflict
+</pre>
+
+[0] File changes are detected only for files mentioned in {i} above.
+
+[1] How change is detected:
+* If last modification date has not been saved, save last modification time and treat as new file for upload. '''TODO''' Reconsider this. Upload all files?
+* Upon any next scan, IFF saved last modification date is different than file last modification date, treat as candidate for upload (think in terms of potential .u1conflict).
+* Do '''NOT''' trust local device time. Never.
+
+[2] Requires persisting cached hash as $hash, getNode() to refresh local cache, and compare hash with $hash.
+
+==== Local file deleted ====
+
+{i} We only scan for changes on files, that have been:
+* cached
+
+<pre>
+LOCAL FILE DELETED [0]
+   |
+    --- SYNC LOCAL DELETIONS setting set to true?
+      /\ Yes
+     |  --- Is this a directory?
+     |    /\ Yes
+     |   |  --- Delete the remote directory'''?'''
+     |   | No
+     |    --- Delete the remote file.
+     | No
+      --- Ignore.
+</pre>
+
+[0] This '''MUST''' consider storage being temporarily unmounted, which is not equivalent of having local files removed. Toggling "Sync local deletions" setting could display a dialog to the user warning about custom storages, which the user is able to unmount.
+
+=== Ubuntu One to device - remote to local sync ===
+
+{i} When talking about remote to local sync, you can use the ''sync-down'' term. Refers to all logic responsible for making client storage reflect server changes.
+
+==== New remote file ====
+
+'''TODO'''
+
+==== Remote file changed ====
+
+'''TODO'''
+
+==== Remote file deleted ====
+
+'''TODO'''
+
+{X} Never assume you can delete a local directory recursively, if it has been deleted remotely. User may have stored some random files within it locally in the mean time, before local scan has picked them up. Delete files using exact paths only, alternatively delete the directories in DFS manner if the root directory has no files left.
+
+=== Sync Behavior ====
+
+<pre>
+[During a file system scan...]
+A file is encountered. Does it have a database entry?
+    -> Yes...[A known file is being looked at]
+        - If the file is unsynced or currently being ignored, skip.
+        - Otherwise, check the file modification date. Sync appropriately.
+    -> No...[An undocumented file has been discovered]
+        - Query the server - does the file exist on the cloud?
+            -> Yes...[A known file is being looked at]
+                - Sync as necessary. [2]
+            -> No...[A confirmed new file has been discovered]
+                Does the user want this file to be uploaded? [3]
+                -> Yes
+                    - If the parent directory of the file does not exist in the cloud, create it 
+                    (recurse until a parent dir exists)
+                    - Upload as a new file
+                -> No
+                    - Set sync property to ignored in the database entry. 
+                      The file doesn't exist on the cloud so we don't care about it, but we need to 
+                      track it to prevent further scans from having to query the server.
+                    
+[1] "on-cloud" is true if the file exists in the user's u1 cloud space. 
+    Files that are not part of the cloud but have been placed in the u1 folder are marked as false.
+[2] The modification date here is almost guarenteed to be incorrect. Proceed with caution.
+[3] The scan can either pop up an interface "5 new files found. Upload 1.6kB?" 
+    or it can base its decision off of a user defined setting.
+
+* NEW! The database must now be iterated through as frequently as possible.
+This step is completely new but essential. Unless you can think of a better way.
+
+[During a database scan]
+-> A database entry is encountered. Does a corresponding file exist on the file system?
+    - No...[The user has manually removed a file]
+        What is the sync property?
+            -> "Synced"
+                - Set "synced" to false, to prevent the file from being automatically re-downloaded
+            -> "Ignore"
+                - Remove the database entry. The file has never been on the cloud and now that it's 
+                  gone we don't need to track it anymore. In fact, we MUST forget it as soon as 
+                  possible because if a new file of the same name comes in we must treat it as a new file.
+            -> "Unsynced"
+                - No change
+* NEW! This architecture will require some method of allowing users to add ignored files to the cloud 
+  so they can become synced files.
+</pre>
+
+== Known Problems and Supported Use Cases == 
+
+These problems and use cases have been identified. The optimal solution should consider all of the following.
+
+Time zone drift
+File deletion
+New file addition
+Fresh install with u1 folder still there
+App version upgrade install
+File being edited a second time on a different device before the first device gets a chance to upload previous edit
+
+=== Implementation phases ===
+
+{1} phase: sync-up complete
+
+{2} phase: sync-down complete
+
+{1} + {2} - sync working
+
+{3} phase: GCM supporting sync-down
+
+{4} phase: Android 4.0+ !MediaStore.Files supporting sync-up
+
+-- <nowiki>[[LaunchpadHome:karni]]</nowiki> 

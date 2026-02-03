@@ -1,0 +1,814 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== SecureBoot in Ubuntu (Canonical key generation) ==
+
+== Introduction ==
+Canonical has access to the Microsoft signing PKCS#7 file (PCA 2010) (`cdboot.pkcs`) and <nowiki>[[SecurityTeam-SecureBoot-KeyCompatibility|its characteristics]]</nowiki> are being mimicked during key generation.
+
+== Initial setup ==
+ 0. Install the necessary packages (example assumes 1.0.1-2ubuntu2 on Ubuntu 12.04):<pre>
+$ sudo apt-get install openssl
+</pre>
+ 0. Create the Certificate Authority directory and defaults:<pre>
+$ mkdir -m 0700 private              # location of private keys
+$ mkdir SecureBootCA
+$ mkdir SecureBootCA/newcerts SecureBootCA/crl
+$ touch SecureBootCA/index.txt
+$ echo "01" > SecureBootCA/serial
+$ echo "01" > SecureBootCA/crlnumber
+</pre>
+ 0. Create the ./SecureBootCA/openssl.cnf to have (adjust crlDistributionPoints accordingly if 'http://www.canonical.com/secure-boot-master-ca.crl' is not the URL we want to use for the CRL (and adjust this page)):<pre>
+
+HOME                    = .
+RANDFILE                = $ENV::HOME/.rnd
+
+oid_section             = new_oids
+
+[ new_oids ]
+
+[ ca ]
+default_ca      = CA_default            # The default ca section
+
+[ CA_default ]
+
+dir             = ./SecureBootCA        # Where everything is kept
+certs           = $dir/certs            # Where the issued certs are kept
+crl_dir         = $dir/crl              # Where the issued crl are kept
+database        = $dir/index.txt        # database index file.
+##################### several ctificates with same subject.
+new_certs_dir   = $dir/newcerts         # default place for new certs.
+
+certificate     = $dir/cacert.pem       # The CA certificate
+serial          = $dir/serial           # The current serial number
+crlnumber       = $dir/crlnumber        # the current crl number
+##################### must be commented out to leave a V1 CRL
+crl             = $dir/crl.pem          # The current CRL
+private_key     = $dir/private/cakey.pem # The private key
+RANDFILE        = $dir/private/.rand    # private random number file
+
+x509_extensions = usr_cert              # The extentions to add to the cert
+
+name_opt        = ca_default            # Subject Name options
+cert_opt        = ca_default            # Certificate field options
+
+default_days    = 10956                 # how long to certify for (30 years)
+default_crl_days= 90                    # how long before next CRL
+default_md      = default               # use public key default MD
+preserve        = no                    # keep passed DN ordering
+
+policy          = policy_match
+
+[ policy_match ]
+countryName             = match
+stateOrProvinceName     = match
+organizationName        = match
+organizationalUnitName  = optional
+commonName              = supplied
+emailAddress            = optional
+
+[ policy_anything ]
+countryName             = optional
+stateOrProvinceName     = optional
+localityName            = optional
+organizationName        = optional
+organizationalUnitName  = optional
+commonName              = supplied
+emailAddress            = optional
+
+[ req ]
+default_bits            = 2048
+default_keyfile         = privkey.pem
+distinguished_name      = req_distinguished_name
+attributes              = req_attributes
+x509_extensions = v3_ca # The extentions to add to the self signed cert
+
+string_mask = utf8only
+
+[ req_distinguished_name ]
+countryName                     = Country Name (2 letter code)
+countryName_default             = GB
+countryName_min                 = 2
+countryName_max                 = 2
+
+stateOrProvinceName             = State or Province Name (full name)
+stateOrProvinceName_default     = Isle of Man
+
+localityName                    = Locality Name (eg, city)
+localityName_default            = Douglas
+
+0.organizationName              = Organization Name (eg, company)
+0.organizationName_default      = Canonical Ltd.
+
+organizationalUnitName          = Organizational Unit Name (eg, section)
+
+commonName                      = Common Name (e.g. server FQDN or YOUR name)
+commonName_max                  = 64
+
+emailAddress                    = Email Address
+emailAddress_max                = 64
+
+[ req_attributes ]
+challengePassword               = A challenge password
+challengePassword_min           = 4
+challengePassword_max           = 20
+
+unstructuredName                = An optional company name
+
+[ usr_cert ]
+
+basicConstraints=critical,CA:FALSE
+
+extendedKeyUsage = codeSigning,1.3.6.1.4.1.311.10.3.6
+
+nsComment                       = "OpenSSL Generated Certificate"
+
+subjectKeyIdentifier=hash
+authorityKeyIdentifier=keyid,issuer
+
+[ v3_req ]
+
+basicConstraints = critical,CA:FALSE
+keyUsage = nonRepudiation, digitalSignature, keyEncipherment
+
+[ v3_ca ]
+
+subjectKeyIdentifier=hash
+
+authorityKeyIdentifier=keyid:always,issuer
+
+basicConstraints = critical,CA:true
+
+keyUsage = digitalSignature, cRLSign, keyCertSign
+
+crlDistributionPoints=URI:http://www.canonical.com/secure-boot-master-ca.crl
+
+[ crl_ext ]
+
+authorityKeyIdentifier=keyid:always
+
+[ proxy_cert_ext ]
+
+basicConstraints=critical,CA:FALSE
+
+nsComment                       = "OpenSSL Generated Certificate"
+
+subjectKeyIdentifier=hash
+authorityKeyIdentifier=keyid,issuer
+
+proxyCertInfo=critical,language:id-ppl-anyLanguage,pathlen:3,policy:foo
+</pre>
+
+== Master certificate/key ==
+=== Private ===
+The master private key should not be encrypted, since we are dividing the key into 7 shards (specify '-aes256' to require the key be aes256 encrypted (requires password)).
+ 0. Create the private key:<pre>
+$ openssl genrsa -out ./private/master-private.key 2048
+Generating RSA private key, 2048 bit long modulus
+...................................+++
+...................+++
+e is 65537 (0x10001)
+</pre>
+ 0. Check the private key:<pre>
+$ openssl rsa -in ./private/master-private.key -check -noout
+RSA key ok
+</pre>
+ 0. [optional] Create a hash of the key:<pre>
+$ openssl sha256 -out ./private/master-private.key.sha256 ./private/master-private.key
+</pre>
+
+=== Public ===
+Default values for certificates come from the 'req_distinguished_name' of SecureBootCA/openssl.conf. All fields except 'Common Name (CN)' (and email, which can be left blank) should match in all certificates in the certificate chain.
+
+ 0. Create self-signed master certificate good for 30 years (openssl does not permit creating a certificate without an expiration date. This is set to the arbitrarily high 30 years as this should outlive the reasonable lifetime of a system with secure boot without updating its db with an updated certificate from Canonical):<pre>
+$ openssl req -x509 -config ./SecureBootCA/openssl.cnf -days 10956 -sha256 -new -key ./private/master-private.key -out master-public.pem
+Country Name (2 letter code) [GB]:<use default>
+State or Province Name (full name) [Isle of Man]:<use default>
+Locality Name (eg, city) [Douglas]:<use default>
+Organization Name (eg, company) [Canonical Ltd.]:<use default>
+Organizational Unit Name (eg, section) []:<leave blank>
+Common Name (e.g. server FQDN or YOUR name) []:Canonical Ltd. Master Certificate Authority
+Email Address []:<leave blank>
+</pre>
+ 0. Verify the certificate output for correctness (output is for example purposes):<pre>
+$ openssl x509 -in master-public.pem -text -noout
+Certificate:
+    Data:
+        Version: 3 (0x2)
+        Serial Number: 18395472014686033076 (0xff49d8557f0014b4)
+    Signature Algorithm: sha256WithRSAEncryption
+        Issuer: C=GB, ST=Isle of Man, L=Douglas, O=Canonical Ltd., CN=Canonical Ltd. Master Certificate Authority
+        Validity
+            Not Before: Mar 28 20:03:15 2012 GMT
+            Not After : Mar 27 20:03:15 2042 GMT
+        Subject: C=GB, ST=Isle of Man, L=Douglas, O=Canonical Ltd., CN=Canonical Ltd. Master Certificate Authority
+        Subject Public Key Info:
+            Public Key Algorithm: rsaEncryption
+                Public-Key: (2048 bit)
+                Modulus:
+                    00:cb:c6:46:eb:7d:20:02:be:17:08:27:b6:50:a7:
+                    2e:44:46:1e:ab:e5:53:38:b1:3f:ff:0c:7e:6d:2f:
+                    ad:71:f3:cc:14:05:7d:e2:c0:79:5d:07:e2:b3:21:
+                    18:2b:52:ab:07:30:3a:9a:29:26:9a:51:5d:04:0c:
+                    68:b5:cb:92:e6:57:ac:a3:fe:20:b7:3b:e9:f3:37:
+                    03:73:90:c0:0b:a6:2e:0d:cf:66:8a:ed:16:5d:9e:
+                    7b:76:ba:53:00:4d:b0:da:af:23:f4:5f:97:ba:65:
+                    0b:2c:0f:ff:ae:6b:42:18:4b:05:51:51:1c:ab:e1:
+                    73:40:f7:6c:15:47:86:91:35:06:47:6f:49:dc:25:
+                    af:6c:96:df:33:bb:49:7a:c5:3e:97:0b:6d:6e:bf:
+                    95:2f:12:25:aa:86:26:ae:44:26:b5:dc:ce:e1:6b:
+                    5d:b6:28:a4:23:d2:b5:55:ce:d7:b7:94:8d:80:76:
+                    88:86:11:7f:90:42:c9:1b:c2:00:5a:27:47:1b:92:
+                    95:ec:17:ac:1f:d0:d0:e8:0b:b7:8f:f8:dd:0d:3c:
+                    79:08:9c:88:18:95:fb:ef:cc:f9:6c:87:31:e3:3f:
+                    76:51:cc:2f:9f:7e:93:9d:3f:f4:6b:6a:ca:01:7c:
+                    09:29:fb:c5:15:98:b5:b7:5e:76:bc:df:e2:42:23:
+                    4e:11
+                Exponent: 65537 (0x10001)
+        X509v3 extensions:
+            X509v3 Subject Key Identifier: 
+                7A:47:09:1F:3B:23:3F:AD:CD:58:EA:49:78:3D:90:E2:30:44:7E:3F
+            X509v3 Authority Key Identifier: 
+                keyid:7A:47:09:1F:3B:23:3F:AD:CD:58:EA:49:78:3D:90:E2:30:44:7E:3F
+
+            X509v3 Basic Constraints: critical
+                CA:TRUE
+            X509v3 Key Usage: 
+                Digital Signature, Certificate Sign, CRL Sign
+            X509v3 CRL Distribution Points: 
+
+                Full Name:
+                  URI:http://www.canonical.com/secure-boot-master-ca.crl
+
+    Signature Algorithm: sha256WithRSAEncryption
+         b1:7f:36:33:d1:2a:d5:76:cb:9a:ac:b9:9f:8b:0f:8f:8b:1c:
+         1e:8a:81:e4:75:f5:8b:88:c0:17:62:0d:31:33:9e:d1:2a:28:
+         ff:91:f2:5e:40:61:61:5b:f9:c2:d7:36:75:26:df:9c:c5:67:
+         11:29:5d:5c:3b:aa:07:e4:e1:75:be:cd:04:04:b0:f7:0d:ed:
+         4d:7c:e2:b7:67:05:31:88:0d:69:a4:84:63:dd:10:62:57:6e:
+         ca:27:54:e9:c9:c7:b3:18:21:8f:71:7d:69:dd:4d:d2:36:e5:
+         14:fb:f8:7d:c6:3b:44:2f:c6:06:76:8d:81:8a:93:39:b2:49:
+         91:9f:d8:e1:1c:0e:f8:f4:d2:b0:4a:b5:a7:e6:b0:3a:38:30:
+         57:94:58:ee:15:f9:8e:1d:20:85:02:12:a0:ac:c5:a2:ab:2b:
+         21:45:c4:27:83:60:c8:83:e0:b7:b5:92:c8:f9:8f:db:03:7a:
+         77:f6:5b:76:03:86:f6:24:53:6a:5c:8e:09:dd:d8:f5:b6:8f:
+         7f:07:2c:d7:b0:f2:d8:61:07:0e:74:28:f7:57:ed:00:ec:3f:
+         05:31:ea:e5:6d:ad:a4:1a:48:a0:92:c7:d0:7d:51:e8:56:25:
+         9d:28:b5:6f:ac:9c:64:97:ae:a8:a6:30:8d:f9:4a:fa:e2:40:
+         f9:63:66:63
+</pre>
+ 0. Verify the master certificate is signed with its private key:<pre>
+$ openssl verify ./master-public.pem
+./master-public.pem: C = GB, ST = Isle of Man, L = Douglas, O = Canonical Ltd., CN = Canonical Ltd. Master Certificate Authority
+error 18 at 0 depth lookup:self signed certificate
+OK
+</pre>
+ 0. Export the master public key:<pre>
+$ openssl x509 -pubkey -in ./master-public.pem -noout > ./master-public.pubkey
+</pre>
+ 0. Verify the master public key (modulus should match the modulus from master-public.pem):<pre>
+$ openssl rsa -pubin -in ./master-public.pubkey -text -noout
+Public-Key: (2048 bit)
+Modulus:
+    00:cb:c6:46:eb:7d:20:02:be:17:08:27:b6:50:a7:
+    2e:44:46:1e:ab:e5:53:38:b1:3f:ff:0c:7e:6d:2f:
+    ad:71:f3:cc:14:05:7d:e2:c0:79:5d:07:e2:b3:21:
+    18:2b:52:ab:07:30:3a:9a:29:26:9a:51:5d:04:0c:
+    68:b5:cb:92:e6:57:ac:a3:fe:20:b7:3b:e9:f3:37:
+    03:73:90:c0:0b:a6:2e:0d:cf:66:8a:ed:16:5d:9e:
+    7b:76:ba:53:00:4d:b0:da:af:23:f4:5f:97:ba:65:
+    0b:2c:0f:ff:ae:6b:42:18:4b:05:51:51:1c:ab:e1:
+    73:40:f7:6c:15:47:86:91:35:06:47:6f:49:dc:25:
+    af:6c:96:df:33:bb:49:7a:c5:3e:97:0b:6d:6e:bf:
+    95:2f:12:25:aa:86:26:ae:44:26:b5:dc:ce:e1:6b:
+    5d:b6:28:a4:23:d2:b5:55:ce:d7:b7:94:8d:80:76:
+    88:86:11:7f:90:42:c9:1b:c2:00:5a:27:47:1b:92:
+    95:ec:17:ac:1f:d0:d0:e8:0b:b7:8f:f8:dd:0d:3c:
+    79:08:9c:88:18:95:fb:ef:cc:f9:6c:87:31:e3:3f:
+    76:51:cc:2f:9f:7e:93:9d:3f:f4:6b:6a:ca:01:7c:
+    09:29:fb:c5:15:98:b5:b7:5e:76:bc:df:e2:42:23:
+    4e:11
+Exponent: 65537 (0x10001)
+</pre>
+
+=== CRL ===
+ 0. Generate the (currently empty) CRL list for this CA: <pre>
+$ openssl ca -md sha256 -cert ./master-public.pem -keyfile ./private/master-private.key -config ./SecureBootCA/openssl.cnf -gencrl -out ./SecureBootCA/crl/secure-boot-master-ca.crl.pem
+Using configuration from ./SecureBootCA/openssl.cnf
+</pre>
+ 0. Verify the CRL: <pre>
+$ openssl crl -text -in ./SecureBootCA/crl/secure-boot-master-ca.crl.pem
+Certificate Revocation List (CRL):
+        Version 2 (0x1)
+    Signature Algorithm: sha256WithRSAEncryption
+        Issuer: /C=GB/ST=Isle of Man/L=Douglas/O=Canonical Ltd./CN=Canonical Ltd. Master Certificate Authority 2012
+        Last Update: Mar 28 22:21:05 2012 GMT
+        Next Update: Jun 26 22:21:05 2012 GMT
+        CRL extensions:
+            X509v3 CRL Number: 
+                1
+No Revoked Certificates.
+    Signature Algorithm: sha256WithRSAEncryption
+         48:fb:de:6a:27:70:0b:83:88:79:d4:90:18:04:99:12:e5:b9:
+         59:20:32:2b:37:8e:a5:e2:dc:27:90:0d:2c:40:47:3a:5e:2c:
+         c6:63:d1:de:e1:61:0a:6b:9c:d3:1d:02:90:ee:63:ec:73:4c:
+         36:a9:e6:19:8b:3d:24:25:4a:0b:d2:07:83:3c:78:d0:8d:33:
+         78:92:33:2d:da:6d:38:73:88:52:16:ea:d9:13:dc:62:02:cd:
+         0f:fa:13:03:da:93:4d:c2:a7:23:f0:2a:e5:6e:e6:2d:35:c8:
+         42:0f:e7:50:ee:08:2a:d5:33:e6:ed:e4:fd:f6:c6:76:4e:07:
+         53:51:4a:f2:5d:bb:a2:a5:28:41:2f:75:ef:7f:ad:c9:78:37:
+         e4:2f:3a:47:22:f2:3a:0a:c5:6e:c2:10:d6:86:7c:28:ae:23:
+         f3:ed:84:ba:be:dc:1d:58:3d:c2:a0:e9:7f:48:d8:75:3f:4b:
+         00:05:02:a9:a5:7c:23:50:ec:03:44:ad:22:fd:ef:e9:22:53:
+         6f:a8:a7:f8:fb:bc:5b:7e:67:73:bf:fb:96:32:63:8c:25:a9:
+         56:5c:52:3f:95:a6:1c:fa:fb:d8:0b:59:2d:e6:83:17:db:84:
+         29:16:1b:6b:6c:7c:0e:c4:32:75:85:b7:57:b0:fb:e7:86:af:
+         3e:4c:b8:dd
+-----BEGIN X509 CRL-----
+MIIB4zCBzAIBATANBgkqhkiG9w0BAQsFADCBiTELMAkGA1UEBhMCR0IxFDASBgNV
+BAgMC0lzbGUgb2YgTWFuMRAwDgYDVQQHDAdEb3VnbGFzMRcwFQYDVQQKDA5DYW5v
+bmljYWwgTHRkLjE5MDcGA1UEAwwwQ2Fub25pY2FsIEx0ZC4gTWFzdGVyIENlcnRp
+ZmljYXRlIEF1dGhvcml0eSAyMDEyFw0xMjAzMjgyMjIxMDVaFw0xMjA2MjYyMjIx
+MDVaoA4wDDAKBgNVHRQEAwIBATANBgkqhkiG9w0BAQsFAAOCAQEASPveaidwC4OI
+edSQGASZEuW5WSAyKzeOpeLcJ5ANLEBHOl4sxmPR3uFhCmuc0x0CkO5j7HNMNqnm
+GYs9JCVKC9IHgzx40I0zeJIzLdptOHOIUhbq2RPcYgLND/oTA9qTTcKnI/Aq5W7m
+LTXIQg/nUO4IKtUz5u3k/fbGdk4HU1FK8l27oqUoQS9173+tyXg35C86RyLyOgrF
+bsIQ1oZ8KK4j8+2Eur7cHVg9wqDpf0jYdT9LAAUCqaV8I1DsA0StIv3v6SJTb6in
++Pu8W35nc7/7ljJjjCWpVlxSP5WmHPr72AtZLeaDF9uEKRYba2x8DsQydYW3V7D7
+54avPky43Q==
+-----END X509 CRL-----
+</pre>
+ 0. Convert to DER format: <pre>
+$ openssl crl -in ./SecureBootCA/crl/secure-boot-master-ca.crl.pem -outform DER -out ./SecureBootCA/crl/secure-boot-master-ca.crl
+</pre>
+ 0. Verify the DER-encoded CRL: <pre>
+$ openssl crl -text -inform DER -in ./SecureBootCA/crl/secure-boot-master-ca.crl 
+Certificate Revocation List (CRL):
+        Version 2 (0x1)
+    Signature Algorithm: sha256WithRSAEncryption
+        Issuer: /C=GB/ST=Isle of Man/L=Douglas/O=Canonical Ltd./CN=Canonical Ltd. Master Certificate Authority 2012
+        Last Update: Mar 28 22:21:05 2012 GMT
+        Next Update: Jun 26 22:21:05 2012 GMT
+        CRL extensions:
+            X509v3 CRL Number: 
+                1
+No Revoked Certificates.
+    Signature Algorithm: sha256WithRSAEncryption
+         48:fb:de:6a:27:70:0b:83:88:79:d4:90:18:04:99:12:e5:b9:
+         59:20:32:2b:37:8e:a5:e2:dc:27:90:0d:2c:40:47:3a:5e:2c:
+         c6:63:d1:de:e1:61:0a:6b:9c:d3:1d:02:90:ee:63:ec:73:4c:
+         36:a9:e6:19:8b:3d:24:25:4a:0b:d2:07:83:3c:78:d0:8d:33:
+         78:92:33:2d:da:6d:38:73:88:52:16:ea:d9:13:dc:62:02:cd:
+         0f:fa:13:03:da:93:4d:c2:a7:23:f0:2a:e5:6e:e6:2d:35:c8:
+         42:0f:e7:50:ee:08:2a:d5:33:e6:ed:e4:fd:f6:c6:76:4e:07:
+         53:51:4a:f2:5d:bb:a2:a5:28:41:2f:75:ef:7f:ad:c9:78:37:
+         e4:2f:3a:47:22:f2:3a:0a:c5:6e:c2:10:d6:86:7c:28:ae:23:
+         f3:ed:84:ba:be:dc:1d:58:3d:c2:a0:e9:7f:48:d8:75:3f:4b:
+         00:05:02:a9:a5:7c:23:50:ec:03:44:ad:22:fd:ef:e9:22:53:
+         6f:a8:a7:f8:fb:bc:5b:7e:67:73:bf:fb:96:32:63:8c:25:a9:
+         56:5c:52:3f:95:a6:1c:fa:fb:d8:0b:59:2d:e6:83:17:db:84:
+         29:16:1b:6b:6c:7c:0e:c4:32:75:85:b7:57:b0:fb:e7:86:af:
+         3e:4c:b8:dd
+-----BEGIN X509 CRL-----
+MIIB4zCBzAIBATANBgkqhkiG9w0BAQsFADCBiTELMAkGA1UEBhMCR0IxFDASBgNV
+BAgMC0lzbGUgb2YgTWFuMRAwDgYDVQQHDAdEb3VnbGFzMRcwFQYDVQQKDA5DYW5v
+bmljYWwgTHRkLjE5MDcGA1UEAwwwQ2Fub25pY2FsIEx0ZC4gTWFzdGVyIENlcnRp
+ZmljYXRlIEF1dGhvcml0eSAyMDEyFw0xMjAzMjgyMjIxMDVaFw0xMjA2MjYyMjIx
+MDVaoA4wDDAKBgNVHRQEAwIBATANBgkqhkiG9w0BAQsFAAOCAQEASPveaidwC4OI
+edSQGASZEuW5WSAyKzeOpeLcJ5ANLEBHOl4sxmPR3uFhCmuc0x0CkO5j7HNMNqnm
+GYs9JCVKC9IHgzx40I0zeJIzLdptOHOIUhbq2RPcYgLND/oTA9qTTcKnI/Aq5W7m
+LTXIQg/nUO4IKtUz5u3k/fbGdk4HU1FK8l27oqUoQS9173+tyXg35C86RyLyOgrF
+bsIQ1oZ8KK4j8+2Eur7cHVg9wqDpf0jYdT9LAAUCqaV8I1DsA0StIv3v6SJTb6in
++Pu8W35nc7/7ljJjjCWpVlxSP5WmHPr72AtZLeaDF9uEKRYba2x8DsQydYW3V7D7
+54avPky43Q==
+-----END X509 CRL-----
+</pre>
+ 0. This file should now be installed in the URI specified in crlDistributionPoints.
+
+== Signing certificate/key ==
+The procedure documents the process for generating the Ubuntu secure boot signing key. This certificate/key pair is used by Launchpad to sign secure boot images (eg, the bootloader).
+
+=== Private ===
+The signing private key should not be encrypted (no password):
+ 0. Create the private key:<pre>
+$ openssl genrsa -out ./private/archive-subkey-private.key 2048
+Generating RSA private key, 2048 bit long modulus
+...............................+++
+.................................+++
+e is 65537 (0x10001)
+</pre>
+ 0. Check the private key:<pre>
+$ openssl rsa -in ./private/archive-subkey-private.key -check -noout
+RSA key ok
+</pre>
+ 0. [optional] Create a hash of the private key:<pre>
+$ openssl sha256 -out ./private/archive-subkey-private.key.sha256 ./private/archive-subkey-private.key
+</pre>
+
+=== Public ===
+Default values for certificates come from the 'req_distinguished_name' of SecureBootCA/openssl.conf. All fields except 'Common Name (CN)' (and email, which can be left blank) should match in all certificates in the certificate chain.
+
+ 0. Generate a certificate signing request (CSR) for our signing key to be signed by our master private key:<pre>
+$ openssl req -sha256 -new -config ./SecureBootCA/openssl.cnf -key ./private/archive-subkey-private.key -out ./archive-subkey-public.csr
+Country Name (2 letter code) [GB]:<use default>
+State or Province Name (full name) [Isle of Man]:<use default>
+Locality Name (eg, city) [Douglas]:<use default>
+Organization Name (eg, company) [Canonical Ltd.]:<use default>
+Organizational Unit Name (eg, section) []:Secure Boot
+Common Name (e.g. server FQDN or YOUR name) []:Canonical Ltd. Secure Boot Signing
+Email Address []:<leave blank>
+Please enter the following 'extra' attributes
+to be sent with your certificate request
+A challenge password []:<optional password>
+An optional company name []:<leave blank>
+</pre>
+ 0. Verify CSR for our signing key for correctness (output is for example purposes):<pre>
+$ openssl req -in archive-subkey-public.csr -text -noout -verify
+verify OK
+Certificate Request:
+    Data:
+        Version: 0 (0x0)
+        Subject: C=GB, ST=Isle of Man, L=Douglas, O=Canonical Ltd., OU=Secure Boot, CN=Canonical Ltd. Secure Boot Signing
+        Subject Public Key Info:
+            Public Key Algorithm: rsaEncryption
+                Public-Key: (2048 bit)
+                Modulus:
+                    00:ad:68:a8:94:88:09:1c:c7:03:b3:8a:0d:89:27:
+                    54:1d:16:2f:83:7b:fa:7b:70:74:df:6c:1f:af:18:
+                    71:53:2f:6f:46:0c:ab:ad:f1:75:1b:0f:e5:bc:5a:
+                    99:44:6c:80:45:26:4a:05:bd:01:8e:91:65:4c:37:
+                    eb:38:69:b0:91:67:8f:0e:3f:b8:dc:da:a7:ea:a7:
+                    86:cc:87:98:d8:10:07:64:01:1d:da:dc:ef:97:a0:
+                    37:34:8d:69:0d:6d:d5:da:f7:3f:e2:e3:e2:6c:23:
+                    ae:97:43:3b:11:9a:c0:3a:2f:26:8b:8b:1a:92:5a:
+                    78:bb:0c:df:cc:19:d0:ad:f0:2e:31:d7:7f:d7:94:
+                    36:9b:77:26:06:33:43:5e:cf:e8:d9:54:31:5f:08:
+                    dc:40:d5:c1:ba:04:51:de:d7:f6:a9:58:20:da:cc:
+                    f5:9f:4f:ef:bf:73:52:77:42:ca:ca:5f:d8:16:89:
+                    2c:f5:e5:34:10:69:f6:44:3e:45:f2:92:78:8f:7c:
+                    23:a7:ab:24:a0:ef:1b:7d:51:d0:d2:6b:d2:8e:65:
+                    08:e6:b5:9a:bb:2c:7a:cf:09:3f:6a:a8:e6:58:b1:
+                    33:0a:ce:49:36:84:93:28:40:05:e2:e1:0b:27:c4:
+                    19:49:17:e5:c9:e1:6f:fa:1a:1a:ca:8d:af:f5:3e:
+                    a8:c9
+                Exponent: 65537 (0x10001)
+        Attributes:
+            challengePassword        :unable to print attribute
+    Signature Algorithm: sha256WithRSAEncryption
+         08:e2:29:d1:d7:a3:ca:a5:c9:55:84:b9:e6:a5:d8:02:3f:7f:
+         2b:d0:31:93:31:17:83:41:eb:ab:96:4a:9d:dc:6a:41:cb:ab:
+         b4:06:26:89:f8:ff:18:4a:ae:ac:11:f1:ec:97:15:03:a8:b1:
+         9a:10:9d:96:64:f2:d9:e7:e4:8f:fc:4d:6d:e9:08:77:8a:20:
+         ec:24:17:64:dc:bd:43:3c:15:e3:b6:2c:24:70:4c:68:c4:29:
+         85:9f:a8:a9:07:48:b9:45:71:4d:d1:3a:43:9e:f0:3a:e2:8c:
+         dc:be:12:45:3b:2c:92:ef:c5:cb:6a:b6:4a:7d:d7:6f:ef:03:
+         31:7e:a6:1e:8c:0f:77:da:5a:3b:b7:dd:86:30:9b:92:50:fb:
+         92:cb:41:d4:be:5e:62:28:ab:fe:76:18:c1:e8:53:a3:5f:66:
+         93:a1:18:0b:50:a8:f8:3e:48:c7:9a:aa:ff:11:12:06:01:a6:
+         d9:a2:b2:74:ce:3f:4e:07:af:3d:80:99:43:51:2e:7e:d2:b2:
+         aa:36:52:08:7a:8e:df:06:3a:50:c5:eb:b8:bf:64:d5:b4:9f:
+         2f:17:7c:32:af:95:a1:5f:35:bb:80:84:d7:6a:bf:6c:ab:25:
+         cb:63:b1:47:17:14:c9:e8:66:2f:3d:23:d9:f1:b3:8f:5b:11:
+         db:cc:0b:3c
+</pre>
+ 0. Sign the CSR for our signing key with the master private key and create the certificate (if you specified a master password, you will be prompted for it):<pre>
+$ openssl ca -md sha256 -cert ./master-public.pem -keyfile ./private/master-private.key -config ./SecureBootCA/openssl.cnf -out ./archive-subkey-public.crt -in ./archive-subkey-public.csr
+Using configuration from ./SecureBootCA/openssl.cnf
+Check that the request matches the signature
+Signature ok
+Certificate Details:
+        Serial Number: 1 (0x1)
+...
+Certificate is to be certified until Mar 27 20:13:14 2042 GMT (10956 days)
+Sign the certificate? [y/n]: y
+
+1 out of 1 certificate requests certified, commit? [y/n]y
+Write out database with 1 new entries
+Data Base Updated
+</pre>
+ 0. Verify certificate for correctness (output is for example purposes):<pre>
+$ openssl x509 -in archive-subkey-public.crt -text -noout
+Certificate:
+    Data:
+        Version: 3 (0x2)
+        Serial Number: 1 (0x1)
+    Signature Algorithm: sha256WithRSAEncryption
+        Issuer: C=GB, ST=Isle of Man, L=Douglas, O=Canonical Ltd., CN=Canonical Ltd. Master Certificate Authority
+        Validity
+            Not Before: Mar 28 20:13:14 2012 GMT
+            Not After : Mar 27 20:13:14 2042 GMT
+        Subject: C=GB, ST=Isle of Man, O=Canonical Ltd., OU=Secure Boot, CN=Canonical Ltd. Secure Boot Signing
+        Subject Public Key Info:
+            Public Key Algorithm: rsaEncryption
+                Public-Key: (2048 bit)
+                Modulus:
+                    00:ad:68:a8:94:88:09:1c:c7:03:b3:8a:0d:89:27:
+                    54:1d:16:2f:83:7b:fa:7b:70:74:df:6c:1f:af:18:
+                    71:53:2f:6f:46:0c:ab:ad:f1:75:1b:0f:e5:bc:5a:
+                    99:44:6c:80:45:26:4a:05:bd:01:8e:91:65:4c:37:
+                    eb:38:69:b0:91:67:8f:0e:3f:b8:dc:da:a7:ea:a7:
+                    86:cc:87:98:d8:10:07:64:01:1d:da:dc:ef:97:a0:
+                    37:34:8d:69:0d:6d:d5:da:f7:3f:e2:e3:e2:6c:23:
+                    ae:97:43:3b:11:9a:c0:3a:2f:26:8b:8b:1a:92:5a:
+                    78:bb:0c:df:cc:19:d0:ad:f0:2e:31:d7:7f:d7:94:
+                    36:9b:77:26:06:33:43:5e:cf:e8:d9:54:31:5f:08:
+                    dc:40:d5:c1:ba:04:51:de:d7:f6:a9:58:20:da:cc:
+                    f5:9f:4f:ef:bf:73:52:77:42:ca:ca:5f:d8:16:89:
+                    2c:f5:e5:34:10:69:f6:44:3e:45:f2:92:78:8f:7c:
+                    23:a7:ab:24:a0:ef:1b:7d:51:d0:d2:6b:d2:8e:65:
+                    08:e6:b5:9a:bb:2c:7a:cf:09:3f:6a:a8:e6:58:b1:
+                    33:0a:ce:49:36:84:93:28:40:05:e2:e1:0b:27:c4:
+                    19:49:17:e5:c9:e1:6f:fa:1a:1a:ca:8d:af:f5:3e:
+                    a8:c9
+                Exponent: 65537 (0x10001)
+        X509v3 extensions:
+            X509v3 Basic Constraints: critical
+                CA:FALSE
+            X509v3 Extended Key Usage: 
+                Code Signing, 1.3.6.1.4.1.311.10.3.6
+            Netscape Comment: 
+                OpenSSL Generated Certificate
+            X509v3 Subject Key Identifier: 
+                94:59:E5:48:B9:EC:D6:29:10:C3:89:FE:21:E2:B0:78:BA:EB:07:C5
+            X509v3 Authority Key Identifier: 
+                keyid:7A:47:09:1F:3B:23:3F:AD:CD:58:EA:49:78:3D:90:E2:30:44:7E:3F
+
+    Signature Algorithm: sha256WithRSAEncryption
+         84:6b:b6:45:61:eb:6a:9d:56:e0:00:1e:e8:4a:bd:b7:b2:e5:
+         72:08:19:1b:fb:8e:1c:cd:80:99:dd:d1:ec:0a:1f:c3:f8:57:
+         03:35:36:67:f4:f8:b3:a3:c3:28:23:24:af:24:13:4c:de:3e:
+         a9:e8:22:cd:12:92:c6:6c:24:dd:f7:a9:56:67:4b:7b:dd:f8:
+         ce:c7:36:8f:bc:7a:c9:b1:cb:5e:ea:4a:75:d7:a0:6f:0a:78:
+         76:f7:00:cf:c6:2a:50:51:d7:20:52:20:5c:8f:b0:ad:66:a7:
+         00:32:ce:81:01:74:bd:5b:1a:1b:f7:15:fb:e2:16:e6:9b:b4:
+         07:a3:e5:66:8c:2f:e7:7d:48:6d:44:9e:b2:4d:00:bb:93:ad:
+         b6:1f:5b:f2:92:8a:6a:2f:5a:63:5a:f0:3c:3c:fd:5f:ff:57:
+         3c:4a:d9:7a:5e:d3:ed:34:b3:43:87:fc:46:32:38:63:aa:74:
+         1c:86:73:91:b1:d5:6b:28:cd:a7:37:83:9d:2c:02:cc:31:60:
+         6b:d1:db:5d:c1:af:ad:75:37:69:99:fc:3a:ec:6c:ba:e7:31:
+         00:92:c2:e1:45:4a:4d:b3:e9:d9:9c:6b:cd:07:2f:fb:eb:ab:
+         07:a9:c7:23:45:9f:52:af:18:23:7d:ed:bb:eb:09:c4:19:a7:
+         15:33:4d:dd
+</pre>
+ 0. Verify the certificate chain (that the signing certificate is signed by the master):<pre>
+$ openssl verify -CAfile ./master-public.pem ./archive-subkey-public.crt
+./archive-subkey-public.crt: OK
+</pre>
+ 0. The following will need to be used by the signing tool, so store them somewhere safe:
+** ./archive-subkey-public.crt
+** ./private/archive-subkey-private.key
+
+ This should also be saved (but separately from the above) for submission to other CAs. It is not needed by the signing tool:
+** archive-subkey-public.csr
+
+== Prepare certificates for OEMs (KEK and db) ==
+OpenSSL by default creates certificates in PEM format. For maximum interoperability with OEMs we want to create an DER encoded PKCS#7 certificate. This certificate should include only the master certificate.
+ 0. Commercial engineering has stated that OEMs want a DER encoded x509 certificate. To create this, do:<pre>
+$ openssl x509 -inform PEM -in master-public.pem -outform DER -out master-public.der
+</pre>
+ 0. Then verify with:<pre>
+$ openssl x509 -in ./master-public.der -inform DER -text -noout
+Certificate:
+    Data:
+        Version: 3 (0x2)
+        Serial Number: 18395472014686033076 (0xff49d8557f0014b4)
+    Signature Algorithm: sha256WithRSAEncryption
+        Issuer: C=GB, ST=Isle of Man, L=Douglas, O=Canonical Ltd., CN=Canonical Ltd. Master Certificate Authority
+        Validity
+            Not Before: Mar 28 20:03:15 2012 GMT
+            Not After : Mar 27 20:03:15 2042 GMT
+        Subject: C=GB, ST=Isle of Man, L=Douglas, O=Canonical Ltd., CN=Canonical Ltd. Master Certificate Authority
+        Subject Public Key Info:
+            Public Key Algorithm: rsaEncryption
+                Public-Key: (2048 bit)
+                Modulus:
+                    00:cb:c6:46:eb:7d:20:02:be:17:08:27:b6:50:a7:
+                    2e:44:46:1e:ab:e5:53:38:b1:3f:ff:0c:7e:6d:2f:
+                    ad:71:f3:cc:14:05:7d:e2:c0:79:5d:07:e2:b3:21:
+                    18:2b:52:ab:07:30:3a:9a:29:26:9a:51:5d:04:0c:
+                    68:b5:cb:92:e6:57:ac:a3:fe:20:b7:3b:e9:f3:37:
+                    03:73:90:c0:0b:a6:2e:0d:cf:66:8a:ed:16:5d:9e:
+                    7b:76:ba:53:00:4d:b0:da:af:23:f4:5f:97:ba:65:
+                    0b:2c:0f:ff:ae:6b:42:18:4b:05:51:51:1c:ab:e1:
+                    73:40:f7:6c:15:47:86:91:35:06:47:6f:49:dc:25:
+                    af:6c:96:df:33:bb:49:7a:c5:3e:97:0b:6d:6e:bf:
+                    95:2f:12:25:aa:86:26:ae:44:26:b5:dc:ce:e1:6b:
+                    5d:b6:28:a4:23:d2:b5:55:ce:d7:b7:94:8d:80:76:
+                    88:86:11:7f:90:42:c9:1b:c2:00:5a:27:47:1b:92:
+                    95:ec:17:ac:1f:d0:d0:e8:0b:b7:8f:f8:dd:0d:3c:
+                    79:08:9c:88:18:95:fb:ef:cc:f9:6c:87:31:e3:3f:
+                    76:51:cc:2f:9f:7e:93:9d:3f:f4:6b:6a:ca:01:7c:
+                    09:29:fb:c5:15:98:b5:b7:5e:76:bc:df:e2:42:23:
+                    4e:11
+                Exponent: 65537 (0x10001)
+        X509v3 extensions:
+            X509v3 Subject Key Identifier: 
+                7A:47:09:1F:3B:23:3F:AD:CD:58:EA:49:78:3D:90:E2:30:44:7E:3F
+            X509v3 Authority Key Identifier: 
+                keyid:7A:47:09:1F:3B:23:3F:AD:CD:58:EA:49:78:3D:90:E2:30:44:7E:3F
+
+            X509v3 Basic Constraints: critical
+                CA:TRUE
+            X509v3 Key Usage: 
+                Digital Signature, Certificate Sign, CRL Sign
+            X509v3 CRL Distribution Points: 
+
+                Full Name:
+                  URI:http://www.canonical.com/secure-boot-master-ca.crl
+
+    Signature Algorithm: sha256WithRSAEncryption
+         b1:7f:36:33:d1:2a:d5:76:cb:9a:ac:b9:9f:8b:0f:8f:8b:1c:
+         1e:8a:81:e4:75:f5:8b:88:c0:17:62:0d:31:33:9e:d1:2a:28:
+         ff:91:f2:5e:40:61:61:5b:f9:c2:d7:36:75:26:df:9c:c5:67:
+         11:29:5d:5c:3b:aa:07:e4:e1:75:be:cd:04:04:b0:f7:0d:ed:
+         4d:7c:e2:b7:67:05:31:88:0d:69:a4:84:63:dd:10:62:57:6e:
+         ca:27:54:e9:c9:c7:b3:18:21:8f:71:7d:69:dd:4d:d2:36:e5:
+         14:fb:f8:7d:c6:3b:44:2f:c6:06:76:8d:81:8a:93:39:b2:49:
+         91:9f:d8:e1:1c:0e:f8:f4:d2:b0:4a:b5:a7:e6:b0:3a:38:30:
+         57:94:58:ee:15:f9:8e:1d:20:85:02:12:a0:ac:c5:a2:ab:2b:
+         21:45:c4:27:83:60:c8:83:e0:b7:b5:92:c8:f9:8f:db:03:7a:
+         77:f6:5b:76:03:86:f6:24:53:6a:5c:8e:09:dd:d8:f5:b6:8f:
+         7f:07:2c:d7:b0:f2:d8:61:07:0e:74:28:f7:57:ed:00:ec:3f:
+         05:31:ea:e5:6d:ad:a4:1a:48:a0:92:c7:d0:7d:51:e8:56:25:
+         9d:28:b5:6f:ac:9c:64:97:ae:a8:a6:30:8d:f9:4a:fa:e2:40:
+         f9:63:66:63
+</pre>
+
+At this point, several files exist for the Master public component:
+* '''Default for OEMs''': master-public.der (DER-encoded x509 certificate)
+* master-public.pem (x509 PEM-encoded certificate)
+* master-public.pubkey (the RSA2048 public key)
+
+If a DER-formatted PKCS#7 certificate is needed, run:<pre>
+$ openssl crl2pkcs7 -nocrl -certfile ./master-public.pem -outform DER -out master-public.pkcs7
+$ openssl pkcs7 -in ./master-public.pkcs7 -inform DER -text -print_certs -noout
+Certificate:
+    Data:
+        Version: 3 (0x2)
+        Serial Number: 18395472014686033076 (0xff49d8557f0014b4)
+    Signature Algorithm: sha256WithRSAEncryption
+        Issuer: C=GB, ST=Isle of Man, L=Douglas, O=Canonical Ltd., CN=Canonical Ltd. Master Certificate Authority
+        Validity
+            Not Before: Mar 28 20:03:15 2012 GMT
+            Not After : Mar 27 20:03:15 2042 GMT
+        Subject: C=GB, ST=Isle of Man, L=Douglas, O=Canonical Ltd., CN=Canonical Ltd. Master Certificate Authority
+        Subject Public Key Info:
+            Public Key Algorithm: rsaEncryption
+                Public-Key: (2048 bit)
+                Modulus:
+                    00:cb:c6:46:eb:7d:20:02:be:17:08:27:b6:50:a7:
+                    2e:44:46:1e:ab:e5:53:38:b1:3f:ff:0c:7e:6d:2f:
+                    ad:71:f3:cc:14:05:7d:e2:c0:79:5d:07:e2:b3:21:
+                    18:2b:52:ab:07:30:3a:9a:29:26:9a:51:5d:04:0c:
+                    68:b5:cb:92:e6:57:ac:a3:fe:20:b7:3b:e9:f3:37:
+                    03:73:90:c0:0b:a6:2e:0d:cf:66:8a:ed:16:5d:9e:
+                    7b:76:ba:53:00:4d:b0:da:af:23:f4:5f:97:ba:65:
+                    0b:2c:0f:ff:ae:6b:42:18:4b:05:51:51:1c:ab:e1:
+                    73:40:f7:6c:15:47:86:91:35:06:47:6f:49:dc:25:
+                    af:6c:96:df:33:bb:49:7a:c5:3e:97:0b:6d:6e:bf:
+                    95:2f:12:25:aa:86:26:ae:44:26:b5:dc:ce:e1:6b:
+                    5d:b6:28:a4:23:d2:b5:55:ce:d7:b7:94:8d:80:76:
+                    88:86:11:7f:90:42:c9:1b:c2:00:5a:27:47:1b:92:
+                    95:ec:17:ac:1f:d0:d0:e8:0b:b7:8f:f8:dd:0d:3c:
+                    79:08:9c:88:18:95:fb:ef:cc:f9:6c:87:31:e3:3f:
+                    76:51:cc:2f:9f:7e:93:9d:3f:f4:6b:6a:ca:01:7c:
+                    09:29:fb:c5:15:98:b5:b7:5e:76:bc:df:e2:42:23:
+                    4e:11
+                Exponent: 65537 (0x10001)
+        X509v3 extensions:
+            X509v3 Subject Key Identifier: 
+                7A:47:09:1F:3B:23:3F:AD:CD:58:EA:49:78:3D:90:E2:30:44:7E:3F
+            X509v3 Authority Key Identifier: 
+                keyid:7A:47:09:1F:3B:23:3F:AD:CD:58:EA:49:78:3D:90:E2:30:44:7E:3F
+
+            X509v3 Basic Constraints: critical
+                CA:TRUE
+            X509v3 Key Usage: 
+                Digital Signature, Certificate Sign, CRL Sign
+            X509v3 CRL Distribution Points: 
+
+                Full Name:
+                  URI:http://www.canonical.com/secure-boot-master-ca.crl
+
+    Signature Algorithm: sha256WithRSAEncryption
+         b1:7f:36:33:d1:2a:d5:76:cb:9a:ac:b9:9f:8b:0f:8f:8b:1c:
+         1e:8a:81:e4:75:f5:8b:88:c0:17:62:0d:31:33:9e:d1:2a:28:
+         ff:91:f2:5e:40:61:61:5b:f9:c2:d7:36:75:26:df:9c:c5:67:
+         11:29:5d:5c:3b:aa:07:e4:e1:75:be:cd:04:04:b0:f7:0d:ed:
+         4d:7c:e2:b7:67:05:31:88:0d:69:a4:84:63:dd:10:62:57:6e:
+         ca:27:54:e9:c9:c7:b3:18:21:8f:71:7d:69:dd:4d:d2:36:e5:
+         14:fb:f8:7d:c6:3b:44:2f:c6:06:76:8d:81:8a:93:39:b2:49:
+         91:9f:d8:e1:1c:0e:f8:f4:d2:b0:4a:b5:a7:e6:b0:3a:38:30:
+         57:94:58:ee:15:f9:8e:1d:20:85:02:12:a0:ac:c5:a2:ab:2b:
+         21:45:c4:27:83:60:c8:83:e0:b7:b5:92:c8:f9:8f:db:03:7a:
+         77:f6:5b:76:03:86:f6:24:53:6a:5c:8e:09:dd:d8:f5:b6:8f:
+         7f:07:2c:d7:b0:f2:d8:61:07:0e:74:28:f7:57:ed:00:ec:3f:
+         05:31:ea:e5:6d:ad:a4:1a:48:a0:92:c7:d0:7d:51:e8:56:25:
+         9d:28:b5:6f:ac:9c:64:97:ae:a8:a6:30:8d:f9:4a:fa:e2:40:
+         f9:63:66:63
+</pre>
+
+== Backup the CA configuration ==
+The 'SecureBootCA/' directory and master public certificates should be backed up to be used again in disaster recovery or when creating OEM-specific keys. Eg:<pre>
+$ cp -av master* SecureBootCA/
+'master-public.der' -> 'SecureBootCA/master-public.der'
+'master-public.pem' -> 'SecureBootCA/master-public.pem'
+'master-public.pkcs7' -> 'SecureBootCA/master-public.pkcs7'
+'master-public.pubkey' -> 'SecureBootCA/master-public.pubkey'
+$ tar -zcvf ~/SecureBootCA.tar.gz ./SecureBootCA/
+./SecureBootCA/
+./SecureBootCA/index.txt.old
+./SecureBootCA/serial
+./SecureBootCA/crl/
+./SecureBootCA/crl/secure-boot-master-ca.crl.pem
+./SecureBootCA/crl/secure-boot-master-ca.crl
+./SecureBootCA/newcerts/
+./SecureBootCA/newcerts/01.pem
+./SecureBootCA/crlnumber
+./SecureBootCA/openssl.cnf
+./SecureBootCA/crlnumber.old
+./SecureBootCA/index.txt
+./SecureBootCA/index.txt.attr
+./SecureBootCA/serial.old
+./SecureBootCA/master-public.der
+./SecureBootCA/master-public.pem
+./SecureBootCA/master-public.pkcs7
+./SecureBootCA/master-public.pubkey
+</pre>
+
+This backup should be given to anyone who is authorized to generate new keys.
+
+== WinQual certificate ==
+The !WinQual program uses a different method. Please see <nowiki>[[SecurityTeam-SecureBoot-WinQual]]</nowiki> for details.
+
+== GUID ==
+Canonical also needs to generate a unique GUID for the entry in db (EFI_CERT_X509_GUID). This can be generated with the `uuidgen` command. Commercial engineering generated this one:
+
+<pre>
+e40ac46d-e82e-4c9c-a314-0fc7b2008710
+</pre>
+
+This is the RFC4122 representation of the GUID, which includes the bytes exactly in the order that they appear above. Specifically, a byte array for this GUID is defined as:
+
+<pre>
+const unsigned char canonical_guid_bytes[] = {
+	0xe4, 0x0a, 0xc4, 0x6d, 0xe8, 0x2e, 0x4c, 0x9c,
+	0xa3, 0x14, 0x0f, 0xc7, 0xb2, 0x00, 0x87, 0x10,
+};
+</pre>
+
+Or, if you're using libuuid:
+
+<pre>
+UUID_DEFINE(canonical_guid, \
+	0xe4, 0x0a, 0xc4, 0x6d, 0xe8, 0x2e, 0x4c, 0x9c, \
+	0xa3, 0x14, 0x0f, 0xc7, 0xb2, 0x00, 0x87, 0x10);
+</pre>
+
+However, if you're using the UEFI constructs for defining GUIDs, you need to specify some fields in little-endian form. This is how you'd represent the Canonical GUID in the syntax used by the UEFI specification:
+
+<pre>
+	{0x6dc40ae4, 0x2ee8, 0x9c4c, \
+	{0xa3,0x14,0x0f,0xc7,0xb2,0x00,0x87,0x10}}
+</pre>
+
+The kernel's EFI_GUID macro follows this behaviour. To use the Canonical GUID in kernel code:
+
+<pre>
+     EFI_GUID(0x6dc40ae4, 0x2ee8, 0x9c4c, \
+	0xa3, 0x14, 0x0f, 0xc7, 0xb2, 0x00, 0x87, 0x10)
+</pre>
+
+So far, there's been no need to define UEFI GUIDs on a big-endian system. In those cases, we'll need to byte-swap the (already-byte-swapped) values that appear in the specification.
+
+== Producing the EFI Signature List ==
+
+If you want to produce a Platform Key (PK) that is importable into the system trust store, you need to signed signed key lists.
+
+Install efitools to get cert-to-efi-sig-list and sign-efi-sig-list. Use the UUID above to generate the key list for the Certificate Authority:
+
+<pre>
+cert-to-efi-sign-list -g e40ac46d-e82e-4c9c-a314-0fc7b2008710 master-public.pem master-public.esl
+sign-efi-sig-list -k private/master-private.key -c master-public.pem PK master-public.esl master-public.auth
+</pre>
+
+To allow the key to be removed later, you also need to generate an empty signed update:
+
+<pre>
+rm -f remove-master-public.esl
+touch remove-master-public.esl
+sign-efi-sig-list -k private/master-private.key -c master-public.pem PK remove-master-public.esl remove-master-public.auth
+</pre>
+
+You should now be able to install them using KeyTool. If you need to work with a vendor to include this key, please see the next point.
+
+== Image signing procedure ==
+Please see:
+* <nowiki>[[SecurityTeam-SecureBoot-ImageSigning#Canonical_master_only|image signing procedure by Canonical master]]</nowiki> for more information.

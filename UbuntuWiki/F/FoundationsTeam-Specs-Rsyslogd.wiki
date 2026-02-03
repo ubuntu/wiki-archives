@@ -1,0 +1,122 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+* '''Launchpad Entry''': UbuntuSpec:rsyslogd
+* '''Created''':
+* '''Contributors''': ColinWatson, MichaelBiebl, <nowiki>[[mterry]]</nowiki>
+* '''Packages affected''': `sysklogd`, `rsyslog`, `librelp` (a helper library for `rsyslog`)
+
+=== Summary ===
+
+Debian is using rsyslog as its system log daemon rather than sysklogd now. Investigate following suit.
+
+=== Release Note ===
+
+Debian now uses `rsyslog` as its system log daemon rather than the older `sysklogd`. `rsyslog` has a compatible configuration file format, but is more extensible, including the ability to log to SQL databases.
+
+=== Rationale ===
+
+sysklogd is old and crufty, and does not support advanced but frequently-requested features such as logging to SQL databases. rsyslog is the next generation and appears to be mature enough for us to switch to it.
+
+=== Design ===
+
+==== Evaluation ====
+
+The Debian maintainer of rsyslog (Michael Biebl) was present at the UDS discussion and gave us some feedback on the system logger change in Debian. By and large the switch was pretty painless, with not many bug reports after Lenny. Existing installations were ''not'' upgraded to rsyslog. rsyslog provides compatibility with sysklogd's configuration file format, which is used by default (it has multiple compatibility levels). Database modules are split out into separate packages. rsyslog can filter on any part of the log message; for example, it can filter out Network``Manager/ACPI messages. Some future work is expected on a native Oracle backend with improved batching.
+
+We looked briefly at syslog-ng. rsyslog has direct compatibility with sysklogd, which syslog-ng does not attempt. syslog-ng has a commercial "premium edition" and an "open source edition". rsyslog upstream has been very receptive indeed to changes. There seems no compelling reason for Ubuntu to use syslog-ng, and the fact that Debian is using rsyslog is in itself quite a compelling reason for us.
+
+Canonical's Ubuntu support department currently recommends the use of rsyslog with SQL database logging to customers with that requirement.
+
+In short: we will switch to rsyslog for Karmic.
+
+=== Implementation ===
+
+==== Migration ====
+
+We would prefer to upgrade existing installations to rsyslog, since it should not be too risky and it reduces our total support footprint. This means that we will have to deal with configuration file migration, and note that `/etc/rsyslog.conf` is a conffile.
+
+The simplest answer appears to be to copy `/etc/syslog.conf` to `/etc/rsyslog.d/something.conf`, which will not be a conffile; the postinst will ship a default for it for the fresh-install case. We then remove the default logging configuration from `/etc/rsyslog.conf` and rely on the built-in `$IncludeConfig /etc/rsyslog.d/*.conf` rule.
+
+In the event that this fails for some reason, there are a number of other obvious fallbacks, such as declaring that a sysadmin edit to `/etc/syslog.conf` can safely be transferred to `/etc/rsyslog.conf` despite the usual rules on maintainer scripts editing conffiles. We would prefer to avoid this, but if need be it seems to be borderline acceptable.
+
+'''Implementation:''' If `/etc/syslog.conf` is present and modified, we copy it to `/etc/rsyslog.d/default.conf`.  Then, we merge `/usr/share/rsyslog/default.conf` (which is just the rules portion of `/etc/rsyslog.conf`) into `/etc/rsyslog.d/default.conf` using ucf.  See <nowiki>[[https://bugs.launchpad.net/bugs/388608|bug 388608]]</nowiki>.  '''This was pushed in.'''
+
+==== Derooting ====
+
+At the moment, rsyslog always runs as root, representing a regression in the amount of code we run as root. This needs discussion with the security team, and we will attempt to deroot rsyslog if it seems feasible to do so. When doing so, beware a recurrence of <nowiki>[[https://bugs.launchpad.net/bugs/255635|bug 255635]]</nowiki>.
+
+'''Implementation:''' There's a bug about this now, with an example debdiff (which also handles the upgrade case mentioned above): <nowiki>[[https://bugs.launchpad.net/bugs/388608|bug 388608]]</nowiki>.  Basically, we backport some configuration values that let us drop privileges to a user and add a new config value that lets us specify a different path for /proc/kmsg.  Then we use a privileged dd process to shovel /proc/kmsg to a syslog-readable location.  '''This was pushed in.'''
+
+==== Activation ====
+
+Switching the default system log daemon is a simple seed change and metapackage upload.
+
+<nowiki>[[MainInclusionReport-rsyslog|rsyslog]]</nowiki> and <nowiki>[[MainInclusionReport-librelp|librelp]]</nowiki> need to be included in main.
+
+==== Metapackages ====
+
+There have been a number of requests to make ubuntu-minimal more flexible in terms of its dependencies on a system log daemon, i.e. `Depends: rsyslog | system-log-daemon`. We will investigate this, although doing this may have upgrade ramifications (for example, it could leave sysklogd installed when that isn't desirable) and so this is not a commitment to implement this. This cannot be expressed in the current seed syntax and would need to be hacked manually into the ubuntu-meta source package.
+
+==== Other packages ====
+
+Changes to other packages are out of scope for this specification; it is expected that developers will take advantage of new facilities as necessary. However, it may be worth sending a note to ubuntu-devel-announce to the effect that packages that ship daemons that operate in minimal chroots for privilege separation purposes can configure rsyslog to listen on `/path/to/chroot/dev/log`; postfix already does this.
+
+Files should be placed in /etc/rsyslog.d with a .conf suffix.  Ideally, there would be a numeric prefix for ordering purposes.  An example file (from postfix):
+<pre>
+$AddUnixListenSocket /var/spool/postfix/dev/log
+</pre>
+
+An example change to the postinst script to reload rsyslog to pick up the new file:
+<pre>
+if [ -e /etc/init.d/rsyslog ]; then
+  if which invoke-rc.d >/dev/null 2>&1; then
+    invoke-rc.d rsyslog force-reload
+  else
+    /etc/init.d/rsyslog force-reload
+  fi
+fi
+</pre>
+
+Same deal in postrm:
+<pre>
+case "$1" in
+  purge)
+    if [ -e /etc/init.d/rsyslog ]; then
+      if which invoke-rc.d >/dev/null 2>&1; then
+        invoke-rc.d rsyslog force-reload
+      else
+        /etc/init.d/rsyslog force-reload
+      fi
+    fi
+    ;;
+esac
+</pre>
+
+=== Test/Demo Plan ===
+
+It's important that we are able to test new features, and demonstrate them to users.  Use this section to describe a short plan that anybody can follow that demonstrates the feature is working.  This can then be used during testing, and to show off after release. Please add an entry to http://testcases.qa.ubuntu.com/Coverage/NewFeatures for tracking test coverage.
+
+This need not be added or completed until the specification is nearing beta.
+
+To test upgrade: 
+# From an existing install that has sysklogd, remove sysklogd, install rsyslog, and check that /etc/rsyslog.d/default.conf is reasonable.
+# With /etc/syslog.conf still around from sysklogd, modify it in some way.  Now purge rsyslog and reinstall it.  It should prompt you about your changes to /etc/rsyslog.d/default.conf.
+# Now purge sysklogd (which should remove /etc/syslog.conf).  Purge rsyslog and reinstall.  Check that /etc/rsyslog.d/default.conf is reasonable and the same as what was installed in the first step above.  This tests the 'fresh install' case.
+
+To test derooting:
+ 0. With rsyslog installed, do a 'ps aux | grep rsys' and you should see a privileged dd instance and a rsyslog instance running as the syslog user.
+
+To test it works at all:
+ 0. With rsylsog running, look at /var/log/syslog and /var/log/kern.log.  Both should be filling up with syslog events as expected.
+
+----
+CategorySpec

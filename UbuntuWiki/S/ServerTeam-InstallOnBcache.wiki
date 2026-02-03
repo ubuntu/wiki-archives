@@ -1,0 +1,902 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== How to install Ubuntu Server on a bcached rootfs ==
+'''Experimental'''
+<<BR>>You can read a little bit more about bcache there <nowiki>[[https://wiki.ubuntu.com/ServerTeam/Bcache|Bcache]]</nowiki>
+=== Summary ===
+With this how-to we will install ubuntu server on a bcached rootfs. This server setup has two hardware RAIDs and one SSD:
+* One SSD 120GB
+* One HW RAID1 465GiB
+* One HW RAID10 3,8TiB
+
+For this guide we will setup disks like this:<<BR>> <pre>
+  SSD (/dev/sdc1 here):
+** All LVM2
+
+  RAIDs:
+** RAID1  (/dev/sda1 here): 1GiB for /boot, 
+** RAID1  (/dev/sda2 here): the rest is for LVM2
+** RAID10 (/dev/sdb1 here): full LVM2
+</pre>
+
+Then on LVM we will create those logical volumes:<<BR>> <pre>
+   SSD:
+*** 12GiB for swap (8GiB RAM)
+*** 64GiB for cache
+*** Rest is reserved for other purposes.
+
+   RAID1:
+*** One big partition for root (will get containers and vms, so need some space)
+   RAID10:
+*** One big partition for /srv (Will store data for user and services)
+</pre>
+
+== Installation Guide ==
+
+=== Live DVD setup ===
+
+For setting the bcache root, it is easier for now to start with a live dvd desktop and debootstrap our server installation.
+
+Download a live Ubuntu 15.04 Desktop AMD64 iso (<nowiki>[[http://www.ubuntu.com/download/desktop|Ubuntu Download Page]]</nowiki>), then boot your server with it.
+
+Select 'Try Ubuntu', then when you access the desktop, open a terminal (search for gnome-terminal).<<BR>> <pre>
+   Optional:
+   I use a apt-cache-ng-proxy locally, so
+### sudo su
+### echo ‘Acquire::http::Proxy “http://IP.OF.THE.PROXY:3142”;’ > /etc/apt/apt.conf.d/01Proxy
+</pre><<BR>>
+Now we will install the necessary tools for our setup:<<BR>> <pre>
+### apt-get update && apt-get install -y mdadm lvm2 bcache-tools
+</pre>
+<pre>
+   Note: lvm2 must already be in the iso, and we install mdadm if you want to use a linux software RAID stack.
+         mdadm setup is not included in this guide.
+</pre>
+
+Now you need to setup your partition layout:
+
+=== Disk Layout Setup ===
+
+Creation of partition for LVM Physical Volumes, with sgdisk:<<BR>> <pre>
+   Create one big partition on SSD:
+   Remove any remaining filesystem, raid or partition-table signatures:
+## wipefs -af /dev/sdc
+   Create a new GPT partition table on /dev/sdc ( for some rare cases )
+## sgdisk -Z /dev/sdc
+   Create partition:
+## sgdisk -n 1 /dev/sdc
+   Reload partition table
+## partprobe
+   Verify disk setup:
+## sgdisk -p /dev/sdc
+
+   Create two partitions on RAID1: First: 1GiB(-n 1::1G), Second the remaining (-n 2)
+## wipefs -af /dev/sda
+   For my particular (old) server, I need to make MBR boot, so I add -m to convert gpt to mbr here):
+## sgdisk -Z -m /dev/sda
+   Now use fdisk to create 2 partition, 1 bootable of 1G, and the second for the remaining:
+## echo -e 'o\nn\np\n1\n\n+1G\na\nn\np\n\n\n\nw\n' | fdisk /dev/sda
+## partprobe
+## fdisk -l /dev/sda
+
+   Create one big patition on RAID10
+## wipefs -af /dev/sdb
+## sgdisk -Z /dev/sdb
+## sgdisk -n 1 /dev/sdb
+## partprobe
+## sgdisk -p /dev/sdb
+</pre>
+
+ '''''If your disks were not empty, there may be some errors telling you that the kernel still uses old partitions, you will need to reboot, and redo the steps to install lvm2, bcache-tools, and mdadm if needed. Then pursue from here, else pvcreate or other instructions may fail, especially, if you don't reboot before installing bcache, you will have to purge/clean all disks from bcache and re-create them with reboots in between.'''''
+
+Formating /boot partition (here /dev/sda1):<<BR>> <pre>
+## mkfs.ext4 /dev/sda1
+
+</pre>
+Creating Physical Volumes for LVM: <pre>
+## pvcreate /dev/sda2
+## pvcreate /dev/sdb1
+## pvcreate /dev/sdc1
+</pre>
+This is what it looks like after those commands (lsblk):<<BR>> <pre>
+## lsblk
+</pre>
+{| class="wikitable"
+|-
+| NAME
+| 
+| MAJ:MIN
+| 
+| RM
+| 
+| SIZE
+| 
+| RO
+| 
+| TYPE
+| 
+| MOUNTPOINT
+|-
+| sda
+| 
+| 8:0
+| 
+| 0
+| 
+| 465,3G
+| 
+| 0
+| 
+| disk
+| 
+| 
+|-
+| ├─sda1
+| 
+| 8:1
+| 
+| 0
+| 
+| 1023M
+| 
+| 0
+| 
+| part
+| 
+| 
+|-
+| └─sda2
+| 
+| 8:2
+| 
+| 0
+| 
+| 464,3G
+| 
+| 0
+| 
+| part
+| 
+| 
+|-
+| sdb
+| 
+| 8:16
+| 
+| 0
+| 
+| 3,7T
+| 
+| 0
+| 
+| disk
+| 
+| 
+|-
+| └─sdb1
+| 
+| 8:17
+| 
+| 0
+| 
+| 3,7T
+| 
+| 0
+| 
+| part
+| 
+| 
+|-
+| sdc
+| 
+| 8:32
+| 
+| 0
+| 
+| 111,8G
+| 
+| 0
+| 
+| disk
+| 
+| 
+|-
+| └─sdc1
+| 
+| 8:33
+| 
+| 0
+| 
+| 111,8G
+| 
+| 0
+| 
+| part
+| 
+| 
+|-
+| sdd
+| 
+| 8:48
+| 
+| 1
+| 
+| 58,9G
+| 
+| 0
+| 
+| disk
+| 
+| 
+|-
+| ├─sdd1
+| 
+| 8:49
+| 
+| 1
+| 
+| 1,1G
+| 
+| 0
+| 
+| part
+| 
+| 
+|-
+| └─sdd2
+| 
+| 8:50
+| 
+| 1
+| 
+| 2,2M
+| 
+| 0
+| 
+| part
+| 
+| 
+|-
+| loop0
+| 
+| 7:0
+| 
+| 0
+| 
+| 1G
+| 
+| 1
+| 
+| loop
+| 
+| /rofs
+|}
+<<BR>>
+
+=== LVM Setup ===
+
+Now we will create the Volume Groups: <pre>
+## vgcreate ssd /dev/sdc1
+## vgcreate RAID1 /dev/sda2
+## vgcreate RAID10 /dev/sdb1
+</pre>
+Now we will create the Logical Volumes:
+<<BR>>
+Create swap space:<<BR>> <pre>
+## lvcreate -n swap -L 12G ssd
+</pre>
+Create a cache space:<<BR>> <pre>
+## lvcreate -n cache -L 64G ssd
+</pre>
+Free space on the SSD for other uses:<<BR>> <pre>
+## lvcreate -n free -l 100%FREE ssd
+</pre>
+Create root Logical Volume: <pre>
+## lvcreate -n root -l 100%FREE RAID1
+</pre>
+Create /srv Logical Volume: <pre>
+## lvcreate -n srv -l 100%FREE RAID10
+</pre>
+
+=== Bcache Setup ===
+<<BR>>
+Here we will have one cache for serving two backing devices. We could have created two caches and use a 1:1 cache:backing setup to be sure to reserve a certain amount of cache per backing device (i.e: create 2 lvm cache partition 12G/52G for example). In this setup the cache will be shared between both devices.
+
+==== Bcache Creation ====
+Then create the bcache devices for both RAIDs: <pre>
+
+   For avoiding left-overs:
+## wipefs -af /dev/mapper/ssd-cache
+## wipefs -af /dev/mapper/RAID1-root
+## wipefs -af /dev/mapper/RAID10-srv
+   For the same reason, we will add --wipe-bcache:
+## make-bcache --writeback --wipe-bcache -B /dev/mapper/RAID1-root -B /dev/mapper/RAID10-srv \
+                                           -C /dev/mapper/ssd-cache --wipe-bcache
+
+Notes: make-bcache is the command that will create the bcache, it can take options.
+       --writeback: for performance, but in production you may not want to use this mode for safety reasons. 
+       -B refers to the backing devices, here we will use one cache to cache two disks.
+       -C refers to the caching device, multiple devices not yet supported; use mdadm as a workaround if needed.
+       --wipe-bcache, will overwrite any previous bcache superblocks, thus destroying previous bcache data.
+</pre>
+This is what lsblk must show you at this step:
+<pre>
+## lsblk
+</pre>
+{| class="wikitable"
+|-
+| NAME
+| 
+| MAJ:MIN
+| 
+| RM
+| 
+| SIZE
+| 
+| RO
+| 
+| TYPE
+| 
+| MOUNTPOINT
+|-
+| sda
+| 
+| 8:0
+| 
+| 0
+| 
+| 465,3G
+| 
+| 0
+| 
+| disk
+| 
+| 
+|-
+| ├─sda1
+| 
+| 8:1
+| 
+| 0
+| 
+| 1023M
+| 
+| 0
+| 
+| part
+| 
+| 
+|-
+| └─sda2
+| 
+| 8:2
+| 
+| 0
+| 
+| 464,3G
+| 
+| 0
+| 
+| part
+| 
+| 
+|-
+| └─RAID1-root
+| 
+| 252:3
+| 
+| 0
+| 
+| 464,3G
+| 
+| 0
+| 
+| lvm
+| 
+| 
+|-
+| └─bcache0
+| 
+| 251:0
+| 
+| 0
+| 
+| 464,3G
+| 
+| 0
+| 
+| disk
+| 
+| 
+|-
+| sdb
+| 
+| 8:16
+| 
+| 0
+| 
+| 3,7T
+| 
+| 0
+| 
+| disk
+| 
+| 
+|-
+| └─sdb1
+| 
+| 8:17
+| 
+| 0
+| 
+| 3,7T
+| 
+| 0
+| 
+| part
+| 
+| 
+|-
+| └─RAID10-srv
+| 
+| 252:4
+| 
+| 0
+| 
+| 3,7T
+| 
+| 0
+| 
+| lvm
+| 
+| 
+|-
+| └─bcache1
+| 
+| 251:1
+| 
+| 0
+| 
+| 3,7T
+| 
+| 0
+| 
+| disk
+| 
+| 
+|-
+| sdc
+| 
+| 8:32
+| 
+| 0
+| 
+| 111,8G
+| 
+| 0
+| 
+| disk
+| 
+| 
+|-
+| └─sdc1
+| 
+| 8:33
+| 
+| 0
+| 
+| 111,8G
+| 
+| 0
+| 
+| part
+| 
+| 
+|-
+| ├─ssd-swap
+| 
+| 252:0
+| 
+| 0
+| 
+| 12G
+| 
+| 0
+| 
+| lvm
+| 
+| 
+|-
+| ├─ssd-cache
+| 
+| 252:1
+| 
+| 0
+| 
+| 64G
+| 
+| 0
+| 
+| lvm
+| 
+| 
+|-
+| │ ├─bcache0
+| 
+| 251:0
+| 
+| 0
+| 
+| 464,3G
+| 
+| 0
+| 
+| disk
+| 
+| 
+|-
+| │ └─bcache1
+| 
+| 251:1
+| 
+| 0
+| 
+| 3,7T
+| 
+| 0
+| 
+| disk
+| 
+| 
+|-
+| └─ssd-free
+| 
+| 252:2
+| 
+| 0
+| 
+| 35,8G
+| 
+| 0
+| 
+| lvm
+| 
+| 
+|-
+| sdd
+| 
+| 8:48
+| 
+| 1
+| 
+| 58,9G
+| 
+| 0
+| 
+| disk
+| 
+| 
+|-
+| └─sdd1
+| 
+| 8:49
+| 
+| 1
+| 
+| 4K
+| 
+| 0
+| 
+| part
+| 
+| 
+|-
+| loop0
+| 
+| 7:0
+| 
+| 0
+| 
+| 1G
+| 
+| 1
+| 
+| loop
+| 
+| /rofs
+|}
+<<BR>>
+
+==== Format baches ====
+
+I format both ext4 (had a recent issue with bcache + btrfs):<<BR>>
+<pre>
+## mkfs.ext4 /dev/bcache0
+## mkfs.ext4 /dev/bcache1
+</pre>
+Partitioning, and disk setup is now done, we head on to server install:
+
+=== Debootstrap Server ===
+==== Prepare Debootstrap ====
+
+We create a mount point for those:<<BR>>
+<pre>
+## mkdir -p /media/target
+## mount /dev/bcache0 /media/target
+</pre>
+
+We install our ubuntu server files with debootstrap:<<BR>>
+<pre>
+## apt-get install -y debootstrap
+</pre>
+
+I prepare env for the debootstrap, I want to use my proxy for this:<<BR>>
+<pre>
+## export https_proxy=http://IP.OF.THE.PROXY:3142
+## export http_proxy=http://IP.OF.THE.PROXY:3142
+## export ftp_proxy=http://IP.OF.THE.PROXY:3142
+</pre>
+
+==== Debootstrap ====
+<pre>
+## debootstrap --arch amd64 vivid /media/target http://archive.ubuntu.com/ubuntu/
+   Note: you may use a different mirror (I use http://mirrors.ircam.fr/pub/ubuntu/archive)
+</pre>
+
+=== Chroot Setup ===
+
+Then, prepare chroot:<<BR>> <pre>
+## cd /media/target
+</pre>
+
+Copy the proxy and DNS setup for this new install:<<BR>> <pre>
+## cp /etc/apt/apt.conf.d/01Proxy /media/target/etc/apt/apt.conf.d/
+## cp /etc/resolv.conf /media/target/etc/resolv.conf
+</pre>
+
+Mount the system mounts:<<BR>> <pre>
+## mount -t proc proc proc
+## mount -o bind /dev/ dev
+## mount -o bind /sys sys
+</pre>
+
+=== Setup Installation ===
+==== Chroot to the new installation ====
+Chroot into target install root:<<BR>> <pre>
+## chroot .
+</pre>
+==== Prepare Mounts ====
+Use lsblk to identify your srv bcache number (it can be either 0 or 1 on your particular setup):<<BR>> <pre>
+## mount /dev/bcacheX /srv
+## mount /dev/sda1 /boot
+</pre>
+
+==== Install Kernel ====
+
+Now proceed with final setup of the installation (kernel + grub setup + packages + users):<<BR>> <pre>
+## apt-get update 
+</pre>
+
+We will need to install kernel, of course; here we will use the generic one, but you can choose an other. To list available ones use:
+<<BR>> ‘apt-cache search linux-image’:<<BR>>
+<pre>
+## apt-get install linux-image-generic
+
+   When grub ask you where to be installed, in this setup:
+    - Select your booting device, not the /boot partition (i.e.: Select /dev/sda)
+</pre>
+
+For a standard Ubuntu server experience: <pre>
+## apt-get install -y server^ standard^
+
+==== Update Grub2 ====
+
+On Vivid, there is a warning message for now, so we will comment HIDDEN_TIMEOUT_OPTIONS:<<BR>> {{{
+## vi /etc/default/grub to comment HIDDEN_TIMEOUT_OPTIONS
+## update-grub2
+</pre>
+
+==== Install mandatory packages ====
+
+We need to install lvm2 and bcache-tools (which will add udev hooks), we need to add mdadm in case we used a linux software RAID option (Those are really important else system won’t boot).<<BR>> <pre>
+## apt-get install -y lvm2 bcache-tools mdadm 
+</pre>
+
+==== Setup fstab ====
+
+Now we will need to get UUIDs for disks to be sure to mount the good one on the good mount-point. Bcache number is not a guaranteed one (bcache0 can become bcache1 at next boot). For this, we will use blkid tool:<<BR>> <pre>
+## blkid
+</pre>
+
+and setup /etc/fstab:
+i.e.:<<BR>> <pre>
+## blkid | grep “/bcache” | cut -d‘“‘ -f2 > /etc/fstab
+## cat /proc/mounts >> /etc/fstab
+</pre>
+
+Now edit properly:<<BR>> <pre>
+## vi /etc/fstab
+</pre>
+
+File /etc/fstab example:<<BR>> <pre>
+   UUID=ebf07bc7-e45d-4bc6-95d5-ca120cc6c135 / ext4 rw,relatime,data=ordered 0 0
+   UUID=e118a9ab-539b-406d-af91-78888b945fb7 /srv ext4 rw,relatime,data=ordered 0 0 
+## /dev/sda1 is the boot partition
+   UUID=”ed353670-703f-4cb1-8a2a-fee649ab97bf” /boot ext4 rw,relatime,data=ordered 0 0
+</pre>
+
+==== Setup Networking ====
+
+Now edit /etc/hostname (i.e. bcache_server.example.com):<<BR>> <pre>
+## vi /etc/hostname
+</pre>
+
+Now edit /etc/hosts, to add the ‘bcache_server bcache_server.example.com’ in the 127.0.0.1 line:<<BR>> <pre>
+## vi /etc/hosts
+</pre>
+
+Configure network interface (as your specific needs):<<BR>> <pre>
+## vi /etc/network/interfaces
+</pre>
+
+File /etc/network/interfaces example:<<BR>> <pre>
+## iface eth0 auto
+## iface eth0 inet dhcp
+</pre>
+
+Install openssh-server:<<BR>> <pre>
+## apt-get install -y openssh-server
+</pre>
+
+==== Create a user ====
+
+Setting-up users:
+create a user and root passwd:<<BR>> <pre>
+## adduser kick
+## addgroup kick admin
+## passwd
+</pre>
+
+=== Reboot to your new system ===
+
+exit chroot and reboot:<<BR>> <pre>
+## exit
+## sudo reboot
+</pre>
+
+On you new system if you issue a mount, you must see:<<BR>> <pre>
+## mount
+</pre>
+
+{| class="wikitable"
+|-
+| Filesystem
+| 
+| Size
+| 
+| Used
+| 
+| Avail
+| 
+| Use%
+| 
+| Mounted on
+|-
+| udev
+| 
+| 3.8G
+| 
+| 0
+| 
+| 3.8G
+| 
+| 0%
+| 
+| /dev
+|-
+| tmpfs
+| 
+| 774M
+| 
+| 8.8M
+| 
+| 765M
+| 
+| 2%
+| 
+| /run
+|-
+| /dev/bcache1
+| 
+| 458G
+| 
+| 791M
+| 
+| 434G
+| 
+| 1%
+| 
+| /
+|-
+| tmpfs
+| 
+| 3.8G
+| 
+| 0
+| 
+| 3.8G
+| 
+| 0%
+| 
+| /dev/shm
+|-
+| tmpfs
+| 
+| 5.0M
+| 
+| 0
+| 
+| 5.0M
+| 
+| 0%
+| 
+| /run/lock
+|-
+| tmpfs
+| 
+| 3.8G
+| 
+| 0
+| 
+| 3.8G
+| 
+| 0%
+| 
+| /sys/fs/cgroup
+|-
+| /dev/sdc1
+| 
+| 1008M
+| 
+| 40M
+| 
+| 918M
+| 
+| 5%
+| 
+| /boot
+|-
+| /dev/bcache0
+| 
+| 3.6T
+| 
+| 68M
+| 
+| 3.4T
+| 
+| 1%
+| 
+| /srv
+|-
+| tmpfs
+| 
+| 774M
+| 
+| 0
+| 
+| 774M
+| 
+| 0%
+| 
+| /run/user/0
+|}
+
+Now you must have a working fresh new server on a bcached rootfs, time to test lxd?

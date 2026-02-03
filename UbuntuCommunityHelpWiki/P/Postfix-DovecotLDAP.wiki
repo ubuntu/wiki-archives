@@ -1,0 +1,232 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+== Introduction ==
+
+Dovecot is an open source IMAP and POP3 server for Linux/UNIX-like systems, written with security primarily in mind. Dovecot is an excellent choice for both small and large installations. It's fast, simple to set up, requires no special administration and it uses very little memory.
+
+== Installation ==
+
+This guide will help you set up a complete email server using <nowiki>[[Postfix]]</nowiki> as MTA, <nowiki>[[OpenLDAP]]</nowiki> as a back-end for users, and <nowiki>[[Dovecot]]</nowiki> for <nowiki>[[SASL]]</nowiki> authentication, <nowiki>[[LDA]]</nowiki> and <nowiki>[[IMAP]]</nowiki> server.
+
+This guide assumes you already have installed Postfix and OpenLDAP (on localhost) (with it's directory structure and users). If not, you won't find explications here on how to get those (please search this wiki on how to set up Postfix and LDAP). This guide explains in details how to integrate all the above services with Dovecot in order to get the multi user mail server.
+
+To continue, please use your favorite package manager and install `dovecot`.
+<pre>
+sudo apt-get install dovecot
+</pre>
+
+=== SASL ===
+
+First let's us set-up SASL authentication.
+Check out <nowiki>[[PostfixDovecotSASL]]</nowiki> page to get it done.
+Next, to use Dovecot for delivery (LDA), we'll have to add the following to the dovecot.conf
+<pre>
+  socket listen {
+    master {
+#### Master socket provides access to userdb information. It's typically
+#### used to give Dovecot's local delivery agent access to userdb so it
+#### can find mailbox locations.
+      path = /var/run/dovecot/auth-master
+      mode = 0660
+#### Default user/group is the one who started dovecot-auth (root)
+      user = mail
+      group = mail
+    }
+    client {
+#### The client socket is generally safe to export to everyone. Typical use
+#### is to export it to your SMTP server so it can do SMTP AUTH lookups
+#### using it.
+      path = /var/spool/postfix/private/auth
+      mode = 0660
+      user = postfix
+      group = postfix
+    }
+  }
+</pre>
+
+=== General ===
+
+To enable imap ( you can also enable imaps, just add `ssl_cert_file`, `ssl_key_file` and `ssl_ca_file` values to dovecot.conf ), add the following:
+<pre>
+protocols = imap
+login_user = postfix
+login_greeting = Dovecot IMAP server!
+</pre>
+
+Our user's home folder will be taken from LDAP, so we should consider this when setting up the mail location for users:
+<pre>
+mail_location = maildir:~/Maildir
+</pre>
+
+Considering the homefolder path and the LDAP base, don't forget to give the right permission to the folder where user's home folder will be created. If LDAP users are in group `users` then
+<pre>
+sudo chgrp users /home
+sudo chmod 775 /home
+</pre>
+should solve the permissions problem.
+
+I advise you add
+<pre>
+mail_full_filesystem_access = no
+</pre>
+to the dovecot.conf in order to maintain the security level of you system.
+
+For security you should also know the minimum uid and gid of the LDAP users, that value should be used at 
+<pre>
+first_valid_uid = 2000
+last_valid_uid = 0
+first_valid_gid = 2000
+last_valid_gid = 0
+</pre>
+
+Also due to performance issues, it is recommended to set up
+<pre>
+maildir_copy_with_hardlinks = no
+</pre>
+
+Because LDAP users may not be written in a standard way, I recommend you using
+<pre>
+auth_username_format = %Lu
+</pre>
+this will convert to lowercase usernames.
+
+If you decided to use imaps and your certificates are self signed, consider using this
+<pre>
+ssl_require_client_cert = no
+</pre>
+
+=== IMAP ===
+
+At IMAP settings (protocol imap) add the right `imap` and `imap-login`
+<pre>
+login_executable = /usr/lib/dovecot/imap-login
+mail_executable = /usr/lib/dovecot/imap
+</pre>
+You might consider using several plugins like quota for example, then add those at
+<pre>
+mail_plugins = quota imap_quota
+</pre>
+And finally I advise you to enable dovecot's workarounds in order to make it perfectly compatible to most of the IMAP clients
+<pre>
+imap_client_workarounds = outlook-idle delay-newmail netscape-eoh tb-extra-mailbox-sep
+</pre>
+
+=== LDA ===
+
+At LDA specific settings (protocol lda) add the basics ( I included quota cause I included it in IMAP settings )
+<pre>
+postmaster_address = your@email.tld
+mail_plugins = quota
+sendmail_path = /usr/lib/sendmail
+</pre>
+Check <nowiki>[[#SASL|SASL]]</nowiki> in order to use this
+<pre>
+auth_socket_path = /var/run/dovecot/auth-master
+</pre>
+And finally, I recommend you setting up the logs, at least until your system will not be 100% working. This logs helped me a lot!
+<pre>
+log_path = /var/log/dovecot-deliver.log
+info_log_path = /var/log/dovecot-deliver.log
+</pre>
+
+=== Plugins ===
+
+In order to use plugins settings (our case quotas), add this
+<pre>
+plugin {
+  quota = maildir
+  quota_rule = *:storage=50M
+  quota_rule2 = Trash:storage=10%%
+  quota_rule3 = Spam:storage=20%%
+}
+</pre>
+
+== Postfix ==
+
+To enable virtual alias maps of the LDAP users (in short the recipients table from LDAP) and LDAP users to be able to login for sending emails , add 
+<pre>
+virtual_alias_maps =
+        hash:/etc/postfix/virtual
+        ldap:/etc/postfix/ldap_virtual_users.cf
+
+smtpd_sender_login_maps = ldap:/etc/postfix/ldap_senders.cf
+</pre>
+
+Where a `ldap_<somethig>.cf` file will look like this
+<pre>
+server_host = ldap://localhost
+search_base = ou=users,dc=domain,dc=tld
+bind = no
+
+query_filter = (&(objectclass=orgMailService)(|(aliasMail=%s)(aliasMailAlternateAddress=%s)))
+result_attribute = uid
+domain = domain.tld
+</pre>
+
+To enforce security add this rules
+<pre>
+smtpd_client_restrictions=
+        permit_mynetworks,
+        permit
+
+smtpd_recipient_restrictions=
+        permit_sasl_authenticated,
+        reject_invalid_hostname,
+        reject_non_fqdn_hostname,
+        reject_non_fqdn_sender,
+        reject_non_fqdn_recipient,
+        reject_unknown_sender_domain,
+        reject_unknown_recipient_domain,
+        reject_unauth_pipelining,
+        permit_auth_destination,
+        reject_unauth_destination,
+        reject
+
+smtpd_sender_restrictions=
+        reject_unknown_sender_domain,
+        reject_unlisted_sender,
+        reject_authenticated_sender_login_mismatch,
+        permit
+</pre>
+
+I assume you already added the required values to use <nowiki>[[PostfixDovecotSASL]]</nowiki>.
+To enable dovecot for delivery use this
+<pre>
+mailbox_transport = dovecot
+mailbox_command = /usr/lib/dovecot/deliver
+dovecot_destination_recipient_limit = 1
+virtual_transport = dovecot
+</pre>
+
+Now to allow dovecot for delivery, add the following entry to `master.cf`
+<pre>
+dovecot   unix  -       n       n       -       -       pipe
+  flags=DRhu user=mail:mail argv=/usr/lib/dovecot/deliver -f ${sender} -d ${user}
+</pre>
+The `-d ${user}` argument is necessary to be able to deliver email to LDAP users IMAP mailboxes, otherwise you might get errors like
+<pre>
+Authenticated user not found
+</pre>
+
+Save and restart the postfix and dovecot.
+
+Now, in order to be able to <nowiki>[[http://wiki.dovecot.org/LDA#Multiple_UIDs|deliver mails for different uids]]</nowiki>, we have to set up sticky bit to the delivery executable. Something like
+<pre>
+chmod u+s /usr/lib/dovecot/deliver
+</pre>
+
+Should be enough!
+This should be all.
+
+== Testing ==
+
+Was done on a vanilla installation of Ubuntu 8.04.2

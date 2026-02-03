@@ -1,0 +1,123 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+This page describes how to roll an OAMP4 image from scratch, similar (but not identical) to the released omap4 images ubuntu provides.
+
+You should have a fast armel machine for building the root filesystem. The subsequent image build that gets created out of the resulting livefs files can then happen on an i386 machine.
+
+=== Rolling the LiveFS ===
+
+On an armel system do the following:
+
+sudo apt-get install livecd-rootfs
+
+sudo /usr/sbin/livecd.sh -somap4 -dmaverick -fext3 -aarmel ubuntu-netbook
+
+This will create an ext3 filesystem file, an initrd and a kernel together with a manifest file that describes the contents of the filesystem
+
+=== Building the actual image ===
+
+For wrapping together the partitioned preinstalled image you need some script similar to the one below.
+
+<pre>
+
+set -e
+
+file_length() {
+    stat -c %s "$1"
+}
+
+xloader_package="x-loader-omap4"
+path_to_xloader="usr/lib/x-loader-omap4/MLO"
+
+uboot_package="u-boot-linaro-omap4-panda"
+path_to_uboot="usr/lib/u-boot/omap4_panda/u-boot.bin"
+
+v_opts="vram=32M"
+board_opts="mem=463M"
+
+log "Extracting bootloader from main archive"
+extract_file_from_package $xloader_package $path_to_xloader "MLO"
+extract_file_from_package $uboot_package $path_to_uboot "u-boot.bin"
+
+uboot_kernel="uImage"
+uboot_initrd="uInitrd"
+uboot_kernel_addr="0x80000000"
+uboot_ramdisk_addr="0x81600000"
+uboot_script_addr="0x1000"
+uboot_script_text="$CDDIR/boot.scr.in"
+uboot_script_image="$CDDIR/boot.scr"
+
+uboot_desc="Ubuntu Preinstalled Image"
+uboot_input_kernel="$PREINSTALLEDIMAGES/$FULLARCH.kernel-$SUBARCH"
+uboot_input_initrd="$PREINSTALLEDIMAGES/$FULLARCH.initrd-$SUBARCH"
+uboot_extra_cmdline=" root=/dev/mmcblk0p2 fixrtc"
+
+EXT3=$IMAGE.rootfs
+MTOOLSRC=$IMAGE.mtoolsrc
+
+log "Calling uboot-mkimage on kernel and ramdisk"
+
+rm -f $uboot_kernel $uboot_initrd
+mkimage -A arm -O linux -T kernel -C none -a 0x80008000 -e 0x80008000 -n "Ubuntu Kernel" -d "$uboot_input_kernel" "$uboot_kernel"
+mkimage -A arm -O linux -T ramdisk -C gzip -a 0x0 -e 0x0 -n "Ubuntu Initrd" -d "$uboot_input_initrd" "$uboot_initrd"
+
+log "Generating boot.scr"
+cat >"$uboot_script_text" <<EOF
+    fatload mmc 0:1 $uboot_kernel_addr $uboot_kernel
+    fatload mmc 0:1 $uboot_ramdisk_addr $uboot_initrd
+    setenv bootargs $v_opts $board_opts $DEFAULT_PRESEED $uboot_extra_cmdline
+    bootm $uboot_kernel_addr $uboot_ramdisk_addr
+EOF
+
+mkimage -A arm -T script -C none -n "Ubuntu boot script" -d "$uboot_script_text" "$uboot_script_image"
+rm -f "$uboot_script_text"
+
+mv $IMAGE $EXT3
+
+cat > $MTOOLSRC <<EOF
+mtools_skip_check=1
+EOF
+
+export MTOOLSRC
+
+BOOT_SIZE="$((72 * 1024 * 1024))"
+
+IMAGE_SIZE="$(file_length "$EXT3")"
+IMG_SIZE_BLOCKS="$((($BOOT_SIZE + $IMAGE_SIZE + 512 - 1) / 512))"
+
+dd if=/dev/zero of="$IMAGE" bs=512 count=0 seek="$IMG_SIZE_BLOCKS" >/dev/null 2>&1
+
+TRG_SIZE="$(file_length "$IMAGE")"
+CYLINDERS=`echo $TRG_SIZE/255/63/512 | bc`
+
+{
+    echo ,9,0x0C,*
+    echo ,,,-
+} | sfdisk -D -H 255 -S 63 -C $CYLINDERS $IMAGE >/dev/null 2>&1
+
+VATSTART=$(parted $IMAGE unit B print|grep "^ 1"|awk '{print $2}')
+VATSIZE=$(LANG=C fdisk -l ${IMAGE} 2>/dev/null|grep W95 |awk '{print $5}')
+
+mkdosfs -F 32 -C $IMAGE.vfat ${VATSIZE} >/dev/null 2>&1
+mcopy -i $IMAGE.vfat MLO ::MLO
+mcopy -i $IMAGE.vfat u-boot.bin ::u-boot.bin
+mcopy -i $IMAGE.vfat $uboot_kernel ::uImage
+mcopy -i $IMAGE.vfat $uboot_initrd ::uInitrd
+mcopy -i $IMAGE.vfat $uboot_script_image ::boot.scr
+
+dd conv=notrunc bs="${VATSTART%B}" if=$IMAGE.vfat of="$IMAGE" seek=1 >/dev/null 2>&1
+rm $IMAGE.vfat
+
+EXT3START=$(parted $IMAGE unit B print|grep "^ 2"|awk '{print $2}')
+dd conv=notrunc bs="${EXT3START%B}" if=$IMAGE.rootfs of="$IMAGE" seek=1 >/dev/null 2>&1
+
+rm -f "$IMAGE.rootfs" "$IMAGE.vfat" "$IMAGE.mtoolsrc" MLO u-boot.bin uImage uInitrd
+</pre>

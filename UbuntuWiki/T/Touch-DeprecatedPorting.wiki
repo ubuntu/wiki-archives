@@ -1,0 +1,593 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+{| class="wikitable"
+|-
+| <tablebgcolor="#F1F1ED" tablewidth="40%" tablestyle="float:right;font-size:0.9em;margin:0 0 1em 1em;"style="padding:0.25em;"><<BR>>
+|}
+
+== Work in Progress ==
+
+'''Attention:''' this tutorial is '''deprecated'''. A new porting guide will be written shortly and be availble at <nowiki>[[Touch-Porting]]</nowiki>
+
+=== TODO ===
+
+Android:
+* Describe how to customize the boot.img, to be compatible with the partition table of the ported device
+
+Ubuntu:
+* How to contribute/add the device specific udev rules to the lxc-android-config package
+
+=== Porting Notes ===
+
+Please add your notes here.
+
+==== Troubleshooting (janimo) ====
+
+* The device is in a bootloop or hangs on boot not showing up with adb shell: boot into recovery mode and adb pull /proc/last_kmsg to check the previous dmesg. Do not power off the device between the hang and booting into recovery as that likely leads to losing the ramconsole contents . Make sure you have proper permissions in the ramdisk and /init can start. Make sure you have a valid console=... argument on the kernel command line.
+
+* The device boots but no graphics shell shows up: Debug via adb shell. You can look in /var/log/syslog for general system logs in ubuntu, /home/phablet/.cache/upstart/ for user session logs and run /system/bin/logcat -d to dump the Android logs. Reasons for unity not starting: 
+
+** sensormanager has not started in Android (many Waiting for sensormanager... messages in logcat). Start it manually by running android-chroot and inside that Android shell run sensormanager. This is the symptom of an elusive bug that needs fixing.
+
+** EGL errors in the logs, likely the permissions on the GPU related device nodes are not allowing regular user access (see below for udev rules setup)
+
+==== w-flo's Notes ====
+
+These are random notes that I have sent to the <nowiki>[[https://lists.launchpad.net/ubuntu-phone/msg03398.html|mailing list]]</nowiki> about my experiences with porting flipped Ubuntu Touch to the Desire Z. Someone who is better at writing could probably incorporate them into the guide at the correct place. They might be useful while the porting guide is being updated.
+
+* There are apparently two different approaches for mounting the flipped images, and it seems like my port uses the old-style approach.
+* The android_build repository on phablet.ubuntu.com has all the required changes to create the android zip file. It downloads files for a generic initramfs and puts them in "out/target/product/devicename/ubuntu-root". I think that changes to those files are not automatically put back into the ramdisk. (I've added an additional step to repack the ramdisk after changing the ubuntu-root/ dir contents.) That ramdisk is then used to create boot.img instead of the cyanogenmod ramdisk (which is used for android-boot.img).
+* The "scripts/touch" file in the ramdisk needs to figure out the data partititon's device file name (like /dev/foo). It might fail for your device and cause the boot process to fail. I've hard-coded the device path for the Desire Z for now, maybe we can set this in the device config at build time later.
+* If the initramfs script has problems finding the data partition, then /usr/lib/lxc-android-config/update-fstab could have problems too.
+* /etc/init/lxc-android-boot.conf might be interesting as well.
+* The Ubuntu rootfs needs a udev rules file for your device. Check the /usr/lib/lxc-android-config/70-*.rules  files as an example. You can create that file by looking at the ueventd*.rc files for your device from canogenmod and transforming the /dev/ settings to udev syntax.
+You can create that file by invoking the following command while Ubuntu Touch is booted
+<pre>
+adb shell cat /var/lib/lxc/android/rootfs/ueventd*.rc|grep ^/dev|sed -e 's/^\/dev\///'|awk '{printf "ACTION==\"add\", KERNEL==\"%s\", OWNER=\"%s\", GROUP=\"%s\", MODE=\"%s\"\n",$1,$3,$4,$2}' | sed -e 's/\r//'
+</pre>
+
+Not all device node permissions may be covered by this. In particular if you have no graphics coming up and get EGL related errors in logcat, make sure you add a line allowing non-root rw access to the GPU device node.
+For OMAP/SGX devices the line is something like
+<pre>
+ACTION=="add", KERNEL=="pvrsrvkm", OWNER="root", GROUP="root", MODE="0666"
+</pre>
+ 
+* There are some requirements for the kernel config. For example, I had boot failures before I enabled  CONFIG_VT=y and CONFIG_VT_CONSOLE=y.
+
+* It's a good idea to check output of dmesg and /system/bin/logcat, and the contents of various log files in /var/log/upstart if there are problems.
+
+== Touch Developer Preview - Porting Guide 2.0 ==
+
+<nowiki>[[File:tablet_pictogram.png||align="left"]]</nowiki> We want to port Ubuntu Touch to all kinds of devices. If you have experience in porting code to Android devices or are generally knowledgeable in terms of porting, working with the Kernel and other core bits and pieces of a distribution, this might be interesting to you.
+
+Check out the list of <nowiki>[[..-Devices|devices]]</nowiki> to see what's currently being worked on.
+
+=== Disclaimer ===
+
+=== Differences with the Porting Guide 1.0 ===
+
+In the original porting guide, we had Android as the main OS, having Ubuntu separated in a container. We had that as our first solution as it's easier to just boot Android and bootstrap Ubuntu once Android is up and running (which was a base requirement for Touch). This architecture was traditionally called 'unflipped', and it's part of the raring and first saucy images we produced.
+
+As we continued developing the platform, more issues we found with such architecture, making it harder to improve the quality for the Ubuntu side (ueventd x udev, full control of the services, upgradability of the compat layer, etc). So to be able to further improve the Touch images, we decided to flip the systems, making Ubuntu as the main host, and separating Android in a container, getting us to what we call 'flipped' images.
+
+This is the main change for the Porting Guide 2.0, and at the following topics you'll learn everything that's needed to port Ubuntu Touch to what we call 'flipped'-like images.
+
+=== General ===
+
+To rapidly support a wide range of devices, our architecture reuses some of the drivers and hardware enablement available for Android.
+
+As a consequence, at the current images you'll find some of the Android services running at the device, separated in a lxc container, providing all the basic services needed for Ubuntu to run fully accelerated (media, graphics, modem, etc).
+
+For quick reference, these are the current components used from Android:
+* Linux Kernel (stock Android kernel provided by the vendor, with a few changes to support some extra features needed by Ubuntu, such as Apparmor)
+* OpenGL ES2.0 HAL and drivers
+* Media (stagefright) HAL, to re-use the hardware video decoders
+* RILD for modem support
+
+As Ubuntu is running as the main host on top of an Android kernel and the communication between the Android services and HAL happens via Binder, Sockets and libhybris.
+
+Other than the very basic services (needed to re-use the binary blobs already available), the rest is just pure Ubuntu goodness :-)
+
+=== Building the Ubuntu packages ===
+
+We expect the Ubuntu Touch packages won't need changes for new devices; the usual processes for contributing to Ubuntu apply, such as the SponsorshipProcess.
+
+Either way, you'll need the Ubuntu preinstalled image besides the one you're going to build with the instructions below. You can find the Ubuntu preinstalled images <nowiki>[[http://cdimage.ubuntu.com/ubuntu-touch/daily-preinstalled/|here]]</nowiki>.
+
+=== Building the Android pieces ===
+
+You can find all the needed Android git repositories at http://phablet.ubuntu.com/gitweb. This is basically a mirror of Cyanogen``Mod 10.1, but containing only the needed low level services used by Android (e.g. no Dalvik at all).
+
+For any Android related project at our git server, you'll find a branch named ''phablet-trusty''. This branch contains a static known git HEAD and the required changes needed for Ubuntu, including <nowiki>[[http://phablet.ubuntu.com/gitweb?p=CyanogenMod/android.git;a=blob;f=default.xml;hb=refs/heads/phablet-trusty|our custom Android manifest]]</nowiki>.
+
+==== Set up your development environment ====
+
+To support a wide range of devices, we decided to use Cyanogen``Mod as a base for the Android system. You could safely use AOSP, as we don't use a lot of the customizations and improvements done at the App/Java side, but it's easier with Cyanogen``Mod due the scripts and build procedures available for it.
+
+Everything we take from Android is just C/C++, so you'll notice that your Android build environment will be way smaller than when comparing to the traditional Android builds.
+
+You can set up your development environment by <nowiki>[[https://wiki.ubuntu.com/Touch/Building#Set_up_your_development_environment|Touch/Building]]</nowiki>
+
+==== Enabling a new device ====
+
+As we're using !CyanogenMod, we can easily take advantage of all the devices that are officially supported there.
+
+You can find codenames and devices by looking at http://wiki.cyanogenmod.org/w/Devices
+
+From the individual device wiki page, grab the git repositories that are specific to your device, and update your local `.repo/local_manifests/roomservice.xml` file including them, such as:
+
+Kernel
+Device specific
+
+As a result you should have something like:
+ <pre>
+kernel/[manufacturer]/[codename]
+device/[manufacturer]/[codename]}}}
+
+Where:
+`[manufacturer]` is the manufacturer for codename
+`[codename]` is the product's codename.
+
+It is possible that this structure is not followed as is the case for the Galaxy Nexus line from Samsung, where the codename is their base for the Galaxy's tuna.
+
+Also, depending on the device, other dependencies might be required in addition to device and kernel specific directories. Be sure to check the file cm.dependencies  available on your CM device specific repository (e.g. https://github.com/CyanogenMod/android_device_samsung_p3110/blob/cm-10.1/cm.dependencies), and include them all in your local manifest. As we’re using Cyanogen``Mod branches on github, we should specify for each entry  remote="github" and  revision="refs/heads/cm-10.1".
+
+In the end you should have something similar to the following (for HTC DNA):
+ {{{
+$ cat .repo/local_manifests/roomservice.xml
+<?xml version="1.0" encoding="UTF-8"?>
+<manifest>
+  <project name="CM10DNA/android_device_htc_dlx" path="device/htc/dlx" remote="github" revision="cm-10.1" />
+  <project name="CM10DNA/android_kernel_htc_dlx" path="kernel/htc/dlx-3.4" remote="github" revision="cm-10.1" />
+  <project name="CM10DNA/android_vendor_htc_dlx" path="vendor/htc/dlx" remote="github" revision="cm-10.1" />
+  <project name="CyanogenMod/android_device_htc_msm8960-common" path="device/htc/msm8960-common" remote="github" revision="cm-10.1" />
+</manifest>
+ }}}
+
+'''Remember''' that the above is just an example, it might not even reflect the same repos that are available at the gihub project, as that is updated quite frequently.
+
+Then to download all extra repositories, run the following command from the root directory:
+
+ {{{
+repo sync
+</pre>
+
+==== Retrieving the proprietary blobs from Android ====
+
+Ubuntu Touch Preview uses some pre-compiled binary drivers from the Android layer for rapid enablement of devices. These are referred to as binary or proprietary blobs, as their source code is not available for the build, and are included in binary form.
+
+Since we use AOSP as a base, for supported devices all you need to do is to download and extract and run as mentioned in the downloads from https://developers.google.com/android/nexus/drivers
+
+If porting for a device not available on AOSP and basing out of CyanogenMod, you can take advantage of it's `./extract-files.sh` script.
+
+{*} '''Tip''': you can alternatively extract these binaries from the image (which is essentially a `.zip` file containing, amongst others, these binary files), but flashing it first helps as you can see if CM is working properly in the device.
+
+To download Cyanogen``Mod 10.1 go to http://get.cm/.
+
+Once you have your Cyanogen``Mod 10.1 based rom running at your device, run the following command to extract all the needed data:
+ <pre>
+$ cd device/[manufacturer]/[codename]
+$ ./extract-files.sh}}}
+
+This command should copy the needed files to `vendor/[manufacturer]/[codename]`.
+
+==== Device changes ====
+
+===== Audio =====
+You need to write UCM mixer files and UCM is lacking good documentation, but it's the closest we have to a standard for setting up mixers on embedded devices right now.
+
+To get a two-minute crash course in UCM and how it's used in Ubuntu Touch - start by having a look in
+`/usr/share/alsa/ucm/apq8064-tabla-snd-card/` directory (shipped with `alsa-lib`). You'll need to create a similar directory for your device. You'll find the right directory name if you look in `/proc/asound/cards`.
+
+Second, look at `apq8064-tabla-snd-card.conf`. Rename and copy into your own UCM directory. If you're making a tablet image (that can't make voice calls), you can remove the !VoiceCall part (and the corresponding
+file).
+
+Third, look at the HiFi file. This is where all fun happens. Notice the device names, which are hardcoded into telepathy-ofono and need to match: "Speaker", "Earpiece" and "Headphone" for playback, plus
+"Handset" and "Headset" for recording.
+
+Fourth, if you need voice calls, also look at the VoiceCall file. Btw, the verb names "HiFi" and "VoiceCall" also need to match.) This is largely empty, because the mixer setup is handled by the Audio HAL, but
+there is a twist here that took a while to get right: For PulseAudio's UCM to work, it needs to open a PCM device. However, at the time where UCM tests this, the voice call is not yet set up. So, you might need to
+set up the mixer just a little, so that the PCM can open. (On desktops, PCM can always open, regardless of mixer state. This is not always true on embedded devices, that are using ASoC.) It's a bonus if you can find
+a PCM that actually plays back audio, because then you can get notification sounds while on the phone.
+
+===== Kernel =====
+As a requirement from the Ubuntu userspace, we need to add a few extra kernel configs that are usually not enabled by default for Android.
+
+====== Config ======
+
+You can find your kernel config at <code>kernel/[manufacturer]/[codename]/arch/arm/configs/ cyanogenmod_[codename]_defconfig</code>. Please double check that it is indeed the default config file name in <code>device/[manufacturer]/[codename]/*.mk</code> (look for the TARGET_KERNEL_CONFIG variable).
+
+You can run this tool to check if your config is up to date:
+
+ https://github.com/janimo/check_ubuntu_touch_kernel_config
+
+Extra configs that need to be added '''AT THE END OF THE CONFIG FILE SO THEY DO NOT GET OVERRIDEN'''
+
+ {{{
+CONFIG_SYSVIPC=y
+CONFIG_NAMESPACES=y
+CONFIG_UTS_NS=y
+CONFIG_IPC_NS=y
+CONFIG_USER_NS=y
+CONFIG_PID_NS=y
+CONFIG_NET_NS=y
+CONFIG_DEVTMPFS=y
+CONFIG_DEVTMPFS_MOUNT=y
+CONFIG_DEVPTS_MULTIPLE_INSTANCES=y
+CONFIG_FSNOTIFY=y
+CONFIG_DNOTIFY=y
+CONFIG_INOTIFY_USER=y
+CONFIG_FANOTIFY=y
+CONFIG_FANOTIFY_ACCESS_PERMISSIONS=y
+CONFIG_SWAP=y
+CONFIG_VT=y
+CONFIG_VT_CONSOLE=y
+</pre>
+
+Reasons:
+* `*_NS` to enable support for containers
+* `SWAP` because we're still using a swap file by default
+* Without `paranoid_network` disabled, the browser won't work correctly
+
+For debugging while hardware bringup you may also want to enable
+
+CONFIG_PANIC_TIMEOUT=5
+CONFIG_ANDROID_RAM_CONSOLE=y
+
+The Ubuntu boot image and initramfs may not work at first so these two help read /proc/last_kmsg in case of a boot loop due to a kernel panic from the recovery image - which should work already, being more or less standard Android based.
+
+====== Patches ======
+
+The patch that was needed when Ubuntu was running inside container is no longer needed in the flipped model where Android is in an LXC container.
+
+TODO: Describe the additional kernel patches missing here.
+
+====== AppArmor ======
+
+AppArmor is an integral part of Ubuntu Touch and is required to use click packages. Currently you are able to use Ubuntu Touch without enabling !AppArmor, but you will not be able to use click packages and the port will not be complete without backporting the !AppArmor v3 patchset to older kernels. !AppArmor has been backported to the following kernels in the Ubuntu archive already:
+* <nowiki>[[https://launchpad.net/ubuntu/+source/linux-maguro|linux-maguro (3.0.0)]]</nowiki>
+* <nowiki>[[https://launchpad.net/ubuntu/+source/linux-grouper|linux-grouper (3.1.10)]]</nowiki>
+* <nowiki>[[https://launchpad.net/ubuntu/+source/linux-mako|linux-mako (3.4.0)]]</nowiki>
+* <nowiki>[[https://launchpad.net/ubuntu/+source/linux-manta|linux-manta (3.4.0)]]</nowiki>
+
+Documentation on how to backport the AppArmor v3 patchset to older kernels can be found <nowiki>[[https://wiki.ubuntu.com/SecurityTeam/AppArmorForPhabletKernels|here]]</nowiki>.
+
+Once the AppArmor patchset is working, you will likely need to add hardware-specific AppArmor rules for your device. You'll know this is the case if when running an application it shows an AppArmor denial in /var/log/syslog (`tail -f /var/log/syslog | grep DENIED` is very handy when troubleshooting policy). To make this easier, packages can drop AppArmor snippets into /usr/share/apparmor/hardware/. An entry for graphics hardware will almost certainly be required for click packages to work on the device. As of Ubuntu 13.10, policy consults the following directories:
+* '''/usr/share/apparmor/hardware/graphics.d''': specific graphics hardware access. Used by the templates
+* '''/usr/share/apparmor/hardware/audio.d''': specific audio hardware access. Used by the audio policy group (due to the use of pulseaudio, this may not be needed for your device)
+
+Though any package can ship the policy, it makes sense for `lxc-android-config` to ship it since it also ships the udev rules. For example, if porting the HTC Desire Z (vision), you might ship the following:<pre>
+$ cat /usr/share/apparmor/hardware/graphics.d/htc-desire-z-vision
+## HTC Desire Z (vision)
+  /dev/kgsl-2d0 rw,
+  /dev/genlock rw,
+  /sys/devices/system/soc/soc0/id r,
+</pre>
+
+Typically you specify the path to the device followed by 'r' for read access or 'rw' for read and write access. Simple globs and AARE (AppArmor regular expressions) are also possible. See `man apparmor.d` for details. When developing your policy, be sure to run `sudo aa-clickhook -f` before running your app to regenerate the policy. Please see <nowiki>[[https://wiki.ubuntu.com/DebuggingApparmor#Fixing_profile_bugs|DebuggingApparmor]]</nowiki> for more information on how to debug AppArmor policy.
+
+You can test that !AppArmor is functioning correctly by:
+* viewing the output of the `aa-status` command
+* manually installing a click app doesn't show any !AppArmor errors (`sudo click install --force-missing-framework --user=$USER ./foo.click`)
+* launching the manually installed click application works
+* when running, the click application is confined as seen with `aa-status`. Eg (be sure there are two entries-- the first is that the profile is loaded and the second shows a particular pid is running under this profile):<pre>
+$ sudo aa-status|grep hello-world
+   ar.com.beuno.hello-world_hello-world_0.1
+   ar.com.beuno.hello-world_hello-world_0.1 (24622)
+</pre>
+* install/launch hello-world from the Ubuntu appstore and launch it via 'Installed applications'. It should run and `aa-status` should show it is confined
+* launch the twitter webapp via 'Installed applications' (preinstalled on the device, otherwise get from the Ubuntu appstore). It should run and `aa-status` should show it is confined
+
+While porting, it might be useful to disable !AppArmor:
+* system-wide: boot with apparmor=0
+* click: adjust the desktop file for the click package in ~/.local/share/applications/<click>.desktop to not use `aa-exec` and/or adjust /usr/share/upstart/sessions/application-click.conf to not use 'apparmor switch'
+
+'''IMPORTANT''': disabling !AppArmor for click packages in this manner means that you are disabling important security protections and allowing untrusted, unreviewed arbitrary code to run on your system. While this may be fine while developing the port, it is not enough to finish the port.
+
+===== Screen definition =====
+
+In order to provide a consistent layout across different screen sizes and resolutions we define a grid unit to be used by developers. This is set in:
+
+/etc/ubuntu-touch-session.d/hammerhead.conf
+
+For mako it is defined as:
+<pre>
+GRID_UNIT_PX=25
+QTWEBKIT_DPR=2.5
+</pre>
+For example GRID_UNIT_PX should be 27 for 1080p to be 40GU-wide. More information may be found in the description of <nowiki>[[http://design.ubuntu.com/apps/get-started/screen-sizes | resolution independence]]</nowiki> on the design site.
+
+==== Build changes ====
+===== vendor/.. and device/... =====
+
+Remove all unneeded android packages like FMApp.
+
+===== main.mk =====
+
+The main build file needs to be checked if updates are required to it to support new drivers or parts of the build not used before, it's path is: <code>build/core/main.mk</code>
+
+The part of interest are the <code>subdirs</code> included in the build and if special treatment for devices need to be made, i.e.; make sure the new vendor subdirs are added.
+
+This will eventually not be needed.
+
+===== Brightness indicator =====
+Due to the incorrect default permission at the sys brightness file, a change is needed to allow any user to change the display brightness. We need to `chmod` it to the proper permissions.
+
+You can usually find the permission settings needed at the device init file, which is usually available under `device/[manufacturer]/[codename]/init.[codename].rc`.
+
+The changes should look like the following:
+ {{{#!highlight diff
+device/samsung/p3100$ git diff
+diff --git a/init.espresso.rc b/init.espresso.rc
+index cae5772..4e7df71 100755
+--- a/init.espresso.rc
++++ b/init.espresso.rc
+@@ -224,6 +224,7 @@ on post-fs-data
+
+# Change permission for backlight and lcd
+ 	chown system system /sys/class/backlight/panel/brightness
++	chmod 0666 /sys/class/backlight/panel/brightness
+ 	chown system radio /sys/class/lcd/panel/lcd_type
+ 	chown system radio /sys/class/lcd/panel/lcd_power
+ }}}
+
+=== The image ===
+
+==== Building the image ====
+
+Example for the mako target.
+ <pre>
+. build/envsetup.sh
+lunch aosp_mako-userdebug 
+make -j8 # Or any other amount of threads
+</pre>
+
+Sourcing the envsetup.sh file adds lunch and other functions useful when working with the Android source tree and building from scratch. See http://wiki.cyanogenmod.org/w/Envsetup_help
+
+Calling lunch with no arguments will present a list of valid target names and you can pick one.
+
+At the end of the build process a couple of img files will be generated in `out/target/product/<codename>`, you can use rootstock to easy push your device, described bellow assuming trusty
+
+<pre>
+bzr branch lp:project-rootstock-ng [rootsock_trunk_path]
+ROOTFS="utopic-preinstalled-touch-armhf.tar.gz"
+wget -c "http://cdimage.ubuntu.com/ubuntu-touch/daily-preinstalled/current/$ROOTFS" -O "$OUT/$ROOTFS"
+$ROOTSTOCK_DIR/rootstock-touch-install "$OUT/$ROOTFS" "$OUT/system.img"
+</pre>
+
+==== Debugging ====
+===== Initrd =====
+If you encounter initrd issues while booting you can add to your kernel boot arguments the following line "break=top" or replace "top" with another of the stages below.
+{{{ 
+ top
+modules
+premount
+mount
+mountroot
+bottom
+}}}
+This will open a adb shell and pause execution of the initrd so you can look around. 
+Unlike break normal behavior on dekstop you cannot resume execution by exiting the adb shell.
+
+Also you can add the <code> debug </code> word to the kernel boot argument this will save a log in /run/ with the progress of the initrd booting.
+
+==== Working in the environment ====
+
+===== Networking =====
+
+The simplest solution given that you have a UI available is to use the networking indicator on the device.  The network indicator currently supports basic Wi-Fi connections only ( eg. No security, WEP, WPA Personal ).
+
+An alternate means of configuring networking is via the '''phablet-network-setup''' tool which is part of the phablet-tools package.  This script can be used to copy an active Network Manager system settings file from an Ubuntu Desktop ( >= 12.04 LTS ) to the device.  It also has some extra options which cause the tool to install network-related packages such as iw and openssh-server.
+
+If you have difficulty enabling the wifi drivers on your platform, you can still get network on your phone with reverse USB tethering over adb. See <nowiki>[[..-AdbNetworking | AdbNetworking]]</nowiki> for details.
+
+===== Copying files to the phone =====
+
+Prerequisites:
+
+This is required if you are not working from the Android source tree, as `fastboot` and `adb` should be built as part of system build for the host part, they should be in your path and located here:
+
+<pre>
+out/host/linux-x86/bin/
+</pre>
+
+If not installing a personal build and not using trusty, make sure you have `ppa:phablet-team` added, if not
+
+<pre>
+add-apt-repository ppa:phablet-team/tools
+</pre>
+
+Then make sure to install `adb` and `fastboot`. You can do so by installing the following packages:
+
+<pre>
+apt-get install android-tools-adb android-tools-fastboot
+</pre>
+
+To get packages to your phone's chroot execute the following from your desktop:
+
+<pre>
+adb root
+adb push [filename|directory name] [ubuntu path]
+</pre>
+
+Then to access these files on the phone follow the shell section below
+
+===== Screen Pixel Ratio =====
+
+We have 2 important variables that define the pixel ratio behaviour of the system and the applications, ie. how they visually scale. Look at `/usr/bin/ubuntu-session` for `GRID_UNIT_PX` and `QTWEBKIT_DPR`.
+
+When adding the correct pixel ratio for a new port, first use the method below to calculate the desired `DPR`, and create a device specific config file which ubuntu-session can load at run time.
+
+The number of pixels per grid unit (`GRID_UNIT_PX`) is specific to each device. Its goal is to make the user interface of the system and the applications of the '''same perceived size''' regardless of the device they are displayed on.
+It is primarily dependent on the pixel density of the device’s screen and the distance to the screen the user is at. That second value cannot be automatically detected and is based on heuristics. We assume that tablets and laptops are the same distance and that they are held at 1.235 times the distance phones tend to be held at.
+
+A reference device has been chosen from which we derive the pixels per grid unit for all other devices. The reference device is a laptop with a 120 ppi screen and the pixels per grid unit is set to 8 px/gu.
+
+{| class="wikitable"
+|-
+| '''Device'''
+| '''Form Factor'''
+| '''Resolution'''
+| '''Density'''
+| '''Pixels / grid unit'''
+|-
+| ‘Normal’ Density Laptops
+| Desktop
+| *
+| 96-150
+| 8 px/gu
+|-
+| ‘High’ Density Laptops
+| Desktop
+| *
+| 150-250
+| 16 px/gu
+|-
+| Samsung Galaxy Nexus
+| Phone
+| 1280x720
+| 316 ppi
+| 18 px/gu
+|-
+| LG Nexus 4
+| Phone
+| 1280x768
+| 320 ppi
+| 18 px/gu
+|-
+| Samsung Nexus 10
+| Tablet
+| 2560×1600
+| 299 ppi
+| 20 px/gu
+|-
+| Asus Nexus 7
+| Tablet
+| 1280x800
+| 216 ppi
+| 12 px/gu
+|-
+| Asus Transformer
+| Tablet
+| 1280x800
+| 149 ppi
+| 10 px/gu
+|}
+
+There is no way for the system to dynamically identify the correct pixel ratio for the device, which as a side effect things might be bigger/smaller than expected. For each device you will have to visually verify the quality of the result and adjust the number if necessary. If unsure, send screenshots and screen specifications of the device to the Canonical design team.
+
+To create your device specific configuration, first identify the '''ro.product.device''' android property used by your device (check the ''/system/build.prop'' file from your port or from the original Android image). Then with the desired DPR, create a file at ''/etc/ubuntu-session.d'' adding your custom GRID_UNIT_PX and QTWEBKIT_DPR variables, also specifying the default form factor you want, such as:
+<pre>
+$ cat /etc/ubuntu-session.d/manta.conf
+GRID_UNIT_PX=20
+QTWEBKIT_DPR=2.5
+FORM_FACTOR="tablet"
+</pre>
+
+===== Shell =====
+
+To obtain a `chroot shell` run these command from your desktop <pre>
+adb root
+adb shell
+ubuntu_chroot shell}}}
+
+If you see a prompt that looks like this you are successfully connected to the phone's chroot shell.{{{
+root@localhost:/#}}}
+
+Files that were copied into `/data/ubuntu` above will show up in this root level directory. Packages can be installed using `dpkg -i`, or `apt-get install`.
+
+====== SSH ======
+To enable ssh run
+
+{{{
+adb shell start ssh
+</pre>
+
+To make it start on every boot, run
+
+<pre>
+adb shell setprop persist.service.ssh true
+adb reboot
+</pre>
+
+You can use adb port forwarding to easily connect to the container via SSH over USB.  To do so, run the following commands:
+ <pre>
+adb forward tcp:8888 tcp:22
+ssh phablet@localhost -p 8888}}}
+
+====== phablet User Session ======
+In order work with applications in the user session, it's necessary to run <code>su - phablet</code> after entering the chroot.
+
+====== Shutdown of phone ======
+
+Currently the power button does not work with recent kernels, so one of the following options must be run:
+* remove the battery and replace it
+* run "reboot -p" from the adb shell
+ {{{
+adb root
+adb shell reboot -p
+</pre>
+
+=== Ubuntu pieces ===
+
+The Ubuntu container is put together using Ubuntu packages, which either come from the official Ubuntu archive or a personal package archive (PPA). The <nowiki>[[http://packaging.ubuntu.com/|Ubuntu Development guide]]</nowiki> will tell you more about modifying source packages and submitting them to Ubuntu for inclusion.
+
+If you follow the following articles you should have a better idea of how to fix bugs in Ubuntu and which tools to use:
+* <nowiki>[[http://packaging.ubuntu.com/html/introduction-to-ubuntu-development.html|Introduction to Ubuntu development]]</nowiki>
+* <nowiki>[[http://packaging.ubuntu.com/html/getting-set-up.html|Getting Set Up]]</nowiki>
+* <nowiki>[[http://packaging.ubuntu.com/html/fixing-a-bug.html|Fixing a bug in Ubuntu]]</nowiki>
+
+Images are currently built in the Canonical data center and they are based on `saucy`.
+
+When setting up `pbuilder` in "Getting Set Up", you might want to use something like this: {{{
+pbuilder-dist saucy armhf create}}}
+to set up a builder on a foreign (non-armhf) architecture. To build a source package, you would then use something along the lines of: {{{
+pbuilder-dist saucy armhf build happyhello_0.1.dsc}}}
+
+This creates a native build chroot using `qemu-arm-static`; some programs may fail in this environment.  It is also possible to cross-build some packages, which is still somewhat experimental but can be used at least for many core packages; see CrossBuilding for details.
+
+The article to <nowiki>[[http://packaging.ubuntu.com/html/fixing-a-bug.html|fix a bug in Ubuntu]]</nowiki> and <nowiki>[[http://packaging.ubuntu.com/html/fixing-a-bug-example.html|the tutorial]]</nowiki> also cover how to get a fix sponsored into Ubuntu.
+
+=== Contributing back ===
+
+Images can be published on `cdimages.ubuntu.com`, if they can be built reliably and automatically and all the bits and pieces are redistributable. The images are currently built from an internal Jenkins instance and are manually copied to cdimages.ubuntu.com. In the next few days, we'll be working on moving away from this internal instance and fully automate the build process.
+
+If you have any questions about the images or would like to get images added, <nowiki>[[..-Contribute#Discuss|ask us on the mailing list]]</nowiki>.
+
+==== patches ====
+
+Anything you patch needs to be signed off and have a patch created for which needs to be submitted to ubuntu-phone@lists.launchpad.net
+
+If it’s directly related to the supported devices it will be accepted after review. Patches are accepted for all components. If a device is enabled it does not mean it will be part of the nightlies.
+
+Patches will be reviewed by Sergio Schvezov and Ricardo Salveti (rsalveti) until the gerrit instance is in place.
+
+Let us know as well in case you'd like a git repository that is part of CM to be available at phablet.ubuntu.com. Currently we just added the minimal needed for the Nexus family, but that might change depending on the device used.
+
+==== Merge requests ====
+
+At any point time if you find a bug and have a fix don’t hesitate to create an MR against the specific branch.
+
+The project list lives under the phablet umbrella, looking at the list there you can find your project and review the code and or provide fixes at your discretion
+
+=== Suggested further reading ===
+
+* http://wiki.cyanogenmod.org/w/Doc:_porting_intro
+
+=== Getting in touch ===
+
+If you got lost somewhere, you found a bug or need some help, we're happy to help you. Ubuntu <nowiki>[[Touch]]</nowiki> is put together by a community of many, who are eager to work together on this.
+
+Simply:
+* join us on '''IRC''' in `#ubuntu-touch` on irc.freenode.net and/or
+* join our '''mailing list''' by
+## joining the <nowiki>[[https://launchpad.net/~ubuntu-phone|ubuntu-phone team]]</nowiki> on Launchpad and
+## enabling the team mailing list at https://launchpad.net/~/+editemails

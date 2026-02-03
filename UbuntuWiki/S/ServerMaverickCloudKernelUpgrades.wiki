@@ -1,0 +1,204 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+* '''Launchpad Entry''': UbuntuSpec:server-maverick-cloud-kernel-upgrades
+* '''Created''': 2010-05-20
+* '''Contributors''': Scott Moser
+* '''Packages affected''': linux-ec2
+
+=== Summary ===
+
+=== Release Note ===
+* When Ubuntu 10.10 UEC images are run on EC2 or on UEC their kernel updates can be applied via 'apt-get upgrade' and reboot.
+
+=== Rationale ===
+EC2 (and thus UEC) instances are not able to maintain which kernel is booted.  This is different from other hardware installations where the operating system is able to install a new kernel, update the bootloader, and boot into a new instance.  It is a common point of confusion for users of EC2.
+
+Depending on what we can achieve in this spec, we would like to either:
+* give clear instructions on what can or can't be done
+* actually service the kernel from the operating system like other Ubuntu installations.
+
+=== User stories ===
+* Jamie did a 'apt-get update && apt-get upgrade' on her Ubuntu 10.10 instance running on EC2.  The update pulled a new kernel, and she rebooted.  Upon reboot, the old kernel was running.  She expected the new kernel to be booted.
+* Same story above with 'UEC'
+* Same story above with EC2 EBS root instance.
+
+=== Assumptions ===
+
+=== Design ===
+=== Implementation ===
+Overall goal here is to have a functional grub configuration that is updated on kernel installation inside both EC2 and UEC instances.  That config will be read by a grub bootloader separate from the image itself.
+
+When running in EC2, the bootloader used will have to be grub-0.97.  Under UEC, it is expected to use grub-pc.
+
+In both UEC and EC2, a "kernel" is loaded by the hypervisor.  This does not have to be a traditional linux kernel, but can instead be a bootloader.  We are provided with grub-0.97 bootloaders on EC2 that are hard coded to look at (hd0,0)/boot/grub/menu.lst .  To keep a similar path between UEC and EC2, we expect to provide a grub2 bootloader to be loaded via 'kvm -kernel' that will be hard coded to read (hd0,0)/boot/grub/grub.conf.
+
+==== Expected Path ====
+* During image build populate /boot/grub/menu.lst and /boot/grub/grub.cfg .  
+** for grub2, make it think that it is installed properly on (hd0) and the root filesystem is the first disk, first partition. (hd0,0) (and ready to go such that subsequent 'update-grub' will function properly.
+** for grub1, create 'grub-legacy-ec2' package as binary package out of cloud-init source.  It will write/maintain /boot/grub/menu.lst, and is called from kernel install post hooks.
+* provide a package built as binary package from cloud-init source containing 'grub-update-xen' or some similarly named binary.  That would be tasked with writing / updating menu.lst for the EC2 case.  It would need to be called during image creation and during kernel install/uninstall.
+* via mechanisms already in place (postinst.d/) both update-grub-legacy-ec2 and update-grub will be called on kernel upgrade.
+* Be as "normal" as possible so that this is not broken by future changes to grub or to kernel.
+* On UEC provide a 'kernel' that is a grub2 multiboot image that is configured to chainload to (hd0,0) either via loading (hd0,0)/boot/grub/core.img or relying on having enough modules present (possibly with memdisk) to load the expected update-grub configurations .  
+
+==== General Notes ====
+* The UEC image that is created is a partition image.  It is a raw ext4 filesystem in a file.  That file is then uploaded to EC2 or UEC, and at point prior to instantiation it is turned into a full disk, with the uploaded image as the first partition.
+* So far, the contents of the filesystems of the images that we make available to UEC have been bit for bit identical to those in EC2.  The only difference is that EC2 images have been re-sized to contain a 10G root filesystem.  The UEC images available for download are of a 1.4G filesystem.
+* The images are built using vm-builder (which utilizes debootstrap)
+* /boot/grub/grub.cfg or /boot/menu.lst will need to be populated inside the filesystem that is loaded, as opposed to created on first boot, as the loader will the respective files to make that first boot.
+* The kernel hooks into update-grub via via /etc/kernel-img.conf (postinst_hook = 'update-grub').  Per cjwatson, there is a debian bug to do that instead via /etc/kernel/postinst.d/ .  For now, the image build process will need to set that.
+  postinst_hook = update-grub
+  postrm_hook   = update-grub
+* post-installation hooks (currently in vmbuilder-uec-fixups) will set /boot/grub/grub.cfg to function properly for UEC and /boot/grub/menu.lst to function properly for <nowiki>[[http://bazaar.launchpad.net/~ubuntu-on-ec2/vmbuilder/automated-ec2-builds/revision/136|ec2]]</nowiki>.
+* make image in maverick with: <pre>
+cat > booter.cfg <<EOF
+set root='(hd0)'
+if [ -s /boot/grub/core.img ]; then
+   echo "multibooting (hd0)/boot/grub/core.img"
+   multiboot /boot/grub/core.img
+   boot
+fi
+set root='(hd0,1)'
+if [ -s /boot/grub/core.img ]; then
+   multiboot /boot/grub/core.img
+   echo "multibooting (hd0,1)/boot/grub/core.img
+   boot
+fi
+
+echo "failed to find a core.img to multiboot to"
+sleep 2
+set root='(hd0)'
+chainloader +1
+boot
+EOF
+grub-mkimage --output=grub-loader-i386.img --config=booter.cfg biosdisk part_msdos ext2 serial test  multiboot sleep echo chain -O i386-pc
+</pre>
+
+==== EC2 Notes ====
+* EC2's hypervisor is xen.
+* The bootloader that we're given in EC2 is grub-0.97 (pv-grub).  We do not have the option to use grub-pc there.
+* inside an ec2 guest, 'sudo fdisk -l /dev/sda' shows no output, /proc/partitions contains no 'sda' entry, and there is no /dev/sda or /dev/disk/by-id.  This is probably "standard xen guest" behavior. <pre>
+  major minor  #blocks  name
+    8    1   10485760 sda1
+    8    2  156352512 sda2
+    8    3     917504 sda3
+</pre>
+* due to lack of by-id, dpkg-reconfigure grub-pc does not generate a list of disks/partitions to install to.
+* I have not been able to get grub-install or update-grub to function inside a ec2 guest.  Nothing says this needs to be functional though.  Attempting to do so fails like below: <pre>
+$ sudo grub-install /dev/sda --modules ext4
+$ /usr/sbin/grub-probe: error: cannot find a GRUB drive for /dev/sda1.  Check your device.map.
+
+</pre>
+
+==== UEC Notes ====
+* UEC's hypervisor is kvm.
+* So far I've investigated using grub-pc as the bootloader for UEC.  This was fairly easy to do using 'grub-mkimage' and fixing a bug (Bug:598649).  This seems to be the most forward-supportable path.
+* 'fdisk -l' and /proc/partitions have 'sda' entries.  Generally this looks more like a "normal x86/x86_64" guest.
+* 'sudo grub-install /dev/sda && sudo grub' happily function.
+
+==== Hurdles / Questions ====
+* How should I best populate /boot/grub/grub.conf during image build (ie, what would normally be done by grub-install and update-grub)
+* [DONE] How should I best populate /boot/grub/menu.lst: legacy-grub-ec2
+* [DONE] How should I insert myself into the kernel-installation hook 
+** '''/etc/kernel/postinst.d/''' installed by grub-legacy-ec2.
+** modify /etc/kernel-img.conf ?
+** dpkg trigger on /boot/ ?
+** dpkg diversion of /usr/sbin/update-grub
+* How can I avoid update-grub (from grub2) failing to run when called via kernel-installation or kernel-hook due to "cannot find a GRUB drive" or the like. (''Note:'', update-grub itself succeeds and grub.cfg is created, even though /boot/grub/ is not completely populated.  Likely this is not an issue)
+* <nowiki>[[Bug:599840|Bug 599840]]</nowiki> grub2's update-grub will add xen kernels to the grub2 grub.conf file, possibly booting one of them.
+* Once we start using grub or grub2 to select which kernel is booted, we will get ramdisks being used again. (ramdisks were dropped from <nowiki>[[UbuntuSpec:ServerLucidCloudKernelRamdisk|lucid ec2 and uec images]]</nowiki>).  We may have to look into disabling the ramdisks somehow.  Ramdisks can controlled via kernel-img.conf 'ramdisk' attribute.  Alternatively, it might be better to dpkg-divert update-initramfs with a wrapper that disables ramdisks based on criteria (such as matching "-ec2" or "-virtual").  See <nowiki>[[http://irclogs.ubuntu.com/2010/07/09/%23ubuntu-kernel.html|conversation in ubuntu-kernel]]</nowiki> between smoser, BenC.  The package that does the dpkg-divert would be cloud-specific and not recommended for general use.  When this occurs we will also have to modify update-grub such that LABEL= and UUID= is not given as the root device.
+* Can we get '--once' function in grub 1. [raised question to amazon]. Opened Bug Bug:605910.
+* grub-reboot in grub 2 ?
+* per cjwatson, the installer writes update-grub to kernel-img.conf.  The image creation script will also need to populate this. file, writing <pre>
+postinst_hook = update-grub
+postrm_hook   = update-grub
+</pre>
+
+==== Random Thoughts ====
+* It might be possible to create the grub loader (that is passed to kvm -kernel) to have logic like the following.  This possibly make the grub2 boot path less dependent upon the provided grub loader:
+** try to chainload from (hd0).  if that fails, continue <<BR>>That will not be present on the first boot, but on subsequent boots, after an 'update-grub' has been triggered via kernel install (or possibly first-boot) it could be present.
+** try to load /boot/grub/grub.cfg. if that fails, continue<<BR>>That should work initially, but it is possible it would fail with more lavish grub.cfg files that used newer modules not present in the loader.
+** try to load /boot/grub/core.img
+* I've tried to seed device.map with the "right" values on ec2, but the following fails before writing a grub.cfg. <pre>
+$ sudo sh -c 'printf "%s\t%s\n%s\t%s\n" \
+   "(hd0)" /dev/sda "(hd0,0)" "/dev/sda1" > /boot/grub/device.map'; 
+$ sudo update-grub
+Generating grub.cfg ...
+/usr/sbin/grub-probe.real: error: cannot find a GRUB drive for /dev/sda1.  Check your device.map.
+</pre>
+* We need to get grub-2 grub.cfg to ignore -ec2 kernels (at least when running under xen).
+* We need to get grub-1 menu.lst to ignore -virtual kernels.  This, however is possibly not true long term.  John is hoping to get <nowiki>[[UbuntuSpec:kernel-maverick-pv-ops-ec2-kernel-virtual kernels functional on ec2]]</nowiki> and eventually we'd drop -ec2 all together.  If this doesn't happen in maverick, it might happen in maverick+1.
+
+==== Migration ====
+
+The one migration path that we would hope to support would be an upgrade from a 10.04 LTS EBS image to 10.10.  It is expected that this should be achievable via the normal 'do-release-upgrade'
+
+=== Test/Demo Plan ===
+The following test cases should apply apply:
+* Boot an instance-store or ebs instance, upgrade the kernel, reboot, expect the new kernel to be booted.
+
+=== other info ===
+* <nowiki>[[http://bazaar.launchpad.net/~ubuntu-on-ec2/ubuntu-on-ec2/ec2-publishing-scripts/annotate/head:/kernels-pv-grub-hd0-V1.01.txt|EC2 grub AKIs]]</nowiki>
+* <nowiki>[[http://aws.typepad.com/aws/2010/07/use-your-own-kernel-with-amazon-ec2.html|Amazon announcement]]</nowiki>
+
+=== BoF agenda and discussion ===
+<pre>
+If you accept the limitation that the guest OS cannot directly modify its kernel, then we can ease the pain and confusion for the user on this topic:
+* When the desktop user installs a new kernel via upgrade, they are notified that they need to reboot.  I'm not sure if there is similar functionality in the server install.  We could utilize similar functionality to tell the user what their options are, even providing cut and paste command lines for ebs volumes.
+
+If you choose not to accept that limitation, the following are some things that could be done to address it directly:
+* ksplice : we probably should make sure that ksplice works in kvm and linux-ec2 kernels.  I would expect that it would work out of the box for kvm, but that the xen kernel might throw some hiccups in.
+* kboot / kexec: Ubuntu could register kboot kernels and ramdisks that functioned on ec2 or provide images that function in kvm.  Then, the kernel and ramdisk that were registered with the image would provide nothing more than a bootloader.  Per jjohansen, the xen patches conflict with the kexec function of the kernel.  Thus, in order to make this an option, we may need to have pv_ops kernels, rather than xen kernels.
+* I just read an article about gpxe, and wonder if it might be possible to utilize this (or or other) bootloader as a 'kernel' in ec2.
+* Actually modify UEC to support "full virt", where instead of loading a kernel, it would let the bootloader installed in the image take over.  This may cause some confusion on ec2 (ie, if grub were in the image)
+
+Other topics:
+ - kboot (smoser's pipe dream of guest managed kernels).  kboot depends on kexec, and kexec is incompatible with xen kernels.  That said, John hopes to try again with pv_ops kernels on ec2.
+
+=== Kernel Goal for Maverick ===
+* Single, merged kernel for both EC2 and Server
+   - with working kexec
+     - current xen patchset is incompatible with kexec
+   - working pv_ops
+   - could get to kboot eventually
+   - kernel team wants to drop the xen patchset if possible
+   - needs something that boots and works in every zone
+* Flavours are easier to maintain for the kernel team than a different top level tree
+
+=== Motivation ===
+* Why is upgrading your instance's kernel important at all?
+* So what if you have to kill your instance and start a new one?  That is the cloud model.
+** ebs root volumes gives you persistent storage and users of that could benefit from this
+* For S3-backed instances, applying kernel security updates is the main driver
+
+=== Amazon ===
+* Will Amazon even allow guests servicing their own kernel?  Possibly against ToC?
+** Amazon's concerns:
+*** Security
+*** Stability
+** Bad guest kernels can take down the hosts
+* Will discuss this in advance with Amazon before dedicating development effort on our part
+** Might require modifications to their Xen kernels (?)
+
+=== UEC ===
+* Even if Amazon doesn't allow this, we could enable it for UEC/Eucalyptus
+* Some admins simply want to update their guest kernels
+* kexec (and kboot) should be doable inside of KVM
+** see also pygrub
+
+=== ksplice ===
+* Would be really nice to apply security patches without rebooting (and solve that piece of this problem)
+* However ksplice support in ec2 kernels (if feasible), would move the ec2 kernel further from the distro kernel
+</pre>
+
+----
+CategorySpec

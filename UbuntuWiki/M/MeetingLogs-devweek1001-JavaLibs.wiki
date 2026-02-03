@@ -1,0 +1,213 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+=== Dev Week -- Java libraries packaging -- ttx -- Tue, Jan 26 ===
+UTC
+{{{#!IRC
+[16:00] <ttx> Let's get started !
+[16:00] <ttx> My name is Thierry Carrez, and I'm a member of the Ubuntu Server team.
+[16:01] <ttx> This session will be about the packaging of Java libraries.
+[16:01] <ttx> It assumes you already know the basics of Debian packaging and want to learn the specificities of Java library packaging.
+[16:01] <ttx> We'll first see some basics about Java libraries and how they fit in Debian packaging
+[16:01] <ttx> Then the java-specific issues we need to solve in our packaging work
+[16:01] <ttx> Then we'll see the rules of java library packaging...
+[16:02] <ttx> And we'll look at a few examples, in increasing order of complexity.
+[16:02] <ttx> At the end of each section we'll do a quick Q&A...
+[16:02] <ttx> Questions should be asked in #ubuntu-classroom-chat and will be relayed here.
+[16:02] <ttx> OK, let's start !
+[16:03] <ttx> == Java libraries basics ==
+[16:03] <ttx> Java is an object-oriented language, so it makes use of object classes.
+[16:03] <ttx> Those classes can be grouped inside class libraries, and shipped in a .jar file.
+[16:03] <ttx> A JVM runs with a classpath that defines where classes can be found, and a classpath can point to JAR files.
+[16:03] <ttx> Those JAR files are usually shipped together with the program that uses them.
+[16:04] <ttx> But that results in code duplication, i.e. the same JAR file can be found in several packages.
+[16:04] <ttx> That's bad, because bug fixes (and security fixes) cannot be applied once and for all.
+[16:04] <ttx> In Linux distributions, we want to share the common code across applications, so we want to package Java libraries separately.
+[16:04] <ttx> We follow a few rules, defined in Debian Java policy
+[16:04] <ttx> http://www.debian.org/doc/packaging-manuals/java-policy/x105.html
+[16:05] <ttx> Binary library packages are named libXXX-java. A fictional library called "hello" would be provided by a libhello-java package.
+[16:05] <ttx> They install versioned JAR files in /usr/share/java (hello-1.0.jar) and a unversioned link should point to it
+[16:05] <ttx> /usr/share/java/hello.jar -> /usr/share/java/hello-1.0.jar
+[16:06] <ttx> Note that without installing a package and unzipping the JAR file, it can be difficult to tell exactly which classes it provides
+[16:06] <ttx> So finding where a given class might be shipped would involve installing all the Java library packages and unzipping all the JARs that the distribution contains...
+[16:06] <ttx> Fortunately I did that for you and published java-Contents.gz files that contain all classes in all jars in all packages !
+[16:06] <ttx> https://wiki.ubuntu.com/JavaTeam/JavaContents
+[16:07] <ttx> So finding a given class in karmic is just a matter of downloading the karmic-java-Contents.gz file...
+[16:07] <ttx> and do a "zgrep the.class.name karmic-java-Contents.gz"
+[16:07] <ttx> OK, questions so far ?
+[16:08] <cjohnston> < LumpyCustard> *QN: how often is this file updated?
+[16:08] <ttx> I usually release it after each release
+[16:08] <ttx> but you can regenerate it at will
+[16:09] <ttx> the code is provided in the page I linked to.
+[16:09] <ttx> Takes several hours, btw :)
+[16:09] <cjohnston> < mscahill> QUESTION: this contains all java classes contained in which repository? main? universe and main?
+[16:09] <ttx> main universe, multiverse
+[16:09] <cjohnston> < luckyduck> QUESTION: how are the classes/jars added to the classpath? is that done by the ubuntu java env. or the startup scripts of packages?
+[16:09] <ttx> the component is listed on each line
+[16:09] <ttx> so you can filter output to only main packages if you want
+[16:10] <ttx> startup scripts and packages usually take care of setting up the classpath for a given app
+[16:10] <ttx> luckyduck: ^
+[16:11] <ttx> Let's move on :)
+[16:11] <ttx> == Java-specific packaging issues ==
+[16:11] <ttx> The main issue with Java packaging is that in Debian packaging we need to build everything from source...
+[16:11] <ttx> while most Java programs just build from already-built libraries shipped directly with their source
+[16:12] <ttx> So we need to first make sure all those build-time libraries are already properly packaged.
+[16:12] <ttx> And we also often need to patch the build system so that it uses the shared libraries in /usr/share/java instead of what it is used to.
+[16:12] <ttx> Another issue is that Java "compiling" (which really is bytecode generation) generally requires the presence of a lot of Java libraries
+[16:13] <ttx> And not all of them are already packaged. A given library might need 5 missing libraries, which in turn would require 10 others...
+[16:13] <ttx> So packaging a seemingly simple Java stack can quickly turn into an exponential packaging game.
+[16:13] <ttx> The last issue is that we provide a shared library set, with given version numbers. However, the library APIs can change even in minor releases...
+[16:14] <ttx> And since Java software usually conveniently ships with its own version of the library, it doesn't care so much about staying compatible with the latest version.
+[16:14] <ttx> Software A can require libhello-java>=2.1.14, while library B won't compile with libhello-java>=2.1...
+[16:14] <ttx> We usually patch one to be compatible with the others, but that can quickly become a complicated game.
+[16:14] <ttx> Questions, before we really start packaging ?
+[16:15] <cjohnston> < LumpyCustard> QUESTION: Does building with Maven make this difficult? <-- this can be answered later if you like!
+[16:15] <ttx> LumpyCustard: yes, maven makes it even more difficult
+[16:15] <ttx> LumpyCustard: we'll come back to that later, but maven actually helps software to pick a very specific JAR version
+[16:16] <ttx> rather than encouraging the use of the latest
+[16:17] <ttx> OK, let's start packaging.
+[16:17] <ttx> == Packaging libraries ==
+[16:17] <ttx> Here are a few debian/control rules that apply to Java libraries:
+[16:17] <ttx> - Section should be "java"
+[16:17] <ttx> - You should "Build-depends" on default-jdk
+[16:18] <ttx> - The library binary package should "Depends" on default-jre-headless | javaN-runtime-headless
+[16:18] <ttx> (replace N by the minimum level of Java needed)
+[16:18] <ttx> Anticipating the question, how do I figure that out ? Looking at the level of the target Java code in the build system usually gives a clue:
+[16:18] <ttx> target=1.6 means you should use "default-jre-headless | java6-runtime-headless" -- that's the default for code generated using default-jdk
+[16:19] <ttx> target=1.5 -> "default-jre-headless | java5-runtime-headless"
+[16:19] <ttx> target=1.4 -> "default-jre-headless | java2-runtime-headless"
+[16:19] <ttx> When starting to package a library, you must investigate what build system it uses.
+[16:20] <ttx> If there is a "build.xml" file, then it probably uses "ant", which is like a Java-oriented "make".
+[16:20] <ttx> The Makefile is called build.xml and contains targets (in XML) that you can call with ant <target>.
+[16:20] <ttx> Sometimes there is no build system.
+[16:20] <ttx> Sometimes, it uses maven, which is a complex build/integration system that handles both build rules and dependency management
+[16:21] <ttx> Next step is to look at build dependencies. It's not always obvious which libraries are required for compilation.
+[16:21] <ttx> You can look into the README, look into the build.xml, see if any .jar files are shipped withing the source...
+[16:21] <ttx> Otherwise just try to compile it, it will fail with ClassNotFound errors... and use java-Contents.gz to find where those classes live.
+[16:22] <ttx> Questions, before we move on to practical examples ?
+[16:23] <ttx> OK, moving on, then
+[16:23] <ttx> == Example 1: Simple library ==
+[16:23] <cjohnston> < LumpyCustard> QUESTION: Does building with Maven make this difficult? <-- this can be answered later if you like!
+[16:23] <cjohnston> sorry
+[16:24] <cjohnston> < mscahill> QUESTION: so you're referring to creating a deb of an existing application?
+[16:24] <ttx> mscahill: creating a deb of a java library, to be more exact
+[16:24] <ttx> mscahill: but applications aren't so different
+[16:24] <ttx> mscahill: they just add a launcher, basically
+[16:25] <cjohnston> < luckyduck> QUESTION: in gentoo it was very complicated to work with maven in ebuilds, since there was no automated way to pull in jars an app needed to compile (atleast during the time i was part of
+[16:25] <cjohnston>                    gentoo java). how is that handled in ubuntu?
+[16:25] <ttx> I'll come back to maven, but yes, it's a pain.
+[16:25] <cjohnston> < dig> QUESTION: jar to deb?
+[16:26] <ttx> dig: not sure I get the question, but yes, the idea is to make a deb that contains jars.
+[16:26] <ttx> back to example 1
+[16:27] <cjohnston> < dig> QUESTION:i meant if i make a jar which has all the deps in it, it can be made to a deb easily right?
+[16:27] <ttx> dig: no. We want to rebuild the jar from source.
+[16:27] <ttx> dig: all packages in Ubuntu must be built from source
+[16:27] <ttx> making a deb from a JAr file would be "from binary"
+[16:28] <ttx> ok, really moving on now :)
+[16:28] <ttx> Suppose we want to package a library called "easy", that uses "ant" to build and has no build dependencies
+[16:28] <ttx> It uses a build.xml, and simply running "ant" builds build/easy-1.0.jar
+[16:28] <ttx> We'll use the CDBS "ant" class to do all the work for us.
+[16:29] <ttx> The debian/control file would be like:
+[16:29] <ttx> http://pastebin.ubuntu.com/362512/
+[16:29] <ttx> And the debian/rules file is then as simple as:
+[16:29] <ttx> http://pastebin.ubuntu.com/362514/
+[16:29] <ttx> We include the ant CDBS class on line 3
+[16:29] <ttx> JAVA_HOME on line 5 matches our "default-jdk" build-depend
+[16:30] <ttx> Lines 8 to 10 take care of installing the JAR and the unversioned link to it.
+[16:30] <ttx> Easy enough, if you already know a bit of debian packaging
+[16:30] <ttx> The issue is, I couldn't find a single library as simple as that one. Let's look into real world examples now :)
+[16:30] <ttx> This is the debian/rules file for "trove":
+[16:30] <ttx> http://bazaar.launchpad.net/~ubuntu-branches/ubuntu/lucid/trove/lucid/annotate/head%3A/debian/rules
+[16:31] <ttx> It's mostly identical to our easy one, except we had to specify a DEB_ANT_BUILD_TARGET, since just calling "ant" without argument wouldn't build anything
+[16:31] <ttx> It also builds the Java documentation, so there are special rules to take care of the produced javadoc.
+[16:31] <ttx> Questions !
+[16:33] <ttx> <mhall119|work> QUESTION does it just use javadoc?
+[16:33] <ttx> well, it uses ant, which calls javadoc
+[16:33] <ttx> see DEB_ANT_BUILD_TARGET := jar javadoc
+[16:33] <ttx> that means it will call "ant jar javadoc"
+[16:33] <ttx> if you look into the build.xml you'll find a "javadoc" target
+[16:34] <ttx> that does ant magic to build the doc, by calling javadoc
+[16:34] <ttx> we are just calling ant here.
+[16:34] <ttx> http://bazaar.launchpad.net/~ubuntu-branches/ubuntu/lucid/trove/lucid/annotate/head%3A/build.xml#L167
+[16:35] <ttx> ^that's where the build.xml file specifies it. But that is part of upstream distribution, not written by us
+[16:35] <ttx> OK, complexity level 2 now...
+[16:36] <ttx> == Example 2: Build dependencies ==
+[16:36] <ttx> When you have build dependencies, you'll need to add the required libraries to the build classpath.
+[16:36] <ttx> The CDBS ant class has a nifty mechanism for that, just add the required JAR names on a DEB_JARS line.
+[16:36] <ttx> You can put JAR names (without path or extension, it will look in /usr/share/java) or complete paths.
+[16:37] <ttx> See that example with the "jug" library:
+[16:37] <ttx> http://bazaar.launchpad.net/~ubuntu-branches/ubuntu/lucid/jug/lucid/annotate/head%3A/debian/rules
+[16:37] <ttx> line 11
+[16:37] <ttx> Also note that DEB_ANT_CHECK_TARGET lets you specify a build.xml target to be called for post-compilation tests.
+[16:38] <ttx> The other thing you might need to do at that point is to patch the build.xml file to make it use the system classpath instead of a build.xml-specific one.
+[16:38] <ttx> See line 16 of the build.xml patch needed for jug:
+[16:38] <ttx> http://bazaar.launchpad.net/~ubuntu-branches/ubuntu/lucid/jug/lucid/annotate/head%3A/debian/patches/build-xml.diff
+[16:39] <ttx> Quick tip, you can also pass "DEB_ANT_ARGS := -Dbuild.sysclasspath=last", that will make sure the system classpath is appended to any build.xml local classpath.
+[16:39] <ttx> Questions ?
+[16:39] <ttx> I don't know if this is too easy or too complex :)
+[16:41] <ttx> ok, let's move on
+[16:41] <ttx> <Omar871> QUESTION: I am completely new to this kind of stuff, but I sill want to learn. So, is this some kind of a markup language or something?
+[16:42] <ttx> Omar87: depend on what you mean by "stuff". Is is the debian/control or the build.xml that looks like stuff to you ?
+[16:42] <ttx> It's impossible to cover both debian packaging *and* java libraries packaging in a single hour, sorry :)
+[16:43] <ttx> On to complexity level 3 !
+[16:43] <ttx> == Example 3: Write a build.xml ==
+[16:43] <ttx> Sometimes there will be no build.xml, or the provided build.xml will be so funny rewriting it is better than trying to use it.
+[16:43] <ttx> Then you should provide your own debian/build.xml and point the CDBS ant class to it.
+[16:43] <ttx> See that minimal debian/build.xml example for "mvel":
+[16:44] <ttx> http://bazaar.launchpad.net/~ubuntu-branches/ubuntu/lucid/mvel/lucid/annotate/head%3A/debian/build.xml
+[16:44] <ttx> just takes classes, compiles them and makes a jar out of them
+[16:44] <ttx> And here is the rules file that makes use of it (see DEB_ANT_BUILDFILE at line 10):
+[16:44] <ttx> http://bazaar.launchpad.net/~ubuntu-branches/ubuntu/lucid/mvel/lucid/annotate/head%3A/debian/rules
+[16:44] <ttx> Also note the passing of parameters to the build.xml file, using DEB_ANT_ARGS on lines 11-12.
+[16:45] <ttx> Questions on this example ?
+[16:46]  * ttx lets some time for students to catch up
+[16:46] <ttx> Time for level 4, I guess
+[16:47] <ttx> == Example 4: Shipping POM / maven-repo-helper ==
+[16:47] <ttx> That's starting to be interesting to LumpyCustard
+[16:47] <ttx> Like I already said, maven is a build/integration system that handles both build rules and dependency management
+[16:47] <ttx> It relies on a specific repository layout and dependency description files called .pom files.
+[16:48] <ttx> Usually it just downloads dependencies from the Internet directly
+[16:48] <ttx> We want it to use the system-installed libraries and not use internet for anything
+[16:48] <ttx> because we want reproduceable builds, not depending on the state of internet at any given time
+[16:49] <ttx> In order to support building packages using maven, we need to start shipping our libraries in a maven-compatible form.
+[16:49] <ttx> Debian Java developers worked on a spec, it requires installing JARs and POM files in /usr/share/maven-repo
+[16:49] <ttx> To ease that they created a maven-repo-helper package that provides convenient helpers:
+[16:50] <ttx> mh_installjar will install a JAR in /usr/share/java and create all the necessary links, including the classic unversioned one
+[16:50] <ttx> mh_installpoms will install POM files
+[16:50] <ttx> See this debian/rules example for commons-beanutils, in particular lines 15-16:
+[16:50] <ttx> http://bazaar.launchpad.net/~ubuntu-branches/ubuntu/lucid/commons-beanutils/lucid/annotate/head%3A/debian/rules
+[16:51] <ttx> (this library isn't using maven to build, it's just installing itself in a maven-friendly way)
+[16:51] <ttx> Those maven-friendly libraries allow "maven" to make use of the system installed libraries
+[16:52] <ttx> Questions ?
+[16:52] <ttx> that was the last example, we'll move now to more general Q&A about any subject you want...
+[16:52] <Pendulum> < luckyduck> QUESTION: what is installed by the mh_installjar tools?
+[16:52] <ttx> I'll talk a little about packaging stuff that uses maven, for LumpyCustard
+[16:53] <ttx> mh_installjar makes sure that the jar is installed at the right place with links. For example:
+[16:54] <ttx> easy.jar 1.0 gets installed in /usr/share/java/easy-1.0.jar
+[16:54] <ttx> + the following symlinks:
+[16:54] <ttx> /usr/share/java/easy.jar -> /usr/share/java/easy-1.0.jar
+[16:54] <Pendulum> < luckyduck> QUESTION: a link from an debian/ubuntu package?
+[16:54] <ttx> /usr/share/maven-repo/com/easycorp/easy/easy-1.0.jar -> /usr/share/java/easy-1.0.jar
+[16:54] <ttx> /usr/share/maven-repo/com/easycorp/easy/easy-debian.jar -> /usr/share/java/easy-1.0.jar
+[16:55] <ttx> yes, the jar and the links get installed by dpkg when installing the libeasy-java package
+[16:55] <Pendulum> < SevenMachines> [QUESTION] I've seen packages that carry the actual source files inside a jar, is there any reasonable way to use patches in the packaging in that sort of case?
+[16:56] <ttx> SevenMachines: the source should be repackaged as an orig.tar.gz
+[16:56] <ttx> About maven, having more and more libraries maven-compatible finally allows to use maven in debian packaging
+[16:56] <Pendulum> < LumpyCustard> QUESTION: Would there need to be a new <repository> in the application pom to use the jars already found on the system?
+[16:57] <ttx> http://wiki.debian.org/Java/MavenBuilder
+[16:57] <ttx> LumpyCustard: that's a good question
+[16:58] <ttx> LumpyCustard: I'm far from being a maven expert. All I can say is that pom files are patched at install
+[16:58] <ttx> and our maven is also patched to use /usr/share/maven-repo
+[16:59] <ttx> The MavenBuilder link above points to the work in Debian to further support maven
+[16:59] <ttx> it's still very much work in progress, since maven is so distribution-unfriendly (it's basically another packaging system)
+[16:59] <ttx> ok, time is up
+[17:00] <ttx> thanks everyone !
+...
+}}}

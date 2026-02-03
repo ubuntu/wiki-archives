@@ -1,0 +1,217 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+=== Dev Week -- Writing secure software -- kees -- Wed Sep 2nd, 2009 ===
+15:05:31 - 15:56:21 UTC ''(Reformated from IRC log, important things highlighted.)''
+
+So, if I understand correctly, discussion and questions are in #ubuntu-classroom-chat.
+I'll be watching in there for stuff marked with QUESTION:  so feel free to ask away.  :)
+
+This session is a relatively quick overview on ways to try to keep software more secure.
+I kind of think of it as a "best-pratices" review.
+
+Given that there is a lot of material in this area, I try to talor my topics to langauges people are familiar with.
+As a kind of "show of hands", out of HTML, JavaScript, C, C++, Perl, Python, SQL, what are people familiar with?  (just shout out on the -chat channel)
+(oh, and Ruby)
+Okay, cool, looks like a pretty wide variety.  :)
+
+I'm adapting this overview from some slides I used to give at talk at the Oregon State University.
+You can find that here: http://outflux.net/osu/oss-security.odp
+
+The main thing about secure coding is to take an "offensive" attitude when testing your software.
+If you think to yourself "the user would never type _that_", then you probably want to rethink it.  :)
+I have two opposing quotes: "given enough eyeballs all bugs are shallow" - Eric Raymond, and "most people ... don't explicitly look for security bugs" - John Viega
+I think both are true -- if enough people start thinking about how their code could be abused by some bad-guy, we'll be better able to stop them.
+
+So, when I say "security", what do I mean? Basically...
+I mean a bug with how the program functions that allows another person to change the behavior against the desire of the main user.
+If someone can read all my cookies out of firefox, that's bad.
+If someone can become root on my server, that's bad, etc.
+So, I tend to limit this overview to stuff like gaining access, reading or writing someone else's data, causing outages, etc.
+
+==== Cross Site Scripting ====
+
+I'll start with programming for the web.
+When handling input in CGIs, etc, it needs to be carefully handled.
+The first example of mis-handling input is "Cross Site Scripting" ("XSS").
+
+If someone puts <code><b>hi</b></code> in some form data, and the application returns exactly that, then the bad-guy can send arbitrary HTML.
+Output needs to be filtered for html entites. Luckily, a lot of frameworks exist for doing the right thing: Catalyst (Perl), Smarty (PHP), Django (Python), Rail (Ruby).
+
+==== Cross Site Request Forgery ====
+
+Another issue is Cross Site Request Forgery (CSRF).
+
+The issue here is that HTTP was designed so that "GET" (urls) would be for reading data, and "POST" (forms) would be used for changing data.
+If back-end data changes as a result of a "GET", you may have a CSRF.
+
+I have a demo of this here: http://research.outflux.net/demo/csrf.html
+imdb.com lets users add "favorite" movies to their lists.
+But it operates via a URL http://imdb.com/rg/title-gold/mymovies/mymovies/list?pending&add=0113243
+So, if I put that URL on my website, and you're logged into imdb, I can make changes to your imdb account.
+So, use forms.  :)
+(or "nonces", though I won't go into that for the moment)
+
+==== SQL injection ====
+
+Another form of input validation is SQL.
+If SQL queries aren't escaped, you can end up in odd situations.
+
+{{{SELECT secret FROM users
+WHERE password = '$password'}}}
+
+With that SQL, what happens if the supplied password is    <code>' OR 1=1 --</code>?
+It'll be true and will allow logging in.
+
+My rule of thumb is to _always_ use the SQL bindings that exist for your language, and to never attempt to manually escape strings.
+So, for perl
+<pre>
+    my $query = $self->{'dbh'}->prepare(
+        "SELECT secret FROM users
+         WHERE password = ?");
+    $query->execute($password);
+</pre>
+
+This lets the SQL library you're using do the escaping.  It's easier to maintain, and it's much safer in the long-run.
+Some examples of SQL and XSS are seen here:  http://research.outflux.net/demo/sql-bad.cgi
+
+If I put: <code><blink>oh my eyes</blink></code>   in the form, it'll pass through
+if I put: <code>  ' OR 1=1 --</code>     in the form, I log in, etc.
+http://research.outflux.net/demo/sql-better.cgi   seeks to solve these problems.
+
+==== "GET the files" ====
+
+Another thing about web coding is to think about where files live.
+Yet another way around the sql-bad.cgi example is to just download the SQLite database it's using.
+So, either keeping files out the documentroot, or protecting them: http://research.outflux.net/demo/htaccess-better
+So, moving from web to more language agnostic stuff.
+
+==== Invoking executables ====
+
+When your need to use "system()", go find a better method.
+If you're constructing a system()-like call with a string, you'll run into problems.  you always want to implement this with an array.
+<code>python's subprocess.call()</code> for example.
+This stops the program from being run in a shell (where arguments may be processes or split up).
+
+For example, http://research.outflux.net/demo/progs/system.pl
+* no good: system("ls -la $ARGV[0]");
+* better: system("ls","-la",$ARGV[0]);
+* best: system("ls","-la","--",$ARGV[0]);
+In array context, the arguments are passed directly.  In string context, the first argument may be processed in other ways.
+
+==== Temporary files ====
+
+Handling temporary files is another area.
+Static files or files based on process id, etc, shouldn't be used since they are easily guessed.
+All languages have some kind of reasonable safe temp-file-creation method.
+File::Temp in perl, tempfile in python, "mktemp" in shell, etc
+i.e. bad:  TEMPFILE="/tmp/kees.$$"
+good: TEMPFILE=$(mktemp -t kees-XXXXXX)
+
+Examples of this as well as a pid-racer are in http://research.outflux.net/demo/progs/
+
+==== Secrets in memory ====
+
+Keep data that is normally encrypted out of memory.
+So things like passwords should be erased from memory (rather than just freed) once they're done being used.
+Example of this is http://research.outflux.net/demo/progs/readpass.c
+Once the password is done being used:
+<pre>
+    fclose(stdin);               // drop system buffers
+    memset(password,0,PASS_LEN); // clear out password storage memory
+</pre>
+Then you don't have to worry about leaving it in core-dump files, etc
+
+==== SSL/TLS ====
+
+For encrypted communications, using SSL should actually check certificates.
+Clients should use a Certificate Authority list (apt-get install ca-cerificates, and use /etc/ssl/certs).
+Servers should get a certificate authority.
+The various SSL bindings will let you define a "check cert" option, which is, unfortunately, not on by default.  :(
+
+==== Assertions ====
+
+One item I mentioned early on as a security issue is blocking access to a service, usually through a denial of service.
+One accidental way to make a server program vulnerable to this is to use "assert()" or "abort()" in the code.
+Normally, using asserts is a great habit to catch errors in client software.
+Unfortunately, if an assert can be reached while you're processing network traffic, it'll take out the entire service.
+Those kinds of programs should abort on if absolutely unable to continue (and should gracefully handle unexpected situations).
+
+==== C stuff ====
+
+Switching over to C/C++ specific issues for a bit...
+One of C's weaknesses is its handling of arrays (and therefore strings).  Since it doesn't have built-in boundary checking, it's up to the programmer to do it right.
+As a result, lengths of buffers should always be used when performing buffer operations.
+
+Functions like strcpy, sprintf, gets, strcat should not be used, because they don't know how big a buffer might be.
+Using strncpy, snprintf, fgets, etc is much safer.
+Though be careful you're measureing the right buffer.  :)
+<pre>
+char buf[80];
+strncpy(buf,argv[1],strlen(argv[1]))    is no good
+</pre>
+You need to use buf's len, not the source string.
+
+It's not "how much do I want to copy" but rather "how much space can I use?"
+
+Another tiny glitch is with format strings.  <code>printf(buffer);</code>  should be done with  <code>printf("%s", buffer);</code>  otherwise, whatever is in buffer would be processes for format strings.
+Instead of <code>"hello %x"</code>  you'd get  <code>"hello 258347dad"</code>.
+I actually have a user on my system named <code>%x%x%n%n</code> just so I can catch format string issues in Gnome more easily.  :)
+
+The last bit to go over for C in this overview is calculating memory usage.
+If you're about to allocate memory for something, where did the size come from?
+<code>malloc(x * y)</code>  could wrap around an "int" value and result in less than x * y being allocated.
+This one is less obvious, but the example is here: http://research.outflux.net/demo/progs/alloc.c
+<code>malloc(5 * 15)</code> will be safe, but what about malloc (1294967000 * 10)
+Using MAX_INT to get it right helps.
+(I need to get an example of _good_ math.)
+
+=== Testing ===
+
+So, the biggest thing to help defend against these various glitches is testing.
+* Try putting HTML into form data, URLs, etc.
+* See what kinds of files are written in /tmp.
+* Try putting giant numbers through allocations.
+* Put format strings as inputs.
+* Try to think about how information is entering a program, and how that data is formulated.
+
+There are a lot of unit-test frameworks (python-unit, Test::More, CxxTest, check).
+Give them a try.  :)
+
+As for projects in general, it's great if a few days during a development cycle can be dedicated to looking for security issues.
+
+=== Expoitng C stuff ===
+
+That's about all I've got for this quick overview.  I've left some time for questions, if there are any?
+
+ QUESTION: how could the malloc thing be a security problem?
+
+So, the example I tried to use (http://research.outflux.net/demo/progs/alloc.c) is like a tool that processes an image.
+In the example, it starts by reading the size.
+Then allocates space for it
+And then starts filling it in, one row at a time.
+If we ended up allocating 10 bytes where we're reading 100, we end up with a buffer overflow.
+In some situations, those can be exploitable.
+
+ QUESTION: what security issues are there with streams? (in C++)
+
+I'm not aware of anything to shy away from that implementation.
+Obviously, where the stream is attached (/tmp/prog.$$) should be examined.
+But I haven't seen issues with streams before.  (Maybe I'm missing something in how C++ handles formatting.)
+
+As it happens, Ubuntu's compiler will try to block a lot of the more common C buffer mistakes, including stack overflows.  glibc will block heap overflows, and the kernel is set up to block execution of heap or stack memory.
+So a lot of programs that would have had security issues are just crashes instead.
+This can't really help design failures, though.
+
+Well, that's about it, so I'll clear out of the way.  Thanks for listening, and if other questions pop to mind, feel free to catch me on freenode or via email @ubuntu.com
+
+ QUESTION: will ubuntu stay with apparmor or wil it move to Selinux?
+
+Both are available in Ubuntu (and will remain available).  There hasn't been a good reason to leave AppArmor as a default yet, so we're sticking with that.

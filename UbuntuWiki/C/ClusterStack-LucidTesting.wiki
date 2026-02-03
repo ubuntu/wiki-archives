@@ -1,0 +1,1259 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== Test cases for cluster components in Ubuntu 10.04 ==
+
+'''Contents'''
+
+=== Overview ===
+
+For these tests you'll need a couple of machines or KVMs with Ubuntu 10.04. I strongly suggest three or more of them.
+
+Each test will be enumerated. Following these steps, you shouldn't have any problem. Note that each step is marked with [ALL] or [ONE]. If it's marked with [ALL], you should repeat it on each server in your cluster. If it's marked with [ONE], pick one server and do that step only on that server.
+
+=== Pacemaker, standalone ===
+
+==== 1. [ALL] Add testing PPA ====
+
+Add this PPA to your /etc/apt/sources.list:
+
+<pre>
+deb http://ppa.launchpad.net/ubuntu-ha/lucid-cluster/ubuntu lucid main
+</pre>
+
+==== 2. [ALL] install pacemaker ====
+
+<pre>
+sudo apt-get install pacemaker
+</pre>
+
+edit /etc/default/corosync and enable corosync (START=yes)
+
+==== 3. [ONE] generate corosync authkey ====
+<pre>
+sudo corosync-keygen
+</pre>
+(this can take a while if there's no enough entropy; download ubuntu iso image on the same machine while generating to speed it up or use keyboard to generate entropy)
+
+copy /etc/corosync/authkey to all servers that will form this cluster (make sure it is owned by root:root and has 400 permissions).
+
+==== 4. [ALL] configure corosync ====
+
+In /etc/corosync/corosync.conf, replace bindnetaddr (by default it is 127.0.0.1), with the network address of your server, replacing the last number by 0 to get the network address. For example, if your IP is 192.168.1.101, then you would put 192.168.1.0.
+
+==== 5. [ALL] start corosync ====
+<pre>
+sudo /etc/init.d/corosync start
+</pre>
+Now your cluster is configured and ready to monitor, stop and start your services on all your cluster servers.
+
+==== 6. [ALL] install services that will fail over between servers ====
+
+In this example, I'm installing apache2 and vsftpd. You may install any other service...
+<pre>
+sudo apt-get install apache2 vsftpd
+</pre>
+Disable their init scripts:
+<pre>
+update-rc.d -f apache2 remove
+update-rc.d -f vsftpd remove
+</pre>
+==== 7. [ONE] add some services ====
+
+In this example, I'll create failover for the apache2 and vsftpd services. I'll also add two additional IPs and tie apache2 to one of them, while vsftpd will be grouped with another one.
+
+''Note: Some shells like ZSH can cause committing the crm configure to fail, use an actual root login shell e.g. '''sudo su -l''' to do the following.''
+
+<pre>
+sudo crm configure edit
+</pre>
+It you get empty file, close it and wait for couple of seconds (10-20) and try again. You should get something like this:
+<pre>
+node lucidcluster1
+node lucidcluster2
+node lucidcluster3
+property $id="cib-bootstrap-options" \
+        dc-version="1.0.6-fdba003eafa6af1b8d81b017aa535a949606ca0d" \
+        cluster-infrastructure="openais" \
+        expected-quorum-votes="2"
+</pre>
+Add following lines bellow the 'node' declaration lines. Replace X.X.X.X and X.X.X.Y with addresses that will fail over - do not put the IP of your main server there. Do NOT save and exit after adding the following lines:
+<pre>
+primitive apache2 ocf:heartbeat:apache2 params configfile="/etc/apache2/apache2.conf" httpd="/usr/sbin/apache2" op monitor interval="5s"
+primitive vsftpd lsb:vsftpd op monitor interval="5s"
+primitive ip1 ocf:heartbeat:IPaddr2 params ip="X.X.X.X" nic="eth0"
+primitive ip2 ocf:heartbeat:IPaddr2 params ip="X.X.X.Y" nic="eth0"
+group group1 ip1 apache2
+group group2 ip2 vsftpd
+order apache_after_ip inf: ip1:start apache2:start
+order vsftpd_after_ip inf: ip2:start vsftpd:start
+</pre>
+Now that you've configured some services, you should also define how many servers are needed for a quorum and what stonith devices will be used. For this test, we won't use stonith devices.
+
+Under property, add expected-quorum-votes and stonith-enabled, so that it looks like this (don't forget '\'!). Replace 'X' with number of servers needed for quorum (X should be less or equal to N-1, but not 1 unless there are only two servers in cluster, where N is number of servers):
+<pre>
+property $id="cib-bootstrap-options" \
+	dc-version="1.0.6-fdba003eafa6af1b8d81b017aa535a949606ca0d" \
+	cluster-infrastructure="openais" \
+	expected-quorum-votes="X" \
+	stonith-enabled="false"
+</pre>
+Save and quit.
+
+==== 8. [ALL] monitor and stress test ====
+
+On each server start crm_mon (sudo crm_mon) and monitor how services are grouped and started. Then, one by one, reboot or shutdown servers, leaving at least on running.
+
+First test with normal shutdown, then with pulling the AC plug (destroying domains in KVM).
+
+In all this cases, once servers are up, they should be Online (monitor servers status in crm_mon) after some time. Services should migrate between them without problems.
+
+=== Pacemaker with DRBD ===
+You will need at least two servers. Each of those two servers must have one empty partition of the same size. All other servers can be part of the pacemaker cluster, but will not have drbd resources started on them.
+==== 1. Complete test with standalone Pacemaker ====
+
+==== 2. [ALL] Install DRBD and other needed tools ====
+<pre>
+sudo apt-get install linux-headers-server psmisc
+sudo apt-get install drbd8-utils
+</pre>
+Since we will be using pacemaker for stoping and starting of drbd, remove it from runlevels:
+<pre>
+sudo update-rc.d -f drbd remove
+</pre>
+==== 3. [ALL] Set up DRBD ====
+Create /etc/drbd.d/disk0.res file, containing:
+<pre>
+resource disk0 {
+        protocol C;
+        net {
+                cram-hmac-alg sha1;
+                shared-secret "lucid";
+        }
+        on lucidclusterX {
+                device /dev/drbd0;
+                disk /dev/sdXY;
+                address X.X.X.X:7788;
+                meta-disk internal;
+        }
+        on lucidclusterY {
+                device /dev/drbd0;
+                disk /dev/sdXY;
+                address X.X.X.Y:7788;
+                meta-disk internal;
+        }
+}
+</pre>
+Make sure to replace lucidclusterX|Y with real hostnames of your two servers. Change X.X.X.X and X.X.X.Y to real IPs of those servers and sdXY to real partitions that will be used for drbd.
+
+Once you saved that file, create resource:
+<pre>
+sudo drbdadm create-md disk0
+</pre>
+You should get:
+<pre>
+Writing meta data...
+initializing activity log
+NOT initialized bitmap
+New drbd meta data block successfully created.
+success
+</pre>
+Finally, start drbd:
+<pre>
+sudo /etc/init.d/drbd start
+</pre>
+sudo drbdadm status should return:
+<pre>
+<resource minor="0" name="disk0" cs="Connected" ro1="Secondary" ro2="Secondary" ds1="Inconsistent" ds2="Inconsistent" />
+</pre>
+==== 4. [ONE] Create filesystem ====
+One of your servers will act as primary server for start. You'll use it to create filesystem and force the other cluster to sync from it. On chosen server force it to be primary and create filesystem:
+<pre>
+sudo drbdadm -- --overwrite-data-of-peer primary disk0
+sudo mkfs.ext3 /dev/drbd/by-res/disk0
+</pre>
+
+==== 5. [ONE] DRBD+Pacemaker ====
+Edit pacemaker configuration:
+
+<pre>
+crm configure edit
+</pre>
+and add:
+<pre>
+primitive drbd_disk ocf:linbit:drbd \
+	params drbd_resource="disk0" \
+	op monitor interval="15s"
+primitive fs_drbd ocf:heartbeat:Filesystem \
+	params device="/dev/drbd/by-res/disk0" directory="/mnt" fstype="ext3"
+ms ms_drbd drbd_disk \
+	meta master-max="1" master-node-max="1" clone-max="2" clone-node-max="1" notify="true"
+colocation mnt_on_master inf: fs_drbd ms_drbd:Master
+order mount_after_drbd inf: ms_drbd:promote fs_drbd:start
+</pre>
+
+If you have extra nodes that shouldn't run drbd service, add the below and replace lucidclusterX with hostname of node that doesn't have drbd. 
+<pre>
+location loc-1 fs_drbd -inf: lucidclusterX
+location loc-2 drbd_disk -inf: lucidclusterX
+</pre>
+
+Save and fire up crm_mon. You should get something like this:
+<pre>
+============  ==
+Last updated: Wed Jan 13 18:03:12 2010
+Stack: openais
+Current DC: lucidcluster2 - partition with quorum
+Version: 1.0.6-fdba003eafa6af1b8d81b017aa535a949606ca0d
+3 Nodes configured, 2 expected votes
+4 Resources configured.
+============  ==
+
+Online: [ lucidcluster2 lucidcluster3 lucidcluster1 ]
+
+ Resource Group: group1
+     ip1        (ocf::heartbeat:IPaddr2):       Started lucidcluster2
+     apache2    (ocf:heartbeat:apache2):  Started lucidcluster2
+ Resource Group: group2
+     ip2        (ocf::heartbeat:IPaddr2):       Started lucidcluster3
+     vsftpd     (lsb:vsftpd):   Started lucidcluster3
+ Master/Slave Set: ms_drbd
+     Masters: [ lucidcluster2 ]
+     Slaves: [ lucidcluster1 ]
+fs_drbd (ocf::heartbeat:Filesystem):    Started lucidcluster2
+</pre>
+
+==== 6. [ALL] Testing ====
+Wait for drbd disks to get synced and start rebooting/killing your nodes.
+
+=== Pacemaker, drbd8 and OCFS2 or GFS2 ===
+This test case is based on example from upstream documentation:
+
+<nowiki>[[http://clusterlabs.org/wiki/Dual_Primary_DRBD_%2B_OCFS2]]</nowiki>
+
+==== [ALL] 1. Package installation ====
+
+In this test, you need two machines, with up to date Ubuntu Lucid.
+
+Add this PPA to your /etc/apt/sources.list and update package cache:
+
+<pre>
+deb http://ppa.launchpad.net/ubuntu-ha/lucid-cluster/ubuntu lucid main
+</pre>
+<pre>
+sudo apt-get update
+</pre>
+
+Install kernel-headers (-server, -virtual or -generic flavor, depending on running kernel)
+
+<pre>
+sudo apt-get install linux-headers-server psmisc
+</pre>
+
+If you want OCFS2 install these packages:
+
+<pre>
+sudo apt-get install pacemaker libdlm3-pacemaker ocfs2-tools drbd8-utils openais dlm-pcmk ocfs2-tools-pacemaker
+</pre>
+
+If you want GFS2 install these packages:
+
+<pre>
+sudo apt-get install pacemaker gfs2-pacemaker drbd8-utils
+</pre>
+
+At this point I would suggest reboot, cause we need udevd to load new udev rule that was installed. I'm not that much familiar with udev, so I'm not sure how to tell it to read new rule. Reboot is always a sure thing :)
+==== [ALL] 2. Enable corosync ====
+
+Edit /etc/corosync/corosync.conf, generate authkey and enable it in /etc/default/corosync. For instructions, look at 2), 3) and 4) in first test case (Pacemaker standalone).
+
+Start corosync with
+<pre>
+sudo service corosync start
+</pre>
+
+==== [ALL] 3. Configure drbd ====
+
+On both nodes create file /etc/drbd.d/disk0.res containing (replace 'X' and 'Y' with real values):
+
+<pre>
+resource disk0 {
+        protocol C;
+        net {
+                cram-hmac-alg sha1;
+                shared-secret "lucid";
+                allow-two-primaries;
+        }
+        startup {
+                become-primary-on both;
+        }
+        on lucidclusterX {
+                device /dev/drbd0;
+                disk /dev/sdXY;
+                address X.X.X.X:7788;
+                meta-disk internal;
+        }
+        on lucidclusterY {
+                device /dev/drbd0;
+                disk /dev/sdXY;
+                address X.X.X.Y:7788;
+                meta-disk internal;
+        }
+}
+</pre>
+
+Erase any existing filesystem on /dev/sdXY:
+<pre>
+sudo dd if=/dev/zero of=/dev/sdXY
+</pre>
+
+Create drbd resource:
+<pre>
+sudo drbdadm create-md disk0
+</pre>
+You should get:
+<pre>
+Writing meta data...
+initializing activity log
+NOT initialized bitmap
+New drbd meta data block successfully created.
+success
+</pre>
+
+Start drbd:
+<pre>
+sudo service drbd start
+</pre>
+Pacemaker will handle starting and stopping drbd services, so remove its init script:
+<pre>
+sudo update-rc.d -f drbd remove
+</pre>
+
+==== [ONE] 4. Initialize drbd disk ====
+
+<pre>
+sudo drbdadm -- --overwrite-data-of-peer primary disk0
+</pre>
+
+==== [ALL] 5. OCFS2 cluster configuration ====
+
+dpkg-reconfigure ocfs2-tools, answer yes to start at boot
+
+But pacemaker will handle starting and stopping ocfs2 (o2cb) services, so disable its init script:
+<pre>
+sudo update-rc.d o2cb disable
+</pre>
+
+==== [ONE] 6. Add drbd, dlm and o2cb (or gfs_controld) resources to pacemaker ====
+
+For OCFS2 you should arange your cib to look like this (by running <code> sudo crm configure edit </code>):
+<pre>
+node lucidcluster1
+node lucidcluster2
+primitive resDLM ocf:pacemaker:controld \
+	op monitor interval="120s"
+primitive resDRBD ocf:linbit:drbd \
+	params drbd_resource="disk0" \
+	operations $id="resDRBD-operations" \
+	op monitor interval="20" role="Master" timeout="20" \
+	op monitor interval="30" role="Slave" timeout="20"
+primitive resO2CB ocf:pacemaker:o2cb \
+	op monitor interval="120s"
+ms msDRBD resDRBD \
+	meta resource-stickines="100" notify="true" master-max="2" interleave="true"
+clone cloneDLM resDLM \
+	meta globally-unique="false" interleave="true"
+clone cloneO2CB resO2CB \
+	meta globally-unique="false" interleave="true"
+colocation colDLMDRBD inf: cloneDLM msDRBD:Master
+colocation colO2CBDLM inf: cloneO2CB cloneDLM
+order ordDLMO2CB 0: cloneDLM cloneO2CB
+order ordDRBDDLM 0: msDRBD:promote cloneDLM
+property $id="cib-bootstrap-options" \
+	dc-version="1.0.7-54d7869bfe3691eb723b1d47810e5585d8246b58" \
+	cluster-infrastructure="openais" \
+	stonith-enabled="false" \
+       	no-quorum-policy="ignore"
+</pre>
+
+For GFS2 you should arange your cib to look like this (by running <code> sudo crm configure edit </code>):
+<pre>
+node lucidcluster1
+node lucidcluster2
+primitive resDLM ocf:pacemaker:controld \
+	op monitor interval="120s"
+primitive resDRBD ocf:linbit:drbd \
+	params drbd_resource="disk0" \
+	operations $id="resDRBD-operations" \
+	op monitor interval="20" role="Master" timeout="20" \
+	op monitor interval="30" role="Slave" timeout="20"
+primitive resGFSD ocf:pacemaker:controld \
+	params daemon="gfs_controld.pcmk" args="" \
+	op monitor interval="120s"
+ms msDRBD resDRBD \
+	meta resource-stickines="100" notify="true" master-max="2" interleave="true"
+clone cloneDLM resDLM \
+	meta globally-unique="false" interleave="true"
+clone cloneGFSD resGFSD \
+	meta globally-unique="false" interleave="true" target-role="Started"
+colocation colDLMDRBD inf: cloneDLM msDRBD:Master
+colocation colGFSDDLM inf: cloneGFSD cloneDLM
+order ordDLMGFSD 0: cloneDLM cloneGFSD
+order ordDRBDDLM 0: msDRBD:promote cloneDLM
+property $id="cib-bootstrap-options" \
+	dc-version="1.0.7-54d7869bfe3691eb723b1d47810e5585d8246b58" \
+	cluster-infrastructure="openais" \
+	expected-quorum-votes="1" \
+	stonith-enabled="false"
+</pre>
+
+Once you save it, <code> sudo crm_mon </code> should show (OCFS2):
+<pre>
+============  ==
+Last updated: Sun Feb  7 10:47:48 2010
+Stack: openais
+Current DC: lucidcluster2 - partition with quorum
+Version: 1.0.7-54d7869bfe3691eb723b1d47810e5585d8246b58
+2 Nodes configured, 1 expected votes
+3 Resources configured.
+============  ==
+
+Online: [ lucidcluster2 lucidcluster1 ]
+
+ Master/Slave Set: msDRBD
+     Masters: [ lucidcluster2 lucidcluster1 ]
+ Clone Set: cloneDLM
+     Started: [ lucidcluster2 lucidcluster1 ]
+ Clone Set: cloneO2CB
+     Started: [ lucidcluster2 lucidcluster1 ]
+</pre>
+If this is true, create filesystem on /dev/drbd/by-res/disk0. For OCFS2:
+<pre>
+sudo mkfs.ocfs2 /dev/drbd/by-res/disk0
+</pre>
+It might need <code> -F </code> (force) switch.
+For GFS2:
+<pre>
+sudo mkfs.gfs2 -p lock_dlm -j2 -t pcmk:pcmk /dev/drbd/by-res/disk0
+</pre>
+When filesystem is created, you need to add FS resource to pacemaker. Run <code> sudo crm configure edit </code> and for OCFS2 add:
+<pre>
+primitive resFS ocf:heartbeat:Filesystem \
+	params device="/dev/drbd/by-res/disk0" directory="/opt" fstype="ocfs2" \
+	op monitor interval="120s"
+clone cloneFS resFS \
+	meta interleave="true" ordered="true"
+colocation colFSO2CB inf: cloneFS cloneO2CB
+order ordO2CBFS 0: cloneO2CB cloneFS
+</pre>
+For GFS2 add:
+<pre>
+primitive resFS ocf:heartbeat:Filesystem \
+	params device="/dev/drbd/by-res/disk0" directory="/opt" fstype="gfs2" \
+	op monitor interval="120s" \
+	meta target-role="Started"
+clone cloneFS resFS \
+	meta interleave="true" ordered="true" target-role="Started"
+colocation colFSGFSD inf: cloneFS cloneGFSD
+order ordGFSDFS 0: cloneGFSD cloneFS
+</pre>
+When saved, <code> sudo crm_mon </code> should show that filesystem is mounted:
+<pre>
+============  ==
+Last updated: Sun Feb  7 10:52:44 2010
+Stack: openais
+Current DC: lucidcluster2 - partition with quorum
+Version: 1.0.7-54d7869bfe3691eb723b1d47810e5585d8246b58
+2 Nodes configured, 1 expected votes
+4 Resources configured.
+============  ==
+
+Online: [ lucidcluster2 lucidcluster1 ]
+
+ Master/Slave Set: msDRBD
+     Masters: [ lucidcluster2 lucidcluster1 ]
+ Clone Set: cloneDLM
+     Started: [ lucidcluster2 lucidcluster1 ]
+ Clone Set: cloneO2CB
+     Started: [ lucidcluster2 lucidcluster1 ]
+ Clone Set: cloneFS
+     Started: [ lucidcluster2 lucidcluster1 ]
+</pre>
+If you combine that with Pacemaker, standalone example, you can get something like this:
+<pre>
+============  ==
+Last updated: Sun Feb  7 10:52:44 2010
+Stack: openais
+Current DC: lucidcluster2 - partition with quorum
+Version: 1.0.7-54d7869bfe3691eb723b1d47810e5585d8246b58
+2 Nodes configured, 1 expected votes
+6 Resources configured.
+============  ==
+
+Online: [ lucidcluster2 lucidcluster1 ]
+
+ Master/Slave Set: msDRBD
+     Masters: [ lucidcluster2 lucidcluster1 ]
+ Clone Set: cloneDLM
+     Started: [ lucidcluster2 lucidcluster1 ]
+ Clone Set: cloneO2CB
+     Started: [ lucidcluster2 lucidcluster1 ]
+ Clone Set: cloneFS
+     Started: [ lucidcluster2 lucidcluster1 ]
+ Resource Group: group1
+     ip1        (ocf::heartbeat:IPaddr2):       Started lucidcluster2
+     apache2    (lsb:apache2):  Started lucidcluster2
+ Resource Group: group2
+     ip2        (ocf::heartbeat:IPaddr2):       Started lucidcluster1
+     vsftpd     (lsb:vsftpd):   Started lucidcluster1
+</pre>
+
+=== Test results ===
+{| class="wikitable"
+|-
+| '''Name'''
+| ''Test''
+| ''Passed/Failed''
+| ''Comments''
+|-
+| ivoks
+| Pacemaker, standalone
+| Passed
+| 3 KVMs - no issues
+|-
+| ivoks
+| Pacemaker with DRBD
+| Passed
+| 3 KVMs - no issues
+|-
+| ivoks
+| Pacemaker, DRBD, GFS2
+| Passed
+| 2 KVMs - no issues
+|-
+| ivoks
+| Pacemaker, DRBD, OCFS2
+| Passed
+| 2 KVMs - no issues
+|-
+| Omahn
+| Pacemaker, standalone
+| Passed
+| 3 node/ESX - no issues
+|-
+| Omahn
+| Pacemaker with DRBD
+| Passed
+| 2 node/ESX - no issues
+|-
+| TREllis
+| Pacemaker, standalone
+| Passed
+| 3 KVMs - no issues
+|-
+| TREllis
+| Pacemaker, with DRBD
+| Passed
+| 3 KVMs - no issues
+|-
+| MarcRisse
+| Pacemaker, with DRBD, GFS2, Bonding
+| Passed
+| 2 KVMs - no issues
+|}
+
+=== Questions ===
+
+== BONUS : RHCS Samba file server cluster ==
+<nowiki>[[File:IconsPage/warning.png]]</nowiki> '''This guide is an early draft.'''
+
+=== Overview ===
+Create a fully functional 2 node cluster, offering an active/active samba file server on shared storage.
+
+=== Testing environment ===
+* A standard x86_64 pc running libvirt and virt-manager
+* 2 kvm guests to act as 2 nodes
+* A shared raw virtio image to act as shared storage
+
+Cluster components :
+* Redhat Cluster Suite 3.0.6
+* Cluster LVM
+* GFS2
+* Samba + CTDB
+
+Network : 192.168.122.0/24, gateway : 192.168.122.1
+* node01 192.168.122.201
+* node02 192.168.122.202
+
+=== Cluster Configuration Steps ===
+
+* [HOST] : Step to be done on the KVM host.
+* [ONE] : Steps to be done on only '''ONE''' node.
+* [ALL] : Steps to be done on all nodes.
+
+==== [HOST] Setup the host ====
+* Create 2 kvm guests, I strongly suggest to use libvirt since it will provide a fencing method for the nodes.
+* Add a shared raw disk image with cache=off to mimic the shared storage
+* Install the 2 nodes with the latest lucid-server-iso
+
+==== [ALL] Prepare the nodes ====
+Assign a static ip and add it to both hosts files
+
+Add the ubuntu-ha experimental ppa to the source list
+<pre>
+deb http://ppa.launchpad.net/ubuntu-ha/ppa/ubuntu lucid main
+deb-src http://ppa.launchpad.net/ubuntu-ha/ppa/ubuntu lucid main
+</pre>
+
+<pre>
+}}}
+
+Install Redhat Cluster Suite
+{{{
+# apt-get install redhat-cluster-suite
+</pre>
+
+==== [ONE] Prepare the shared drive ====
+Partition the shared storage, one small partition for the quorum disk (50MB) and the rest for the cluster lvm.
+<pre>
+# parted /dev/vdb mklabel msdos
+# parted /dev/vdb mkpart primary 0 50MB
+# parted /dev/vdb mkpart primary 50MB 100%
+# parted /dev/vdb set 2 lvm on
+</pre>
+
+Create the quorum disk, the label (-l) will be used in the cluster configuration.
+<pre>
+# mkqdisk -l bar01 -c /dev/vdb1
+</pre>
+
+==== [ALL] ====
+Reread the partition table
+<pre>
+# partprobe
+</pre>
+
+Copy the cluster config file : /etc/cluster/cluster.conf
+TODO: Detail the cluster config file.
+<pre>
+<?xml version="1.0"?>
+<cluster name="Foo01" config_version="1">
+
+    <!-- 1 vote per node and 1 vote for the quorum disk,
+         the shared storage is the tie-breaker -->
+    <cman two_node="0" expected_votes="3"/>
+
+    <!-- Configure the quorum disk -->
+    <quorumd interval="1" tko="10" votes="1" label="bar01">
+        <heuristic program="ping 192.168.122.1 -c1 -t1" score="1" interval="2" tko="3"/>
+    </quorumd>
+
+    <!-- Leave a grace period of 20 second for nodes to join -->
+    <fence_daemon post_join_delay="20"/>
+
+    <!-- Enable debug logging -->
+    <logging debug="off"/>
+
+    <!-- Nodes definition (node ids are mandatory and have to be below 16)-->
+    <clusternodes>
+        <clusternode name="node01" nodeid="1">
+            <fence>
+                <method name="virsh">
+                    <device name="virsh" port="node01" action="reboot"/>
+                </method>
+            </fence>
+        </clusternode>
+
+        <clusternode name="node02" nodeid="2">
+            <fence>
+                <method name="virsh">
+                    <device name="virsh" port="node02" action="reboot"/>
+                </method>
+            </fence>
+        </clusternode>
+    </clusternodes>
+
+    <!-- Use libvirt virsh to fence nodes -->
+    <fencedevices>
+        <fencedevice name="virsh" agent="fence_virsh" ipaddr="192.168.122.1" login="root" passwd="xxxxx"/>
+    </fencedevices>
+</cluster>
+</pre>
+
+Simultaneously start the base cluster service (cman) on both nodes, if you don't the other node will get fenced when the post join delay expires.
+<pre>
+# /etc/init.d/cman start
+</pre>
+
+Once the cluster is quorate, start the secondary cluster services.
+<pre>
+# /etc/init.d/clvm start
+# /etc/init.d/rgmanager start
+</pre>
+
+=== GFS Configuration Steps ===
+Before starting this, you need a fully functionning quorate cluster.
+
+==== [ONE] Prepare the cluster fs ====
+Create the clustered volume group.
+<pre>
+# pvcreate /dev/vdb2
+# vgcreate vgcluster01 /dev/vdb2
+</pre>
+
+Create a logical volume.
+<pre>
+# lvcreate vgcluster01 -l100%VG -n gfs01
+</pre>
+
+Create the gfs2 filesystem.
+<pre>
+# mkfs.gfs2 -p lock_dlm -t Foo01:Gfs01 -j 3 /dev/mapper/vgcluster01-gfs01
+</pre>
+
+==== [ALL] ====
+Add the gfs filesystem to fstab.
+<pre>
+ /dev/mapper/vgcluster01-gfs01   /mnt/gfs01      gfs2    defaults        0       0
+</pre>
+
+Create the mountpoint.
+<pre>
+# mkdir /mnt/gfs01
+</pre>
+
+Mount the filesystem.
+<pre>
+# /etc/init.d/gfs2-tools start
+</pre>
+
+Both nodes should now be fully functional, stop them and start them simultaneously to see if the cluster get quorate. Currently plytmouth seems completely broken, so it's impossible to have the boot message to debug cluster initialization.
+
+=== Samba Configuration Steps ===
+Before starting this, you need a working clustered filesystem.
+
+TODO: Samba + CTDB configuration.
+
+== Load Balancing ==
+<nowiki>[[File:IconsPage/warning.png]]</nowiki> '''This guide is an early draft.'''
+
+=== Config Overview ===
+For this tests you'll need at least 3 machines or KVMs with Ubuntu 10.04. We strongly suggest 4 or more. If you want to set up Load Balancing with a backup server for failover, you will need at least 4 machines (Detailed below).
+
+If you follow this steps you shouldn't have problems. Note that each step is marked with [ALL-*] or [ONE-*]. If it's marked with [ALL], you should repeat it on each server in your cluster. If it's marked with [ONE], pick one server and do that step only on that server.
+
+=== Testing Environment ===
+
+The testing environment will consist of 2 Load balance and 2 Web Servers (You can add more) using NAT.
+
+The two Load Balancers have 2 interfaces, eth0 is going to be connected to the outside network and eth1 is going to be connected to the inside network. They will also use two Virtual IPs (VIP). The first VIP will be used for clients in the outside network to access the service (Web Service), and the second VIP will be used as the default gateway for the Web Servers. Each Web Server will need to be configured using as gateway the VIP for the Inside Network. Everything is detailed as follows:
+
+* Load Balancers):
+** Load Balancer 1
+*** eth0: 192.168.1.254/24
+*** eth1: 10.10.10.254/24
+** Load Balancer 2
+*** eth0: 192.168.1.253/24
+*** eth1: 10.10.10.253/24
+** VIPs:
+*** VIP eth0: 192.168.1.100/24
+*** VIP eth1: 10.10.10.1
+
+* Web Servers
+** Web Server 1: 
+*** eth0: 10.10.10.100/24
+*** Gateway: 10.10.10.1
+** Web Server 2:
+*** eth0: 10.10.10.20/24
+*** Gateway: 10.10.10.1
+
+Note that the Load Balancers are going to be configured in Active/Passive mode.
+
+=== IPVS Configuration ===
+
+==== 1. [ALL-BALANCERS] Enabling IP Forwarding ====
+
+Edit /etc/sysctl.conf and add/or uncomment the following:
+
+<pre>
+net.ipv4.ip_forward=1
+</pre>
+
+Then, enable it:
+
+<pre>
+sudo sysctl -p
+</pre>
+
+==== 2. [ALL-BALANCERS] Enabling IPVS Modules ====
+
+First, lets install ipvsadm:
+<pre>
+sudo apt-get install ipvsadm
+</pre>
+
+Second, enter the root console by doing: 
+<pre>
+sudo -i
+</pre>
+
+Then, do the following:
+
+<pre>
+echo ip_vs_dh >> /etc/modules
+echo ip_vs_ftp >> /etc/modules
+echo ip_vs >> /etc/modules
+echo ip_vs_lblc >> /etc/modules
+echo ip_vs_lblcr >> /etc/modules
+echo ip_vs_lc >> /etc/modules
+echo ip_vs_nq >> /etc/modules
+echo ip_vs_rr >> /etc/modules
+echo ip_vs_sed >> /etc/modules
+echo ip_vs_sh >> /etc/modules
+echo ip_vs_wlc >> /etc/modules
+echo ip_vs_wrr >> /etc/modules
+</pre>
+
+Finally, enable the modules:
+
+<pre>
+modprobe ip_vs_dh
+modprobe ip_vs_ftp
+modprobe ip_vs
+modprobe ip_vs_lblc
+modprobe ip_vs_lblcr
+modprobe ip_vs_lc
+modprobe ip_vs_nq
+modprobe ip_vs_rr
+modprobe ip_vs_sed
+modprobe ip_vs_sh
+modprobe ip_vs_wlc
+modprobe ip_vs_wrr
+</pre>
+
+=== Load Balancing with Keepalived ===
+
+==== 1. [ALL] Installing Keepalived ====
+
+Before we begin, we need to install keepalived:
+
+<pre>
+sudo apt-get install keepalived
+</pre>
+
+==== 2. [ONE] Primary Load Balancer ====
+
+Now that we have keepalived installed in our primary loadbalancer, we need to edit /etc/keepalived/keepalived.conf as follows:
+
+<pre>
+global_defs {
+   router_id UBUNTULVS1
+}
+
+vrrp_sync_group VG1 {
+   group {
+      VI_IP1
+   }
+}
+
+vrrp_instance VI_IP1 {
+    state MASTER
+    interface eth0
+    lvs_sync_daemon_interface eth0
+    virtual_router_id 50
+    priority 250
+    authentication {
+        auth_type PASS
+        auth_pass password
+    }
+    virtual_ipaddress {
+        192.168.1.100/24 dev eth0
+        10.10.10.1/24 dev eth1
+    }
+    preempt_delay 300
+}
+
+virtual_server 192.168.1.100 80 {
+    delay_loop 10
+    lb_algo wrr
+    lb_kind NAT
+    nat_mask 255.255.255.0
+    protocol TCP
+
+    real_server 10.10.10.100 80 {
+        weigth 1
+        TCP_CHECK {
+           connect_port 80
+           connect_timeout 3
+        }
+    }
+
+    real_server 10.10.10.110 80 {
+        weight 1
+        TCP_CHECK {
+           connect_port 80
+           connect_timeout 3
+        }
+    }
+}
+</pre>
+
+==== 3. [ONE] Backup Load Balancer ====
+
+To have a backup Load Balancer for failover purposes, we need to copy the configuration above to the second Load Balancer and change the following:
+
+ a. '''router_id''' to UBUNTULVS2
+ a. '''state''' to BACKUP
+ a. '''priority''' to 200
+
+==== 4. [ALL] Setting up iptables ====
+
+The following iptables should be entered:
+
+<pre>
+iptables -t nat -A POSTROUTING -s 10.10.10.0/24 -o eth0 -j MASQUERADE
+</pre>
+
+=== Load Balancing with Pacemaker/ldirectord ===
+
+==== 1. [ALL] Install pacemaker/ipvsadm/ldirectord ====
+
+<pre>
+sudo apt-get install pacemaker ipvsadm ldirectord
+</pre>
+
+==== 2. [ALL] Enable Corosync ====
+
+Edit /etc/default/corosync and enable corosync
+
+<pre>
+START=yes
+</pre>
+
+==== 3. [ONE] Generate corosync authkey ====
+
+<pre>
+sudo corosync-keygen
+</pre>
+
+(this can take a while if there's no enough entropy; download ubuntu iso image on the same machine while generating to speed it up or use keyboard to generate entropy)
+
+'''NOTE:''' copy /etc/corosync/authkey to second Load Balancer (make sure it is owned by root:root and has 400 permissions).
+
+==== 4. [ALL] Configure corosync ====
+
+In /etc/corosync/corosync.conf replace bindnetaddr (by defaults it's 127.0.0.1) with network address of eth0 of the loadbalancer. It should end up like this:
+
+<pre>
+[...]
+bindnetaddr: 192.168.1.0
+[...]
+</pre>
+
+==== 5. [ALL] Start corosync ====
+
+<pre>
+sudo /etc/init.d/corosync start
+</pre>
+
+Now the cluster is configured. Wait a few seconds to verify that the two loadbalancers have synced.
+
+==== 6. [ALL] Configure ldirectord ====
+
+First, we are going to disable ldirectord's init scripts:
+
+<pre>
+update-rc.d -f ldirectord remove
+</pre>
+
+Now, we need to configure ldirectord for the Load Balancing to work. This is done in /etc/ha.d/ldirectord.cf. The file should be like the following:
+
+<pre>
+checktimeout=10
+checkinterval=2
+autoreload=no
+logfile="local0"
+quiescent=yes
+
+virtual=192.168.1.90:80
+        real=10.10.10.100:80 masq
+        real=10.10.10.110:80 masq
+        fallback=127.0.0.1:80 gate
+        service=http
+        scheduler=rr
+        protocol=tcp
+        checktype=connect
+</pre>
+
+==== 7. [ONE] Configure Pacemaker Resources ====
+
+Once corosync and ldirectord are configured, we need to add the resources for the cluster. We do it as follows:
+<pre>
+sudo crm configure edit
+</pre>
+It you get empty file, close it and wait for couple of seconds (10-20) and try again. You should get something like this:
+<pre>
+node lucidbalancer1
+node lucidbalancer2
+property $id="cib-bootstrap-options" \
+        dc-version="1.0.6-fdba003eafa6af1b8d81b017aa535a949606ca0d" \
+        cluster-infrastructure="openais" \
+        expected-quorum-votes="2"
+</pre>
+Add following lines bellow 'node' declarations. R
+
+<pre>
+primitive ip1 ocf:heartbeat:IPaddr2 \
+        params ip="192.168.1.90" nic="eth0" cidr_netmask="24" broadcast="192.168.1.255"
+primitive ip2 ocf:heartbeat:IPaddr2 \
+        params ip="10.10.10.1" nic="eth1" cidr_netmask="24" broadcast="10.10.10.255"
+primitive ldirectord1 ocf:heartbeat:ldirectord \
+        params configfile="/etc/ha.d/ldirectord.cf" \
+        op monitor interval="15s" timeout="20s" \
+        meta migration-threshold="10" target-role="Started"
+group group1 ip1 ip2 ldirectord1
+order ip_before_lvs inf: ip1:start ip2:start ldirectord1:start
+</pre>
+
+Now that you've put some services into configuration, you should also define how many servers are needed for a quorum and what stonith devices will be used. For this test, we won't use stonith devices. Under property, we need to modify expected-quorum-votes and add the stonith-enabled property, so that it looks like this. Note that under expected-quorum-votes should be less or equal to N-1, but not 1 unless there are only two servers in cluster. In our case, since we only have two loadbalancers, it should be 1.
+<pre>
+property $id="cib-bootstrap-options" \
+	dc-version="1.0.6-fdba003eafa6af1b8d81b017aa535a949606ca0d" \
+	cluster-infrastructure="openais" \
+	stonith-enabled="false" \
+	no-quorum-policy="ignore"
+</pre>
+Save and quit.
+
+==== [ALL] 8. Restarting ====
+
+I recommend you restart both loadbalancers because in my own tests, the cluster was not bringing up ldirectord, and I had to restart the cluster nodes to be able to do that.
+
+==== [ALL] 9. Set up iptables ====
+
+In the loadbalancers set up iptables so that the outcoming request are also nated.
+<pre>
+iptables -t nat -A POSTROUTING -s 10.10.10.0/24 -o eth0 -j MASQUERADE
+</pre>
+
+=== Setting up all Real Servers (Web Servers) ===
+
+Now that the Load Balancers are ready, we need to set up the real servers. For this we only install the web server of your preference. In my case, I'm using nginx:
+
+<pre>
+sudo apt-get install nginx
+</pre>
+
+Make sure the service is running.
+
+=== Tests ===
+If you follow the step-by-step guide, you should have everything up and running correctly to be able to perform the following tests:
+
+==== Test Keepalived ====
+
+==== Test Pacemaker/ldirectord ====
+
+===== Test 1: Load Balancing =====
+
+The first test we are going to perform is to verify if Load Balancing is working.
+
+'''STEP 1:'''[ALL] First, determine that IPVS is running by issuing:
+<pre>
+sudo ipvsadm -L -n
+</pre>
+
+The result should be as follows:
+
+<pre>
+IP Virtual Server version 1.2.1 (size=4096)
+Prot LocalAddress:Port Scheduler Flags
+  -> RemoteAddress:Port           Forward Weight ActiveConn InActConn
+TCP  192.168.1.100:80 rr
+  -> 10.10.10.100:80              Masq    1      0          0         
+  -> 10.10.10.110:80              Masq    1      0          0
+</pre>
+
+'''STEP 2:'''[ALL] Now, determine that the MASTER (Specified in Keepalived configuration file) loadbalancer has the VIP's. Also verify that the BACKUP doesn't have VIP's
+<pre>
+ip addr sh eth0 && ip addr sh eth1
+</pre>
+
+The master server will have something similar to this:
+
+<pre>
+2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast state UNKNOWN qlen 1000
+    link/ether 54:52:00:5a:92:24 brd ff:ff:ff:ff:ff:ff
+    inet 192.168.1.253/24 brd 192.168.1.255 scope global eth0
+    inet 192.168.1.100/24 scope global secondary eth0
+    inet6 fe80::5652:ff:fe5a:9224/64 scope link 
+       valid_lft forever preferred_lft forever
+3: eth1: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast state UP qlen 1000
+    link/ether 54:52:00:5a:92:20 brd ff:ff:ff:ff:ff:ff
+    inet 10.10.10.253/24 brd 10.10.10.255 scope global eth1
+    inet 10.10.10.1/24 scope global secondary eth1
+    inet6 fe80::5652:ff:fe5a:9220/64 scope link 
+       valid_lft forever preferred_lft forever
+</pre>
+
+'''STEP 3:'''Now, use a web browser from a machine in the same network as the VIP=192.168.1.100 and see if the loadbalancing is working. To prove it it should open a web site. Once it is done, check IPVS status as follows:
+
+<pre>
+sudo ipvsadm -L -n
+</pre>
+
+The result should similar to:
+
+<pre>
+IP Virtual Server version 1.2.1 (size=4096)
+Prot LocalAddress:Port Scheduler Flags
+  -> RemoteAddress:Port           Forward Weight ActiveConn InActConn
+TCP  192.168.1.100:80 rr
+  -> 10.10.10.100:80              Masq    1      0          1         
+  -> 10.10.10.110:80              Masq    1      0          0
+</pre>
+
+===== Test 2: Failover =====
+
+Not, we need to test that in case of a failure in the Master loadbalancer, the second loadbalancer will take control of the service. To do this, please '''Force Off''' the Master Loadbalancer in KVM. Once this is done, repeat steps 1  to 3 for the BACKUP server.
+
+===== Test 1: Load Balancing =====
+
+The first test we are going to perform is to verify if Load Balancing is working.
+
+'''STEP 1:'''[ALL] First, issue the following on both loadbalancers:
+
+<pre>
+sudo crm status
+</pre>
+
+And you should get something similar to the following:
+
+<pre>
+============  ==
+Last updated: Fri Mar 12 16:11:09 2010
+Stack: openais
+Current DC: server1 - partition with quorum
+Version: 1.0.7-0bf7d14dd5541b31f7dee605e5041bb44d78b336
+2 Nodes configured, 1 expected votes
+1 Resources configured.
+============  ==
+
+Online: [ server2 server1 ]
+
+ Resource Group: group1
+     ip1	(ocf::heartbeat:IPaddr2):	Started server2
+     ip2	(ocf::heartbeat:IPaddr2):	Started server2
+     ldirectord1	(ocf::heartbeat:ldirectord):	Started server2
+
+</pre>
+
+'''STEP 2:'''[ALL] Now, determine which loadbalancer has the VIP's. To do this do the following on BOTH loadbalancers:
+
+<pre>
+server2:~$ ip addr sh eth0 && ip addr sh eth1
+</pre>
+
+The master server will have something similar to this:
+
+<pre>
+2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast state UNKNOWN qlen 1000
+    link/ether 54:52:00:5a:92:24 brd ff:ff:ff:ff:ff:ff
+    inet 192.168.1.253/24 brd 192.168.1.255 scope global eth0
+    inet 192.168.1.100/24 scope global secondary eth0
+    inet6 fe80::5652:ff:fe5a:9224/64 scope link 
+       valid_lft forever preferred_lft forever
+3: eth1: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast state UP qlen 1000
+    link/ether 54:52:00:5a:92:20 brd ff:ff:ff:ff:ff:ff
+    inet 10.10.10.253/24 brd 10.10.10.255 scope global eth1
+    inet 10.10.10.1/24 scope global secondary eth1
+    inet6 fe80::5652:ff:fe5a:9220/64 scope link 
+       valid_lft forever preferred_lft forever
+</pre>
+
+'''STEP 3:'''[ONE] Now, verify that ipvsadm is working by issuing the following in the Master load balancer:
+
+<pre>
+sudo ipvsadm -L -n
+</pre>
+
+The result should be as follows:
+
+<pre>
+IP Virtual Server version 1.2.1 (size=4096)
+Prot LocalAddress:Port Scheduler Flags
+  -> RemoteAddress:Port           Forward Weight ActiveConn InActConn
+TCP  192.168.1.100:80 rr
+  -> 10.10.10.100:80              Masq    1      0          0         
+  -> 10.10.10.110:80              Masq    1      0          0
+</pre>
+
+'''STEP 4:'''Now, use a web browser from a machine in the same network as the VIP=192.168.1.100 and see if the loadbalancing is working. To prove it it should open a web site. Once it is done, check IPVS status as follows:
+
+<pre>
+sudo ipvsadm -L -n
+</pre>
+
+The result should similar to:
+
+<pre>
+IP Virtual Server version 1.2.1 (size=4096)
+Prot LocalAddress:Port Scheduler Flags
+  -> RemoteAddress:Port           Forward Weight ActiveConn InActConn
+TCP  192.168.1.100:80 rr
+  -> 10.10.10.100:80              Masq    1      0          1         
+  -> 10.10.10.110:80              Masq    1      0          0
+</pre>
+
+===== Test 2: Failover =====
+
+Not, we need to test that in case of a failure in the Master loadbalancer, the second loadbalancer will take control of the service. To do this, please '''Force Off''' the Master Loadbalancer in KVM. Once this is done, repeat steps 2 (Only on the remaining loadbalancer) to 4.
+
+==== Test Results ====
+
+{| class="wikitable"
+|-
+| '''Name'''
+| ''Test''
+| ''Passed/Failed''
+| ''Comments''
+|-
+| RoAkSoAx
+| Keepalived, balancing
+| Passed
+| 4 KVMs - no issues
+|-
+| RoAkSoAx
+| Keepalived, failover/balancing
+| Passed
+| 4 KVMs - no issues
+|-
+| RoAkSoAx
+| Pacemaker/ldirectord, balancing
+| Passed
+| 4 KVMs - no issues
+|-
+| RoAkSoAx
+| Pacemaker/ldirectord, failover/balancing
+| Passed
+| 4 KVMs - no issues
+|}
+
+== Comments/Questions/Recommendations/Proposed Fixes ==
+
+On 1.2 "Pacemaker, standalone": on section 7 I had to replace ocf:heartbeat:apache2 with ocf:heartbeat:apache on this line:
+
+primitive apache2 ocf:heartbeat:apache2 params configfile="/etc/apache2/apache2.conf" httpd="/usr/sbin/apache2" op monitor interval="5s"
+
+to make it work.
+
+For PPA you can use apt-add-repository (at python-software-properties package) to get GPG signature automatically:
+<pre>
+add-apt-repository ppa:ubuntu-ha/lucid-cluster
+</pre>

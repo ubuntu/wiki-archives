@@ -1,0 +1,247 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+Virtualbox host networking and WIFI
+
+'''Virtualbox > 2.1.4 and Jaunty. Virtualbox does that on its own now. Select host interface (or bridge network in 2.2) and then your wifi card.
+No need for this lengthy howto anymore...'''
+
+== Scope of this howto ==
+While being connected to your router (thus the Internet) via your computer WIFI card, enable host networking on a different subnet by bridging your unused ethernet card.
+
+Your Virtualbox machines will be connected to the Internet as well.
+
+The tutorial is constructed as follows:<<BR>>
+similar settings for Vbox > 2.1.0 and Vbox < 2.1.0 <<BR>>
+Vbox > 2.1.0 <<BR>>
+Vbox < 2.1.0 <<BR>>
+Guest configuration <<BR>>
+
+Tested and working with the following: <<BR>>
+Virtualbox 1.5.6, 1.6.0, 1.6.2 Ubuntu 8.04 Hardy Heron <<BR>>
+Virtualbox 2.0.4, 2.0.6 Ubuntu 8.10 Intrepid Ibex <<BR>>
+Virtualbox > 2.1.0 Ubuntu 8.10 Intrepid Ibex
+
+== Pre-requisites ==
+One computer with:<<BR>>
+WIFI controller     eth0<<BR>>
+ethernet controller eth1<<BR>>
+Virtualbox<<BR>>
+Internet connection thru eth0<<BR>>
+ 
+All the bridge creation and host interface creation knowledge comes from Virtualbox help contents. (see chapter Host Interface Networking and bridging on Linux hosts)
+
+== How to - by example ==
+Consider a connection to the internet via eth0 (WIFI) with IP 192.168.0.2 . <<BR>>
+The bridge IP address will be 192.168.1.254 (note the difference of subnet between the wifi and the bridge). <<BR>>
+Bridge br0 will include eth1 (ethernet card) and host interface tap0. <<BR>>
+
+I will assume that virtualbox is up and running for the user joe.
+
+=== Similar settings for Vbox > 2.1.0 and Vbox < 2.1.0 ===
+<pre>
+sudo apt-get install bridge-utils
+</pre>
+
+Modify /etc/network/interfaces
+<pre>
+auto lo
+iface lo inet loopback
+
+auto br0
+iface br0 inet static
+address 192.168.0.2
+netmask 255.255.255.0
+    bridge_ports eth0
+    bridge_maxwait 0
+</pre>
+
+Restart networking
+<pre>
+sudo invoke-rc.d networking restart
+</pre>
+
+Enable ip_forwarding: modify /etc/sysctl.conf (line thirty eight)
+<pre>
+net.ipv4.ip_forward=1
+</pre>
+
+While it is not necessary to create a firewall service to enable masquerading, it will be much easier to activate if you do so. You can use ufw if you prefer.
+<pre>
+sudo vi /etc/init.d/firewall
+
+start() {
+	echo "Creating iptables rule"
+	iptables -t nat -A POSTROUTING -o eth1 -j MASQUERADE
+}
+
+stop() {
+	echo "Flushing iptables"
+	iptables -P INPUT ACCEPT
+	iptables -P FORWARD ACCEPT
+	iptables -P OUTPUT ACCEPT
+	iptables -t nat -P PREROUTING ACCEPT
+	iptables -t nat -P POSTROUTING ACCEPT
+	iptables -t nat -P OUTPUT ACCEPT
+	iptables -F
+	iptables -t nat -F
+	iptables -X
+	iptables -t nat -X
+}
+
+case $1 in
+	start) 	start;;
+	stop) 	stop;;
+	restart) 	stop
+			start;;
+	status) /sbin/iptables -L
+		/sbin/iptables -t nat -L
+		exit 0;;
+* ) 	echo "Usage: firewall {start|stop|restart|status}"
+		exit 1
+esac
+exit
+</pre>
+
+Make the script executable
+<pre>
+sudo chmod u+x /etc/init.d/firewall
+</pre>
+
+Create links for the service to be started/stopped automatically
+<pre>
+sudo update-rc.d firewall defaults
+</pre>
+
+Start the service to enable masquerading
+<pre>
+sudo invoke-rc.d firewall start
+</pre>
+
+=== VBox 2.1.0 ===
+The configuration is almost over. <<BR>>
+You just need to select host interface in the virtual machine settings and choose br0.
+
+=== VBox < 2.1.0 ===
+<pre>
+sudo apt-get install uml-utilities
+sudo gpasswd -a uml-net $USER
+sudo chgrp uml-net /lib/udev/devices/net/tun
+sudo chmod g+rw /lib/udev/devices/net/tun
+</pre>
+(reboot necessary unless someone has another solution. You can change the ownership of /dev/net/tun right away and wait for a later reboot)<<BR>><<BR>>
+'''If you want to create a permanent host interface'''<<BR>>
+change /etc/network/interfaces to
+<pre>
+auto lo
+iface lo inet loopback
+
+auto tap0
+iface tap0 inet manual
+up ifconfig $IFACE 0.0.0.0 up
+down ifconfig $IFACE down
+tunctl_user joe    ###replace joe with the name of your user member of vboxusers and uml-net groups##
+
+auto br0
+iface br0 inet static
+address 192.168.0.2
+netmask 255.255.255.0
+    bridge_ports eth0 tap0 #tap1 tap2 ...
+    bridge_maxwait 0
+</pre>
+
+Add as many host interfaces (tap1 tap2 ...) as desired on the same principle. If you do so, don't forget to add them to the bridge.<<BR>>
+Restart networking
+<pre>
+sudo invoke-rc.d networking restart
+</pre>
+
+Assign tap0 (tap1 ...) as a host interface to your virtual machine.<<BR>><<BR>>
+'''I prefer dynamic host interfaces'''<<BR>>
+To create dynamic tap interfaces (from the virtualbox help, 6.7.2. Creating interfaces dynamically when a virtual machine starts up):<<BR>>
+* create a start up script (wherever you want, just remember where), replace joe with your user member of vboxusers and uml-net groups
+<pre>
+cat > /home/joe/addtap.sh <<eof
+
+interface=\`VBoxTunctl -b -u joe\`## replace joe with your user
+
+if [ -z "\$interface" ]; then
+exit 1
+fi
+
+echo \$interface
+
+ifconfig \$interface up
+
+brctl addif br0 \$interface
+eof
+
+chmod u+x /home/joe/addtap.sh
+</pre>
+
+* create an end script
+<pre>
+cat > /home/joe/deltap.sh <<eof
+
+brctl delif br0 \$2
+
+VBoxTunctl -d \$2
+eof
+
+chmod u+x /home/joe/deltap.sh
+</pre>
+
+In the virtual machine network settings, do the following changes<<BR>>
+attached to: host interface<<BR>>
+interface name: (nothing, leave it empty)<<BR>>
+setup application: gksudo /home/joe/addtap.sh<<BR>>
+terminate application: gksudo /home/joe/deltap.sh<<BR>>
+
+if you wish to avoid typing your password when the tap interface is created, add the following line to your sudoers file<<BR>>
+
+<pre>
+sudo visudo
+%vboxusers ALL=(ALL) NOPASSWD: /home/joe/addtap.sh, /home/joe/deltap.sh
+</pre>
+
+=== Guest configuration ===
+==== 1) No DHCP server ====
+If you have no dhcp server serving the 192.168.0.0 range, you will need to assign an IP address in the 192.168.0.0 range to your virtual machine once it is started.
+<pre>
+sudo ifconfig eth0 192.168.0.3
+</pre>
+
+It will be necessary to add 192.168.0.2 as a default route as well
+<pre>
+sudo route add default gw 192.168.0.2
+</pre>
+
+If you want to make it permanent, edit /etc/network/interfaces of your virtual machine.
+<pre>
+auto eth0
+iface eth0 inet static
+address 192.168.0.3
+netmask 255.255.255.0
+gateway 192.168.0.2
+</pre>
+==== 2) DHCP server ====
+You have a dhcp server serving on the 192.168.0.0 range<<BR>>
+either locally (laptop):<<BR>>
+make sure the "option routers" given by dhcp is the IP of your bridge br0 (192.168.0.2)<<BR>>
+
+or on your ethernet LAN connection:<<BR>>
+nothing to do (in that case, your access to the internet will occur thru ethernet most certainly and not thru WIFI)<<BR>>
+
+James Dupin
+http://hmbconcepts.fr <<BR>>
+ventes de savons et bougies parfumés et de serviettes 100% coton roulées en forme de gâteau
+----
+CategoryNetworking

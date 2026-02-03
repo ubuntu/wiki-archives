@@ -1,0 +1,229 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+* '''Launchpad Entry''': <nowiki>[[https://blueprints.launchpad.net/ubuntu/+spec/arm-m-development-tools]]</nowiki>
+* '''Created''':
+* '''Contributors''': GuilhermeSalgado, JamesWestby
+* '''Packages affected''':
+
+=== Summary ===
+
+We want to provide a simple yet powerful set of tools to allow ARM developers to easily create/manage archives (including package uploads/builds) and generate images. 
+
+=== Rationale ===
+
+Organizations need to generate their own images for testing
+and evaluation purposes, possibly including software that supports unreleased hardware or software with restricted redistribution rights. To generate such images they need to maintain an integrated set of software packages that can be installed on to their devices.
+
+=== Definitions ===
+
+<code>larc</code> is the command that allow developers to use the tools described here.
+
+See the Definitions section of <nowiki>[[Specs-M-ARMArchiveBranching|ARMArchiveBranching]]</nowiki> and <nowiki>[[Specs-M-ARMArchiveFeatures|ARMArchiveFeatures]]</nowiki>
+
+=== User stories ===
+
+ 1. Ted wants to generate an image for marvel doves, which require non-free software packages that are not included in Ubuntu but instead are packaged in a marvel PPA. Ted must be able to create a new archive (by <nowiki>[[Specs-M-ARMArchiveBranching|branching]]</nowiki> the Ubuntu archive and marvel's PPA) and generate the image using the new archive.
+ {{{
+larc branch http://archives.ubuntu.com/main https://archives.yap.com/marvel --platform=standard
+larc append-archive https://launchpad.net/~yap/+archive/private https://archives.yap.com/marvel
+larc gen-image https://archives.yap.com/marvel
+ }}}
+
+ 1. A partner is experimenting with a custom netbook UI but doesn't want to include it in their main archive until they've done some more testing, so they use <code>larc</code> to create a slim archive and do any UI changes (or add new packages) there.  Once they decide the UI has had enough testing, they push the changes from the slim archive back to their main one. (The slim archive could be hosted on LP, like a [private] PPA, as soon enough we'll be able to upload packages through sftp).
+ {{{
+larc create https://archives.yap.com/new-netbook-ui
+larc make-workspace https://archives.yap.com/new-netbook-ui
+larc edit-package unity
+cd unity
+vi  # That's how you do it, right? ;)
+larc build  # Make sure it builds correctly with your changes.
+larc push
+ }}}
+
+ 1. YAP (Yet Another Partner) is working on optimizing their new (not-yet-released) chip, but for that they need a version of GCC newer than the one on the Ubuntu archive.  They want to create a new (private) archive where they'll upload the new GCC version, but upgrading to that new version of GCC is known to break binary compatibility, so it must be possible for them to easily rebuild all packages using the new GCC and generate images out of the new binaries to ensure the resulting system works as expected.
+ {{{
+larc branch https://archives.u.c/main https://archives.yap.com/new-gcc --platform=standard 
+larc push gcc-4.5.dsc https://archives.yap.com/new-gcc
+larc rebuild https://archives.yap.com/new-gcc  # This is going to take ages!
+larc gen-image https://archives.yap.com/new-gcc
+ }}}
+
+ 1. YAP also has a separate team working on the UI for a device which will use their new chip, so they want to have yet another archive, based on the one containing the new GCC, where they'll make their UI changes without affecting other users of the archive containing the new GCC. <code>larc</code> must allow them to do that as well.
+ {{{
+larc branch https://archives.yap.com/new-gcc https://archives.yap.com/new-gcc-and-UI --platform=standard 
+ }}}
+
+ 1. During the development of YAP's latest device, it should be possible for them to easily see the delta between their archive and its upstream. They should also be able to review those changes and pull/push changes from/to the upstream archive.
+ {{{
+larc show-delta https://archives.yap.com/new-device
+ }}}
+
+ 1. At the end of the development of their new device, YAP's engineers want to freeze their archive so that all package uploads have to be reviewed by their release team before they're accepted.
+ {{{
+larc freeze https://archives.yap.com/new-device
+ }}}
+
+Some of the features described here will depend on <nowiki>[[Specs-M-DerivedArchiveRebuild|DerivedArchiveRebuild]]</nowiki>
+
+=== Design ===
+
+The goal here is to provide a high-level interface with sensible defaults, abstracting some of the low-level complexity of the underlying utilities/frameworks.
+
+<code>larc</code> should be transparent and allow people to access its inner workings. We should aim to ensure it is always possible to complete a task manually.
+
+Users must be able to run <code>larc</code> on either a desktop or a server.  Also, it must not be tied to Launchpad, although it will take advantage of anything provided by Launchpad whenever desirable.
+
+<code>larc</code> will be able to operate on both local and remote archives, for both read and write operations. When operating on remote archives it will use the HTTP RESTFUL API of the service hosting the archive (wich can be either Launchpad.net or a <nowiki>[[Specs-M-ARMArchiveBranching|vostok]]</nowiki> instance).  To upload packages we'll use sftp.
+
+<code>larc</code> must not try to enforce any sort of version number rules, but it will provide appropriate version numbers by default so that users don't need to worry about that.
+
+The following are some of the main tasks that <code>larc</code> must facilitate.
+
+* Interacting with an archive
+* Modifying packages
+* Image building
+* Updating a derived archive
+
+==== Interacting with an archive ====
+
+This category covers operations on remote archives, such as finding current versions of packages, removing packages, requesting rebuilds, freezing an archive, and indeed branching an archive.
+
+This should make use of an HTTP API exposed by the archive management software that allows querying and modifications.
+
+For each logical operation that a user may wish to do there should be a command or subcommand provided by <code>larc</code>, which it will then map to the necessary API calls. Therefore most of the logic about how the operations work will be in the archive management software, and <code>larc</code> just needs to handle making the correct API call, presenting the information to the user, and handling error conditions.
+
+We will strive to get good coverage of typical operations in the <code>tdb</code> tool, but asking users to go to the web UI of the archive management service is acceptable, and will be necessary if new features are added that old versions of <code>tdb</code> do not support.
+
+==== Modifying packages ====
+
+One of the most common operations will be modifying a package. <code>larc</code> will provide commands that make it easy to get a copy of the current version of the package, make changes to it, build it locally for testing, and then commit the change.
+
+Ideally we should support both pushing the change directly to an archive, and for submission for review for those that either don't have upload rights to the archive, or would like peer review before making the change.
+
+While editing files and the like won't be abstracted, <code>larc</code> can provide wrapper commands for test-building a package, adding a changelog entry and uploading, merging a new upstream version, and merging from a parent archive, amongst others.
+
+There should also be a way to submit the change to a parent archive for review very easily, so that the change can be made in the archive that the developer is targeting, but also start making its way in to parent archives at the same time.
+
+We may also want to provide environments other than the host system in order to build packages. chroots or virtual machines are important as soon as you are building for a target that is different to the host in terms of package versions and the like. Clearly when building for a different architecture this needs to be done, in which case we should interface with UbuntuSpec:arm-m-xdeb-cross-compilation-environment.
+
+==== Image building ====
+
+<code>larc</code> will tie in to the results of UbuntuSpec:arm-m-image-building-tool such that a developer can easily build themselves a test image, including results of their test builds.
+
+In addition, <code>larc</code> will tie in to UbuntuSpec:arm-m-image-building-console such that they can also request image builds from a service. Here it would be needed to host all the packages remotely so that the image building service could make use of them.
+
+Furthermore for the developer's workflow it would be ideal if they could submit a package to build in the archive, and at the same time queue an image build request that would start if and when the package built successfully. That would save them having to switch context too often.
+
+==== Updating a derived archive ====
+
+<code>larc</code> will also allow the developer to make use of the features of the archives described in UbuntuSpec:arm-m-archive-branching. It will allow them to visualise the difference between an archive and its parent, and then act on the result as well.
+
+Crucially it should allow them to do three things:
+
+** Request a sync of a package.
+** Submit a change to the parent archive in the appropriate manner.
+** Merge a package from the parent where the package was modified in both archives.
+
+As the last two operations can't be done through the web UI described in the other spec it is important that <code>larc</code> make that part easy for developers to do.
+
+==== Workspaces ====
+
+A workspace is an area on disk that <code>larc</code> can create which encapsulates a specific configuration. This allows <code>larc</code> to infer lots of information when it is in a workspace and save the developer time in remembering and typing some of those details.
+
+A workspace will be tied to a certain archive, and so by default act on that archive.
+
+The developer can maintain as many workspaces as they like locally, and <code>cd</code> between them in order to work on different archives.
+
+In addition to this the workspace can contain a local archive that can be used in addition to the remote one. This is used to allow the developer to do things like build an image containing some test changes, or to build two packages locally where the second depends on some new API just added to the first, all without having to upload experimental changes to the archive for others to see. We may also want to allow developers to push packages from their development archive to a PPA for sharing with others, or even use a PPA for this if they like.
+
+=== Implementation ===
+
+==== Interacting with an archive ====
+
+Operations accessing remote locations through HTTP will need to be authenticated, so <code>larc</code> will have a per-user registry of credentials that can be used for OAuth authentication. There will be one set of credentials for each remote location, but when such credentials don't exist <code>larc</code> will guide the user, via their web browser, through the process of obtaining them.
+
+Once it has the credentials it can make the necessary authenticated API calls to perform the requested operation.
+
+It must understand enough of the response that it will receive from the server to present the results meaningfully to the developer, and also provide useful error messages where possible.
+
+==== Workspaces ====
+
+Any directory containing a .larc.conf file is considered a workspace and <code>larc</code> will use the archive specified there when one is not explicitly provided. The file will also be able to store other configuration defaults for that workspace, such as extra archives (e.g. PPAs) that should be included in images built from that workspace.
+
+Workspaces are most useful when modifying packages or building images, so they can also cache .deb packages (for image building) and bazaar working trees for the source packages in the archive.
+
+We need to properly lay out bazaar working trees and source/binary packages (resulting from test builds) in workspaces, to keep things sane. Here is an example of how that could look.
+
+ {{{
+  .
+  |-- workspace root
+  |   |-- unity  (bzr working tree)
+  |   |   `-- README.txt
+  |   |-- gcc    (bzr working tree)
+  |   |   `-- HACKING.txt
+  |   `-- testbuilds
+  |       |-- Packages (makes it an archive that image builders can use)
+  |       |-- unity-N.NN-x86.deb
+  |       `-- gcc-N.NN-x86.deb
+ }}}
+
+==== Modifying packages ====
+
+To get the source for a given package we'll use bazaar and fetch the branch associated with the given package, placing it in the current directory.
+
+To generate a binary package from a bazaar working tree, we'll use bzr-builddeb to build a source package from the tree and then build that into a binary package.
+
+When pushing the given bazaar working tree to its parent branch, the facilities of the target archive management system will define how the binary package building happens:
+** If it has full building facilities then we request a build of the branch to a source/binary package.
+** If it can only build binaries then we build a source package locally and upload that, which will then trigger a binary build.
+** Otherwise we also upload source and binary packages.
+
+==== Image building ====
+
+For building images we'll use the <nowiki>[[Specs-M-ARMImageBuildingTool|image building tool]]</nowiki> to generate an image containing the packages specified by the user.
+
+In order to build an image we'll need to fetch lots of binary packages from the archive, so it makes sense to cache these binary packages locally for further images built.  These will be cached in the workspace.
+
+==== Updating a derived archive ====
+
+When requesting a sync of a package, submitting changes to the parent or merging a package from the parent, <code>larc</code> will just make the appropriate HTTP request and let the archive management systems take care of the rest.
+
+When submitting changes to the parent of merging a package from the parent, <code>larc</code> assumes there are no conflicts between the changes.  ('''Is it reasonable to assume that?  -- GuilhermeSalgado''')
+
+To help users doing the above, <code>larc</code> can show the list of modified packages in each category, and then allow the user to choose one to work on.
+
+==== UI Changes ====
+
+Mostly <code>larc</code> will just have command-line arguments and status output.
+
+There will be sometimes when it may need to present the user a list of options, so we should design how that would look.
+
+=== Test/Demo Plan ===
+
+There is clearly a lot of testing that will be required. We will make a lot of use of unit testing, and also dogfooding by developers.
+
+Each feature should be explicitly tested as it is included though, and integration tests included where possible.
+
+=== Unresolved issues ===
+
+* We'll need multiple OAuth credentials (e.g. for launchpad.net, archives.yap.com, etc), so we need to figure out which credentials to use depending on the arguments given.
+
+* If we go with OAuth for the authentication, it means the user will need a browser to obtain the OAuth credentials, so it will be tricky to run <code>larc</code> on a server.  To workaround that we can either copy existing credentials to the server or ask the user for their password and do the oauth dance ourselves (a la ground control).  The latter is a really nasty trick, IMO.
+
+* For long running operations, do we want to try and design some sort of progress report or should we rely just on an email sent by vostok when it's done?
+
+* Maybe the caching of binary packages should be the responsibility of <nowiki>[[Specs-M-ARMImageBuildingTool|ARMImageBuildingTool]]</nowiki>?
+
+* Is supporting the local archive in a workspace in all the tools going to be a lot of work? Should there be a way for it to be transparently included instead?
+
+----
+CategorySpec

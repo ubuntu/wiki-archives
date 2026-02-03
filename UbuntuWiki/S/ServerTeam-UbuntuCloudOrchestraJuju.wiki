@@ -1,0 +1,171 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== Background ==
+
+This page assumes you already have an <nowiki>[[https://wiki.ubuntu.com/Orchestra|Orchestra]]</nowiki> setup working, and that you have linked <nowiki>[[https://wiki.ubuntu.com/ServerTeam/OrchestraJuju|juju to control this Orchestra setup]]</nowiki>. This page discusses using juju to install Ubuntu Cloud Infrastructure, an openstack based private cloud solution
+
+It should be assumed that the user deploying this has a functioning Orchestra + Juju environment bootstrapped and all nodes have two network interfaces linked to two seperate physical networks.  Deploying with a single network is possible with some hacking and workarounds, see original document for that. It's also assumed the user has sufficient number of nodes available in Orchestra.  This does not make use of the '--placement=local' Juju hack to conserve hardware by deploying things to the bootstrap node.  The minimum deployment outlined below requires a minimum of 6 machines including the juju bootstrap node.
+
+== Deploying ==
+
+=== 1. Bootstrap ===
+
+With Orchestra Provisioning server configured and Juju bootstrapped, 'juju status' should show something similar to:
+
+<pre>
+ubuntu@orchestrasrvr:~$ juju status
+2011-09-17 18:02:22,148 INFO Connecting to environment.
+machines:
+  0: {dns-name: mabolo.lan, instance-id: MTMxNDMwNzI0OS40ODkyODE2MzAuODE5ODY}
+</pre>
+ 
+=== 2. Clone Charms ===
+
+Create local branches of the following Juju charms in '''~/charms'''
+
+<pre>
+ubuntu@orchestrasrvr:~$ mkdir -p charms/oneiric
+ubuntu@orchestrasrvr:~$ cd charms/
+ubuntu@orchestrasrvr:~/charms$ bzr branch lp:charm/rabbitmq-server oneiric/rabbitmq-server
+ubuntu@orchestrasrvr:~/charms$ bzr branch lp:charm/mysql oneiric/mysql
+ubuntu@orchestrasrvr:~/charms$ bzr branch lp:charm/nova-compute oneiric/nova-compute
+ubuntu@orchestrasrvr:~/charms$ bzr branch lp:charm/nova-cloud-controller oneiric/nova-cloud-controller
+ubuntu@orchestrasrvr:~/charms$ bzr branch lp:charm/glance oneiric/glance
+</pre>
+
+=== 3. Set Global Configuration ===
+
+We'll need to set some global configuration for the installation.  Create a file '''/home/ubuntu/charms/openstack.yaml''':
+
+<pre>
+nova-cloud-controller:
+  nova-release: distro
+  nova-config: /etc/nova/nova.conf
+  db-user: nova
+  nova-db: nova
+  rabbit-user: nova
+  rabbit-vhost: nova
+  network-manager: FlatDHCPManager
+  bridge-interface: br100
+nova-compute:
+  nova-release: distro
+  nova-config: /etc/nova/nova.conf
+  db-user: nova
+  nova-db: nova
+  rabbit-user: nova
+  rabbit-vhost: nova
+  flat-interface: eth1
+  virt-type: kvm
+glance:
+  glance-release: distro
+  registry-config: /etc/glance/glance-registry.conf
+  api-config: /etc/glance/glance-api.conf
+  db-user: glance
+  nova-db: nova
+</pre>
+
+'''Note:''' Most of these are defaults.  The only option specific to our example deployment is 'flat-interface: eth1'.  This will configure the virtual network on eth1.  Later, nova will create a virtual network on these bridges for instances.
+
+=== 4. Deploy Services ===
+
+After branching the necessary charms to '''/home/ubuntu/charms/''' and setting our configuration at '''/home/ubuntu/charms/openstack.yaml''', we can begin deploying the services.
+
+==== MySQL and RabbitMQ ====
+
+First, deploy the MySQL and RabbitMQ services.  
+
+<pre>
+ubuntu@orchestrasrvr:~$ export REPO=~/charms
+ubuntu@orchestrasrvr:~$ export CONFIG=~/charms/openstack.yaml
+ubuntu@orchestrasrvr:~$ juju deploy --repository=$REPO local:mysql
+ubuntu@orchestrasrvr:~$ juju deploy --repository=$REPO local:rabbitmq
+</pre>
+
+==== Nova and Glance ====
+
+Deploy nova-cloud-controller, nova-compute and glance to their own nodes:
+
+<pre>
+ubuntu@orchestrasrvr:~$ juju deploy --repository=$REPO --config=$CONFIG local:nova-cloud-controller
+ubuntu@orchestrasrvr:~$ juju deploy --repository=$REPO --config=$CONFIG local:nova-compute
+ubuntu@orchestrasrvr:~$ juju deploy --repository=$REPO --config=$CONFIG local:glance
+</pre>
+
+=== 6. Add Relations ===
+
+Now we can add the necessary relations between the services.
+
+Give nova-cloud-controller, nova-compute and glance access to the database:
+
+<pre>
+ubuntu@orchestrasrvr:~$ juju add-relation mysql nova-cloud-controller
+ubuntu@orchestrasrvr:~$ juju add-relation mysql nova-compute
+ubuntu@orchestrasrvr:~$ juju add-relation mysql glance
+</pre>
+
+'''NOTE:''' The first of these 3 relations runs the initial database migration.  It's a good idea to allow it time to complete entirely before adding the others.
+
+Give the Nova components access to the messaging queue:
+
+<pre>
+ubuntu@orchestrasrvr:~$ juju add-relation rabbitmq nova-compute
+ubuntu@orchestrasrvr:~$ juju add-relation rabbitmq nova-cloud-controller
+</pre>
+
+Configure the compute node for the network manager specified in our config.
+
+<pre>
+ubuntu@orchestrasrvr:~$ juju add-relation nova-cloud-controller:nova-network nova-compute:nova-network
+</pre>
+
+Let both the cloud controller and the compute nodes know where to fetch virtual machine images:
+
+<pre>
+ubuntu@orchestrasrvr:~$ juju add-relation glance:image-service nova-cloud-controller:image-service
+ubuntu@orchestrasrvr:~$ juju add-relation glance:image-service nova-compute:image-service
+</pre>
+
+=== 7. Use Your Cloud ===
+
+At this point, the Openstack cloud has been deployed and should be functioning.  If you login to the nova-cloud-controller node (as reported by 'juju status'), you can create the first nova users, projects, networks and export credentials to be used with euca-tools or other API tools.
+
+<pre>
+ubuntu@orchestrasrvr:~$ juju ssh 2
+ubuntu@marula:~$ sudo nova-manage user admin admin
+ubuntu@marula:~$ sudo nova-manage project create novaproject admin
+ubuntu@marula:~$ sudo nova-manage network create \
+                  --label=novanet \
+                  --fixed_range_v4=10.0.0.0/24 \
+                  --num_networks=1 \
+                  --network_size=255 \
+                  --bridge=br100 \
+                  --bridge_interface=eth1 \
+                  --multi_host=T \
+                  --project_id=novaproject
+ubuntu@marula:~$ sudo nova-manage project zipfile novaproject admin
+</pre>
+
+Now we can unzip our credentials and begin using the cloud.
+
+<pre>
+ubuntu@marula:~$ unzip nova.zip
+ubuntu@marula:~$ . novarc
+ubuntu@marula:~$ wget http://uec-images.ubuntu.com/server/server/releases/oneiric/beta-1/ubuntu-11.10-beta1-server-cloudimg-amd64.tar.gz
+ubuntu@marula:~$ uec-publish-tarball ./ubuntu-11.10-beta1-server-cloudimg-amd64.tar.gz images
+ubuntu@marula:~$ euca-add-keypair adam >adam.pk
+ubuntu@marula:~$ euca-run-instances -k adam ami-00000002
+</pre>
+
+We still have 1 extra machine.  We can easily be added as a compute node through Juju to increase our resources:
+
+<pre>
+ubuntu@orchestrasrvr:~$ juju add-unit nova-compute
+</pre>

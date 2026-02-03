@@ -1,0 +1,109 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+== Problem: rsyslog logging haproxy to syslog ==
+
+=== Intro ===
+
+I'm trying to get some kind of reasonable logging for haproxy via rsyslog.  I've almost got it, except that the messages get inserted not only into the haproxy logs but also into the more general syslog and messages logs.
+
+Was able to get rsyslog working with haproxy from here: http://kevin.vanzonneveld.net/techblog/article/haproxy_logging/
+
+=== haproxy.conf ===
+<pre>
+$ sudo cat /etc/haproxy/haproxy.cfg
+global
+	log 127.0.0.1	local0
+	log 127.0.0.1	local1 notice
+	maxconn 4096
+	user haproxy
+	group haproxy
+	daemon
+
+defaults
+	log	global
+	mode	http
+	option	httplog
+	contimeout	5000
+	clitimeout	50000
+	srvtimeout	50000
+
+listen	google  127.0.0.1:10001
+	mode http
+	balance	roundrobin
+	cookie SERVERID insert indirect
+	option httpchk HEAD /index.html HTTP/1.0
+	server	google_1 209.85.225.103:80 cookie google1 check
+</pre>
+
+=== rsyslog ===
+
+<pre>
+$ cat /etc/rsyslog.d/haproxy.conf 
+
+$ModLoad imudp
+$UDPServerRun 514
+
+local0.*			-/var/log/haproxy-0.log
+local1.*			-/var/log/haproxy-1.log
+
+</pre>
+
+=== the test ===
+<pre>
+$ curl -s -I http://127.0.0.1:10001
+$ sudo tail -v -n 1 /var/log/{syslog,messages,haproxy-*}
+</pre>
+
+=== sample test results ===
+<pre>
+$ curl -s -I http://127.0.0.1:10001
+HTTP/1.1 200 OK
+Date: Tue, 04 Jan 2011 04:55:11 GMT
+Expires: -1
+Cache-Control: private, max-age=0
+Content-Type: text/html; charset=ISO-8859-1
+Server: gws
+X-XSS-Protection: 1; mode=block
+Transfer-Encoding: chunked
+Set-Cookie: SERVERID=google1; path=/
+
+$ sudo tail -v -n 1 /var/log/{syslog,messages,haproxy-*}
+=== > /var/log/syslog < ===
+Jan  3 23:55:11 localhost haproxy[4220]: 127.0.0.1:53062 [03/Jan/2011:23:55:11.615] google google/google_1 0/0/46/52/127 200 223 - - --NI 0/0/0/0/0 0/0 "HEAD / HTTP/1.1"
+
+=== > /var/log/messages < ===
+Jan  3 23:55:11 localhost haproxy[4220]: 127.0.0.1:53062 [03/Jan/2011:23:55:11.615] google google/google_1 0/0/46/52/127 200 223 - - --NI 0/0/0/0/0 0/0 "HEAD / HTTP/1.1"
+
+=== > /var/log/haproxy-0.log < ===
+Jan  3 23:55:11 localhost haproxy[4220]: 127.0.0.1:53062 [03/Jan/2011:23:55:11.615] google google/google_1 0/0/46/52/127 200 223 - - --NI 0/0/0/0/0 0/0 "HEAD / HTTP/1.1"
+
+=== > /var/log/haproxy-1.log < ===
+Jan  3 23:53:44 localhost haproxy[4219]: Proxy google started.
+</pre>
+
+=== Solution ===
+
+Found this page: http://serverfault.com/questions/214312/how-to-keep-haproxy-log-messages-out-of-var-log-syslog
+
+Had to modify the default rsyslog file, adding entries to ignore local0 and local1.
+
+<pre>
+$ grep local /etc/rsyslog.d/50-default.conf
+* .*;auth,authpriv,local0,local1.none		-/var/log/syslog
+	local0,local1.none	-/var/log/messages
+</pre>
+
+=== References ===
+
+* http://kevin.vanzonneveld.net/techblog/article/haproxy_logging/
+* http://serverfault.com/questions/214312/how-to-keep-haproxy-log-messages-out-of-var-log-syslog
+* http://haproxy.1wt.eu/download/1.2/doc/haproxy-en.txt # see section 4.2

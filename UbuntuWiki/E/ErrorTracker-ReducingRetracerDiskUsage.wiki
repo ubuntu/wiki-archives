@@ -1,0 +1,68 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+The retracers currently use a very large amount of disk space. This is causing the webops team to be paged as we get close to running out of disk space. They clear the caches and restart the retracers, only to be paged again a few days later.
+
+There are a few things we can do here to free up the webops team.
+
+==== Current solution ====
+
+Haw has written a script (memento, r4695) that automatically purges the cache and restarts the retracers as they get close to running out of space (85% disk usage).
+
+==== Using a squid proxy for apt ====
+
+'''TODO'''
+
+==== Using overlayfs to share common files ====
+The retracers are using between 6 and 7 GB for each 12.04 cache, and between 5 and 9 GB for each 12.10 cache. The bulk of this is shared between all retracers:
+<pre>
+whoopsie@finfolk:~$ comm -1 -2 \
+<(cd /srv/daisy.ubuntu.com/var/Ubuntu\ 12.04/cache-eyhaRI/sandbox; find | sort) \
+<(cd /srv/daisy.ubuntu.com/var/Ubuntu\ 12.04/cache-RFizJx/sandbox/; find | sort) \
+| sed 's,^,/srv/daisy.ubuntu.com/var/Ubuntu\ 12.04/cache-eyhaRI/sandbox/,' \
+| tr '\n' '\0' | du -chs --files0-from=-
+
+6.5G Total
+</pre>
+
+We could use overlayfs to manage a copy on write snapshot per Ubuntu release. Initial testing of overlayfs suggests that it handles the necessary file operations in an expected way.
+
+The implementation would be something akin to the following:
+<pre>
+mkdir -p /srv/daisy.ubuntu.com/var/Ubuntu\ 12.04/{base,cache-eyhaRI,cache-RFizJx,diff-eyhaRI,diff-RFizJx}
+
+sudo mount -t overlayfs overlayfs \
+-olowerdir=/srv/daisy.ubuntu.com/var/Ubuntu\ 12.04/base,\
+upperdir=/srv/daisy.ubuntu.com/var/Ubuntu\ 12.04/diff-eyhaRI \
+/srv/daisy.ubuntu.com/var/Ubuntu\ 12.04/cache-eyhaRI
+
+sudo mount -t overlayfs overlayfs \
+-olowerdir=/srv/daisy.ubuntu.com/var/Ubuntu\ 12.04/base,\
+upperdir=/srv/daisy.ubuntu.com/var/Ubuntu\ 12.04/diff-RFizJx \
+/srv/daisy.ubuntu.com/var/Ubuntu\ 12.04/cache-RFizJx
+</pre>
+
+<code>base</code> would be populated from an existing <code>cache-</code> directory. The <code>diff-</code> directories would contain the files not present in or overwritten from <code>base</code>. We'll want to use the <code>-n</code> option to sudo in <code>process_core.py</code>, with a glob-based entry in <code>/etc/sudoers</code>.
+
+==== LVM snapshots ====
+
+<pre>
+sudo dd if=/dev/zero bs=1M count=300
+sudo kpartx -av lvmdisk.img
+sudo pvcreate /dev/loop0
+sudo vgcreate Test /dev/loop0
+sudo lvcreate -L100 -nbase Test
+sudo mkfs.ext4 /dev/Test/base
+sudo udisks --mount /dev/Test/base
+sudo touch /media/dbe*/hi
+sudo lvcreate -L100 -noverlay -s Test/base
+sudo lvs
+sudo udisks --mount /dev/Test/overlay
+</pre>

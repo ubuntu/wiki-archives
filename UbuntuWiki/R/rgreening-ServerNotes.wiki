@@ -1,0 +1,144 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== Virtualization ==
+=== Documentation ===
+You can find many resources online to assist with building and maintaining vm's. See below for some important ones I refer too:
+
+* <nowiki>[[http://doc.ubuntu.com/ubuntu/serverguide/C/virtualization.html|Virtualization]]</nowiki> in the <nowiki>[[http://doc.ubuntu.com/ubuntu/serverguide/C/|Official Ubuntu Server Guide]]</nowiki>
+* <nowiki>[[https://help.ubuntu.com/community/KVM|Kvm]]</nowiki> in the <nowiki>[[https://help.ubuntu.com/community/|Community]]</nowiki> documentation
+=== Host/Guest Maintenance ===
+==== vmbuilder ====
+vmbuilder is used to automate building vm's. vm's created with vmbuilder are automatically added to your kvm setup, and if configured, will load on booting the host os.
+
+If you do not have vmbuilder installed, you should issue the following, on each host os:
+
+<pre>
+$ sudo apt-get install python-vm-builder
+</pre>
+
+Once installed, you should build a config file/template for using with the builder. I have the following as my ~/.vmbuilder.cfg:
+
+<pre>
+[DEFAULT]
+arch = amd64
+part = vmbuilder.partition
+user = rgreening
+name = "Roderick B. Greening"
+pass = default
+tmpfs = - 
+
+[ubuntu]
+suite = lucid 
+flavour = virtual
+addpkg = rkhunter, telnet, elinks, gpm, openssh-server, unattended-upgrades, acpid, wget, ufw, apparmor, apparmor-profiles, apparmor-utils
+
+[kvm]
+libvirt = qemu:///system 
+</pre>
+
+With the above config settings, I am targeting vm's for lucid 64 bit arch, fully virtualized and using kvm. I have also specified some default packages I wish for all systems and the default account and temporary password to use.
+
+I have also defined the partitioning scheme in a file called vmbuilder.partition, which can be seen below:
+
+<pre>
+root 8000
+swap 4000
+---
+/var 20000
+</pre>
+
+Now, for each new vm, I can override any of these options or add new ones bydefining an alternate config file at the time of running vmbuilder. For example, here is the config file for my cacti vm cacti.cfg:
+
+<pre>
+[DEFAULT]
+ip = 192.168.3.8
+mask = 255.255.255.0
+gw = 192.168.3.1
+bridge = br0.602
+hostname = cacti
+[ubuntu]
+addpkg = rkhunter, telnet, elinks, gpm, openssh-server, unattended-upgrades, acpid, wget, ufw, apparmor, apparmor-profiles, apparmor-utils, cacti, cacti-spine
+</pre>
+
+In the above config, I have added the IP/Networking details, as well as overridded the package list.
+
+Now, suppose we wish to build a vm using the above setup, we first change to the directory where we have the cacti.cfg and vmbuilder.partition files (on my system ~/VMBuilder/). Next we issue the following and go get a coffee while it downloads and builds the system:
+
+<pre>
+$ sudo vmbuilder kvm ubuntu -c cacti.cfg -d /opt/vm/cacti-kvm
+</pre>
+
+The -d option above allows me to speficy where the resulting images are placed. On my system, I have been using /opt/vm for this purpose. This will likely change when I move to a cluster setup, but for now, I'm happy with this location.
+
+==== virsh ====
+
+virsh is the cli shell used to communicate with your vm's. For example, to examine our newly created vm:
+
+<pre>
+$ virsh -c qemu:///system dominfo cacti
+
+Id:             -
+Name:           cacti
+UUID:           8ab33f49-74e9-28f9-a307-f941a2ac78df
+OS Type:        hvm
+State:          shut off
+CPU(s):         1
+Max memory:     131072 kB
+Used memory:    131072 kB
+Autostart:      disable
+Security model: apparmor
+Security DOI:   0
+</pre>
+
+From this you can see that the vm is there, but currently disabled. You'll also notice the default memory of 128M and autostart is disabled. 
+
+Let's enable the vm to start on boot of host os, and then start the vm manually:
+
+<pre>
+$ virsh -c qemu:///system autostart cacti
+
+Domain cacti marked as autostarted
+
+$ virsh -c qemu:///system start cacti
+
+Domain cacti started
+</pre>
+
+=== Recovery ===
+Using KVM, the images for the drives are qcow2 format. To mount one of these images, and effect a repair, you can use the following steps:
+
+<pre>
+$ cd <images dir>
+$ sudo qemu-nbd <image file>
+</pre>
+
+After this, you need to run the nbd client, which creates the device node for the device from the image file.
+
+<pre>
+$ nbd-client localhost 1024 /dev/nbd0
+</pre>
+
+Now you can use fdisk like normal to list the partitions, mount them, and fsck them. For example:
+
+<pre>
+$ fdisk -l /dev/nbd0
+
+Disk /dev/nbd0: 12.6 GB, 12583960576 bytes
+4 heads, 32 sectors/track, 192016 cylinders
+Units = cylinders of 128 * 512 = 65536 bytes
+Sector size (logical/physical): 512 bytes / 512 bytes
+I/O size (minimum/optimal): 512 bytes / 512 bytes
+Disk identifier: 0x0008ac5a
+
+     Device Boot      Start         End      Blocks   Id  System
+/dev/nbd0p1               1      122055     7811504   83  Linux
+/dev/nbd0p2          122071      183090     3905280   82  Linux swap / Solaris
+</pre>

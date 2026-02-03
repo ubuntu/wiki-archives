@@ -1,0 +1,62 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== Go 1.5 in Trusty ==
+
+I have filed the SRU bug now: https://bugs.launchpad.net/ubuntu/+source/golang/+bug/1536882
+
+There is a need to provide a version of Go 1.5 in trusty-updates. We can't upgrade the golang package itself in trusty because that will cause other packages to ftbfs so the best place seems to be providing a golang1.5 package that juju and other consumers can build depend upon.
+
+=== Motivation ===
+
+There is an expectation that new versions of juju will be made available in trusty-updates. trusty was released with version 1.2 of Go, which is almost indescribably ancient in Go terms. The Go team maintains at most two versions of Go, so 1.4 and 1.5 at the time of writing but this will be 1.5 and 1.6 in a few weeks, which means that trusty will soon be 3 versions behind a supported version.
+
+In particular, authors of third-party packages that juju depends upon are mostly no longer supporting go 1.2. Specific examples of packages this affects:
+
+* lxd client code requires Go 1.3+ (currently not built on trusty)
+* the new Azure provider requires Go 1.3+ (needed for centos and windows workloads in azure)
+* vmware provider requires Go 1.3+ (currently vendored and hacked to work with 1.2)
+* the systemd go bindings require Go 1.3+ (currently vendored and hacked to work with 1.2)
+
+In addition, Go 1.5 is available for all supported architectures in trusty, which means the Juju developers and release managers do not have to worry about bugs and different behaviours in gccgo (such as the rather alarming https://bugs.launchpad.net/bugs/1517611 ) as well as the gc compiler.
+
+=== Building the packages ===
+
+A wrinkle is that Go 1.5 requires Go 1.4 to bootstrap, which is not available in trusty. Also there is no version of the 1.4 gc compiler for arm64 or ppc64le, which means that the only option is to build with gccgo 5. While it presumably would be possible to create temporary gccgo 5 packages for trusty that could be used to build the package, this is an almighty lot of work compared to building the package once in wily or xenial, binary copying this to trusty and then rebuilding it with the copied package there. 
+
+=== The Packages ===
+
+Basically the first step involves taking the go package and doing sed 's/golang-/golang1.5-/g' (on file names and contents) in the debian directory. I have uploaded such a package to my ppa (https://launchpad.net/~mwhudson/+archive/ubuntu/go15-trusty/+packages): 
+
+https://launchpad.net/~mwhudson/+archive/ubuntu/go15-trusty/+files/golang1.5_1.5.3-0ubuntu1~bootstrap.dsc
+
+Then, after this package has built for xenial and been copied to trusty, another version of the package (the only substantive change being changing the build-depends to depend on golang1.5-go rather than golang-go | gccgo) can be uploaded to the same ppa:
+
+https://launchpad.net/~mwhudson/+archive/ubuntu/go15-trusty/+files/golang1.5_1.5.3-0ubuntu4.dsc
+
+(unfortunately I made some stupid mistakes necessitating the silly version numbers so we should do this once more before copying it into trusty).
+
+=== Looking to the future ===
+
+In which I ramble about how things might go going forward and convince myself that the problems aren't too bad.
+
+Although it will ease matters greatly to have Go 1.5 in trusty soon, trusty will supported for another three years and it would be naive to think that there won't in 18 months be pressure to have Go 1.8 (or whatever) in trusty as well. One angle will be easier: Go 1.8 will likely build with Go 1.5, or at worst there will be a chain of versions we can upload to get to Go 1.8 without any binary copy games.
+
+The same questions apply to xenial, of course, with two extra wrinkles: one to do with the support levels implied my main inclusion and another to do with shared libraries.
+
+My concern about main is: currently golang is in main, because juju and lxd are in main and so this means their build dependencies are in main. Xenial will release with Go 1.6. Assuming that in a couple of years we have uploaded Go 1.8 and are looking at uploading Go 1.10 so that we can easily deliver new versions of Juju to xenial-updates: golang1.8-go will be in main, but once golang1.10-go is uploaded, nothing will use it, but aiui we'll be committed to maintaining it until Xenial EOLs. This seems like a bit of a burden, although perhaps it's just a reason to avoid upgrading too frequently -- if we upload a new version every two years, there will be at most three versions of Go in xenial & xenial-updates, which doesn't seem so bad.
+
+The concern about shared libraries is this: Assume as before that xenial releases with Go 1.6 and we're uploading a golang1.8-go package and there is a package, say golang-foobar, that is built as a shared library and depended on by both juju and some other package, say frobnozzle, that we don't care about so much. Before we can upload a version of juju that uses Go 1.8, we'll need to rebuild golang-foobar's shared library as Go does not support linking objects compiled by different compiler versions together (at either program link time or dynamic link time). We need to keep frobnozzle installable.
+
+One way we could do this would be to update golang-foobar's SOVER (so we'd have both libgolang-foobar1 and libgolang-foobar2 in the archive). This does mean that any upload of frobnozzle would have to switch it's build depends over to golang1.8-go though, because golang-foobar's golang-foobar-dev package will depend on a shared library built with golang 1.8, which might be particularly awkward if frobnozzle does not build cleanly with Go 1.8.
+
+The alternative would be to, as well as "forking" the golang-go package to golang1.8-go, "fork" in the same way all library packages that are depended on by juju, so in this case we'd create a golang1.8-foobar source package that builds a libgolang1.8-foobar1 and golang1.8-foobar-dev package.
+
+Given that one would expect SRUs of random packages we don't really care about such as frobnozzle to be rare, the first of these options seems likely to be less painful overall.

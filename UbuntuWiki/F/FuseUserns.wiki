@@ -1,0 +1,164 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== Using FUSE in Unprivileged Containers ==
+
+=== Setup ===
+
+Mounting FUSE from user namespaces is still a work in progress, so you will need to be running a kernel which has been patched to support this. The most recent patches can be obtained from the fuse-userns branch of http://kernel.ubuntu.com/git/sforshee/ubuntu-utopic.git.
+
+Once you have a patched kernel you will need get a bindmount for `/dev/fuse` into the container you'll be using for the tests. Add the following line to /usr/share/lxc/config/userns.conf:
+
+<pre>
+lxc.mount.entry = /dev/fuse dev/fuse none bind,create=file 0 0
+</pre>
+
+You will also need to add the lines
+
+<pre>
+mount fstype=fuse,
+mount fstype=fuseblk,
+</pre>
+
+in `/etc/apparmor.d/abstractions/lxc/container-base` on the host (the latter is only needed if you plan to test fuseblk). With that in place you should be able to mount using FUSE from within an unprivileged container.
+
+=== Testing ===
+
+For most test cases the fusexmp driver (available in the FUSE userspace source code at http://sourceforge.net/projects/fuse/) is useful. This driver uses a local directory tree as the backing store for the FUSE mount. This is the driver used in most example test cases below.
+
+fuseext2 is another good option which can be used with an ext2 or ext3 filesystem image (e.g. one created using dd and mke2fs). Note that the `force` mount option must be supplied for read/write access.
+
+For all test cases the `fuse` package and its dependencies must be installed, along with any FUSE drivers being used (e.g. `fuseext2`). The test cases primarily focus on details specific to use of FUSE within user namespaces.
+
+==== Mount / unmount ====
+
+Test mounting and unmounting with FUSE from an unprivileged container. For example:
+
+<pre>
+$ fusexmp -omodules=subdir,subdir=/path/to/backing_store mnt
+$ fusermount -u mnt
+</pre>
+
+Both commands should be successful, and when mounted any expected files should appear in `mnt`.
+
+==== Basic filesystem operations ====
+
+Test basic filesystem operations (create, mkdir, read, write, chmod, chown, etc.) and verify that the results are as expected. Verify that the numeric user/group ids are the same when an image is mounted from the host and from within the unprivileged container (e.g. a file owned by uid 1000 inside the container should also be owned by uid 1000 in the host).
+
+==== allow_other ====
+
+Mount a FUSE volume without the `allow_other` mount option, then attempt to list the mountpoint's contents as the user which did the mount, then again as root. This should be successful when done as the normal user but fail when done as root.
+
+<pre>
+$ ls mnt
+dir1 file1 file2
+$ sudo ls mnt
+ls: cannot access mnt: Permission denied
+</pre>
+
+Now unmount the mountpoint and remount with the `allow_other` option (`default_permission` is also useful in combination with `allow_other` to tell FUSE to allow the kernel to do permission checking). It should now be possible to access the mount as any user with appropriate permissions.
+
+<pre>
+$ ls mnt
+dir1 file1 file2
+$ sudo ls mnt
+dir1 file1 file2
+</pre>
+
+However it should still be impossible to access the mount from the host with any user not mapped into the container's user namespace.
+
+<pre>
+$ ls /proc/$(pidof fusexmp)/root/path/to/mnt
+ls: cannot access /proc/nnn/root/path/to/mnt: Permission denied
+$ sudo ls /proc/$(pidof fusexmp)/root/path/to/mnt
+ls: cannot access /proc/nnn/root/path/to/mnt: Permission denied
+</pre>
+
+==== nodev ====
+
+It should not be possible to mount a FUSE mount from an unprivileged container without having the `nodev` option applied to the mount.
+
+==== nosuid ====
+
+Mounting as an unprivileged user within the container should always result in the `nosuid` flag being applied to the mount (unless the FUSE userspace utilities have been modified).
+
+It should be possible to mount without the `nosuid` flag by running the FUSE mount command (`fuseext2`, `fusexmp`, etc.) as container root and passing `suid` as a mount option. It should only be possible to change to users or groups which have been mapped into the user namespace of the container.
+
+==== ids which don't map into the user ns ====
+
+From the host, create a file in the fusexmp backing store and set ownership to user and group ids not mapped into the containers user ns. Mount from within the container using fusexmp. Ownership of the file should from within the mount should be nobody/nogroup (65534/65534). It will be impossible to change ownership or permissions of the inode.
+
+==== pid translation ====
+
+Mount from within the container using fusexmp with debugging enabled, e.g.
+
+<pre>
+$ fusexmp -omodules=subdir,subdir=/path/to/backing_store,allow_other,default_permissions -d mnt
+</pre>
+
+fusexmp will continue to run in the foreground and print out debug information, including the pid of processes making filesystem requests. From another terminal run commands which access the filesystem and verify that the pids in the fusexmp debug output are mapped into the container's pid namespace.
+
+==== pid translation in file locks ====
+
+This is a bit tricky to test, as most of the FUSE filesystem implementations don't seem to implement file locking (i.e. they just let the kernel handle it). What I ended up doing was modifying fusexmp to stub out the flie locking callbacks and ran it in debug mode (`-d`), then used a test application to exercise file locking within the mount. I verified that the pids printed by fusexmp had been translated.
+
+Also worthwhile is testing file locking against any unmodified FUSE filesystem to verify that it works as expected. E.g.:
+
+<pre>
+$ flock foobar sleep 10 &
+[1] 743
+$ flock foobar echo hello
+hello
+</pre>
+
+==== fuseblk ====
+
+You can test the `fuseblk` filesystem type by setting up a loopback device for an ext2 (or any other supported FUSE filesystem type) fs image and bindmounting that device into the container with appropriate ownership/permissions. When mounting the device you must pass the `blkdev` mount option to instruct fusermount to mount using the `fuseblk` fs type rather than the `fuse` type. E.g.
+
+<pre>
+$ sudo fuseext2 /dev/loop0 mnt -o force,allow_other,default_permissions,blkdev
+$ mount | grep fuseblk
+/dev/loop0 on /path/to/mnt type fuseblk (rw,default_permissions,allow_other)
+</pre>
+
+All other tests should work identically when mounted as the `fuseblk` fs type as with `fuse`.
+
+==== xattrs ====
+
+When mounted from outside of init_user_ns FUSE allows getting and setting xattrs in only the `user.*` namespace. In order to test this your fuse filesystem must support xattrs. `fusexmp` supports xattrs when compiled with `-DHAVE_SETXATTR` in the compiler flags. With such a filesystem, getting and setting attributes in the `user.*` namespace should succeed; getting and setting attributes from any other xattr namespace should fail.
+
+<pre>
+$ setfattr -n user.test -v "test" foo
+$ getfattr -n user.test foo
+user.test="test"
+
+$ setfattr -n system.test -v "test" foo
+setfattr: foo: Operation not supported
+</pre>
+
+From outside the container set an xattr in another namespace, e.g.:
+
+<pre>
+$ sudo setfattr -n security.test -v "test" ~/.local/share/lxc/.../backing-store/foo
+</pre>
+
+Verify that you can get this xattr from outside the fuse mount within the container.
+
+<pre>
+$ getfattr -n security.test /path/to/backing-store/foo
+security.test="test"
+</pre>
+
+Now attempt to read the same xattr from within a fusexmp mount. The operation should fail with `ENOTSUPP`.
+
+<pre>
+$ getfattr -n security.test /path/to/mount/foo
+foo: security.test: Operation not supported
+</pre>

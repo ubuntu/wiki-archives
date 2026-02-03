@@ -1,0 +1,323 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== Introduction ==
+
+In this tutorial, you will build a simple script to interact with files stored in the Ubuntu One cloud.  This won't be a fancy graphical application, just a simple command line Python script to show you how it's done.
+
+You'll need to be using Ubuntu 11.10 or later.
+
+== Basics ==
+
+First, we need a skeleton of a script, something that can take arguments like "get", "put", or "list" and then do something.
+
+{{{#!highlight python
+
+import sys
+
+if len(sys.argv) <= 1:
+  print "Need more arguments"
+  sys.exit(1)
+
+print sys.argv[1:]
+}}}
+
+This is a very brain-dead script, it merely complains about not being given an argument or prints out whatever argument it was given.  But it's enough to start with.  We won't be worrying too much about error handling in this tutorial.
+
+Save it with the name "u1file.py".
+
+See <nowiki>[[attachment:1.py]]</nowiki> for a copy of the script at this point.
+
+== Logging In ==
+
+One thing we have to do before we can even talk to the Ubuntu One cloud is log into it.  There’s a utility class in ubuntuone.platform.credentials to help with this.  It’s designed to be asynchronous, but for our simple purposes, we’ll fake synchronicity by waiting in an event loop while it finishes.
+
+So let's add a new function to our script:
+
+{{{#!highlight python
+
+import sys
+
+_login_success = False
+def login():
+  from gobject import MainLoop
+  from dbus.mainloop.glib import DBusGMainLoop
+  from ubuntuone.platform.credentials import CredentialsManagementTool
+
+  global _login_success
+  _login_success = False
+
+  DBusGMainLoop(set_as_default=True)
+  loop = MainLoop()
+
+  def quit(result):
+    global _login_success
+    loop.quit()
+    if result:
+	    _login_success = True
+
+  cd = CredentialsManagementTool()
+  d = cd.login()
+  d.addCallbacks(quit)
+  loop.run()
+  if not _login_success:
+    sys.exit(1)
+
+if len(sys.argv) <= 1:
+  print "Need more arguments"
+  sys.exit(1)
+
+if sys.argv[1] == "login":
+  login()
+}}}
+
+Note that if you're using Twisted and its asynchronous support, then you can use CredentialsManagmentTool().login() directly and not worry about this loop trick.
+
+Now we can call our script like so: "python u1file.py login" and we will be prompted by Ubuntu One to login.  You'll notice that if you call "python u1file.py login" multiple times you don't get prompted twice.  That's because the user's credentials are saved locally.
+
+In order to test logging in again, you'll need to first clear the user's credentials.  Let's add a tiny "logout" function to do this for our testing purposes:
+
+{{{#!highlight python
+def logout():
+  from gobject import MainLoop
+  from dbus.mainloop.glib import DBusGMainLoop
+  from ubuntuone.platform.credentials import CredentialsManagementTool
+
+  DBusGMainLoop(set_as_default=True)
+  loop = MainLoop()
+
+  def quit(result):
+    loop.quit()
+
+  cd = CredentialsManagementTool()
+  d = cd.clear_credentials()
+  d.addCallbacks(quit)
+  loop.run()
+
+if sys.argv[1] == "logout":
+  logout()
+}}}
+
+See <nowiki>[[attachment:2.py]]</nowiki> for the full script at this point.
+
+== Creating Volumes ==
+
+Ubuntu One has a concept called a volume, which is a cloud folder that can be synchronized to the user's devices.  There is always a default volume called "Ubuntu One", and there may be other volumes that the user has created.
+
+Let's augment our script to be able to create volumes.  New volumes are not synchronized to any devices by default.  Trying to create a volume that already exists is not an error (much like logging in above when already logged in wasn't an error).
+
+For this, we're going to actually need to make our first real cloud API call.  Which means we will need to sign our HTTP request using OAuth headers.  Which would normally be a pain, but there's a convenience call for this in ubuntuone.couch.auth:
+
+{{{#!highlight python
+def create_volume(path):
+  import ubuntuone.couch.auth as auth
+  import urllib
+  base = "https://one.ubuntu.com/api/file_storage/v1/volumes/~/"
+  auth.request(base + urllib.quote(path), http_method="PUT")
+
+if sys.argv[1] == "create-volume":
+  login()
+  create_volume(sys.argv[2])
+}}}
+
+This snippet, if added to the rest of your script, will allow you to call "python u1file.py create-volume testing", which will create a new "testing" volume for your use.  If you now visit http://one.ubuntu.com/files/ you should be able to see your "testing" volume.
+
+Note that we ensure that we are logged in before calling the cloud API function.
+
+A couple notes about legal volumes.  You can create a volume with a path, like "one/two", but you can not create nested volumes (a volume inside another volume).  However, volumes can have normal folders inside of them.
+
+See <nowiki>[[attachment:3.py]]</nowiki> for the full script at this point.
+
+== Uploading Files ==
+
+Now that we have a fresh volume, let's put something in it.  Uploading a file is a two-step process.  First, we create the metadata, then we upload the actual contents.  Uploading the contents is actually done to a different URL, "files.one.ubuntu.com" to a path returned to you when creating the metadata.
+
+When uploading, you must specify a content type and length.  But we'll just automatically detect both.
+
+The response to our initial request to create the file will return a JSON-encoded string.  This is a way of encoding data structures in a string.  Python has excellent support for it, in the "json" module.  You'll see simple uses of it below.
+
+{{{#!highlight python
+def put(local, remote):
+  import json
+  import ubuntuone.couch.auth as auth
+  import mimetypes
+  import urllib
+
+## Create remote path (which contains volume path)
+  base = "https://one.ubuntu.com/api/file_storage/v1/~/"
+  answer = auth.request(base + urllib.quote(remote),
+                        http_method="PUT",
+                        request_body='{"kind":"file"}')
+  node = json.loads(answer[1])
+
+## Read info about local file
+  data = bytearray(open(local, 'rb').read())
+  size = len(data)
+  content_type = mimetypes.guess_type(local)[0]
+  content_type = content_type or 'application/octet-stream'
+  headers = {"Content-Length": str(size),
+             "Content-Type": content_type}
+
+## Upload content of local file to content_path from original response
+  base = "https://files.one.ubuntu.com"
+  url = base + urllib.quote(node.get('content_path'), safe="/~")
+  auth.request(url, http_method="PUT",
+               headers=headers, request_body=data)
+
+if sys.argv[1] == "put":
+  login()
+  put(sys.argv[2], sys.argv[3])
+}}}
+
+So let's upload our own script for testing: "python u1file.py put u1file.py testing/u1file.py".  If you now visit http://one.ubuntu.com/files/ you should be able to see your "testing" volume and its one file "u1file.py".
+
+See <nowiki>[[attachment:4.py]]</nowiki> for the full script at this point.
+
+== Downloading Files ==
+
+Now that we have files to download, let's try that.  Just like uploading, this is a two-step process.  First, we ask for the metadata, then we download the actual contents.  For the contents, we'll use "files.one.ubuntu.com" again.
+
+{{{#!highlight python
+def get(remote, local):
+  import json
+  import ubuntuone.couch.auth as auth
+  import urllib
+
+## Request metadata
+  base = "https://one.ubuntu.com/api/file_storage/v1/~/"
+  answer = auth.request(base + urllib.quote(remote))
+  node = json.loads(answer[1])
+
+## Request content
+  base = "https://files.one.ubuntu.com"
+  url = base + urllib.quote(node.get('content_path'), safe="/~")
+  answer = auth.request(url)
+  f = open(local, 'wb')
+  f.write(answer[1])
+
+if sys.argv[1] == "get":
+  login()
+  get(sys.argv[2], sys.argv[3])
+}}}
+
+Try to download the script you uploaded before:
+
+<pre>
+python u1file.py get testing/u1file.py /tmp/u1file.py
+diff -u u1file.py /tmp/u1file.py
+</pre>
+
+The diff command should not output any differences, to prove that the file survived its round trip.
+
+See <nowiki>[[attachment:5.py]]</nowiki> for the full script at this point.
+
+== Listing Files ==
+
+Listing files is very similar in form to requesting metadata about a file (as we did in the get example above).  The only difference is that we'll additionally ask for information about folder children.
+
+{{{#!highlight python
+def get_children(path):
+  import json
+  import ubuntuone.couch.auth as auth
+  import urllib
+
+## Request children metadata
+  base = "https://one.ubuntu.com/api/file_storage/v1/~/"
+  url = base + urllib.quote(path) + "?include_children=true"
+  answer = auth.request(url)
+
+## Create file list out of json data
+  filelist = []
+  node = json.loads(answer[1])
+  if node.get('has_children') == True:
+    for child in node.get('children'):
+      child_path = urllib.unquote(child.get('path')).lstrip('/')
+      filelist += [child_path]
+  print filelist
+
+if sys.argv[1] == "list":
+  login()
+  get_children(sys.argv[2])
+}}}
+
+To test this, try "python u1file.py list testing".
+
+See <nowiki>[[attachment:6.py]]</nowiki> for the full script at this point.
+
+== Querying Files ==
+
+Getting specific information on a file is very similar to listing, you just don't bother to ask for children information.
+
+{{{#!highlight python
+def query(path):
+  import json
+  import ubuntuone.couch.auth as auth
+  import urllib
+
+## Request metadata
+  base = "https://one.ubuntu.com/api/file_storage/v1/~/"
+  url = base + urllib.quote(path)
+  answer = auth.request(url)
+  node = json.loads(answer[1])
+
+## Print interesting info
+  print 'Size:', node.get('size')
+
+if sys.argv[1] == "query":
+  login()
+  query(sys.argv[2])
+}}}
+
+Try this out with "python u1file.py query testing/u1file.py"
+
+See <nowiki>[[attachment:7.py]]</nowiki> for the full script at this point.
+
+== Deleting Files ==
+
+Last but not least, it is sometimes useful to delete files.  This is probably the easiest example:
+
+{{{#!highlight python
+def delete(path):
+  import ubuntuone.couch.auth as auth
+  import urllib
+  base = "https://one.ubuntu.com/api/file_storage/v1/~/"
+  auth.request(base + urllib.quote(path), http_method="DELETE")
+
+if sys.argv[1] == "delete":
+  login()
+  delete(sys.argv[2])
+}}}
+
+Try this out with "python u1file.py delete testing/u1file.py".  If you now visit http://one.ubuntu.com/files/ you should be able to see that the file "u1file.py" is no longer in your "testing" volume.
+
+See <nowiki>[[attachment:u1file.py]]</nowiki> for the full and final version of your script.
+
+== Error Handling ==
+
+One thing I didn't cover at all was error handling.  I'll cover it briefly now.
+
+If an error occurs on the cloud side, Ubuntu One will return a status code indicating what kind of error.  These status codes are standard HTTP codes.
+
+To check the status, do something like:
+status = int(answer[0].get('status'))
+
+Status codes in the 200s are success codes.  Here are some important error codes:
+* 400 is "permission denied"
+* 404 is "file not found"
+* 503 is "servers busy, please try again in a bit"
+* 507 is "out of space"
+
+Sometimes you will also receive a generic 500 status message.  This just means some internal error happened.  Usually such errors have an Oops ID that you can use to report the problem to the Ubuntu One folks:
+
+oops_id = answer[0].get('x-oops-id')
+
+== Conclusion ==
+
+Hopefully that was useful!  If you have any other questions or want to read more, read the official documenation: https://one.ubuntu.com/developer/files/store_files/cloud/

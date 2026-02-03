@@ -1,0 +1,514 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+* '''Launchpad Entry''': UbuntuSpec:get-rid-of-python-central-and-support
+* '''Created''': 2008-06-02
+* '''Contributors''': LarsWirzenius
+* '''Packages affected''': python, python-central, python-support (+ everything Python related)
+
+=== Nota Bene ===
+
+This is undergoing a re-think and a re-write. Stay tuned for more updates
+to come soon, and please don't worry if this document is self-contradictory
+at the moment.
+
+=== Summary ===
+
+Pure Python modules are currently installed in a single location, and
+symlinks are created at package installation time from site-packages
+to the single location. This way, a single copy of a module can server
+for all installed Python versions. Howeer, creating the symlinks is
+error prone, and can cause problems during upgrades.
+
+The proposal is to have the symlinks created at package build time
+so that they are included in the .deb, so that dpkg creates them at
+the right time. This way the python-central and python-support packages
+become build-time dependencies instead of run-time dependencies.
+
+(FIXME: This summary is incomplete. We'll update it when things become
+more stable.)
+
+=== Release Note ===
+
+Python packaging will change somewhat. Packages using debhelper or cdbs
+will require no or only minor changes to their source. Users of packages will
+see no change.
+
+=== Exploring the Phase Space of Python Packaging ===
+
+Packaging the Python implementation and software implemented in
+Python is not always straightforward. This section explores some
+of the challenges involved in order to provide a basis for discussing
+improvements in how the packaging is done.
+
+This section starts with the basics, for clarity. It is written so that
+things are as clear as they can be, which means not assuming everyone
+understands the entire history. This section should probably be moved
+to a different document before the final spec.
+
+==== Terminology ====
+
+* '''Python implementation''': The Python interpreter, written in C.
+ Several versions of the interpreter can be installed at the same time:
+ `/usr/bin/python2.4`, `/usr/bin/python2.5`, etc. The interpreters are
+ packaged in packages named `python-X.Y`. The different versions are
+ completely independent of each other.
+* '''Default Python interpreter''': The default Python interpreter,
+ installed as `/usr/bin/python`. This is a symlink to the appropropriate
+ pythonX.Y executable. The symlink is governed by the package
+ `python`.
+* '''Python module''': a pure Python file (''foo.py''). When installed
+ onto the system, they should (currently) be accessible via the
+ /usr/lib/pythonX.Y/site-packages directory.
+* '''Python byte code file''': Python byte code installed into a file
+ ('''foo.pyc''' and/or '''python.pyo'''). Byte codes with an X.Y series
+ (X.Y.0, X.Y.1, etc) are compatible, but this is not true if X or Y
+ changes.
+* '''Python extension''': a shared object (''foo.so''), typically built
+ from C, and loaded by the Python interpreter as if it were a Python
+ module. Extensions need to be compiled for each Python interpreter
+ version (X.Y) separately, since the ABI is not stable.
+* '''Python package''': a collection of Python modules and extensions
+ in a directory which contains a `__init__.py` file. (This is highly
+ simplified.)
+
+==== More than one Python version? ====
+
+Debian and Ubuntu need to support more than one concurrently installed
+Python version. This is necessary because software does not always work
+with every version of Python, and different software included in the
+distribution might need different versions of Python. For example, Zope
+may require Python 2.4, and breaks with 2.5, whereas something else
+might not work with 2.4, and requires 2.5.
+
+In addition, upgrades between releases of the distributions need to work.
+If the previous release had only Python 2.4, and the new one had only 2.5, 
+there
+will probably a long phase during the upgrade when Python or some of the
+software implemented in Python would not be fully
+operational. This would prevent using Python for tools involved in, or used
+during the upgrade, which would be a crippling restriction.
+
+==== Default Python version? ====
+
+The decision of what is the default Python version is made by the
+distributions based on an analysis of how well the new version works,
+and, more importantly, how well software implemented in Python works
+with the new version. If most of the system is happy with 2.5, then
+2.5 can be made the default version. Anything that still requires 2.4
+will be changed to require and use it explicitly, rather than using
+the default Python version.
+
+However, it is not practical to modify every Python package separately
+to switch to a new version of Python. There are too many such packages.
+
+==== Byte code compilation in Python ====
+
+The Python intepreter compiles a Python module into byte code when it
+loads it. If it can, it will also write the byte code into a .pyc file,
+or a .pyo file if running in optimised mode. It can do that if the file
+does not already exist, and it has write permission to the directory.
+
+This storing of byte code in files happens implicitly, invisibly, when
+the program runs. It can also be done explicitly by calling a compilation
+script provided with Python.
+
+==== Byte code compilation with .deb packages ====
+
+Byte codes could generated when the package is built, and included
+in the .deb file. This increases the size of the package quite a bit:
+byte code is not small, it is on the order of magnitude ofthe source
+code. Debian and Ubuntu feel that it is better to generate the byte
+code files on the installed system instead. This saves bandwidth and
+disk space on mirrors.
+
+Compilation happens in the .deb postinst script, and removal in the
+prerm script.
+
+The compilation logic should be encapsulated into a single script,
+provided by a suitable Python package, instead of duplicated in each
+prerm/postinst script. (Such a script should also be made smart enough
+to log things into syslog, for example.)
+
+==== Byte code non-compilation and programs run by root ====
+
+If the package does not take care to generate and remove byte code, and
+the program is run by root, the byte code will be left on the filesystem
+when the package is removed. This is considered to be a (small) bug.
+
+==== The byte code and Python version problem ====
+
+Byte codes between Python interpreter versions (major/minor, not counting
+patch level changes) are not necessarily compatible. That is, byte code
+compiled for the 2.4 version of Python might not work for the 2.5 version.
+
+The Python interpreters recognize when the byte code is not compiled
+for them, and will ignore it (and compile it internally for themselves).
+Having the wrong byte code file will not thus break anything, but it will
+impact performance.
+
+==== Idea: Distributing only byte code, not Python module source ====
+
+It would be possible to distribute only the byte code, not the Python
+module source code (.py). However, the byte code would have to be 
+distributed for each Python interpreter version, meaning there would
+several binary packages of each Python module. This is still wasting
+disk space on mirrors, and bloats the package list unnecessarily.
+Compiling on the installed system is still a better compromise.
+
+Also, pydoc does not work without the .py files. This is bad for
+people programming in Python.
+
+==== Idea: Always compile .pyo as well ====
+
+This suggestion is from Robert Collins: When we byte compile,
+we should always also do optimized compilation. This helps people
+who run programs with python -O. More importantly, it means they
+don't get '''worse''' behavior with -O, since the lack of a .pyo
+file means Python needs to re-compile every time they run the
+program.
+
+Suggestion from Lars Wirzenius: Since all byte compilation will
+be done by the same script, have it read a configuration file
+(/etc/python-byte-compile-package.conf), which lets the sysadmin
+decide whether to byte compile to .pyc, .pyo, both, or neither.
+
+==== The symlink approach to Python module source code ====
+
+The current approach is to install the Python module source in a
+central location and create symlinks into /usr/lib/pythonX.Y/site-packages
+for each supported pythonX.Y.
+
+The postinst script installs the symlinks for each interpeter version,
+and then byte compiles the modules. The prerm script removes both the
+byte code and the symlinks.
+
+This is fragile. The symlinks will be missing after a package is unpacked
+and until is configured, and this can be a long time during a large upgrade,
+such as from a release of Debian or Ubuntu to the next. This then means
+the package is inoperable, which means no other software may use the
+package while it is inoperable. This severely restricts how Python may
+be used on these systems.
+
+A way to fix this is to include the symlinks in the package. This means
+that dpkg will create the symlinks during the unpack phase. It will also
+automatically remove them, meaning that there is less for the package
+to do manually.
+
+An additional benefit to including the symlinks in the package is
+that "dpkg --search", "dpkg --listfiles", "apt-file", and other tools
+will show the customary locations for the files to exist in.
+
+FIXME: Instead of symlinks, it would be possible to use hardlinks
+(getting rid of /usr/share/pyshared) or even full copies.
+
+Having support for all Python versions in the same binary package
+simplifies transitions. If support for Python X.Y for the foo module was
+in pythonX.Y-foo, for each X.Y, when a new Python version is added to
+the distribution, every module or extension package needs to add a new
+binary package. While the build part of this can be automated, it
+results in all of the packages ending up in the NEW queue, where they
+will be manually reviewed by the archive admins. This is a lot of
+unnecessary manual work.
+
+A problem with having symlinks in the package itself: when a
+new Python version is introduced, the packages need to be rebuilt.
+Debian cannot binNMU architecture independent packages so they
+would have to be rebuilt manually.
+
+FIXME: How many Python packages are there, and how many of them
+are architecture independent? In hardy, it seems 343 binary
+python-* packages that are arch indep. According to Steve Langasek,
+that is a lot of packages to require manual attention during
+a transition, but it could be manageable, especially if the only
+changes are a new changelog entry and a rebuild.
+
+==== Extensions and packages ====
+
+A Python package may contain both pure Python modules, and compiled
+extensions. Parts of a package may import each other using relative
+names, and for this to work flawlessly in all situations, the files
+must be in the same directory.
+
+Such a package should be installed into the site-packages directory:
+
+<pre>
+/usr/lib/pythonX.Y/site-packages/foo/
+/usr/lib/pythonX.Y/site-packages/foo/__init__.py -> /wherever/foo/__init__.py
+/usr/lib/pythonX.Y/site-packages/foo/__init__.pyc
+/usr/lib/pythonX.Y/site-packages/foo/__init__.pyo
+/usr/lib/pythonX.Y/site-packages/foo/foo.py -> /wherever/foo/foo.py
+/usr/lib/pythonX.Y/site-packages/foo/foo.pyc
+/usr/lib/pythonX.Y/site-packages/foo/foo.pyo
+/usr/lib/pythonX.Y/site-packages/foo/bar.so
+</pre>
+
+(`/wherever` is the location where the Python module source is stored.
+It will probably be `/usr/share/pyshared/$packagename` in real life.)
+
+==== System tools implemented in Python and release upgrades ====
+
+FIXME: Discuss this with mvo.
+
+==== Separation of modules installed by system and by system admin ====
+
+Packages provided by the distribution install modules and
+extensions into /usr/lib/pythonX.Y/site-packages. If the sysadmin
+installs packages by compiling and installing the upstream source,
+they should not conflict with the ones installed from the
+distributions. They should instead co-exist in parallel.
+
+This can be achieved by using /usr/lib/pythonX.Y/dist-packages for
+modules from the distribution, or by changing the distutils to install
+into /usr/local.
+
+If the user installs an additional Python implementation from
+upstream source, it will install into /usr/local. The distutils
+from that installation also installs into /usr/local
+(specifically /usr/local/lib/pythonX.Y/site-packages).
+
+Changing the system Python to install under /usr/local seems like
+te simpler change, and will keep the modules provided by the system
+in their usual location.
+
+==== Walkthrough of new package installation ====
+
+ 1. dpkg unpacks package. The software now works, since symlinks are
+ included in the package. Byte code files don't yet exist, however.
+ 1. dpkg calls postinst, which compiles byte code files.
+
+==== Walkthrough of package removal ====
+
+ 1. dpkg calls prerm, which removes byte code files. This needs to be
+ done in prerm so that dpkg can remove the package's directories.
+ 1. dpkg removes all of the package's files and directories, except for
+ conffiles. Package now now longer works.
+
+==== Walkthrough of package upgrade ====
+
+ 1. dpkg calls preinst, which makes a list of the byte code files that
+ currently exist.
+# dpkg unpacks new version.
+# dpkg calls postinst with "configure most-recently-configured-version".
+ This removes old byte code files and creates new ones.
+
+==== Walkthrough of system upgrade ====
+
+FIXME: A system upgrade is just the package upgrade repeated a lot of times.
+However, since so many packages change at the same time, interesting
+interactions may happen. This needs to be explored further.
+
+One problem, pointed out by Michael Vogt: complexity in package
+maintainer scripts tends to result in bugs, and when upgrading a system
+to the next release a lot of those bugs will have ample opportunity to
+manifest themselves. The creation/removal of symlinks in Python packages
+is one such source of complexity. In extreme cases, if the system
+crashes after prerm has been run (and symlinks to .py removed) and
+before postinst runs (and symlinks are re-installed), the software that
+is needed to fix up the half-installed system may have become
+inoperational. This is not acceptable for system software.
+
+==== A new Python version is added to the distribution ====
+
+When a new Python version is added to the distribution, all the packages
+that (should) support it need to be rebuilt. Such packages can be found
+by looking at the XS-Python-Versions header in the debian/control file.
+
+==== A new Python version: avoid cyclic dependencies ====
+
+A historical note from how things used to work in Debian:
+dependency graphs should avoid cycles to allow smooth transitions
+when new Python versions are introduced. At one point, Python
+packages often did "Depends: python (>= X.Y), python (<< X.Y+1)", and 
+all those packages had to be fixed before Python X.Y+1 could
+enter the "testing" distribution.
+
+==== A Python version is removed from the distribution ====
+
+When a Python version is to be removed from the distribution, first
+all dependencies on it need to be removed. This is accomplished by
+rebuilding all relevant packages after removing the unwanted Python
+version from the list of supported versions. If any dependencies
+remain, they need to be resolved manually. After nothing depends on
+the unwanted Python version, it can be removed from the distribution.
+
+=== Rationale ===
+
+The main Python implementation, also known as CPython, does not provide
+a stable ABI for its byte code files or binary extension (.so files).
+This means that Python modules and extensions (usually written in C)
+must be compiled for each version of the interpreter separately.
+
+Originally this was done by having a binary package specific to each
+Python interpreter in the archive: a package providing the ''foo'' extension
+needed to provide the binary packages ''python2.3-foo'' and ''python2.4-foo''
+to support both version 2.3 and 2.4 of the interpreter.
+
+This approach had several drawbacks:
+* Adding a new version of the interpreter required updating all Python
+ module and extension packages, and usually this required source changes.
+* There was a large number of unnecessary binary packages in the archive.
+* If you had more than one version of the interpreter in the archive,
+ you needed multiple copies of the module source code (.py files),
+ which wastes disk space.
+
+Eventually in 2006 Debian (and then Ubuntu) changed to support a new
+approach. The packaging helper tools python-central and python-support
+were implemented. Now:
+* Each module and extension source package declares which interpreter
+ versions it supports. Most of them declare that they support all of
+ them.
+* Binary packages now bundle support for all interpreter versions in
+ the same package. Where there previously were ''python2.3-foo'' and
+ ''python2.4-foo'', there is now only ''python-foo''. This reduces
+ the number of binary packages a lot, and simplifies transitions.
+* When a new Python interpreter version is added to the archive, most
+ module and extension packages can just be rebuilt, without source
+ changes. This transition can mostly be handled by the archive
+ maintainers in an automated way.
+
+The new approach has serious benefits, which must be retained. It does
+have some additional problems, however. The main one is the added
+complexity: all Python module and extension packages need special handling
+in their postinst and prerm scripts. Although most packages get this
+from python-central and python-support, it is still more complicated
+and fragile than is desired. It is also undesired to have two helper
+packages doing essentially the same thing, but with their own individual
+sets of bugs.
+
+=== Use Cases ===
+
+* Anatole maintains a package of ''totleigh'', a pure Python module that
+ works with any Python interpreter version in the 2.x series.
+* Bertram maintains a package of ''dahlia'', an extension to Python
+ written in C that also supports all Python interpreter versions in
+ the 2.x series.
+
+=== Assumptions ===
+
+At least in the initial drafts of this spec, we will assume Python 2.x.
+Python 3.x will not be entirely backwards compatible even at the syntax
+level, so the transition from 2.x will require a lot of careful
+thinking.
+
+=== Design ===
+
+The basic problem is that Python byte code files (.pyc and .pyo) and
+extensions (.so) are not compatible between major releases, although
+they are between minor revisions of the major releases (2.x.y and 2.x.z
+are compatible; 2.x and 2.y are not).
+
+Thus, every byte code file and every extension needs to be built for
+each interpreter version, and the files need to be placed in a location
+specific to that interpreter version: /usr/lib/pythonX.Y/site-packages.
+The Python module source (.py) needs to be kept in a central location
+with symlinks from the site-packages directories to avoid duplicated
+files.
+
+=== Implementation ===
+
+* Install pure Python modules into /usr/lib/pyshared.
+* debian/control declares which Python versions are supported, using
+   XS-Python-Version.
+* At package build time, create symlinks from 
+   /usr/lib/pythonX.Y/site-packages to /usr/share/pyshared, for each
+   version X.Y of Python that the package supports.
+* At package build time, build any extension for every supported version,
+   and install it into /usr/lib/pythonX.Y/site-packages.
+* At package build time, generate a list of .py files in the package,
+   store it in /usr/share/pyshared/file_lists/$packagename_$version.list.
+* Write a script python-byte-compile-package to compile all .py files in
+   a package. The script gets the name of the package on the command line,
+   and uses the file list in /usr/share/pyshared/file_lists.
+* The package's postinst needs to call python-byte-compile-package.
+* The package's prerm needs to call python-byte-compile-package --remove.
+
+Random jotting:
+
+<pre>
+debian/control:
+
+    XS-Python-Versions: whatever
+    Build-Depends(-Indep?): 
+        python (>= x.y.z),
+        cdbs (>= x.y.z),
+        debhelper (>= x.y.z), 
+        python-support (>= x.y.z),
+        python-central (>= x.y.z)
+    Depends: python (>= x.y.z)
+
+debian/rules:
+
+    dh_python
+    dh_pycentral
+    dh_pysupport
+    python-debian-prepare-package --package=foo debian/tmp
+    
+.deb:
+
+    usr/share/pyshared/foo/foo.py
+    usr/share/pyshared/file_lists/foo.list
+    usr/lib/python2.4/site-packages/foo.py -> 
+        ../../../share/pyshared/foo/foo.py
+    usr/lib/python2.4/site-packages/bar.so
+    usr/lib/python2.5/site-packages/foo.py -> 
+        ../../../share/pyshared/foo/foo.py
+    usr/lib/python2.5/site-packages/bar.so
+
+postinst configure prevver:
+
+    python-byte-compile-package foo \
+        --previous-version=$prevver \
+        --version=a.b
+    
+prerm remove:
+
+    python-byte-compile-package --remove foo --version=a.b
+</pre>
+
+==== debhelper and CDBS Changes ====
+
+FIXME: This needs more thought.
+
+==== Migration ====
+
+FIXME: Needs thought.
+
+The package maintainers of Python modules and extensions and
+applications need to change very little at the source code
+level. They will no longer need to have a run-time dependency
+on python-support or python-central. If they use debhelper or
+cdbs, no changes to the source package should be necessary.
+
+=== Test/Demo Plan ===
+
+* Implement the spec in a private apt repository.
+* Rebuild all affected packages.
+* Test upgrade from hardy/intrepid (Ubuntu), and etch/lenny (Debian).
+* After upgrade, verify that system and packages work, by executing
+ some automatic tests for selected packages.
+
+=== Outstanding Issues ===
+
+Ubuntu wants to implement this early on in the intrepid (or intrepid+1)
+development
+cycle. Debian is nearing its freeze and
+is unlikely to want to adopt the new Python packaging approach this
+late in the development cycle. Thus it may be necessary to implement
+this in Ubuntu first, and port it to Debian after lenny has been
+released. Except if Ubuntu wants it in intrepid+1, then this should
+be implemented in Debian first.
+
+It is possible that these changes should be discussed with Python
+upstream. This is particularly true if they can't be implement
+by minor changes to search paths, and the module/extension loaders.
+
+----
+CategorySpec

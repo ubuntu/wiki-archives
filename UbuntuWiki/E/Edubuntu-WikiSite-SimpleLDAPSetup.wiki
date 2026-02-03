@@ -1,0 +1,232 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== Simple LDAP setup for Edubuntu ==
+
+Karmic or Lucid
+
+=== Server: install slapd, ldap-utils ===
+
+Install the packages you'll need from apt.
+
+<pre>
+sudo apt-get install slapd ldap-utils
+</pre>
+
+=== Server: Install schemas ===
+
+This will install the schemas you'll need for doing LDAP authentication.
+
+<pre>
+sudo ldapadd -Y EXTERNAL -H ldapi:/// -f /etc/ldap/schema/cosine.ldif
+sudo ldapadd -Y EXTERNAL -H ldapi:/// -f /etc/ldap/schema/inetorgperson.ldif
+sudo ldapadd -Y EXTERNAL -H ldapi:/// -f /etc/ldap/schema/nis.ldif
+</pre>
+
+=== Server: Create initial cn=config entry ===
+
+You'll need to create cn=config entry.
+
+NOTE:
+
+We're going to assume that our LDAP database is being set up with o=edubuntu.  Our admin password for the ldap administrator (cn=admin,o=edubuntu) is "edubuntu".  Security!
+
+Create the following file, save it as config.ldif:
+
+<pre>
+
+dn: cn=module{0},cn=config
+objectClass: olcModuleList
+cn: module{0}
+olcModulePath: /usr/lib/ldap
+olcModuleLoad: {0}back_hdb
+
+dn: olcDatabase={1}hdb,cn=config
+objectClass: olcDatabaseConfig
+objectClass: olcHdbConfig
+olcDatabase: {1}hdb
+olcDbDirectory: /var/lib/ldap
+olcSuffix: o=edubuntu
+olcRootDN: cn=admin,o=edubuntu
+olcRootPW: edubuntu
+olcAccess: {0}to attrs=userPassword,shadowLastChange by dn="cn=admin,o=edubuntu" write by anonymous auth by self write by * none
+olcAccess: {1}to dn.base="" by * read
+olcAccess: {2}to * by dn="cn=admin,o=edubuntu" write by * read
+olcLastMod: TRUE
+olcDbCheckpoint: 512 30
+olcDbConfig: {0}set_cachesize 0 4194304 0
+olcDbConfig: {1}set_lk_max_objects 2048
+olcDbConfig: {2}set_lk_max_locks 2048
+olcDbConfig: {3}set_lk_max_lockers 2048
+olcDbIndex: uid pres,eq
+olcDbIndex: cn,sn,mail pres,eq,approx,sub
+olcDbIndex: objectClass eq
+</pre>
+
+Install it with:
+
+<pre>
+sudo ldapadd -Y EXTERNAL -H ldapi:/// -f config.ldif
+</pre>
+
+=== Server: Create your initial database ===
+
+We'll create our database.  We'll have two ou's (organization units).
+
+ou=users,o=edubuntu will hold our users (/etc/password and /etc/shadow).
+
+ou=groups,o=edubuntu will hold our groups (/etc/groups).
+
+Create the a file called root.ldif:
+
+<pre>
+dn: o=edubuntu
+objectclass: organization
+o: edubuntu
+description: Edubtunu
+
+dn: cn=admin,o=edubuntu
+objectClass: simpleSecurityObject
+objectClass: organizationalRole
+cn: admin
+userPassword: edubuntu
+description: LDAP administrator
+
+dn: ou=users,o=edubuntu
+objectClass: organizationalUnit
+objectClass: top
+description: Users
+ou: users
+
+dn: ou=groups,o=edubuntu
+objectClass: organizationalUnit
+objectClass: top
+description: Groups
+ou: groups
+</pre>
+
+Add it with the following command:
+
+<pre>
+sudo ldapadd -x -D cn=admin,o=edubuntu -W -f root.ldif
+</pre>
+
+It'll ask you for a password.  Use what you did in the config step, i.e. edubuntu (Security!)
+
+=== Server: add a user and group ===
+
+So, add a user.  And their group as well.  Here's a user who's /etc/password line would look like:
+
+<code>sbalneav:x:1000:1000:Scott Balneaves:/home/sbalneav:/bin/bash</code>
+
+And who's password expires every 90 days.  Default password is set to sbalneav (Security!).
+
+Create a file called sbalneav.ldif:
+
+<pre>
+
+dn: uid=sbalneav,ou=users,o=edubuntu
+cn: Scott Balneaves
+objectClass: posixAccount
+objectClass: top
+objectClass: shadowAccount
+objectClass: inetOrgPerson
+displayName: Scott Balneaves
+telephoneNumber: 555-1212
+givenName: Scott
+sn: Balneaves
+labeledURI: http://ltsp.org
+mail: sbalneav@ltsp.org
+uid: sbalneav
+uidNumber: 1000
+gidNumber: 1000
+gecos: Scott Balneaves
+homeDirectory: /home/sbalneav
+loginShell: /bin/bash
+shadowMax: 90
+shadowWarning: 7
+userPassword: sbalneav
+
+dn: cn=sbalneav,ou=groups,o=edubuntu
+cn: sbalneav
+objectClass: posixGroup
+objectClass: top
+gidNumber: 1000
+</pre>
+
+There's some other useful info set in there, like mail address, display name, and homepage.
+
+add it with:
+
+<pre>
+sudo ldapadd -x -D cn=admin,o=edubuntu -W -f sbalneav.ldif
+</pre>
+
+Password, edubuntu, you know the drill.
+
+Congrats!  You now have a working LDAP auth server.
+
+On to the client.
+
+=== Client: install client pieces ===
+
+There's a nice meta-package that installs all the stuff you need.
+
+<pre>
+sudo apt-get install ldap-auth-client
+</pre>
+
+* It'll ask for the base.  Base is o=edubuntu
+* connect as DB version 3
+* Root bind dn is cn=admin,o=edubuntu (from above)
+* Password is edubuntu (Security!)
+
+=== Client: create an auth-client-config profile ===
+
+Create a file in <code>/etc/auth-client-config/profile.d</code>, called <code>edubuntu-ldap-config</code>:
+
+<pre>
+[edubuntu]
+nss_passwd=passwd: compat ldap
+nss_group=group: compat ldap
+nss_shadow=shadow: compat ldap
+nss_netgroup=netgroup: compat ldap
+pam_auth=auth         optional   pam_group.so
+         auth         sufficient pam_ldap.so
+         auth         required   pam_unix.so nullok_secure use_first_pass
+pam_account=account   sufficient pam_ldap.so
+            account   required   pam_unix.so
+pam_password=password sufficient pam_ldap.so
+             password required   pam_unix.so try_first_pass
+pam_session=session   required   pam_unix.so
+            session   required   pam_mkhomedir.so skel=/etc/skel/
+            session   optional   pam_ldap.so
+            session   optional   pam_foreground.so
+</pre>
+
+This will set up both nss and pam services to use LDAP.
+
+Set the auth config with:
+
+<pre>
+sudo auth-client-config -a -p edubuntu
+</pre>
+
+Note that the "edubuntu" in that command comes from the <code>[edubuntu]</code> in the config file.
+
+=== Client: reboot the machine ===
+
+I always find I need this.
+
+=== Client: log in as user ===
+
+For some reason, the user won't appear in the gdm face browser until they've logged in for the first time, so choose "other", and log in with user "sbalneav", password "sbalneav".
+
+Things like <code>getent password</code> will give you the combined local /etc/passwd and LDAP password database, as you'd expect.

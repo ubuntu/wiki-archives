@@ -1,0 +1,194 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+''Please check the status of this specification in Launchpad before editing it.  If it is Approved, contact the Assignee or another knowledgeable person before making changes.''
+
+* '''Launchpad entry''': UbuntuSpec:xorg-input-hotplug
+* '''Packages affected''': xorg, xorg-server, xserver-xorg-input-*
+
+=== Summary ===
+
+Input hotplug allows hotplugging of input devices, and also adds enhanced support for touchscreens and tablets, through either HAL or D-Bus. This is now the standard mechanism supported by upstream for handling input devices.  Once XInput properties are available, it will also permit run-time configuration of devices such as mapping mice buttons and keyboard layouts.  
+
+For Intrepid, integrate input-hotplug by default, document its usage, and prototype GUI config tools.
+
+=== Rationale ===
+
+Historically, X probes input devices on X startup, so devices attached subsequently may not function.  To overcome this in situations like a
+laptop with external mouse, the kernel emulates a PS/2 mouse at /dev/input/mice (or /dev/psaux) with events coming from ANY mouse connected to the system.  This mostly works, but doesn't handle multi-protocol situations perfectly (other protocols can be translated, but some events can be lost in the process).  Can't change speed settings for different mice (laser pointer vs. touch pad, etc.)  Doesn't handle multi-mouse buttons.  etc. etc.
+
+Without input-hotplug, all input devices need to be configured in xorg.conf, thus adding a new device or reconfiguring a device would require an X restart.  Plugging in a wacom tablet to a running computer, for example, doesn't work if the wacom's config isn't in xorg.conf -- and if it is, then warnings are generated in X client apps if it's not present.  Input-hotplug's primary motivation is to solve this by allowing devices to be plugged in on the fly, and be detected and automatically configured.  It also promises to allow reconfiguration of devices while X is running.
+
+Furthermore, input-hotplug represents a major rearchitecting of the entire input device handling architecture.  Over the years, a series of hacks and workarounds were added to Xorg to mitigate some of the issues, but these have caused other issues; for example mice automatically have their protocol converted so one can easily plug in any kind of mouse pretty much, however this results in many mouse features (like extra buttons) to be unavailable.    Input-hotplug provides a more holistic solution, rendering these workarounds unnecessary and thus avoiding the various issues they bring.
+
+As well, Input-Hotplug is the accepted and supported mechanism for handling input devices now.  Support for the old style of handling input devices is being withdrawn, so we must change over in order to benefit from future Xorg development work.  See the <nowiki>[[http://www.x.org/wiki/XInputHotplug|Xorg Wiki on XInputHotplug]]</nowiki> and the <nowiki>[[http://www.x.org/wiki/XInputSpec|XInputSpec]]</nowiki> for further design details.
+
+This was considered for Hardy but postponed due to a) various unexpected problems cropping up, b) HAL configuration complexity, and c) lack of config/admin tools, which we weren't confident could all be addressed sufficiently for an LTS release.  However, most of the dependent code is already in place, and simply requires configuration changes to take advantage of.
+
+We anticipate a large number of Xorg bug reports will be closed once this feature is available: 
+
+=== Use cases ===
+
+* Fry plugs in a mouse that has two thumb buttons and a wheel that tilts horizontally. He expects all the buttons to Just Work™ without configuring stuff.
+* Leela has recently started studying the Russian language. To make typing it easier, she plugs in an additional keyboard with a Cyrillic layout. She is able to configure a Cyrillic keymap to be used with it, while the US English keymap is still used with her original keyboard. If the keyboard is able to tell its layout to the computer, that is used as the default keymap setting.
+* Amy is an artist. She plugs in a pen tablet and expects it to Just Work™.
+
+=== Design ===
+
+For Intrepid we wish to integrate input-hotplug and use it by default if at all possible. This will include investigating/solving critical issues, documenting basic configuration steps, prototyping of GUI config tools, and thorough testing.  We'll switch over to input-hotplug configurations early in development so we can maximize the number of testers.  Turning it off later (like we did in Hardy) is straightforward so we can do that later if there are problems.
+
+The problem can be divided into two pieces:  (A) Everything except keyboards, (B) keyboards.  Fedora 9 shipped only with (A).  For Intrepid we hope to be able to ship both (A) and (B), but if not will try to fall back to at least doing (A).
+
+The timeframe for this change will be within a few weeks, probably around the time we merge xserver 1.5 (which is pending on the upcoming mesa 7.1 release currently).
+
+1.  '''Switch configuration to evdev''' [DONE]
+
+2.  '''Incorporate command line configuration tools''' [DONE]
+
+3.  '''Write Documentation'''
+
+4.  '''Test Extensively''' - [DONE] revert keyboard input-hotplugging if it proves too buggy
+
+5.  '''Prototype GUI Tools'''
+
+==== References ====
+
+* http://lists.freedesktop.org/archives/xorg/2004-June/001095.html
+* http://www.fooishbar.org/blog/tech/x/input-hotplug-2006-11-02-15-19.html
+
+=== Implementation ===
+
+The implementation has <nowiki>[[http://fooishbar.org/blog/tech/x/input-hotplug-2006-11-02-15-19.html|already been merged]]</nowiki> to the X.Org 7.3 development branch, and has been available in Ubuntu since Gutsy, but not turned on by default.  So to implement this, we mainly need to just switch the configuration settings over.  A daemon will probably be needed for applying user pref changes to input properties, however it's expected this work will be done upstream in GNOME, so we only need to integrate it when it becomes available.
+
+==== Switch configuration to evdev ====
+
+'''xserver-xorg.postinst.in''': This includes a good bit of keyboard selection logic.  It looks if the keyboard layout has been specified in the console configuration (/etc/default/console-setup), and if not selects it from debian-installer/keymap.  With this info, it then looks up the corresponding keyboard rules files and keycodes.  It also contains a few hardware-specific workarounds. The new way of doing things is to rely on evdev, which is more flexible and a better design, and permits per-user default settings via Xi and XKB requests at login time; it is used by default if no keyboard section is specified in xorg.conf, thus xserver-xorg.postinst.in simply needs to be modified to not define keyboard parameters by default, but to instead write them into the x11-input.fdi file if needed (and/or console-setup).
+
+* Move hardware-specific workarounds to hal and/or evdev
+* Ensure that all keymap-to-rules mappings are covered in fdi files
+* Drop keyboard config code in xserver-xorg.postinst.in
+* Verify that user can still override selection by specifying a different keyboard in console-setup
+
+'''mouse protocol selection''': For the mouse protocol we pretty much just need to change DEFAULT_PROTOCOL to be empty in xserver-xorg.postinst.in for all of the port types it supports. 
+
+'''other input devices''': There are a few devices being carried in the Debian/Ubuntu config files, which should either be dropped or moved upstream.
+
+'''dexconf''':  Replace the keyboard and input device settings with use of <code>evdev</code> (or possibly remove these device sections entirely).  xserver needs a CoreKeyboard and a CorePointer.  If these aren't specified in xorg.conf, xserver will try to auto-find them via /dev/input and create default devices (do not want).  So we need the "AllowEmptyInput" server flag set.
+
+* Test removing all device setup logic from dexconf
+** If fails, then replace the keyboard and input device settings in dexconf with <code>evdev</code>
+* Evaluate if "AllowEmptyInput" is still needed, and if so set it as the default in the server
+* At this point, it may be possible to omit xorg.conf entirely, so it should be strongly considered
+
+'''FDI files''':  FDI files are used for controlling how input-hotplug works.  As an example, <code>/etc/hal/fdi/policy/11-kb.fdi</code>.  This is a way 
+to add properties to a device that match certain criteria.  For example, if a device has usb.vendor="wacom", the fdi-file could add a xorg.driver="wacom" property.  The daemon that listen to HAL events would use these properties to avoid adding devices the user wants to ignore and load the right driver for wacom tablets etc.
+
+* console-setup should generate the fdi-file on the fly if possible; if not, investigate patching the server to have it configure the default layout in xorg.conf
+** See http://people.ubuntu.com/~bryce/InputHotplug/console2fdi.sh
+
+==== Incorporate Command Line Configuration Tools ====
+
+There is already an xinput command line tool, it simply needs to be made part of the default Ubuntu installation.
+
+* (DONE) Submit a main inclusion request for <code>xinput</code> - <nowiki>[[https://launchpad.net/bugs/254749|254749]]</nowiki>
+* Request xinput be added to the default seed
+* (DONE) Verify https://wiki.ubuntu.com/MouseExtraButtons now works properly; if not, detail tasks needed to resolve that
+
+==== Write Documentation ====
+
+Documentation will be written in the wiki at http://wiki.ubuntu.com/X, covering the following topics:
+
+* (DONE) Search wiki.ubuntu.com for docs relating to pre-input-hotplug and mark them "For Hardy and Earlier Only"
+* (DONE) Search help.ubuntu.com for docs relating to pre-input-hotplug and mark them "For Hardy and Earlier Only"
+
+Add to <nowiki>[[X-Config]]</nowiki>
+* (DONE) Using the xinput command line config tool
+
+Add to <nowiki>[[X-Troubleshooting]]</nowiki>:
+* (DONE) Procedure for requesting support to be added for new input devices
+** If USB, check for linux compatibility at http://www.qbik.ch/usb/devices/
+** If PCI, check for linux compatibility at http://kmuto.jp/debian/hcl/
+** General linux support lists:  http://hardware4linux.info/, http://www.ubuntuhcl.org/
+** What if it lacks kernel-level support?
+
+* (DONE) Procedure for troubleshooting if an input device is not detected, or mis-detected on connection
+** https://wiki.ubuntu.com/DebuggingMouseDetection
+
+==== Test Plan ====
+
+<pre>
+  1.  Select and set up a test machine
+  2.  ssh into the test machine from a 2nd machine.  This 2nd machine
+      will be used for taking notes, collecting logs, and obtaining
+      backtraces as necessary.
+  3.  Set up xorg.conf for input hotplug
+  4.  Boot test machine
+  5.  tail -f /var/log/Xorg.0.log in your ssh window
+  6.  For each input device
+      a.  Try out its capabilities and compose a baseline list (see <code>xinput</code>)
+      b.  Unplug device
+      c.  Verify the remove is listed in the log file
+      d.  Plug device back in
+      e.  Verify it was detected.
+      f.  Re-test its capabilities and make sure it matches baseline
+      g.  Examine setting its properties (such as Sensitivity or Resolution) different from other devices
+      h.  Unplug device and leave it unplugged
+  7.  With no input devices attached, reboot test machine
+  8.  tail -f /var/log/Xorg.0.log in your ssh window
+  9.  For each input device
+      a.  Plug device into system
+      b.  Verify it was detected in /var/log/Xorg.0.log
+      c.  Try out its capabilities and make sure it matches baseline
+</pre>
+
+Test with:
+* MS Scrollwheel Mouse
+** Check that common button functionality (simulate middle button, scrolling, scrollwheel click)
+* Touchpad in laptop
+** Check ability to turn it off, or to tune sensitivity
+* Mouse with >3 buttons
+** Check that the extra buttons work and can be mapped
+* Wacom tablet - in GIMP and Inkscape especially
+* Game controller - use with games and as a general purpose mouse
+* US keyboard
+* Non-us keyboard
+
+Other things to test:
+* SDL-based games, full screen.  Particularly watch at entry and exit from game, and modifying input prefs from within game.
+* How do GTK+ apps react to having XInput devices disappear on them?
+* Security.  Can clients request opening any file as a device (e.g. add mouse and specify /etc/passwd as the device file)
+
+==== Prototype GUI Tools ====
+
+Like with <code>xrandr</code>, while the <code>xinput</code> command line tool provides a mechanism for adjusting input device settings, many users will not consider command line configuration as a viable long term solution.  The GUI development is outside the scope of this blueprint, but we will instead focus on prototyping/planning the changes desired, for potential future development if someone else doesn't get to it first.
+
+Most likely, the input-hotplug GUI would simply integrate/extend the existing capplets ('''Keyboard''', '''Keyboard Shortcuts''', '''Mouse''').  It may be worth considering merging the Keyboard Shortcuts interface into the Keyboard capplet.  Consideration will need to be made into how to handle non-keyboard/non-mouse devices like gamepads and tablets.
+
+Deliverables for Intrepid will include:
+
+* Screen mockups for capplet dialog changes
+* Listing of desired changes/augmentations (review of existing blueprints and LP bugs)
+** Automatically run a script when device is added/removed <nowiki>[[http://lists.freedesktop.org/archives/xorg/2004-June/001095.html]]</nowiki>
+** per-user properties to ignore a device (set xorg.ignore=true)
+* Discussion of design issues to be considered
+* Research into any existing development activities in the community
+** Review daniel stone's old respeclaration tool, and compare with xinput
+* Propose session for next UDS to discuss "Xorg Input GUI Config Tools"
+
+=== Unresolved issues ===
+
+Multi-pointer-X is being integrated upstream, and it would be nice to have a snapshot of that branch of the X server available for testers to check GNOME application stability with multi-pointer configurations.
+
+For GNOME, does there need to be a daemon integrated into gnome-settings-daemon for reading per-user input device settings from GConf?
+
+=== Discussion ===
+
+----
+CategorySpec

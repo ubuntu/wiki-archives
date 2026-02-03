@@ -1,0 +1,148 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+This page contains the notes from Scott and Colin's session braindumping the expected behaviour of the hardware and system wall clocks.
+
+=== Players ===
+
+Hardware Clock:
+ A physical clock able to maintain the time while the system is otherwise powered off, either by relying on chemical or mechanical working or though its own discrete power source.
+
+System Wall Clock:
+ A software clock maintained by the kernel while the system is powered on.
+
+Network Clock:
+ A non-specific accurate clock available over the network.
+
+The hardware clock and network clock are ''reliable'', we can rely on them to maintain an incrementing time while the system is powered off.  The system wall clock is ''unreliable'' because it cannot.
+
+The system wall clock and network clock are ''accurate'', we can rely on them to maintain the correct time.  The hardware clock is ''inaccurate'' because it may lose time.
+
+We use the system wall clock for time operations, since it is accurate.  So that we can track time while powered off, we synchronise this to and from the hardware clock which is reliable.  But because the hardware clock is inaccurate, we regularly resynchronise both the system clock and hardware clock with a network clock.
+
+=== Timezones ===
+
+Ideally all clocks would operate free of timezones, storing only UTC.  We would then apply the timezone adjustment, accounting for daylight savings and local differences, in software (ie. in the C library) based on the desired timezone.
+
+Indeed, this is the case for the network clock and the system clock; and since software retrieves the time from the system clock, it applies the adjustments.
+
+Unfortunately we can't always keep the hardware clock in UTC.  While this is our preferred setting, and our default for pristine Ubuntu installations, other operating systems such as Windows store local time in the hardware clock instead.  Thus when installing Ubuntu alongside Windows, we have to co-operate and also store local time into the hardware clock.
+
+This means that there may be a ''delta'' between the hardware clock and system clock.
+
+* on boot, the system clock is set from the hardware clock.  It must be adjusted by this delta.
+
+* whenever the time is changed, this delta must be taken into account and both the hardware clock and system clock set with it in mind.
+
+* whenever the timezone is changed, this delta must be taken into account, and only the hardware clock set with it in mind (the system clock is unaffected by timezone changes).
+
+A tangential discussion began about being evil and changing Windows (by registry edit) to <nowiki>[[http://weblogs.asp.net/dfindley/archive/2006/06/20/Set-hardware-clock-to-UTC-on-Windows-_2800_or-how-to-make-the-clock-work-on-a-Mac-Book-Pro_2900_.aspx|store the clock in UTC]]</nowiki>.  And then we realised we had a bug:
+
+* the installer should not set Ubuntu up to store localtime in the hardware clock if this registry setting has been changed by the user.
+
+=== Filesystem considerations ===
+
+The filesystem metadata is one of the most important consumers of system clock information, since it is highly sensitive to time moving backwards.  Filesystem events appear to have happened in the future, and this is a consistency that needs to be corrected by `fsck`.
+
+If the system clock is changed after filesystem metadata has been written (ie. after the filesystem is checked or mounted writable), and that change is backwards, then the filesystem will be inconsistent.
+
+What happens is:
+
+ 1. the hardware clock is in localtime, WEST of UTC
+
+ 2. the system clock is in UTC
+
+ 3. the filesystem is unmounted, the UTC timestamp is written
+
+ 4. the system is rebooted
+
+ 5. the system boots, the system clock is set from the hardware clock, and is thus LESS than it should be
+
+ 6. the filesystem modification time is in the future
+
+ 7. fsck corrects this inconsistency
+
+ 8. the system boot continues
+
+ 9. the system clock is adjusted to UTC
+
+ 10. repeat from step 3
+
+The only way to break this cycle is for the downtime between reboots to be greater than the offset between UTC and localtime.  And notably, this bug is not observed by users who are EAST of UTC, or in GMT.
+
+* Thus it is important that the system clock be adjusted for the timezone delta before the filesystem is checked or mounted.
+
+* This can be done from a udev rule, since filesystem checking and mounting cannot take place until udev has finished since udev provides the block devices.
+
+=== Drift ===
+
+Since the hardware clock is inaccurate, it cannot be guaranteed to keep good time and over extended periods may drift.  If not corrected, either manually or by sync with a network clock, time may be increasingly wrong.
+
+`hwclock` supports tracking this drift through the `/etc/adjtime` file by comparing the difference between the hardware clock and system clock while the machine is running, and expecting the same drift rate while the system is powered off.
+
+This is unfortunately error-prone, setting the hardware clock at any time without compensating in the `/etc/adjtime` file will result in the incorrect belief that a drift has occurred.
+
+While we can address this mostly across our software, it's broken by simply rebooting into another operating system that shares the clock.  For example a dual-boot into Windows, or even just booting an Ubuntu Live CD.
+
+In addition, it can be a problem if the write to the file is lost due to a power outage; or because the filesystem is not writable.
+
+=== Multiple hardware clocks ===
+
+Multiple hardware clocks need not be a consideration, since it would be ambigious what to set the system clock to in cases that they disagree.
+
+* only the first clock (rtc0) will be used for the system clock
+
+* this matches kernel configuration (which needs to know this)
+
+* and leaves other clocks free for software to use as they desire, for example as sources to NTP that can adjust the system clock using complex algorithms
+
+=== Kernel ===
+
+The kernel already handles much of the needed work:
+
+* it sets the system clock to the hardware clock on boot
+
+* it allows userspace to re-adjust the system clock to UTC, providing the hardware clock offset (which it uses for filesystems that require a localtime)
+
+* it handles recording the delta between the two clocks on suspend, and resetting the system clock on resume by that delta
+
+Notably the kernel does not resynchronise the hardware clock with the system clock on shutdown, and does not allow the offset for localtime to be adjusted once initially set.
+
+=== hwclock ===
+
+We have to handle setting the hardware clock based on the system clock at shutdown.  `hwclock` provides the `--systohc` option to do this - to be combined with either `--utc` or `--localtime`.  Since we only want to use `/dev/rtc0`, we should also obviously pass `--rtc=/dev/rtc0`.
+
+We also have to handle resetting the system clock on startup based on the timezone; while `hwclock` provides `--hctosys`, this actually reads the value from the hardware clock and sleeps for up to a second to keep the two in sync.  There doesn't appear to be any need to do this - the kernel has already set the system clock, all we need to do is step it and provide the timezone.  It's suggested to add an option to only step the system clock without reading the hardware clock.
+
+This would be run from a udev rule when `/dev/rtc0` is created, since that is when the system time is set.
+
+ <pre>
+KERNEL=="rtc0", RUN+="/sbin/hwclock --stepsys --utc/--localtime"
+</pre>
+
+Since we do not want to account for drift, we should pass `--noadjfile` to each invocation of `hwclock`.
+
+The invocations for suspend and resume can be removed.
+
+=== NTP ===
+
+It was noted that we currently set the system and hardware clocks from the network clock through use of ntpdate which steps the clock, and may even do so backwards.
+
+There are advantages to using NTP itself, most notably that the clock is kept continually in sync, slewed instead of step if the adjustment is greater, and it provides notification of leap seconds.
+
+=== Rejected considerations ===
+
+We enjoyed a tangent about leap second processing that it is worth documenting.  To quote from the time2posix(3) manpage: IEEE Std 1003.1-1988 ("POSIX.1") legislates that a `time_t` value of 536457599 shall correspond to "Wed Dec 31 23:59:59 GMT 1986."  This effectively implies that POSIX `time_t`'s cannot include leap seconds and, therefore, that the system time must be adjusted as each leap occurs.
+
+The Linux kernel can represent leap seconds (as 23:59:60), but since many of the legacy APIs such as `stat()` use `time_t` instead of `struct timespec`, this can be an inconvenience.
+
+Since we were arguing about a single second, we then got carried away and talked about the lack of compensation for relativistic effects, depending on the different relative speeds of the machines - either by their point on the earth's surface, or by being above it.
+
+It was friday.

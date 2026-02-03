@@ -1,0 +1,735 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+In this tutorial we will set up a highly available server providing iSCSI targets to iSCSI initiators. Should a server become unavailable, services provided by our cluster will continue to be available to client systems.
+
+Our highly available system will resemble the following:
+
+<nowiki>[[File:iscsi.jpg]]</nowiki>
+
+<pre>
+iSCSI server1: node1.home.local IP address: 10.10.1.251
+iSCSI server2: node2.home.local IP address: 10.10.1.252
+iSCSI Virtual IP address 10.10.1.250
+</pre>
+
+To begin, set up two Ubuntu 9.04 (Jaunty Jackalope) systems. In this guide, the servers will be set up in a virtual environment using KVM-84. Using a virtual environment will allow us to add additional disk devices and NICs as needed.
+
+The following partition scheme will be used for the Operating System installation:
+<pre>
+/dev/vda1 -- 10 GB / (primary' jfs, Bootable flag: on)
+/dev/vda5 -- 1 GB swap (logical)
+</pre>
+
+After the installation of a minimal Ubuntu install on both servers, we will install packages required to configure a bonded network interface, and in-turn assign static IP addresses to bond0 of node1 and node2. Using a bonded interface will prevent a single point of failure should the client accessible network fail.
+
+The majority of commands used will require us to employ the use of sudo.  Alternatively we can set a password for root or sudo to the root account.
+
+<pre>
+sudo su
+</pre>
+
+Install ifenslave
+
+<pre>
+apt-get -y install ifenslave
+</pre>
+
+Append the following to /etc/modprobe.d/aliases.conf:
+<pre>
+alias bond0 bonding
+options bond0 mode=0 miimon=100 downdelay=200 updelay=200 max_bonds=2
+</pre>
+
+Modify the network configuration and assign eth0 and eth1 as slaves of bond0.
+
+Example /etc/network/interfaces:
+<pre>
+auto lo
+iface lo inet loopback
+
+auto eth0
+iface eth0 inet manual
+
+auto eth1
+iface eth1 inet manual
+
+auto bond0
+iface bond0 inet static
+	address 10.10.1.251
+	netmask 255.255.255.0
+	broadcast 10.10.1.255
+	network 10.10.1.0
+	gateway 10.10.1.1
+	up /sbin/ifenslave bond0 eth0
+	up /sbin/ifenslave bond0 eth1
+</pre>
+
+We do not need to define eth0 or eth1 in /etc/network/interfaces as they will be brought up when the bond comes up. I have included them for documentation purposes.
+
+We have added a module to be loaded when the system is booted.  Either reboot the system, or manually modprobe bonding.
+
+Review the current status of our bonded interface.
+
+<pre>
+cat /proc/net/bonding/bond0 
+Example output:
+Ethernet Channel Bonding Driver: v3.3.0 (June 10, 2008)
+
+Bonding Mode: load balancing (round-robin)
+MII Status: up
+MII Polling Interval (ms): 100
+Up Delay (ms): 200
+Down Delay (ms): 200
+
+Slave Interface: eth0
+MII Status: up
+Link Failure Count: 0
+Permanent HW addr: 54:52:00:6d:f7:4d
+
+Slave Interface: eth1
+MII Status: up
+Link Failure Count: 0
+Permanent HW addr: 54:52:00:11:36:cf
+</pre>
+
+Please note: A bonded network interface supports multiple modes. In this example eth0 and eth1 are in an round-robin configuration.
+
+Shutdown both servers and add additional devices. We will add additional disks to contain the DRBD meta data and the data that is mirrored between the two servers. We will also add an isolated network for the two servers to communicate and transfer the DRBD data.
+
+The following partition scheme will be used for the DRBD data:
+<pre>
+/dev/vdb1 -- 1 GB unmounted (primary) DRBD meta data
+/dev/vdc1 -- 1 GB umounted (primary) DRBD device used for iSCSI configuration files
+/dev/vdd1 -- 10 GB unmounted (primary) DRBD device used as the iSCSI target
+</pre>
+
+Sample output from fdisk -l:
+<pre>
+Disk /dev/vda: 10.7 GB, 10737418240 bytes
+255 heads, 63 sectors/track, 1305 cylinders
+Units = cylinders of 16065 * 512 = 8225280 bytes
+Disk identifier: 0x000d570a
+
+   Device Boot      Start         End      Blocks   Id  System
+/dev/vda1   *           1        1244     9992398+  83  Linux
+/dev/vda2            1245        1305      489982+   5  Extended
+/dev/vda5            1245        1305      489951   82  Linux swap / Solaris
+
+Disk /dev/vdb: 1073 MB, 1073741824 bytes
+root@node1:~# fdisk -l
+
+Disk /dev/vda: 10.7 GB, 10737418240 bytes
+255 heads, 63 sectors/track, 1305 cylinders
+Units = cylinders of 16065 * 512 = 8225280 bytes
+Disk identifier: 0x000d570a
+
+   Device Boot      Start         End      Blocks   Id  System
+/dev/vda1   *           1        1244     9992398+  83  Linux
+/dev/vda2            1245        1305      489982+   5  Extended
+/dev/vda5            1245        1305      489951   82  Linux swap / Solaris
+
+Disk /dev/vdb: 1073 MB, 1073741824 bytes
+16 heads, 63 sectors/track, 2080 cylinders
+Units = cylinders of 1008 * 512 = 516096 bytes
+Disk identifier: 0xba6f1cad
+
+   Device Boot      Start         End      Blocks   Id  System
+/dev/vdb1               1        2080     1048288+  83  Linux
+
+Disk /dev/vdc: 1073 MB, 1073741824 bytes
+16 heads, 63 sectors/track, 2080 cylinders
+Units = cylinders of 1008 * 512 = 516096 bytes
+Disk identifier: 0xdbde4889
+
+   Device Boot      Start         End      Blocks   Id  System
+/dev/vdc1               1        2080     1048288+  83  Linux
+
+Disk /dev/vdd: 10.7 GB, 10737418240 bytes
+16 heads, 63 sectors/track, 20805 cylinders
+Units = cylinders of 1008 * 512 = 516096 bytes
+Disk identifier: 0xf505afa1
+
+   Device Boot      Start         End      Blocks   Id  System
+/dev/vdd1               1       20805    10485688+  83  Linux
+</pre>
+
+The isolated network between the two servers will be:
+<pre>
+iSCSI server1: node1-private IP address: 10.10.2.251
+iSCSI server2: node2-private IP address: 10.10.2.252
+</pre>
+
+We will again bond these two interfaces.  If our server is to be highly availble, we should eliminate all single points of failure.
+
+Append the following to /etc/modprobe.d/aliases.conf:
+<pre>
+alias bond1 bonding
+options bond1 mode=0 miimon=100 downdelay=200 updelay=200
+</pre>
+
+Example /etc/network/interfaces:
+<pre>
+auto lo
+iface lo inet loopback
+
+auto eth0
+iface eth0 inet manual
+
+auto eth1
+iface eth1 inet manual
+
+auto eth2
+iface eth2 inet manual
+
+auto eth3
+iface eth3 inet manual
+
+auto bond0
+iface bond0 inet static
+	address 10.10.1.251
+	netmask 255.255.255.0
+	broadcast 10.10.1.255
+	network 10.10.1.0
+	gateway 10.10.1.1
+	up /sbin/ifenslave bond0 eth0
+	up /sbin/ifenslave bond0 eth1
+
+auto bond1
+iface bond1 inet static
+	address 10.10.2.251
+	netmask 255.255.255.0
+	broadcast 10.10.2.255
+	network 10.10.2.0
+	up /sbin/ifenslave bond1 eth2
+	up /sbin/ifenslave bond1 eth3
+</pre>
+
+Ensure that /etc/hosts on both nodes contains the names and IP addresses of the two servers.
+
+Example /etc/hosts:
+<pre>
+127.0.0.1       localhost
+10.10.1.251     node1.home.local    node1
+10.10.1.252     node2.home.local    node2
+10.10.2.251     node1-private
+10.10.2.252     node2-private
+</pre>
+
+Install NTP to ensure both servers have the same time.
+
+<pre>
+apt-get -y install ntp
+</pre>
+
+You can verify the time is in sync with the date command.
+
+At this point, you can either modprobe the second bond, or restart both servers.
+
+Install drbd and heartbeat.
+
+<pre>
+apt-get -y install drbd8-utils heartbeat
+</pre>
+
+As we will be using heartbeat with drbd, we need to change ownership and permissions on several DRBD related files on both servers.
+
+<pre>
+chgrp haclient /sbin/drbdsetup
+chmod o-x /sbin/drbdsetup
+chmod u+s /sbin/drbdsetup
+chgrp haclient /sbin/drbdmeta
+chmod o-x /sbin/drbdmeta
+chmod u+s /sbin/drbdmeta
+</pre>
+
+Using /etc/drbd.conf as an example create your resource configuration.  We will define two resources.
+
+# The drbd device that will contain our iSCSI configuration files
+# The drbd device that will become our iSCSI target
+
+Example /etc/drbd.conf:
+<pre>
+resource iscsi.config {
+	protocol C;
+ 
+	handlers {
+	pri-on-incon-degr "echo o > /proc/sysrq-trigger ; halt -f";
+	pri-lost-after-sb "echo o > /proc/sysrq-trigger ; halt -f";
+	local-io-error "echo o > /proc/sysrq-trigger ; halt -f";
+	outdate-peer "/usr/lib/heartbeat/drbd-peer-outdater -t 5";      
+	}
+
+	startup {
+	degr-wfc-timeout 120;
+	}
+
+	disk {
+	on-io-error detach;
+	}
+
+	net {
+	cram-hmac-alg sha1;
+	shared-secret "password";
+	after-sb-0pri disconnect;
+	after-sb-1pri disconnect;
+	after-sb-2pri disconnect;
+	rr-conflict disconnect;
+	}
+
+	syncer {
+	rate 100M;
+	verify-alg sha1;
+	al-extents 257;
+	}
+
+	on node1 {
+	device  /dev/drbd0;
+	disk    /dev/vdc1;
+	address 10.10.2.251:7788;
+	meta-disk /dev/vdb1[0];
+	}
+
+	on node2 {
+	device  /dev/drbd0;
+	disk    /dev/vdc1;
+	address 10.10.2.252:7788;
+	meta-disk /dev/vdb1[0];
+	}
+}
+
+resource iscsi.target.0 {
+	protocol C;
+ 
+	handlers {
+	pri-on-incon-degr "echo o > /proc/sysrq-trigger ; halt -f";
+	pri-lost-after-sb "echo o > /proc/sysrq-trigger ; halt -f";
+	local-io-error "echo o > /proc/sysrq-trigger ; halt -f";
+	outdate-peer "/usr/lib/heartbeat/drbd-peer-outdater -t 5";      
+	}
+
+	startup {
+	degr-wfc-timeout 120;
+	}
+
+	disk {
+	on-io-error detach;
+	}
+
+	net {
+	cram-hmac-alg sha1;
+	shared-secret "password";
+	after-sb-0pri disconnect;
+	after-sb-1pri disconnect;
+	after-sb-2pri disconnect;
+	rr-conflict disconnect;
+	}
+
+	syncer {
+	rate 100M;
+	verify-alg sha1;
+	al-extents 257;
+	}
+
+	on node1 {
+	device  /dev/drbd1;
+	disk    /dev/vdd1;
+	address 10.10.2.251:7789;
+	meta-disk /dev/vdb1[1];
+	}
+
+	on node2 {
+	device  /dev/drbd1;
+	disk    /dev/vdd1;
+	address 10.10.2.252:7789;
+	meta-disk /dev/vdb1[1];
+	}
+}
+</pre>
+
+Duplicate the DRBD configuration to the other server.
+
+<pre>
+scp /etc/drbd.conf root@10.10.1.252:/etc/
+</pre>
+
+Initialize the meta-data disk on both servers.
+
+<pre>
+[node1]drbdadm create-md iscsi.config
+[node1]drbdadm create-md iscsi.target.0
+[node2]drbdadm create-md iscsi.config
+[node2]drbdadm create-md iscsi.target.0
+</pre>
+
+We could have initialized the meta-data disk for both resources with:
+<pre>
+[node1]drbdadm create-md all
+[node2]drbdadm create-md all
+</pre>
+
+If a reboot was not performed post-installation of drbd, the module for DRBD will not be loaded.
+
+Start the drbd service (which will load the module).
+
+<pre>
+[node1]/etc/init.d/drbd start
+[node2]/etc/init.d/drbd start
+</pre>
+
+Decide which server will act as a primary for the DRBD device that will contain the iSCSI configuration files and initiate the first full sync between the two servers.
+
+We will execute the following on node1:
+<pre>
+drbdadm -- --overwrite-data-of-peer primary iscsi.config
+</pre>
+
+Review the current status of DRBD.
+
+<pre>
+cat /proc/drbd 
+Example output:
+IT-hash: 9ba8b93e24d842f0dd3fb1f9b90e8348ddb95829 build by ivoks@ubuntu, 2009-01-17 07:49:56
+ 0: cs:SyncSource ro:Primary/Secondary ds:UpToDate/Inconsistent C r---
+    ns:761980 nr:0 dw:0 dr:769856 al:0 bm:46 lo:10 pe:228 ua:256 ap:0 ep:1 wo:b oos:293604
+	[=============>......] sync'ed: 72.3% (293604/1048292)K
+	finish: 0:00:13 speed: 21,984 (19,860) K/sec
+ 1: cs:Connected ro:Secondary/Secondary ds:Inconsistent/Inconsistent C r---
+    ns:0 nr:0 dw:0 dr:0 al:0 bm:0 lo:0 pe:0 ua:0 ap:0 ep:1 wo:b oos:10485692
+</pre>
+
+I prefer to wait for the initial sync to complete before proceeding, however, waiting is not a requirement.
+
+Once completed, format /dev/drbd0 and mount it.
+
+<pre>
+[node1]mkfs.jfs /dev/drbd0
+[node1]mkdir -p /srv/data
+[node1[mount /dev/drbd0 /srv/data
+</pre>
+
+To ensure replication is working correctly, create data on node1 and then switch node2 to be primary.
+
+<pre>
+[node1]dd if=/dev/zero of=/srv/data/test.zeros bs=1M count=100
+</pre>
+
+Switch the Primary DRBD device to node2:
+<pre>
+On node1:
+[node1]umount /srv/data
+[node1]drbdadm secondary iscsi.config
+On node2:
+[node2]mkdir -p /srv/data
+[node2]drbdadm primary iscsi.config
+[node2[mount /dev/drbd0 /srv/data
+</pre>
+
+You should now see the 100MB file in /srv/data on node2. We will now delete this file and make node1 the primary DRBD server to ensure replication is working in both directions.
+
+Switch the Primary DRBD device to node1:
+<pre>
+On node2:
+[node2]rm /srv/data/test.zeros
+[node2]umount /srv/data
+[node2]drbdadm secondary iscsi.config
+On node1:
+[node1]drbdadm primary iscsi.config
+[node1]mount /dev/drbd0 /srv/data
+</pre>
+
+Performing an ls /srv/data on node1 will verify the file is now removed and synchronization successfully occured in both directions.
+
+Decide which server will act as a primary for the DRBD device that will be the iSCSI target and initiate the first full sync between the two servers.
+
+We will execute the following on node1:
+<pre>
+[node1]drbdadm -- --overwrite-data-of-peer primary iscsi.target.0
+</pre>
+
+We could have initiated the full sync for both resources with:
+<pre>
+[node1]drbdadm -- --overwrite-data-of-peer primary all
+</pre>
+
+Next we will install iSCSI target package.  The plan is to have heartbeat control the service instead of init, thus we will prevent iscsitarget from starting with the normal init routines. We will then place the iSCSI target configuration files on the DRBD device so both servers will have the information available when they are the primary DRBD device.
+
+Install iscsitarget package on node1 and node2.
+
+<pre>
+[node1]apt-get -y install iscsitarget
+[node2]apt-get -y install iscsitarget
+</pre>
+
+The ability to run as a daemon is disabled for iscsitarget when first installed.
+
+Enable the ability for iscsitarget to run as a daemon.
+
+<pre>
+[node1]sed -i s/false/true/ /etc/default/iscsitarget
+[node2]sed -i s/false/true/ /etc/default/iscsitarget
+</pre>
+
+Remove the runlevel init scripts for iscsitarget from node1 and node2.
+
+<pre>
+[node1]update-rc.d -f iscsitarget remove
+[node2]update-rc.d -f iscsitarget remove
+</pre>
+
+Relocate the iSCSI configuration to the DRBD device.
+
+<pre>
+[node1]mkdir /srv/data/iscsi
+[node1]mv /etc/ietd.conf /srv/data/iscsi
+[node1]ln -s /srv/data/iscsi/ietd.conf /etc/ietd.conf
+[node2]rm /etc/ietd.conf
+[node2]ln -s /srv/data/iscsi/ietd.conf /etc/ietd.conf
+</pre>
+
+Define our iSCSI target.
+
+Example /srv/data/iscsi/ietd.conf:
+<pre>
+Target iqn.2008-04.local.home:storage.disk.0
+	IncomingUser geekshlby secret
+	OutgoingUser geekshlby password
+	Lun 0 Path=/dev/drbd1,Type=blockio
+	Alias disk0
+	MaxConnections         1
+	InitialR2T             Yes
+	ImmediateData          No
+	MaxRecvDataSegmentLength 8192
+	MaxXmitDataSegmentLength 8192
+	MaxBurstLength         262144
+	FirstBurstLength       65536
+	DefaultTime2Wait       2
+	DefaultTime2Retain     20
+	MaxOutstandingR2T      8
+	DataPDUInOrder         Yes
+	DataSequenceInOrder    Yes
+	ErrorRecoveryLevel     0
+	HeaderDigest           CRC32C,None
+	DataDigest             CRC32C,None
+	Wthreads               8
+</pre>
+
+Last but not least configure heartbeat to control a Virtual IP address and failover iSCSI in case a node fails.
+
+On node1, define the cluster within /etc/heartbeat/ha.cf.
+
+Example /etc/heartbeat/ha.cf:
+<pre>
+logfacility     local0
+keepalive 2
+deadtime 30
+warntime 10
+initdead 120
+bcast bond0
+bcast bond1
+node node1
+node node2
+</pre>
+
+On node1, define the authentication mechanism within /etc/heartbeat/authkeys the cluster will use. 
+
+Example /etc/heartbeat/authkeys:
+<pre>
+auth 3
+3 md5 password
+</pre>
+
+Change the permissions of /etc/heartbeat/authkeys.
+
+<pre>
+chmod 600 /etc/heartbeat/authkeys
+</pre>
+
+On node1, define the resources that will run on the cluster within /etc/heartbeat/haresources. We will define the master node for the resource, the Virtual IP address, the file systems used, and the service to start.
+
+Example /etc/heartbeat/haresources:
+<pre>
+node1 drbddisk::iscsi.config Filesystem::/dev/drbd0::/srv/data::jfs
+node1 IPaddr::10.10.1.250/24/bond0 drbddisk::iscsi.target.0 iscsitarget
+</pre>
+
+Copy the cluster configuration files from node1 to node2.
+<pre>
+[node1]scp /etc/heartbeat/ha.cf root@10.10.1.252:/etc/heartbeat/
+[node1]scp /etc/heartbeat/authkeys root@10.10.1.252:/etc/heartbeat/
+[node1]scp /etc/heartbeat/haresources root@10.10.1.252:/etc/heartbeat/
+</pre>
+
+At this point you can either:
+  1.  Unmount /srv/data, make node1 secondary for drbd,  and start heartbeat
+  2.  Reboot both servers
+
+To test connectivity to our new iSCSI target, configure an additional system to be an initiator.
+
+I will use Ubuntu 9.04 (Jaunty Jackalope) for this as well.
+
+Install the iSCSI initiator software.
+
+apt-get -y install open-iscsi
+
+The default configuration does not automatically start iSCSI node communication.
+
+Modify the iSCSI daemon configuration to start up automatically and use the authentication methods we defined on the iSCSI target.
+
+<pre>
+sed -i 's/node.startup = manual/node.startup = automatic\nnode.conn\[0\].startup = automatic/' /etc/iscsi/iscsid.conf
+sed -i 's/#node.session.auth.authmethod = CHAP/node.session.auth.authmethod = CHAP/' /etc/iscsi/iscsid.conf
+sed -i 's/#node.session.auth.username = username/node.session.auth.username = geekshlby/' /etc/iscsi/iscsid.conf
+sed -i 's/#node.session.auth.password = password/node.session.auth.password = secret/' /etc/iscsi/iscsid.conf
+sed -i 's/#node.session.auth.username_in = username_in/node.session.auth.username_in = geekshlby/' /etc/iscsi/iscsid.conf
+sed -i 's/#node.session.auth.password_in = password_in/node.session.auth.password_in = password/' /etc/iscsi/iscsid.conf
+sed -i 's/#discovery.sendtargets.auth.authmethod = CHAP/discovery.sendtargets.auth.authmethod = CHAP/' /etc/iscsi/iscsid.conf
+sed -i 's/#discovery.sendtargets.auth.username = username/discovery.sendtargets.auth.username = geekshlby/' /etc/iscsi/iscsid.conf
+sed -i 's/#discovery.sendtargets.auth.password = password/discovery.sendtargets.auth.password = secret/' /etc/iscsi/iscsid.conf
+sed -i 's/node.session.iscsi.InitialR2T = No/node.session.iscsi.InitialR2T = Yes/' /etc/iscsi/iscsid.conf
+sed -i 's/node.session.iscsi.ImmediateData = Yes/node.session.iscsi.ImmediateData = No'/ /etc/iscsi/iscsid.conf
+</pre>
+
+Example /etc/iscsid.conf:
+<pre>
+node.startup = automatic
+node.conn[0].startup = automatic
+node.session.auth.authmethod = CHAP
+node.session.auth.username = geekshlby
+node.session.auth.password = secret
+node.session.auth.username_in = geekshlby
+node.session.auth.password_in = password
+discovery.sendtargets.auth.authmethod = CHAP
+discovery.sendtargets.auth.username = geekshlby
+discovery.sendtargets.auth.password = secret
+node.session.timeo.replacement_timeout = 120
+node.conn[0].timeo.login_timeout = 15
+node.conn[0].timeo.logout_timeout = 15
+node.conn[0].timeo.noop_out_interval = 5
+node.conn[0].timeo.noop_out_timeout = 5
+node.session.err_timeo.abort_timeout = 15
+node.session.err_timeo.lu_reset_timeout = 20
+node.session.initial_login_retry_max = 8
+node.session.cmds_max = 128
+node.session.queue_depth = 32
+node.session.iscsi.InitialR2T = Yes
+node.session.iscsi.ImmediateData = No
+node.session.iscsi.FirstBurstLength = 262144
+node.session.iscsi.MaxBurstLength = 16776192
+node.conn[0].iscsi.MaxRecvDataSegmentLength = 131072
+discovery.sendtargets.iscsi.MaxRecvDataSegmentLength = 32768
+node.session.iscsi.FastAbort = Yes
+</pre>
+
+The iSCSI initiator name is contained in /etc/iscsi/initiatorname.iscsi.
+
+Example /etc/iscsi/initiatorname.iscsi:
+<pre>
+InitiatorName=iqn.2009-04.local.home:client.01
+</pre>
+
+Restart the iSCSI daemon.
+
+<pre>
+/etc/init.d/open-iscsi restart
+</pre>
+
+We will now instruct the initiator to discover available LUNs on the target.
+
+<pre>
+iscsiadm -m discovery -t st -p 10.10.1.250
+</pre>
+
+<pre>
+Example output:
+10.10.1.250:3260,1 iqn.2008-04.local.home:storage.disk.0
+</pre>
+
+Once the available LUNs are discovered, restart the iSCSI initiator daemon, and we should see a new disk.
+
+<pre>
+/etc/init.d/open-iscsi restart
+</pre>
+
+As expected, we now have a new disk.  /dev/sda is out new iSCSI block device.
+
+Example fdisk -l sample output:
+<pre>
+Disk /dev/vda: 4194 MB, 4194304000 bytes
+255 heads, 63 sectors/track, 509 cylinders
+Units = cylinders of 16065 * 512 = 8225280 bytes
+Disk identifier: 0x000f3f8b
+
+   Device Boot      Start         End      Blocks   Id  System
+/dev/vda1   *           1         480     3855568+  83  Linux
+/dev/vda2             481         509      232942+   5  Extended
+/dev/vda5             481         509      232911   82  Linux swap / Solaris
+
+Disk /dev/sda: 10.7 GB, 10737345024 bytes
+64 heads, 32 sectors/track, 10239 cylinders
+Units = cylinders of 2048 * 512 = 1048576 bytes
+Disk identifier: 0xe1db3c07
+
+Disk /dev/sda doesn't contain a valid partition table
+</pre>
+
+Create a partition and file-system on our new iSCSI device.
+
+<pre>
+fdisk /dev/sda
+Command (m for help): 							<--- n
+Command action
+   e   extended
+   p   primary partition (1-4) 						<--- p
+Partition number (1-4):							<---1 
+First cylinder (1-10239, default 1): 					<--- enter
+Last cylinder, +cylinders or +size{K,M,G} (1-10239, default 10239):	<--- enter
+Command (m for help): 							<--- w
+mkfs.jfs -q /dev/sda1
+</pre>
+
+Create a mount point for the new file-system.
+
+<pre>
+mkdir -p /mnt/iscsi
+</pre>
+
+Update fstab to automatically mount the new filesystem at boot.  Modern distros prefer to use the disk's UUID for mounting in fstab, referring to the device by its "old school" nomenclature still works as well.
+
+Determine the UUID of our new iSCSI disk and add it to /etc/fstab with:
+<pre>
+blkid /dev/sda1 | cut -d' ' -f2 | sed s/\"//g
+
+Example output:
+UUID=e227bd05-f102-4c08-ae4f-3dbfade128aa
+
+Add this UUID to fstab:
+printf "UUID=e227bd05-f102-4c08-ae4f-3dbfade128aa\t/mnt/iscsi\tjfs\tnoatime\t0\t0\n" >> /etc/fstab
+</pre>
+
+Mount the new iSCSI block device.
+
+<pre>
+mount /mnt/iscsi
+</pre>
+
+Create data on the initiator node and test failover of the target.  I prefer using a movie or a sound file as this will help show latency.  Once you have the test data availble, play the movie or the mp3, and instruct node1 it is no longer a member of the cluster.  This can be done by simply shutting down heartbeat.
+
+<pre>
+[node1]/etc/init.d/heartbeat stop
+</pre>
+
+Once you have tested the latency of the data transfer when node1 fails, start heart beat on node1, this will in-turn move the resources back to node1  
+
+<pre>
+[node1]/etc/init.d/heartbeat start
+</pre>
+
+An alternative test would be to failover the nodes while writing data.

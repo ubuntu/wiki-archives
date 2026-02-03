@@ -1,0 +1,155 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+{{{#!IRC
+[12:59] <ttx> Who is here for the Packaging Training session on Java libraries ?
+[13:00] <ttx> anyone? :)
+[13:01] <jkeyes0> I am, sort of. I know little to nothing about packaging in Ubuntu, so I just planned to sit on the sidelines and observe.
+[13:01]  * drubin 
+[13:01] <ttx> jkeyes0: that's perfectly alright. I was worried I would talk with noone listening
+[13:02] <ttx> OK, let's start !
+[13:02] <ttx> Welcome everyone to this packaging training session, today the subject is Java library packaging...
+[13:02] <ttx> This session assumes you know some basics of Debian packaging and have a vague notion of what a Java library and "ant" are.
+[13:02]  * Quintasan waves
+[13:02] <ttx> Talk / discussion should happen in #ubuntu-classroom-chat. Prefix questions with QUESTION: so that I can spot them more easily. Let me know on channel if I go too fast...
+[13:03] <ttx> So...
+[13:03] <ttx> Java software uses lots of Java libraries, which are commonly provided as JAR files
+[13:03] <ttx> It usually ships with a directory full of those JAR files and some launcher that builds a classpath from them. But that's not how we do it in Linux distributions
+[13:03] <ttx> We want to build from source, and we want to avoid code duplication. So we want to package Java libraries separately, place them in a common directory (/usr/share/java), and then have the software started with a classpath that points to them
+[13:04] <ttx> Trying to have a common library set causes several global issues (in particular with software requiring slightly different versions of the same library) but that's not the purpose of this session
+[13:04] <ttx> We lack a lot of very common Java libraries, which makes packaging Java software more complex than it should. This session will focus on the specific rules and tips to properly package Java libraries, with a few examples.
+[13:05] <ttx> Any question so far ?
+[13:05] <ttx> OK, there should be a lot more in a few minutes :)
+[13:05] <ttx> So let's say you are packaging some Java software and it imports org.safehaus.uuid, conveniently from a binary JAR bundled with its own source in lib/jug-asl-2.2.0.jar
+[13:06] <ttx> I meant, "So let's say you are packaging some Java software and it imports org.safehaus.uuid, conveniently from a binary JAR bundled with its own source in lib/jug-asl-2.2.0.jar"
+[13:06] <ttx> We can't just use that binary JAR. We have to build that JAR from source and have the software build-depend on it.
+[13:07] <ttx> So we need to package version 2.2.0 of that "jug-asl" library.
+[13:07] <ttx> Basically what you want to do is to build jug-asl.jar from source and end up with /usr/share/java/jug-asl-2.2.0.jar, together with a symbolic link /usr/share/java/jug-asl.jar -> jug-asl-2.2.0.jar
+[13:08] <ttx> First you need to double-check that this library hasn't already been packaged somewhere. It's not as easy as it sounds, sometimes its classes will be hidden somewhere in a strange jar name in an obscure package...
+[13:08] <ttx> To be sure, you would need to unjar all the JARs that the distribution contains to check.
+[13:08] <ttx> Fortunately I did that for you and published java-Contents.gz files that contain all classes in all jars in all packages...
+[13:08] <ttx> See https://wiki.ubuntu.com/JavaTeam/JavaContents
+[13:09] <ttx> So making sure that nobody already provides org.safehaus.uuid in Jaunty is just a matter of downloading the java-Contents.gz file and do a "zgrep org.safehaus.uuid jaunty-java-Contents.gz"
+[13:10] <ttx> If you try it, you can see that it's packaged as part of the "eucalyptus-javadeps" package...
+[13:10] <ttx> But now you want to properly package it separately, depending on eucalyptus-javadeps is just not an option for you.
+[13:10] <ttx> Questions, so far ?
+[13:11] <ttx> Before we attack the packaging part :)
+[13:12] <ttx> I'll assume everything is crystal clear, then.
+[13:12] <ttx> QUESTION: how could I know that an app uses org.safehaus.uuid?
+[13:13] <ttx> You can usually tell from the build documentation of the software you want to package.
+[13:13] <ttx> But you often find out when you try to compile it... and get import errors during java compilation
+[13:14] <ttx> jmehdi: does that answer your question ?
+[13:14] <jmehdi> ttx: yep ;)
+[13:15] <ttx> Ok, let's continue.
+[13:15] <ttx> Java library packaging follows the usual rules, with a few specificities.
+[13:15] <ttx> First debian/control:
+[13:15] <ttx> You should build-depend on "default-jdk" (+any other Java library needed at build-time)
+[13:15] <ttx> That will use openjdk-6-jdk in Ubuntu
+[13:16] <ttx> (for amd64/i386)
+[13:16] <ttx> The binary package that will install those MUST be named libjug-asl-java, this is a requirement of the Debian Java policy. I'll name the source package after the project name, "jug", even if some packagers use libfoo-java as the source package name as well.
+[13:17] <ttx> The binary should usually depend on "default-jre-headless | java2-runtime-headless". That makes sure the right runtime environment is pulled if nothing is already present.
+[13:17] <ttx> If the library requires Java 5 or Java 6, use java5- or java6- instead of java2-
+[13:17] <ttx> If the library *really* cannot do anything without the full JRE, then you should depend on "default-jre | java2-runtime". But usually you don't need to.
+[13:18] <ttx> Any question about the debian/control file ?
+[13:19] <ttx> QUESTION: what's the difference between jre-headless and default-jre?
+[13:20] <ttx> The "headless" JRE is one without graphical extensions
+[13:20] <ttx> so it doesn't pull 50 Mb of X libraries with it
+[13:20] <ttx> On a desktop you don't really care
+[13:21] <ttx> but on servers... you clearly don't want to install all those X libraries that your Java library doesn't really use
+[13:21] <ttx> OK, moving on to debian/rules
+[13:21] <ttx> the complex part :)
+[13:21] <ttx> Downloading jug-src.tar.gz from http://jug.safehaus.org/Download I can see that there is a build.xml there, which means it uses the ant build system, which is good news.
+[13:22] <ttx> "ant" is like a Java-oriented "make". The Makefile is called build.xml and contains targets (in XML) that you can call with ant <target>.
+[13:22] <ttx> The easy way to write the rules file is to use the CDBS ant class. See http://pastebin.ubuntu.com/192289/ for example
+[13:22] <ttx> simple, uh ?
+[13:23] <ttx> You just need to identify the ant task that will build what you need. here it is "jar.asl", you don't want the native part of the jug-lgpl version.
+[13:23] <ttx> Now, the tricky part.
+[13:23] <ttx> To successfully compile you will need to have the required Java libraries in the compiler classpath.
+[13:24] <ttx> To make the Ubuntu build-daemons happy we need to build-depend on the needed library package and insert its JAR into the compiler classpath, we can't use directly another binary coming from nowhere.
+[13:24] <ttx> As a sidenote, that means you first need to properly package all the Java library dependencies needed to build your own... which can be a very large number ;)
+[13:24] <ttx> The CDBS ant class has a nifty mechanism for inserting JARs in the system classpath, just add the required JAR names on a DEB_JARS line. You can put JAR names (without path or extension, it will look in /usr/share/java) or complete paths.
+[13:25] <ttx> In our example, jug needs the log4j library to compile. We would just add a liblog4j-java build-depend in debian/control, and in debian/rules :
+[13:25] <ttx> DEB_JARS := log4j
+[13:26] <ttx> (will add /usr/share/java/log4j.jar to the Java compiler classpath)
+[13:26] <ttx> If the build.xml doesn't try to be too smart with required dependencies, it's all that is needed. But sometimes the "source" bundles the needed binary JAR dependencies, so you need to patch out the part that adds them to the classpath.
+[13:26] <ttx> Another option is to play with the "build.sysclasspath" ant property to control precedence between system classpath and build.xml classpath, like this:
+[13:27] <ttx> DEB_ANT_ARGS := -Dbuild.sysclasspath=last
+[13:27] <ttx> There is no definitive solution since it all depends on how the build.xml file is written. I'd suggest starting packaging easy libraries with no build-dependencies, then try one with a couple dependencies, etc.
+[13:27] <ttx> Questions ?
+[13:28] <ttx> That may seem complex. But Libraries without any dependencies are really simple
+[13:29] <bdrung> i missed the start, is there already a log for this session?
+[13:29] <ttx> QUESTION: is this dependencies management specific to java?
+[13:29] <ttx> bdrung: maybe on irclogs.ubuntu.com
+[13:30] <ttx> This dependency management is not really specific to Java
+[13:30] <ttx> What is specific to Java is that stuff usually depends on tons of other stuff
+[13:31] <ttx> and their build systems aren't distribution-oriented
+[13:31] <ttx> so they just pack their binary dependencies with their source code
+[13:31] <ttx> and tell you to run "ant" and be done with it.
+[13:31] <ttx> the difficulty here is to make that build-daemon compatible
+[13:32] <ttx> and end up with everything built from pure source
+[13:32] <ttx> and without code duplication
+[13:32] <ttx> That's where it gets complex :)
+[13:33] <ttx> OK, we have some time left, so I'll speak of what we do when the library doesn't use "ant".
+[13:33] <ttx> If there is no build system, the easiest way is to write a minimal build.xml file and use the ant CDBS class.
+[13:33] <ttx> Something like http://pastebin.ubuntu.com/192303/
+[13:34] <ttx> (this one will compile all classes in src/main/java and make a JAR out of them)
+[13:34] <ttx> This should be sufficient for most libraries. But sometimes... if you're unlucky... the stuff you want to package will use maven.
+[13:34]  * ttx pauses for some dramatic effect
+[13:35] <ttx> Maven is a complex build/integration system that handles both build rules and dependency management. The trouble for us is that it makes heavy use of pre-built JARS that it downloads directly from Maven repositories.
+[13:35] <ttx> Since we want reproduceability our build-daemons cannot download from outside repositories. We need to use our own packages. So we need to bypass Maven dependency management completely.
+[13:35] <ttx> If the software is simple enough I'd recommend rewrite an ant build.xml file, as if there were no build system, and use the maven files as hints on required dependencies.
+[13:36] <ttx> But if you're really really unlucky, the thing you're trying to package will make heavy use of "maven plugins" so rewriting it as a build.xml file is just impossible.
+[13:36]  * ttx pauses again for more dramatic effect
+[13:36] <ttx> We are still investigating techniques to work around that problem. The idea is to set up an environment around maven to make it believe it already has everything it needs to run, so that it doesn't download anything.
+[13:37] <ttx> For those interested, Debian proposes: http://wiki.debian.org/Java/MavenBuilder. It's not really complete, but they packaged a lot of Maven plugins already so that's very good.
+[13:37] <ttx> We originally proposed a slightly different approach, less integrated but that can be used on a per-package basis: https://wiki.ubuntu.com/JavaTeam/Specs/MavenSupportSpec. We benefit from Debian work on packaging plugins.
+[13:38] <ttx> That's all about alternative build systems.
+[13:38] <ttx> To sum it up, looking at the build system and dependencies you'll have a good idea of the complexity of the task ahead
+[13:39] <ttx> ant-based, no build dependencies --> easy
+[13:39] <ttx> ant-based, a few already-packaged build dependencies --> medium
+[13:39] <ttx> no build system --> medium
+[13:40] <ttx> ant-based or no build system, lots of build deps --> hard
+[13:40] <ttx> maven-based with lots of plugins --> huh
+[13:40] <ttx> Questions ?
+[13:41] <ttx> QUESTION: does eclipse uses maven?
+[13:42] <ttx> I don't think so. I think they use ant, and they don't have so much external dependencies
+[13:42] <ttx> apt-get source eclipse and looking at debian/rules you should be able to see
+[13:43] <ttx> Jetty 6 uses maven, for example
+[13:43] <ttx> But upstream was kind enough to produce an ant build.xml
+[13:44] <ttx> Most of the stuff I talked about is documented in wiki at https://wiki.ubuntu.com/JavaTeam/LibraryPackaging
+[13:44] <ttx> Please join #ubuntu-java and the Java team meetings (on Thursdays, 1400 UTC) if you're interested in doing Java packaging.
+[13:45] <ttx> We should publish a list of wanted libraries, with an evaluation of the expected difficulty
+[13:45] <darkwise> Q: is-it the same why to package a java program ? (there is some where to ask questions?)
+[13:45] <darkwise> ah ok thanks :)
+[13:46] <ttx> darkwise: Java programs have the same problems. A few things I talked about don't apply to them though
+[13:46] <ttx> like package naming
+[13:46] <ttx> or runtime dependencies
+[13:46] <ttx> But in the end programs are made of libraries, so... :)
+[13:47] <ttx> If you look into the tomcat6 package for example...
+[13:47] <ttx> it produces a library part called libtomcat6-java
+[13:47] <ttx> the rest is the launchers, init scripts and tools around that
+[13:48] <ttx> that's all I wanted to talk about, so I open the floor for discussion
+[13:48] <darkwise> I get it ;) thanks ttx
+[13:49] <ttx> Any other question ?
+[13:50] <ttx> OK, thanks everyone for listening, hopefully I didn't make it look like more difficult than it really is :)
+[13:51] <ttx> I expect the logs of the session to be available at http://irclogs.ubuntu.com/2009/06/11/%23ubuntu-classroom.txt in a few minutes
+[13:51] <darkwise> thank you ttx
+[13:51] <ttx> for those that have been missing the beginning
+[13:51] <maxpaguru> ttx: thanks! Bye everybody
+[13:52] <ttx> and soon on https://wiki.ubuntu.com/Packaging/Training/Logs
+[13:52] <derwas> nice!
+[13:53] <ttx> For more questions you can always ping me on #ubuntu-java
+[13:53] <ttx> (as long as it's Java packaging questions more than Java questions)
+[13:54] <ttx> bye everyone !
+}}}
+
+----
+CategoryPackaging

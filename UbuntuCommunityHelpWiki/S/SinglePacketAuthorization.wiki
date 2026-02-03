@@ -1,0 +1,351 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+''' ''Single Packet Authorization (SPA)'' ''' using '''<nowiki>[[http://www.cipherdyne.org/fwknop/|"fwknop"]]</nowiki>''' is probably one of the coolest recent innovations in server and network access control technology. Just what is SPA, you ask? SPA is a method of limiting access to server and network resources by cryptographically authenticating users before any type of TCP/IP stack access is allowed.
+
+In its simplest form, your Linux server can have an inbound firewall rule that by default drops all access to any of its listening services. Nmap scans will completely fail to detect any open ports, and zero-day attacks will not have any effect on vulnerable services since the firewall is blocking access to the applications.
+
+The server however has a nifty trick up its sleeve. An authorized user sends a single encrypted UDP packet that is passively sniffed and analyzed by the fwknopd service running on the server using pcap. If successfully authenticated, fwknopd dynamically creates an iptables firewall rule, granting the source IP address of the authorized client access to the service for a defined period of time (default is 30 seconds).
+
+In this example, the service we will be protecting is SSH. I will be using a simple firewall rule that blocks all inbound connections, but has an unrestricted outbound policy. The client will authenticate using a GNUPG key pair.
+
+=== IMPORTANT INFORMATION ===
+
+Before you even begin to mess with this software on a remote server, PLEASE make sure you know EXACTLY what you are doing!  If you do not carefully plan, test, and deploy, there is a serious potential that you will lock yourself out of your server.  How?
+
+If you apply a default firewall policy that blocks all inbound traffic, including SSH, and your fwknop service is misconfigured or fails, then you will not be able to access your server, as the service will be unable to add the dynamic access list entry!  Please make sure you have alternate method of accessing the server during this initial deployment.  i.e. Direct console access; or SSH listening on two ports, one that's blocked, the other that's not.
+
+This will keep a minor mistake from becoming a larger one.  You have been warned.
+
+=== Install Software ===
+
+In the following section, we will download and install fwknop and all of its prerequisites.
+
+==== OpenSSH Server (Optional) ====
+
+Since we are using SSH for this tutorial, make sure you have installed the OpenSSH server.  If you have already done so, you may skip this step.
+
+<pre>
+$ sudo apt-get install openssh-server
+</pre>
+
+==== fwknop installation prerequisites ====
+
+<pre>
+$ sudo apt-get install build-essential libpcap-dev mailx
+</pre>
+
+==== fwknop installation ====
+
+Download the latest version of fwknop from the official website, and install.  Please check for latest version of fwknop at <nowiki>[[http://www.cipherdyne.org/fwknop/download/]]</nowiki>.
+
+<pre>
+$ wget http://www.cipherdyne.org/fwknop/download/fwknop-1.9.5.tar.gz
+$ tar zxvf fwknop-1.9.5.tar.gz
+$ cd fwknop-1.9.5
+$ sudo ./install.pl
+</pre>
+
+The installer will ask you a few questions which you must answer appropriately.  For a typical server installation the following answers will work nicely.  Note: The output has been snipped and slightly modified for brevity.
+
+<pre>
+In which mode will fwknop be executed on the local system?
+(client/[server]): server
+
+Which of the following data acquistion methods would you like to use?
+([pcap], file_pcap, ulogd, syslogd, syslog-ng): pcap
+
+Which network interface would you like fwknop to sniff packets from?  eth0
+
+fwknop access alerts will be sent to: root@localhost
+Would you like access alerts sent to a different address ([y]/n)?  n
+
+Enable fwknop at boot time ([y]/n)?  y
+
+fwknop has been installed!  To start in server mode, run 
+"/etc/init.d/fwknop start"
+
+</pre>
+
+Before starting the fwknop service, you need to configure authentication.  The following steps will outline the usage of GnuPG for fwknop authentication.
+
+=== GnuPGP Authentication ===
+
+If you are new to PGP concepts, please see the GnuPrivacyGuardHowto before going any further.  For those of you that regularly use GnuPG, these concepts are probably quite familiar.
+
+You (the client) and the server should use individualized PGP key pairs for this to work as securely as possible. The client will use its own private key to digitally sign the SPA packet payload, and use the servers public key to encrypt it as well. The server will use the clients public key and digital signature to verify that the SPA packet originated from a trusted source. This means that both the server and the client will need a signed copy of each others public keys in their keyring.
+
+==== Generate Client-side GnuPG key pairs ====
+
+From the workstation you are using as a client, generate your client side key pair, and export the public key to a text file.
+
+<pre>
+$ gpg --gen-key
+$ gpg --list-key fwknop-client@localhost
+pub   1024D/2FBEA691 2007-11-17
+uid                  fwknop client key <fwknop-client@localhost>
+sub   2048g/C3FD544F 2007-11-17
+
+$ gpg -a --export 2FBEA691 > fwknop-client.asc
+</pre>
+
+Upload the client public key to the SSH server.
+
+<pre>
+$ scp fwknop-client.asc <server-ip-address>:
+</pre>
+
+==== Generate Server-side GnuPG key pairs ====
+
+From the server, generate the server side key pair, and export the public key to a text file.
+
+<pre>
+$ gpg --gen-key
+$ gpg --list-key fwknopd@localhost
+pub   1024D/3F89D02C 2007-11-17
+uid                  fwknop server key <fwknopd@localhost>
+sub   2048g/C6AABDF0 2007-11-17
+
+$ gpg -a --export 3F89D02C > fwknop-server.asc
+</pre>
+
+From the client, download the server's exported public key.
+
+<pre>
+$ scp <server-ip-address>:fwknop-server.asc .
+</pre>
+
+==== Import and sign GnuPG key pairs ====
+
+From your client side workstation, import the server's public key into your keyring and sign it.
+
+<pre>
+$ gpg --import fwknop-server.asc
+$ gpg --sign-key fwknopd@localhost
+</pre>
+
+From your server, import the clients public key into your keyring and sign it.
+
+<pre>
+$ gpg --import fwknop-client.asc
+$ gpg --sign-key fwknop-client@localhost
+</pre>
+
+=== Finishing the installation ===
+
+==== fwknopd configuration ====
+
+You will need to edit the fwknop configuration file “/etc/fwknop/access.conf”.  An example of this configuration is shown below.
+
+<pre>
+SOURCE: ANY;
+OPEN_PORTS: tcp/22;
+DATA_COLLECT_MODE: PCAP;
+GPG_HOME_DIR: /root/.gnupg;
+GPG_DECRYPT_ID: SERVER_KEY_ID;
+GPG_DECRYPT_PW: PASSWORD_HERE;
+GPG_REMOTE_ID: CLIENT_KEY_ID;
+FW_ACCESS_TIMEOUT: 30;
+</pre>
+
+'''Note:''' Be sure to replace the GPG_HOME_DIR variable with the path to the correct key ring.  The other variables are fairly self explanatory.
+
+==== Optional Fallback Authentication ====
+
+Although NOT recommended, in addition to the use of GnuPG, you have the option to configure a static password as a fallback authentication mechanism.  This is especially useful in scenarios where you need access to your server but do not have access to your GnuPG key pair.  The fwknop client requires that you use a minimum of 8 characters for your password, but you should use additional best practices to reduce the threat of password theft and brute force attacks.  
+
+If you would like to use this form of authentication, add your selected password to "/etc/fwknop/access.conf".
+
+<pre>
+KEY: YourPasswordHere;
+</pre>
+
+==== Start fwknop ====
+
+<pre>
+$ sudo /etc/init.d/fwknop start
+</pre>
+
+=== Testing fwknop ===
+
+You should now be ready to test things out using another computer with the fwknop client. You install everything exactly the same as the server, with the exception of specifying that the installer should run fwknop as a client.
+
+The typical authorization process from client to server can be completed as follows.
+
+<pre>
+$ fwknop -A tcp/22 --gpg-recip SERVER_KEY --gpg-sign CLIENT_KEY -w -k SERVER_IP
+</pre>
+
+The "-w" flag queries www.whatismyip.com for the clients real ip address and uses that as the source address. This is useful when you are behind a NAT firewall, since the source address specified on the SPA packet would otherwise be a local address.
+
+If you are on the same network as the server, or simply do not have to worry about NAT, the syntax would be as follows:
+<pre>
+$ fwknop -A tcp/22 --gpg-recip SERVER_KEY --gpg-sign CLIENT_KEY -s -k SERVER_IP
+</pre>
+
+The "-s" flag specifies that the server should use the source address from which the SPA packet originates.
+
+Upon issuing the command, the fwknop client will ask you to enter your client side GnuPG key password.  The output will look similar to the following.
+<pre>
+$ fwknop -A tcp/22 --gpg-recip 3F89D02C --gpg-sign 2FBEA691 -s -k 192.168.200.131
+[+] Starting fwknop client (SPA mode)...
+[+] Enter the GnuPG password for signing key: 2FBEA691
+
+GnuPG signing password: 
+
+[+] Building encrypted Single Packet Authorization (SPA) message...
+[+] Packet fields:
+
+        Random data:    4498932332071523
+        Username:       yourusername
+        Timestamp:      1212948230
+        Version:        1.9.5
+        Type:           1 (access mode)
+        Access:         0.0.0.0,tcp/22
+        SHA256 digest:  UBgkOqX60lLVFUjH/BbQE/wGW3/nMp1pHyh7f5bQgAk
+
+[+] Sending 1040 byte message to 192.168.200.131 over udp/62201...
+</pre>
+
+If you have opted to configure a symmetric key password for fallback authentication, you can test this out by simply omitting the gpg options:
+<pre>
+$ fwknop -A tcp/22 -s -k 192.168.200.1
+
+[+] Starting fwknop client (SPA mode)...
+[+] Enter an encryption key. This key must match a key in the file
+    /etc/fwknop/access.conf on the remote system.
+
+Encryption Key: 
+
+[+] Building encrypted Single Packet Authorization (SPA) message...
+[+] Packet fields:
+
+        Random data:    2259603590509959
+        Username:       yourusername
+        Timestamp:      1212948275
+        Version:        1.9.5
+        Type:           1 (access mode)
+        Access:         0.0.0.0,tcp/22
+        SHA256 digest:  9BUOw7cNHacvTOfZwCicv3GGgkaT2V14n822N6LH3WM
+
+[+] Sending 182 byte message to 192.168.200.1 over udp/62201...
+</pre>
+
+If successful, your server adds the appropriate access list entry for you to connect using your ssh client. You will have 30 seconds to make the connection, after which the access list is dynamically removed.
+<pre>
+$ ssh username@SERVER_IP
+</pre>
+
+The following is a great way to view what is going on in the background.  Run this command while using the client to see the action in real time.
+<pre>
+$ tail -f /var/log/syslog | grep fwknop
+Jun  8 11:03:55 ubuntu-server fwknopd: received valid GnuPG encrypted packet (signed with required key ID: "2FBEA691") from: 192.168.200.1, remote user: yourusername, client version: 1.9.5 (SOURCE line num: 22)
+Jun  8 11:03:55 ubuntu-server fwknopd: add FWKNOP_INPUT 192.168.200.1 -> 0.0.0.0/0(tcp/22) ACCEPT rule 30 sec
+Jun  8 11:04:26 ubuntu-server fwknop(knoptm): removed iptables FWKNOP_INPUT ACCEPT rule for 192.168.200.1 -> 0.0.0.0/0(tcp/22), 30 sec timeout exceeded
+</pre>
+
+It is important to note that the SPA packet is sent to the servers IP address using the destination port of UDP/62201. You must ensure that this port number is allowed outbound from the network you are connecting from, and that no router or firewall is blocking it from reaching your server.
+
+It should also be noted that the time stamp embedded in the SPA packet must fall within 120 seconds of the servers clock. You should make sure that both the server and client are using NTP to keep their clocks as close as possible.  This will be apparent when you syslog gives you the following error messages.
+<pre>
+Jun  8 11:00:30 ubuntu-server fwknopd: remote time stamp is older than 120 second max age.
+</pre>
+
+It's also helpful to view your iptables output in real time while testing.
+<pre>
+$ sudo watch -n1 iptables -L -n
+</pre>
+
+=== Firewall Configuration (Optional) ===
+
+If you are already using an iptables firewall configuration on your server, you may skip this step.  If you would like additional information regarding iptables, please see the IpTablesHowTo.
+
+Here is a simple firewall script to help you test things out.  Please use it with caution, as it blocks all incoming traffic!  We will use it simply to demonstrate SPA functionality.
+
+==== Download firewall script ====
+
+Download and save the following <nowiki>[[attachment:firewall.sh|firewall.sh]]</nowiki> script in your home directory.
+
+==== Test firewall script ====
+
+In order to test your script, start by opening a terminal window, (''Applications → Accessories → Terminal'').
+
+Check the syntax of the script and verify resulting output:
+<pre>
+$ sudo sh firewall.sh
+firewall.sh {start|stop|restart|reload|force-reload|show}
+</pre>
+
+Show your current iptables configuration.  If you are not running any rules, it will look like a following:
+
+<pre>
+$ sudo sh firewall.sh show
+Chain INPUT (policy ACCEPT)
+target     prot opt source               destination
+
+Chain FORWARD (policy ACCEPT)
+target     prot opt source               destination
+
+Chain OUTPUT (policy ACCEPT)
+target     prot opt source               destination
+</pre>
+
+Start your firewall:
+
+<pre>
+$ sudo sh firewall.sh start
+</pre>
+
+Show your new iptables configuration:
+
+<pre>
+$ sudo sh firewall.sh show
+Chain INPUT (policy DROP)
+target     prot opt source               destination
+ACCEPT     0    --  0.0.0.0/0            0.0.0.0/0
+ACCEPT     0    --  0.0.0.0/0            0.0.0.0/0           state RELATED,ESTABLISHED
+DROP       0    --  0.0.0.0/0            0.0.0.0/0           PKTTYPE = broadcast
+DROP       0    --  0.0.0.0/0            0.0.0.0/0           PKTTYPE = multicast
+LOG        0    --  0.0.0.0/0            0.0.0.0/0           LOG flags 0 level 4
+
+Chain FORWARD (policy ACCEPT)
+target     prot opt source               destination
+
+Chain OUTPUT (policy ACCEPT)
+target     prot opt source               destination
+</pre>
+
+With your new rules in place, you are now blocking all incoming traffic.
+
+To stop your firewall:
+
+<pre>
+$ sudo sh firewall.sh stop
+</pre>
+
+=== Resources ===
+
+* <nowiki>[[http://www.cipherdyne.org/fwknop/]]</nowiki>
+* <nowiki>[[http://www.cipherdyne.org/fwknop/docs/faq.html]]</nowiki>
+* <nowiki>[[http://www.cipherdyne.org/fwknop/docs/gpghowto.html]]</nowiki>
+* GnuPrivacyGuardHowto
+* <nowiki>[[iptablesHowTo]]</nowiki>
+
+=== See Also ===
+
+* <nowiki>[[PortKnocking]]</nowiki>
+
+=== Credits ===
+
+Special thanks to <nowiki>[[http://www.cipherdyne.org/author.html|Michael Rash]]</nowiki>, author of fwknop.
+
+----
+CategorySecurity

@@ -1,0 +1,254 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+Finding that my MacBookPro 3.1 (MacBookPro/SantaRosa) was getting incredibly hot, even with applesmc installed.  
+
+=== Trivia (how I came to write this and other boring details) ===
+I first tried to set the fans to 3000rpm, but even then, at the end of the day it would remain hot.  At least, the writer of the comment I have followed gave me the base knowledge on how to deal with applesmc. 
+
+From then I have written a stupid little script, that grew a bit along a couple week of testing, which controls the minimum fan speed so that it stays at a reasonable temperature.  The model is quite weird because it's a linear one (the rpm grows linearly as the temperature grows, trying to find the best possible equilibrium between the value range you give it). Maybe a log or a sinus one should have been more efficient, but I am still trying to figure how to do a log in bash, when you have to remain in the great world of integer.
+
+Other quirk: we have 2 fans and 8 sensors.  Which one are left, or right, no one tells, so for now I do an average on the main 4 ones (the one I have seen growing the hotest first).  I average them and base my cooling on it.  
+
+Also, I came to realize a bit late, that when setting the minimum fan speed to one, applesmc seems to take over regulation.  This is why when it tops cleanly, it leave the value to 1.  If you leave it this way you core temperature is stabilzed around 56, which is a bit too hot but it works well to have a low fan speed.  One of these days I'll have time to dig into applesmc to understand how it works...
+
+==== Python Version ====
+
+Sloth has written a python version of a similar script.  You may want to <nowiki>[[http://ubuntuforums.org/showthread.php?p=8450939|check it out]]</nowiki>.
+
+==== Version 0.5 ====
+* Wrong sensor was used for TEMP4
+* Redirection did not work in init script
+
+==== Version 0.4 ====
+* Added a control of the hard drive power saving mode depending on wether the laptop is plugged in or not.  This should help getting more life time out of HD for laptops which are connected most of the time.  For more info on this, I recommend reading <nowiki>[[[http:--lwn.net-SubscriberLink-257426-c4589a9a7d1395fd-|Laptops, power management, and Ubuntu on LWN]]</nowiki>].
+* Added a TARGET temp so that if we start heating up too much, we force the maximum fan speed until we get back to TARGET
+
+==== Thermodynamic model ====
+
+The what ? Believe me, I am even surprised I know how to spell this ;)
+
+=== the scripts ===
+
+==== Warning ====
+
+'''There is no guaranty that the model I am using works'''.  Nobody but '''you take the responsability to install this''' on your laptop.  If your laptop starts burning, start by turning it off then blame yourself.  '''You've been warned !'''
+
+==== tempmon (the main part) ====
+
+The following scripts create a daemon that will regulate temperature for us.  They (the 2 scripts) just require that the applesmc module be loaded (<code>sudo modprobe applesmc</code> to make sure). Create it as /usr/local/sbin/tempmon.
+
+Note: the first line of this script should be "#!/bin/bash" but for some reason, moimoin does not display it even though it is present in the source of this page (click edit to check out).
+
+<pre>
+
+########## ## W A R N I N G ###
+
+do_init()
+{
+##### I'm pretty happy with the following  values but feel free to
+##### play with them.  Just keep an eye on the values return by the sensors
+##### package.
+##### We set different value for on and off line, as we don't care
+##### about saving power when on-line.
+        if (cat /proc/acpi/ac_adapter/ADP1/state | grep on-line > /dev/null); then
+######### We are online, be pretty cool
+                [ $debug -eq 1 ] && echo "state:                   on-line"
+                MIN=475 # temp in degree celsius x 10
+                MAX=540
+                let "RATIO = 6000 / ($MAX - $MIN)"
+######### no need for much hd power saving when on-line
+                hdparm -B 200 /dev/sda 
+        else
+                [ $debug -eq 1 ] && echo "state:                   off-line"
+                MIN=510 # temp in degree celsius x 10
+                MAX=590
+                let "RATIO = 6000 / ($MAX - $MIN)"
+######### be more agressive on hd power-savings when off-line
+                hdparm -B 50 /dev/sda
+        fi
+        let "TARGET = ( ($MAX - $MIN)/3 ) + $MIN"
+}
+
+get_temp()
+{
+        TEMP1=`cat /sys/devices/platform/applesmc.768/temp5_input`
+        TEMP2=`cat /sys/devices/platform/applesmc.768/temp8_input`
+        TEMP3=`cat /sys/devices/platform/applesmc.768/temp3_input`
+        TEMP4=`cat /sys/devices/platform/applesmc.768/temp4_input`
+        let "TEMP = ($TEMP1 + $TEMP2 + $TEMP3 + $TEMP4)/ 400"
+}
+
+debug=0
+do_init
+count=1
+maxtempcount=0
+
+while [ true ]; do 
+
+        get_temp
+
+        [ $debug -eq 1 ] && echo "average temp: $TEMP (target: $TARGET, max: $MAX)" 
+
+        let "SPEED = ($TEMP - $MIN) * $RATIO"    
+
+##### Just to make sur we do not set fan >6000 or <0
+        if [ $SPEED -gt 6000 ]; then
+                SPEED=6000
+        elif [ $SPEED -lt 1 ]; then
+                SPEED=1
+        elif [ $TEMP -lt $TARGET ]; then
+######### let autoregulation work (if it does)
+                SPEED=1  
+        fi
+
+        [ $debug -eq 1 ] && echo "set fan speed to: $SPEED (step: $RATIO)"
+        echo $SPEED > /sys/devices/platform/applesmc.768/fan2_min
+        echo $SPEED > /sys/devices/platform/applesmc.768/fan1_min
+
+        if [ $TEMP -gt $MAX ]; then
+                [ $debug -eq 1 ] && echo "temp: $TEMP > max: $MAX"
+                let "maxtempcount = $maxtempcount + 1"
+                if [ $maxtempcount -gt 3 ]; then
+                        while [ $TEMP -gt $TARGET ]; do
+                                [ $debug -eq 1 ] && echo "Force fan speed to: 6000 until temp ($TEMP) = $TARGET"
+                                echo 6000 > /sys/devices/platform/applesmc.768/fan2_min
+                                echo 6000 > /sys/devices/platform/applesmc.768/fan1_min
+                                sleep 10
+                                get_temp
+                                let "count = $count + 2"
+                        done
+                        maxtempcount=0
+                else
+                        sleep 5
+                        let "count = $count+1"
+                fi
+        elif [ $SPEED -lt 2 ]; then
+######### Sleep longer when autoregulating
+                sleep 20
+                let "count = $count+4"
+        else
+                sleep 5
+                let "count = $count+1"
+        fi
+
+        if [ $count -gt 10 ]; then
+                count=0
+                do_init
+        fi
+done
+</pre>
+
+allow access rights to it by doing a :
+
+<code>sudo chmod +x /usr/local/sbin</code>
+
+==== tempmon.sh (the init.d script) ====
+
+then add the following script as /etc/init.d/tempmon.sh :
+
+Note: the first line of this script should be "#!/bin/sh" but for some reason, moimoin does not display it even though it is present in the source of this page (click edit to check out).
+
+<pre>
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+DESC="MacBook minimum fan speed setter"
+NAME=tempmon
+SCRIPTNAME=/etc/init.d/$NAME
+MIN_FAN_SPEED=3000
+DEFAULT_MIN_FAN_SPEED=2000
+
+[ -r /etc/default/$NAME ] && . /etc/default/$NAME
+
+[ -f /etc/default/rcS ] && . /etc/default/rcS
+
+. /lib/lsb/init-functions
+
+do_start()
+{
+	killall tempmon > /dev/null 2>&1 
+	/usr/local/sbin/tempmon > /dev/null 2>&1 &
+}
+
+do_stop()
+{
+	killall tempmon > /dev/null 2>&1 
+	sleep 1
+# Put the fan back to auto regulation
+	echo 1 > /sys/devices/platform/applesmc.768/fan2_min
+	echo 1 > /sys/devices/platform/applesmc.768/fan1_min
+}
+
+case "$1" in
+  start)
+	[ "$VERBOSE" != no ] && log_daemon_msg "Starting $DESC" "$NAME"
+	do_start
+	case "$?" in
+		0|1) [ "$VERBOSE" != no ] && log_end_msg 0 ;;
+		2) [ "$VERBOSE" != no ] && log_end_msg 1 ;;
+	esac
+	;;
+  stop)
+	[ "$VERBOSE" != no ] && log_daemon_msg "Stopping $DESC" "$NAME"
+	do_stop
+	case "$?" in
+		0|1) [ "$VERBOSE" != no ] && log_end_msg 0 ;;
+		2) [ "$VERBOSE" != no ] && log_end_msg 1 ;;
+	esac
+	;;
+  reload|force-reload|restart)
+
+	log_daemon_msg "Reloading $DESC" "$NAME"
+	do_start
+	log_end_msg 0
+	;;
+** )
+	echo "Usage: $SCRIPTNAME {start|stop|restart|reload|force-reload}" >&2
+# echo "Usage: $SCRIPTNAME {start|stop|restart|force-reload}" >&2
+	exit 3
+	;;
+esac
+
+:
+</pre>
+
+allow access rights to it by doing a :
+
+<code>sudo chmod +x /etc/init.d/tempmon.sh</code>
+
+make sure that it starts and stops automatically :
+
+<code>sudo update-rc.d tempmon.sh defaults 90</code>
+
+==== Starting the daemon automatically ====
+
+you can then start and stop the daemon by using the following call
+
+<code>sudo /etc/init.d/tempmon.sh {start|stop|reload} </code>
+
+NOTE: This page should be moved to the help.ubuntu.com wiki. This site is more for Team wiki pages rather than How-Tos and guides.
+
+Extensions:
+One can add support for GPU (NVIDIA) temperature control by changing:
+<pre>
+get_temp()
+{
+        TEMP1=`cat /sys/devices/platform/applesmc.768/temp5_input`
+        TEMP2=`cat /sys/devices/platform/applesmc.768/temp8_input`
+        TEMP3=`cat /sys/devices/platform/applesmc.768/temp3_input`
+        TEMP4=`cat /sys/devices/platform/applesmc.768/temp4_input`
+	TEMP5=`nvidia-settings -q GPUCoreTemp | grep 'Attribute' | awk '{print  $4 * 1000}'`
+        let "TEMP = ($TEMP1 + $TEMP2 + $TEMP3 + $TEMP4 + $TEMP5)/ 500"
+} 
+</pre>
+Requires '''nvidia-settings''' to be installed.
+
+==== Known problem ====
+* For some unknown reason, moinmoin (the tool used to provide this wiki) arbitrarily cuts off the #!/bin/bash or #!/bin/sh which are at the top of each one of the above scripts.  Please have a look at the version in edit mode not to be bitten by sh running instead of bash.

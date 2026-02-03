@@ -1,0 +1,265 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+This page explains how to create a Debian/Ubuntu rootfs from scratch using debootstrap and QEMU.
+
+This is not the recommended nor the easiest way to create a Debian/Ubuntu armel rootfs; see <nowiki>[[ARM-RootfsFromScratch]]</nowiki> for other ways.
+
+== Prerequisites ==
+
+You will need:
+* debootstrap; your debootstrap should be recent enough to debootstrap the suite you're interested in
+* one of qemu-arm-static (syscall emulation) or qemu-system-arm (machine emulation)
+* e2fsprogs or some mkfs.something tool if you want to create an actual filesytem
+* a kernel for qemu/versatile/cortex-a8
+
+TODO provide a PPA with backports.
+
+== Building the Root Filesystem ==
+
+The initial image of the root filesystem can be done manually via "debootstrap", or more easily via the "mk-sbuild" wrapper.
+
+=== mk-sbuild ===
+
+Trivially easy:
+<pre>
+   mk-sbuild --arch armel lucid
+</pre>
+
+=== debootstrap ===
+
+==== First stage debootstrap ====
+
+debootstrap bootstraps a Debian/Ubuntu system in multiple steps which can be divided in two stages: the parts running code/tools from the build environment, and the parts running code/tools from the target environment.
+
+For the first stage, run something like:
+<pre>
+    sudo debootstrap \
+        --arch=armel \
+        --keyring=/usr/share/keyrings/ubuntu-archive-keyring.gpg \
+        --verbose \
+        --foreign \
+        karmic \
+        rootfs
+</pre>
+
+The arguments tells debootstrap respectively to:
+* bootstrap for armel
+* verify the downloaded data with the installed Ubuntu keyring (from the ubuntu-keyring package); if you want to install e.g. Debian, point at the Debian keyring instead (in the debian-archive-keyring package)
+* give some progress information
+* only do the first phase of the bootstrapping
+* target the Ubuntu 9.10 (karmic) suite
+* use "rootfs" as target directory
+
+Things you might want to customize:
+* by default, only packages from the "main" component are used, you can enable other components (such as "restricted", "universe", and "multiverse" for Ubuntu and "contrib" and "non-free" for Debian) with the --components= flag
+* you can include/exclude some packages via the --include= and --exclude= flags
+* you can select different package selections depending on the intended use of the rootfs via the --variant= flag; for instance, --variant=minbase will create a minimal environment with essential packages and apt, while --variant=buildd will install build-essential packages
+
+Check the debootstrap(8) manpage for details.  TODO link to man page
+
+==== Second stage debootstrap with QEMU ====
+
+QEMU sports two types of emulation:
+* syscall emulation: this translates code from one architecture to another, remapping system calls (calls to the kernel) between the two architectures
+* machine emulation: this emulates a complete computer, including a virtual CPU, a virtual video card, a virtual clock, a virtual SCSI controller etc.
+
+QEMU's syscall emulation is much faster than machine emulation, but both are relatively slow when compared to native programs for your computer.  One major drawback of syscall emulation is that it that some syscalls are not emulated, so some programs might now work, also when building programs, these might configure themselve for the features of the kernel they run on instead of what the target architecture actually supports.
+
+For rootfs creation, using syscall emulation is probably fine for core packages, but you might run into issues with higher level ones.
+
+===== Using syscall emulation =====
+
+While qemu-arm can be used to run a single armel binary from the command-line, it's impractical to use it to run a program which will fork and execute other programs.  Also, because qemu-arm itself uses shared libraries and the ld.so dynamic linker/loader from the build environment, it's impractical to copy it in the rootfs to use it with chroot-ed programs.  So the following instructions expect that you're using a static version of qemu-arm ("qemu-arm-static"), and that your build environment supports the binfmt-misc module, this modules allows running any executable matching some configured pattern with an interpreter of your choice.
+
+<pre>
+### Ubuntu 10.04 (lucid)
+    sudo apt-get install qemu-kvm-extras-static
+</pre>
+
+(Under Debian, the package is named qemu-user-static and under Ubuntu 9.10 (karmic) it's called qemu-arm-static.)
+
+Under Debian and Ubuntu, the package should automatically pull in the "binfmt-support" package and registers the qemu-arm format; check with:
+<pre>
+    cat /proc/sys/fs/binfmt_misc/qemu-arm
+</pre>
+(the format is named "arm" under Ubuntu 9.10 (karmic)).
+
+Because we're going to chroot into the rootfs directory, the kernel will look for the interepreter in the chroot; copy the interpreter in the chroot:
+<pre>
+    sudo cp /usr/bin/qemu-arm-static rootfs/usr/bin
+</pre>
+
+Enter the rootfs chroot and run the second-stage:
+<pre>
+    sudo chroot rootfs /bin/bash
+    /debootstrap/debootstrap --second-stage
+</pre>
+
+And you're done!  You can create a tarball of the rootfs directory, or copy the files into an actual filesystem; see <nowiki>[[#Creating a filesystem from a directory|Creating a filesystem from a directory]]</nowiki>.
+
+You might want to do some system configuration before using this rootfs on devices though; see <nowiki>[[#System configuration|System configuration]]</nowiki>.
+
+You may also re-enter the chroot as above, e.g. to install additional packages, but note that usual chroot rules apply, so you will have to mount /proc manually, perhaps bind-mount /dev/pts or /tmp depending on programs you're trying to run, and you should be careful that installin packages might start (duplicate) services/jobs in the chroot or kill ones from outside the chroot!
+
+===== Using machine emulation =====
+
+Install qemu-system-arm (you don't need a static version):
+<pre>
+### Ubuntu 10.04 (lucid)
+    sudo apt-get install qemu-kvm-extras
+</pre>
+
+(Under Debian and Ubuntu 9.04 (jaunty) and earlier the package is named qemu.)
+
+Create a filesystem image from the rootfs directory; see <nowiki>[[#Creating a filesystem from a directory|Creating a filesystem from a directory]]</nowiki>.
+
+Grab a pre-built kernel for ARM "Versatile" boards patched to run with Cortex-A8 CPU (ARMv7).  Use the <nowiki>[[https://launchpad.net/ubuntu/+source/linux|latest Lucid kernel]]</nowiki>, or the netboot image, which may not always work:
+<pre>
+    wget http://ports.ubuntu.com/ubuntu-ports/dists/lucid/main/installer-armel/current/images/versatile/netboot/vmlinuz
+</pre>
+
+Start qemu as follows:
+<pre>
+    qemu-system-arm \
+        -M versatilepb \
+        -cpu cortex-a8 \
+        -hda rootfs.img \
+        -m 256 \
+        -kernel vmlinuz \
+        -append 'rootwait root=/dev/sda init=/bin/sh rw'
+</pre>
+
+The arguments tells qemu ARM machine emulation respectively to:
+* emulate a Versatile PB board
+* emulate a Cortex A8 CPU (ARMv7, what the kernel expects and supports all Debian/Ubuntu releases)
+* use the rootfs.img file as the contents of the emulated SCSI hard disk
+* emulate 256 MB of RAM
+* use the downloaded kernel
+* and pass some arguments to the kernel to set the root device and start a shell instead of starting /sbin/init
+
+Once booted, run:
+<pre>
+    /debootstrap/debootstrap --second-stage
+</pre>
+
+== System configuration ==
+After bootstrapping, a Debian/Ubuntu installation isn't quite complete; depending on the intended use, some final things have to be setup.
+
+You might want to do some system configuration before using this rootfs on devics though; see <nowiki>[[#System configuration|System configuration]]</nowiki>.
+
+=== fstab ===
+
+The "mountall" process requires an entry in `/etc/fstab` for the root partition.  Normally, it's best to use UUIDs to refer to the rootfs as to be independent of the device path/name; for instance:
+<pre>
+    UUID=01234567-89ab-cdef-0123-456789abcdef / ext4 relatime,errors=remount-ro 0 1
+</pre>
+but for the initial machine emulation, just use the default disk path, e.g.:
+<pre>
+    /dev/sda / ext4 relatime,errors=remount-ro 0 1
+</pre>
+
+=== Users and passwords ===
+
+Set a root password with:
+<pre>
+    passwd
+</pre>
+
+and create an additional non-root user (e.g. ubuntu) with:
+<pre>
+    adduser ubuntu
+</pre>
+
+=== APT sources ===
+
+Edit etc/apt/sources.list and configure some APT sources; e.g. for Ubuntu 10.04 (lucid):
+<pre>
+    deb http://ports.ubuntu.com/ubuntu-ports/ lucid main
+</pre>
+(This will have been done already if you used `mk-sbuild`)
+
+=== Kernel ===
+
+Install the official kernel, for later use.
+<pre>
+    apt-get install linux-image-versatile
+</pre>
+
+=== Hosts and hostname ===
+
+Give a name to the host device by creating an etc/hostname file with just the short name (e.g. qemu):
+<pre>
+    qemu
+</pre>
+
+And add a basic etc/hosts file referencing that short name and definit localhost:
+<pre>
+    127.0.0.1 localhost qemu
+</pre>
+
+=== Virtual network setup ===
+
+You probably want a loopback interface (lo) and if you're not using Network-Manager to setup the network, you probably want to bring up the virtual ethernet card; create an etc/network/interfaces file with:
+<pre>
+    auto lo
+    iface lo inet loopback
+
+    auto eth0
+    iface eth0 inet dhcp
+</pre>
+
+=== Serial console ===
+
+TODO
+
+== Creating an Image file from a directory ==
+
+First, check how much space the files from the rootfs dir would use when copied into a filesystem of a specific block size; for example for a blocksize of 4096 bytes (see the documentation of your filesystem to check which blocksize it uses):
+<pre>
+    du -s -B 4096 rootfs
+</pre>
+This will return the number of blocks which your filesystem uses, so multiply this number by the blocksize to get the minimum size of your filesystem.
+
+Next, add to that amount the number in bytes of extra space you want in the filesystem.
+
+Create a file, preferably a sparse one, which will hold the rootfs, for instance for a rootfs of 300 000 000 bytes:
+<pre>
+    dd if=/dev/zero of=rootfs.img bs=1 count=0 seek=300M
+</pre>
+
+Then format the filesystem, e.g. for ext4 with 4096 bytes blocks:
+<pre>
+    mkfs.ext4 -b 4096 -F rootfs.img
+</pre>
+
+Mount the filesystem and move the files over:
+<pre>
+    mount -o loop rootfs.img /mnt
+    sudo cp -a rootfs/. /mnt/
+    umount /mnt
+</pre>
+
+Copy the kernel to outside the image:
+<pre>
+    cp rootfs/boot/vmlinuz* .
+    ln -s vmlinuz-* vmlinuz
+</pre>
+
+== Starting QEMU ==
+
+Now you can start QEMU on the disk image:
+<pre>
+    qemu-system-arm \
+        -M versatilepb -cpu cortex-a8 \
+	-m 256 \
+	-drive file=rootfs.img,media=disk \
+        -kernel vmlinuz -append 'root=/dev/sda rootwait'
+</pre>

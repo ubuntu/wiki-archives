@@ -1,0 +1,530 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+* '''Launchpad Entry''': UbuntuSpec:security-karmic-missing-profiles
+* '''Created''': 2009-06-17
+* '''Contributors''': jdstrand
+* '''Packages affected''': libvirt and apparmor
+* '''Launchpad Bug''': <nowiki>[[https://bugs.launchpad.net/ubuntu/+source/libvirt/+bug/388422|388422]]</nowiki>
+
+=== Summary ===
+
+Virtual machines started by libvirt run unconfined. If there is a bug in the
+hypervisor, a guest could potentially attack other guests or the host.
+Providing an AppArmor profile would help protect against this. As of libvirt
+0.6.1, <nowiki>[[http://fedoraproject.org/wiki/Features/SVirt_Mandatory_Access_Control|sVirt]]</nowiki> has been merged and contains all the necessary hooks through a
+plugin architecture to confine a virtual machine, and includes an SELinux
+plugin. Providing an AppArmor plugin would help increase security and contain
+virtual machines in Ubuntu.
+
+=== Release Note ===
+
+Libvirt now contains AppArmor integration when using KVM or QEMU. Libvirtd
+is now configured to launch virtual machines that are confined by uniquely
+restrictive AppArmor profiles. This feature significantly improves
+virtualization in Ubuntu by providing user-space host protection as well
+as guest isolation.
+
+=== Rationale ===
+
+Virtual machines started by libvirt run unconfined. Since virtual machines
+with security bugs, misconfigured software or nefarious users could be
+deployed, it is imperative that the host machine is protected from attack
+by a malicious guest and guests be isolated from each other. Generally
+speaking, the hypervisor takes care of this isolation, however, bugs in the
+hypervisor may allow attackers to circumvent the hypervisor's protections.
+
+AppArmor can increase security and help protect the host and isolate guests in
+the event of bugs in the hypervisor.
+
+=== Design ===
+
+When a virtual machine is started, determine if a profile is currently defined
+for the machine, and use it if available. If not, generate a new profile for
+the machine based on a template, which is by default a very restrictive profile
+allowing access to ```disk``` files, and anything else needed to run, such as
+the pid, monitor and log files.
+
+Virtual machines should have a unique profile specific to that machine. To
+ensure uniqueness, the profile name will be derived from the UUID of the
+virtual machine.  These profiles should be configurable, either by adjusting
+the profile template for new machines, creating/modifying the VM profile
+directly or through the use of AppArmor abstractions. This will allow for
+administrators to fine-tune confinement for individual machines if desired.
+
+In addition to the above, initially confine ```libvirtd``` itself with a
+permissive (perhaps even complain-mode only) profile. ```libvirtd``` should not
+be allowed to create arbitrary profiles or modify profiles directly, so as to
+not allow ```libvirtd``` to potentially (ie via a security bug in libvirtd
+itself) bootstrap out of AppArmor confinement, should it be in a restrictive
+enforcing profile. Because root privileges are needed to manipulate AppArmor
+profiles, ```qemu:///session``` will not be supported at this time. As such,
+the implementation and profile must allow for a confined libvirtd with
+```qemu:///session``` guests running unconfined.
+
+Note that the upstream security plugin framework in libvirt 0.6.1 only works
+with qemu (and kvm), and not other technologies like Xen or OpenVZ. If and when
+these technologies are supported by the upstream framework, AppArmor
+confinement should work with them as well.
+
+=== Implementation ===
+
+* Create an AppArmor plugin for libvirt using the security plugin framework provided by libvirt 0.6.1. Use aa_change_profile() from (sys/apparmor.h) in the hook for virExecWithHook(). This allows ```libvirtd``` to run in it's own profile and then change to a new profile in the kvm child after fork().
+* Provide a permissive libvirt AppArmor profile (```/etc/apparmor.d/usr.sbin.libvirtd```)
+* Provide a restrictive AppArmor abstraction for guest profiles to include (```/etc/apparmor.d/abstractions/libvirt-qemu```)
+* Provide a restrictive AppArmor template to be used when generating new profiles (```/etc/apparmor.d/libvirt/TEMPLATE```).
+* Write ```virt-aa-helper``` which ```libvirtd``` calls to create/update the profiles and load them. This application can create a profile based on TEMPLATE, load a profile, unload a profile and delete a profile.
+* Provide a restrictive AppArmor profile for ```virt-aa-helper``` (as part of ```/etc/apparmor.d/usr.sbin.libvirtd```)
+
+==== Blocked by ====
+* <nowiki>[[https://bugs.launchpad.net/ubuntu/+source/linux/+bug/375422|bug #375422]]</nowiki>: AppArmor not available in 9.10 (Fix Released)
+* <nowiki>[[https://bugs.launchpad.net/ubuntu/+source/linux/+bug/401931|bug #401931]]</nowiki>: [karmic] aa_change_profile() no longer works (Fix Released)
+* <nowiki>[[https://bugs.launchpad.net/ubuntu/+source/apparmor/+bug/408773|bug #408773]]</nowiki>: apparmor capabilities not working properly (Fix Released)
+
+=== Test/Demo Plan ===
+Please note that 9.04 packages for libvirt 0.6.1 will be supplied in a PPA. Due to  <nowiki>[[https://bugs.launchpad.net/ubuntu/+source/apparmor/+bug/390810|bug #390810]]</nowiki>, the libvirtd profile must be in complain mode, and not enforcing (though virt-aa-helper and guests will be in enforce mode).
+
+Packages for 9.10 are available in the Ubuntu archive.
+
+==== libvirtd (daemon) ====
+All of the libvirtd tests should be done with with AppArmor enabled (default
+install), with AppArmor not started (```sudo /etc/init.d/apparmor stop```) and
+with AppArmor disabled (boot with apparmor.enabled=0). Note that libvirtd will
+always need to be restarted if you change its profile from unconfined to
+complain/enforcing or vice-versa. All tests assume ```qemu:///system``` unless
+otherwise noted.
+{| class="wikitable"
+|-
+| '''Test case'''
+| '''9.04'''
+| '''9.10'''
+|-
+| ```virsh capabilities``` (when enabled, should show apparmor secmodel under <host>)
+| pass
+| pass
+|-
+| ```virsh capabilities``` (security = 'none' in /etc/libvirt/qemu.conf, no secmodel under <host>)
+| '''NEEDED'''
+| pass
+|-
+| ```virsh create <xml>``` (when enabled, should show 'Security model: apparmor')
+| pass
+| pass
+|-
+| ```virsh define <xml>``` (when enabled, should show 'Security model: apparmor' after start)
+| pass
+| pass
+|-
+| ```virsh dominfo <guest>``` (when enabled, should show 'Security model: apparmor')^1^
+| pass
+| pass
+|-
+| ```virsh dumpxml <guest>``` (when enabled, should show <seclabel> section)^1^
+| pass
+| pass
+|-
+| ```virsh start <guest>``` (when enabled, should be confined, otherwise unconfined)^2^
+| pass
+| pass
+|-
+| ```virsh shutdown <guest>``` (when enabled, should unload the profile)^2^
+| pass
+| pass
+|-
+| ```virsh destroy <guest>``` (when enabled, should unload the profile)^2^
+| pass
+| pass
+|-
+| ```virsh -c qemu:///session start <guest>``` (should be unconfined)
+| pass
+| pass
+|-
+| ```virsh -c qemu:///session shutdown <guest>```
+| pass
+| pass
+|-
+| ```virsh -c qemu:///session destroy <guest>```
+| pass
+| pass
+|}
+# needs to be started first
+# use ```sudo aa-status```
+
+==== Guests ====
+{| class="wikitable"
+|-
+| '''Test case'''
+| '''9.04'''
+| '''9.10'''
+|-
+| start confined libvirtd, guest without existing profile confined on start
+| pass
+| pass
+|-
+| start confined libvirtd, guest with existing profile confined on start
+| pass
+| pass
+|-
+| ```virsh dumpxml <guest>``` (when enabled, should show <seclabel> section)^1^
+| pass
+| pass
+|-
+| add a disk via virt-manager^2^
+| pass
+| pass
+|-
+| add a disk via ```virsh define```^2^
+| pass
+| pass
+|-
+| uses a disk with '/./' or '/../' in the path^3^
+| pass
+| pass
+|-
+| uses a disk with symlink in the path^3^
+| pass
+| pass
+|-
+| uses a non-existent disk (should fail gracefully)
+| pass
+| pass^4^
+|-
+| hotplugging a disk (add a USB disk with virt-manager)
+| '''FAIL'''^5^
+| pass
+|-
+| add a CDROM iso
+| pass
+| pass
+|-
+| disconnect a connected CDROM iso^2^
+| pass
+| pass
+|-
+| install with virt-install
+| pass
+| pass
+|-
+| install with vmbuilder
+| pass
+| pass^6^
+|-
+| install with virt-manager and local ISO
+| pass
+| pass
+|-
+| install with virt-manager and local ISO with no storage
+| N/A
+| pass^7^
+|-
+| install with virt-manager and local cdrom
+| pass
+| pass
+|-
+| install with virt-manager and network tree
+| '''NEEDED'''
+| '''NEEDED'''
+|-
+| install with virt-manager and PXE (requires kvm-pxe)
+| '''NEEDED'''
+| pass
+|-
+| install with virt-manager and new volume from storage pool
+| N/A
+| pass
+|-
+| install with virt-manager and existing volume from storage pool
+| N/A
+| pass
+|-
+| install with virt-manager and local disk of varying sizes using full allocation
+| N/A
+| pass
+|-
+| install with virt-manager and local disk of varying sizes without using full allocation
+| N/A
+| pass
+|-
+| install with virt-manager with various OS types and Versions
+| N/A
+| pass^8^
+|-
+| install with virt-manager with various RAM allocations and CPUs
+| N/A
+| pass
+|-
+| virt-clone
+| pass
+| pass
+|-
+| add non-disk hardware to the guest
+| pass (added tablet)
+| pass (added generic usb mouse)
+|-
+| modifying hardware in the guest
+| pass (changed memory)
+| pass (changed memory)
+|-
+| default networking (NAT with dnsmasq)
+| pass
+| pass
+|-
+| bridged networking
+| pass
+| pass
+|-
+| USB passthrough
+| '''NEEDED'''
+| policy^9^
+|-
+| eucalyptus
+| '''NEEDED'''
+| pass
+|-
+| serial/console
+| '''NEEDED'''
+| pass
+|-
+| alternate kernel
+| '''NEEDED'''
+| pass
+|-
+| alternate initrd
+| '''NEEDED'''
+| pass
+|-
+| attach-device
+| '''NEEDED'''
+| pass^10^
+|-
+| detach-device
+| '''NEEDED'''
+| pass^10^
+|-
+| attach-disk
+| '''NEEDED'''
+| pass^10^
+|-
+| detach-disk
+| '''NEEDED'''
+| pass^10^
+|-
+| attach-disk (virtio)
+| '''NEEDED'''
+| pass^10^
+|-
+| detach-disk (virtio)
+| '''NEEDED'''
+| pass^10^
+|-
+| attach-disk (AoE/virtio)
+| '''NEEDED'''
+| pass^11^
+|-
+| detach-disk (AoE/virtio)
+| '''NEEDED'''
+| pass^11^
+|-
+| create with different os.type.arch than host architecture
+| '''NEEDED'''
+| pass^12^
+|-
+| suspend
+| '''NEEDED'''
+| pass
+|-
+| resume
+| '''NEEDED'''
+| pass
+|-
+| save
+| '''NEEDED'''
+| pass
+|-
+| restore
+| '''NEEDED'''
+| pass
+|-
+| migration
+| '''NEEDED'''
+| FAIL^14^
+|-
+| migration (live)
+| '''NEEDED'''
+| FAIL^14^
+|}
+# guest may need to be started first
+# disk is removed from /etc/apparmor.d/libvirt/libvir-<uuid>.files on next machine boot
+# AppArmor will normalize the path, virt-aa-helper should do the same
+# fails as gracefully as libvirt 0.7.0 does (which is not very-- it waits for the monitor timeout instead of reporting the disk doesn't exist)
+# in 9.04, /etc/apparmor.d/libvirt/libvir-<uuid>.files is updated and the profile reloaded, but the disk doesn't work until reboot of guest.
+# must use grub-legacy on the host due to <nowiki>[[https://bugs.launchpad.net/ubuntu/+source/vm-builder/+bug/408739|bug #408739]]</nowiki>
+# while initial install is ok, subsequent reboots don't work (no disks in the profile even though it is in the xml)
+# test Linux/Hardy, Linux/Intrepid, Linux/Jaunty, Linux/Karmic, Generic/Generic, Other/MS-DOS, Windows/Vista, UNIX/FreeBSD 7.x
+# this works fine if the profile allows it. Currently, a commented out section has been added to /etc/apparmor.d/abstractions/libvirt-qemu that the user can uncomment if desired
+# if attach-device/attach-disk during guest boot, then may trigger spurious AppArmor denied errors in the kernel. Disk is still available in the guest when this happens (<nowiki>[[https://bugs.launchpad.net/ubuntu/+source/libvirt/+bug/435527|bug #435527]]</nowiki>). Also, qemu-kvm <nowiki>[[https://bugs.launchpad.net/ubuntu/+source/qemu-kvm/+bug/432154|bug #432154]]</nowiki> may prevent this from working for all cases, but using libvirt with an older version works fine.
+# requires host to have aoetools installed with access to a AoE disk. Requires acpiphp module loaded in the guest for hotplugging the device
+# Bug:448671 (fixed in 0.7.0-1ubuntu11). If using virt-manager with qemu, see Bug:453495.
+# Bug:457716. This is upstream <nowiki>[[https://bugzilla.redhat.com/show_bug.cgi?id=529363|bug #529363]]</nowiki>. A workaround will be uploaded in an SRU for 9.10 until upstream fixes svirt relabelling.
+# Bug:461528. Note that to test this the diskfile needs to be in the same place on both machines (ideally on NFS) with the hostname of the target resolvable in DNS (ie '<code>nslookup `hostname`</code>' should return something valid. This will be fixed in an SRU for 9.10
+
+==== Hypervisors ====
+The security plugin framework in libvirt 0.6.1 and higher currently only supports kvm/qemu and not xen, openvz, etc. When using a hypervisor that doesn't support the security driver, libvirt simply ignores the driver.
+{| class="wikitable"
+|-
+| '''Test case'''
+| '''9.04'''
+| '''9.10'''
+|-
+| kvm  (should be confined)
+| pass
+| pass
+|-
+| qemu (should be confined)
+| pass
+| pass
+|-
+| kvm from qemu-kvm (should be confined)
+| N/A
+| pass
+|-
+| qemu from qemu-kvm (should be confined)
+| N/A
+| pass
+|-
+| kqemu (should be confined)
+| pass
+| N/A
+|}
+
+ 0. kqemu is no longer available in Ubuntu 9.10
+
+==== Remote vs local ====
+Please note that if testing this on a virtual machine, you'll need to change the virtual machine's libvirt network configuration like so:<pre>
+$ virsh net-dumpxml default | sed 's/192.168.122/192.168.123/g' > /tmp/foo.xml
+$ virsh net-define /tmp/foo.xml
+$ virsh net-destroy default
+$ virsh net-start default
+</pre>
+
+Otherwise, you will lose network connectivity in the guest.
+
+{| class="wikitable"
+|-
+| '''Test case'''
+| '''9.04'''
+| '''9.10'''
+|-
+| unconfined client runs ```virsh -c qemu+ssh://<confined host>/system capabilities``` (shows apparmor secmodel under <host>)
+| pass
+| pass
+|-
+| unconfined client runs ```virsh -c qemu+ssh://<confined host>/system dominfo <guest>``` (has 'Security model: apparmor')^1^
+| pass
+| pass
+|-
+| unconfined client runs ```virsh -c qemu+ssh://<confined host>/system dumpxml <guest>``` (has seclabel)^1^
+| pass
+| pass
+|-
+| unconfined client starts guest on remote host with AppArmor (remote guest is confined)
+| pass
+| pass
+|-
+| unconfined client shuts down guest on remote host with AppArmor (profile removed)
+| pass
+| pass
+|-
+| unconfined client destroys guest on remote host with AppArmor (profile removed)
+| pass
+| pass
+|-
+| confined client^2^ runs ```virsh -c qemu+ssh://<unconfined host>/system capabilities``` (no security driver)
+| pass
+| pass
+|-
+| confined client^2^ runs ```virsh -c qemu+ssh://<unconfined host>/system dominfo <guest>``` (no security model)
+| pass
+| pass
+|-
+| confined client^2^ runs ```virsh -c qemu+ssh://<unconfined host>/system dumpxml <guest>``` (no seclabel)
+| pass
+| pass
+|-
+| confined client^2^ starts guest on remote host without AppArmor
+| pass
+| pass
+|-
+| confined client^2^ shuts down guest on remote host without AppArmor
+| pass
+| pass
+|-
+| confined client^2^ destroys guest on remote host without AppArmor
+| pass
+| pass
+|-
+| unconfined client runs ```virsh -c qemu+ssh://<unconfined host>/system capabilities``` (no security driver)
+| pass
+| pass
+|-
+| unconfined client runs ```virsh -c qemu+ssh://<unconfined host>/system dominfo <guest>``` (no security model)
+| pass
+| pass
+|-
+| unconfined client runs ```virsh -c qemu+ssh://<unconfined host>/system dumpxml <guest>``` (no seclabel)
+| pass
+| pass
+|-
+| unconfined client starts guest on remote host without AppArmor (remote guest is unconfined)
+| pass
+| pass
+|-
+| unconfined client shuts down guest on remote host without AppArmor
+| pass
+| pass
+|-
+| unconfined client destroys guest on remote host without AppArmor
+| pass
+| pass
+|-
+| virsh -c qemu+tcp://<confined host>/system list
+| '''NEEDED'''
+| FAIL^3^
+|}
+
+# guest may need to be started first
+# 'confined client' means AppArmor is enabled on this host, not that virsh has a profile
+# Bug:462000 (profiling bug to be fixed in 9.10 SRU). Adjust libvirt.conf to have ```listen_tls = 0``` and ```listen_tcp = 1``` then start libvirtd with ```--listen```. If prompted for a password, then it worked.
+
+==== Upstream bugs ====
+* verify https://bugzilla.redhat.com/show_bug.cgi?id=499569 is fixed (CONFIRMED OK)
+* verify https://bugzilla.redhat.com/show_bug.cgi?id=507555 is not a problem (CONFIRMED OK)
+* verify https://bugzilla.redhat.com/show_bug.cgi?id=493692 is not a problem (CONFIRMED OK)
+* verify https://bugzilla.redhat.com/show_bug.cgi?id=505625 is not a problem on Karmic (CONFIRMED OK)
+
+==== Other investigations ====
+These haven't been tested, but should be considered:
+* vde (per Soren and Dustin, not supported)
+* storage pools (per Soren, not a problem)
+
+=== Unresolved issues ===
+
+qemu:///session is not supported because libvirtd is started as a non-root user
+and cannot write and load AppArmor profiles.
+
+=== Submit upstream ===
+Accepted by upstream:
+* http://libvirt.org/git/?p=libvirt.git;a=commit;h=709c37e9321484939caa1dc94555cb72865f32f0
+* http://libvirt.org/git/?p=libvirt.git;a=commit;h=bbaecd6a8f15345bc822ab4b79eb0955986bb2fd
+* http://libvirt.org/git/?p=libvirt.git;a=commit;h=624a7927f076b58a6a27af2d00a2edef49326d11
+
+----
+CategorySpec

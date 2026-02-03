@@ -1,0 +1,368 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+* '''Created''': 2014-12-05
+* '''Created by''': <nowiki>[[LaunchpadHome:jdstrand|Jamie Strandboge]]</nowiki>
+* '''Contributors''': <nowiki>[[LaunchpadHome:jdstrand|Jamie Strandboge]]</nowiki>, <nowiki>[[LaunchpadHome:tyhicks|Tyler Hicks]]</nowiki>, <nowiki>[[LaunchpadHome:mdeslaur|Marc Deslauriers]]</nowiki>
+* '''Packages affected''': apparmor, libseccomp, ubuntu-core-security, ubuntu-snappy, ubuntu-core-launcher (historically, click-apparmor)
+* '''Status''': Production
+
+=== Introduction ===
+Snappy confinement is an evolution of the <nowiki>[[https://wiki.ubuntu.com/SecurityTeam/Specifications/ApplicationConfinement|security model for Ubuntu Touch]]</nowiki>. The basic concepts for confined applications and the !AppStore model pertain to snappy applications as well. In short, applications are confined by default through the use of various technologies and this is achieved through a simple template-based system where policy is extended through the use of caps (aka policy groups).
+
+It will be most helpful if you are familiar with:
+* https://developer.ubuntu.com/en/snappy/tutorials/using-snappy
+* https://developer.ubuntu.com/en/snappy/guides/filesystem-layout
+* https://developer.ubuntu.com/en/snappy/guides/packaging-format-apps
+
+=== Implementation summary ===
+Snappy uses a simple packaging format that is an evolution of <nowiki>[[https://wiki.ubuntu.com/SecurityTeam/Specifications/ApplicationConfinement/Manifest|click packaging]]</nowiki>. Snappy packages use a declarative <nowiki>[[https://developer.ubuntu.com/en/snappy/guides/packaging-format-apps/|yaml syntax]]</nowiki> and defaults to using `default` !AppArmor template and the "network-client" cap. Apps will be able to customize the default behavior in a number of ways via the yaml syntax.
+
+Snappy developers will likely want to read the following:
+* https://developer.ubuntu.com/en/snappy/guides/filesystem-layout/
+* https://developer.ubuntu.com/en/snappy/guides/packaging-format-apps/
+* https://developer.ubuntu.com/en/snappy/guides/package-metadata/
+* https://developer.ubuntu.com/en/snappy/guides/security-policy/
+* https://developer.ubuntu.com/en/snappy/guides/oem/
+* https://developer.ubuntu.com/en/snappy/guides/frameworks/
+
+==== Native snap format ====
+
+===== Security policy =====
+Applications are tracked by the system by using the concept of an ApplicationId. The `APP_ID` is the composition of the package name, the app's origin namespace from the store (if applicable-- only snaps of type: app (the default) have an origin namespace as part of their `APP_ID`), the service/binary name and package version. The `APP_ID` takes the form of `<pkgname>.<namespace>_<appname>_<version>`. For example, if this is in package.yaml:<pre>
+name: foo
+version: 0.1
+...
+services:
+  - name: bar
+    start: bin/bar
+</pre>
+
+and the app was uploaded to the myorigin namespace in the store, then the `APP_ID` for the bar service is `foo.myorigin_bar_0.1`. The `APP_ID` is used throughout the system including in the enforcement of security policy by the app launcher.
+
+The app launcher:
+* sets up cgroups (device, network (future), memory (future)*)
+* sets up iptables (for internal app access, future)
+* drops privileges to uid of service (future)
+* sets up a private /tmp (private mount namespace with app-specific directory mounted on /tmp in the namespace)
+* sets up seccomp
+* sets up various environment variables (eg, SNAP_APP_PATH, SNAP_APP_DATA_PATH, SNAP_APP_USER_DATA_PATH, SNAP_APP_TMPDIR, SNAP_OLD_PWD, SNAP_APP_ARCH and HOME).
+* chdirs to SNAP_APP_PATH (the install directory)
+* execs the app under apparmor profile under default nice value
+
+The launcher is used when lauching both services and using CLI binaries. The default policy allows ELF executables, python, perl and shell (with selected corresponding utilities from /bin and /usr/bin), disallows capabilities(7) and enforces application isolation as per the <nowiki>[[https://developer.ubuntu.com/en/snappy/guides/filesystem-layout/|snappy FHS]]</nowiki>.
+
+====== AppArmor ======
+Upon snap package install, the yaml is examined and `apparmor` profiles are generated for each service and binary in `/var/lib/snappy/apparmor/profiles` and have names based on the APP_ID. `apparmor` profiles are template based and may be extended through caps (policy groups), which are expressed in the yaml as `caps`.
+* If unspecified in the packaging yaml, `snappy` will choose the `default` template and `network-client` cap (this may change as snappy involves)
+* Apps may choose to specify an alternate confinement for binaries and services by specifying `caps` and/or `security-template` in the yaml. Eg:<pre>
+...
+services:
+  - name: bar
+    start: bin/bar
+    caps:
+      - network-client
+  - name: baz
+    start: bin/baz
+    security-template: nondefault
+    caps:
+      - network-client
+      - something-else
+</pre>
+
+`apparmor` policy templates and caps (policy groups) are shipped on the snappy system and also via framework snaps. Apps that depend on a particular framework may reference the framework snap's policy templates and/or groups.
+
+Apps may also optionally specify `security-override` to specify high level overrides to use when `security-template’ and `caps’ are not sufficient. The path specified by `security-override` is a custom <nowiki>[[https://wiki.ubuntu.com/SecurityTeam/Specifications/ApplicationConfinement/Manifest|security manifest]]</nowiki>. Use of this will trigger manual review in the Ubuntu store. Eg:<pre>
+services:
+  - name: bar
+    start: bin/bar
+    caps:
+      - network-client
+  - name: baz
+    start: bin/baz
+    security-override:
+      read-paths:
+        - /path/to/file
+        - /path/to/dir/
+      write-paths:
+        - /path/to/file
+      abstractions:
+        - apparmor-abstraction-name
+</pre>
+
+then upon install the `default` security policy is generated but with the specified read-paths, write-paths and abstractions added. Specifying a directory to `read-paths` or `write-paths` gives permission to that directory and all files in that directory and its subdirectories.
+
+Note: Ubuntu Core 15.04 used a <nowiki>[[https://github.com/ubuntu-core/snappy/blob/15.04/docs/security.md|different method]]</nowiki> for specifying `security-override`. See <nowiki>[[https://wiki.ubuntu.com/SecurityTeam/Specifications/SnappyConfinement/15.04|SnappyConfinement/15.04]]</nowiki> for more details.
+
+Furthermore, apps may also specify `security-policy` instead of using the template based policy to use hand-crafted `apparmor` policy. Use of this will trigger a manual review in the Ubuntu store. Eg:<pre>
+services:
+  - name: bar
+    start: bin/bar
+    caps:
+      - network-client
+  - name: baz
+    start: bin/baz
+    security-policy:
+      apparmor: meta/apparmor.profile
+      seccomp: ...
+</pre>
+
+When using `security-policy`, the profile author can use !AppArmor variables to avoid worrying about updating the profile name, the app name, where the app is installed or knowing the package version. Example `meta/apparmor.profile`:<pre>
+
+## include <abstractions/base>
+## include <abstractions/nameservice>
+
+## Read-only for the install directory
+  @{CLICK_DIR}/@{APP_PKGNAME}/                   r,
+  @{CLICK_DIR}/@{APP_PKGNAME}/@{APP_VERSION}/    r,
+  @{CLICK_DIR}/@{APP_PKGNAME}/@{APP_VERSION}/**  mrklix,
+
+## Writable home area
+  owner @{HOMEDIRS}/apps/@{APP_PKGNAME}/   rw,
+  owner @{HOMEDIRS}/apps/@{APP_PKGNAME}/** mrwklix,
+
+## Read-only system area for other versions
+  /var/lib/apps/@{APP_PKGNAME}/   r,
+  /var/lib/apps/@{APP_PKGNAME}/** mrkix,
+
+## Writable system area only for this version.
+  /var/lib/apps/@{APP_PKGNAME}/@{APP_VERSION}/   w,
+  /var/lib/apps/@{APP_PKGNAME}/@{APP_VERSION}/** wl,
+
+  ... specialized confinement ...
+</pre>
+
+Up to date templates can be found in the <nowiki>[[http://bazaar.launchpad.net/~snappy-dev/snappy-hub/snappy-examples/files/head:/framework-template/meta/|snappy-examples bzr tree]]</nowiki>. Use of `security-policy` for seccomp requires the use of `security-policy` for apparmor.
+
+====== Seccomp ======
+Like with `apparmor` (see above), on snap package install the yaml is examined and seccomp filter lists are generated for each service and binary in `/var/lib/snappy/seccomp/profiles`. These seccomp filter lists are template based and may be extended through caps (policy groups), which are expressed in the yaml as `caps`. For simplicity, the seccomp caps (policy groups) and templates will have the same names as the corresponding `apparmor` caps and templates such that:
+* If unspecified in the packaging yaml, `snappy` will choose the `default` filter template and `network-client` cap (policy group) (this may change as snappy involves)
+* Apps may choose to specify an alternate confinement for binaries and services by specifying `caps` and/or `security-template`
+
+Apps may also optionally specify `security-override` to specify high level overrides to use when `security-template` and `caps` are not sufficient. The path specified by `security-override` is a custom seccomp filter manifest (this uses yaml-syntax and can be used to specify `security-template`, `caps`, `syscalls`, `policy-vendor` and `policy-version`). Use of this will trigger manual review in the Ubuntu store. Eg:<pre>
+services:
+  - name: bar
+    start: bin/bar
+    caps:
+      - network-client
+  - name: baz
+    start: bin/baz
+    security-override:
+      syscalls:
+        - clock_adjtime
+</pre>
+
+then upon install the `default` security policy is used but with the `clock_adjtime` syscall added.
+
+Note: Ubuntu Core 15.04 used a <nowiki>[[https://github.com/ubuntu-core/snappy/blob/15.04/docs/security.md|different method]]</nowiki> for specifying `security-override`.
+
+Furthermore, apps may also specify `security-policy` instead of using the template based policy to use hand-crafted seccomp filters. Use of this will trigger a manual review in the Ubuntu store. Eg:<pre>
+services:
+  - name: bar
+    start: bin/bar
+    caps:
+      - network-client
+  - name: baz
+    start: bin/baz
+    security-policy:
+      seccomp: meta/seccomp-filter.list
+      apparmor: ...
+</pre>
+
+The format of the seccomp filter is simply a list of syscalls specified one per line. If an app attempts to use a syscall not found in its seccomp filter, the process will be sent the SIGKILL signal. Use of `security-policy` for seccomp requires the use of `security-policy` for apparmor.
+
+'''IMPORTANT''': there are several things to keep in mind when running an app under a seccomp sandbox:
+* The ubuntu-core-launcher uses libseccomp's `seccomp_load()` which will call `prctl` with `PR_SET_NO_NEW_PRIVS`
+* When a process is running under seccomp it may alter its seccomp policy (if the seccomp filter allows it) to be more strict, but not more lenient
+* When a process performs a fork/exec, the child will inherit the parent's seccomp policy
+
+The combination of all of these means that processes running under seccomp are not allowed to elevate their privileges at any point (including executing a setuid program). If this affects your program, you will have to alter your program to work within the seccomp sandbox.
+
+====== Cgroups ======
+As described above, snaps normally run confined and therefore have limited access to devices. Snappy has the concept of assigning hardware to specific (usually framework) snaps. To achieve this, OEM snaps may provide udev rule snippets via the `assign` yaml and upon install, udev rules are generated which add app-specific tags and properties to matching hardware (the `snappy hw-assign` developer command does something similar for the specified devices, but the udev tags/properties won't persist across reboots). Upon app launch, the launcher queries udev to see which devices have tags that match the app, then adds those devices (along with a few common devices such as /dev/null, /dev/random, etc) to a default deny, app-specific device cgroup (`/sys/fs/cgroup/devices/snappy.<pkgname>`). When the app is executed by the launcher, apps will be able to see all devices, but the device cgroup, DAC and !AppArmor^1^ will determine if the app can access it.
+
+ 0. '''Note:''' because device names are not always static and due to limitations in !AppArmor (Bug:1350598, Bug:1444679), the device cgroup mechanism is only used when hardware is assigned to a snap, at which point a general write rule for '/dev/**' and a read rule for '/run/udev/data/*' is added to the !AppArmor profile (via the .additional mechanism) for the app and device access is mediated by the app-specific device cgroup and traditional UNIX permissions. Conversely, when no hardware is assigned to the app, then the strict !AppArmor rules are in effect and an app-specific cgroup is not used.
+
+In the future a net cgroup will be added to tag network traffic and possibly a memory cgroup will be added.
+
+====== Namespaces ======
+Initially snappy setup an app-specific directory in /tmp (eg, `/tmp/snaps/<pkgname>/<version>`) and set TMPDIR to point to that. However it was found that too many applications did not properly honor TMPDIR. To help developers, snappy now uses Linux namespaces to setup a private /tmp. This is achieved by creating a private mount namespace then bind mounting an app-specific directory on /tmp in the private namespace.
+
+====== Privilege dropping ======
+TBD: a mechanism will be provided for apps to drop privileges
+
+===== Available policy =====
+A given Snappy system will have the following security policy:
+* Default policy shipped on the system. This policy contains `security-templates` and `caps` that is always be available to apps for a particular release. For example, a 15.04 based Ubuntu Core system will always have `ubuntu-core/15.04` `security-templates` and `caps`.
+* Optional <nowiki>[[https://wiki.ubuntu.com/SecurityTeam/Specifications/SnappyConfinement/DevelopingFrameworkPolicy|framework policy]]</nowiki> that is installed by <nowiki>[[https://developer.ubuntu.com/en/snappy/guides/frameworks/|framework]]</nowiki> snaps that extends the security policy available to apps and allows apps that depend on this given framework to interact with the framework. A framework may ship `security-templates`, `caps` or a combination of both. A system with no frameworks installed will not have any framework policy.
+
+The Ubuntu store contains the `snappy-debug` tool to see what policy is available on the system. See `snappy-debug.security -h` for details. Eg: <pre>
+$ sudo snappy install snappy-debug
+...
+$ snappy-debug.security list -i
+System policy:
+ Policy vendor: ubuntu-core
+ Policy version: 15.04
+ Templates:
+  default
+  - Description: Allows access to app-specific directories and basic runtime
+  - Usage: common
+  unconfined
+  - Description: Allows unrestricted access to the system
+  - Usage: reserved
+ Caps:
+  network-admin
+  - Description: Can configure networking
+  - Usage: reserved
+  network-client
+  - Description: Can access the network as a client
+  - Usage: common
+  network-firewall
+  - Description: Can configure firewall
+  - Usage: reserved
+  network-service
+  - Description: Can access the network as a server
+  - Usage: common
+  network-status
+  - Description: Can query network status information
+  - Usage: reserved
+  networking
+  - Description: Can access the network as a client
+  - Usage: common
+  snapd
+  - Description: Can use snapd
+  - Usage: reserved
+Framework policy:
+ Templates:
+ Caps:
+</pre>
+
+Note: the `unconfined` template provides unrestricted access to the system (with the exception that it doesn’t allow transitioning into another app’s security policy). This template is useful for debugging and development but should not generally be used in production. Store policies may trigger a manual review for uploads of snaps specifying this template.
+
+==== Click compat ====
+Historically (no longer on 16.04 and higher) snappy used `click-apparmor` to generate security policy for !AppArmor (seccomp always used the native format, above). When debugging on a 15.04 system the following may be useful:
+* click security manifests for apparmor are installed to `/var/lib/apparmor/clicks` for templated policy and `/var/lib/apparmor/snappy/profiles` for hand-crafted policy
+* apparmor profiles are generated in `/var/lib/apparmor/profiles`
+* use `aa-clickhook -f` to regenerate all templated policy
+* use `aa-profile-hook -f` to regenerate all custom policy
+
+=== Normal usage ===
+As stated, the snappy packaging yaml does not have to do anything to specify the default confinement. Eg, the following yaml:<pre>
+name: foo
+version: 0.1
+...
+services:
+  - name: bar
+    start: bin/bar
+  - name: baz
+    start: bin/baz
+  - name: norf
+    start: bin/norf
+</pre>
+
+will create the following !AppArmor profiles with default confinement:
+* foo_bar_0.1
+* foo_baz_0.1
+* foo_norf_0.1
+
+=== Advanced usage ===
+While the snappy packaging yaml is intentionally simple and straightforward for app developers, it can also quite flexible for those who need it. For example, consider the following yaml:<pre>
+name: foo
+version: 0.1
+...
+services:
+  - name: normal-service
+    start: bin/normal-service
+  - name: extra-policy-group-service
+    start: bin/extra-policy-group-service
+    caps:
+      - network-client
+      - extra
+  - name: non-default-template-service
+    start: bin/non-default-template-service
+    security-template: non-default
+binaries:
+  - name: bin/normal-binary
+  - name: extra-policy-group-binary
+    caps:
+      - network-client
+      - extra
+</pre>
+
+Which in turn creates the following !AppArmor profiles (using the specified `security-template` and/or `caps`:
+* foo_normal-service_0.1
+* foo_extra-policy-group-service_0.1
+* foo_non-default-template-service_0.1
+* foo_normal-binary_0.1
+* foo_extra-policy-group-binary_0.1
+
+=== Debugging ===
+When debugging policy issues, the `snappy-debug.security` tool can help. Use `sudo snappy install snappy-debug` and then simply launch it to have it follow the logs and provide suggestions:<pre>
+$ sudo snappy-debug.security scanlog
+...
+</pre>
+
+`snappy-debug.security scanlog` will report both !AppArmor and seccomp denials.
+
+Alternatively you can use the lowlevel tools to check to see if you have any denials:<pre>
+$ sudo journalctl --no-pager -k | grep audit
+</pre>
+
+An !AppArmor denial will look something like:<pre>
+apparmor="DENIED" operation="mkdir" profile="foo_bar_0.1" name="/var/lib/foo" pid=637 comm="bar" requested_mask="c" denied_mask="c" fsuid=0 ouid=0
+</pre>
+
+If there are no !AppArmor denials, !AppArmor shouldn't be blocking the app.
+
+If there are !AppArmor denials, you can unblock yourself by:
+* modifying the profile in /var/lib/snappy/apparmor/profiles (/var/lib/apparmor/profiles on 15.04) that corresponds to your app
+* reload the profile with:
+** 16.04:<pre>
+$ sudo apparmor_parser -r /var/lib/snappy/apparmor/profiles/<profile>
+</pre>
+** 15.04:<pre>
+$ sudo apparmor_parser -r /var/lib/apparmor/profiles/<profile>
+</pre>
+
+A seccomp denial will look something like:<pre>
+audit: type=1326 audit(1430766107.122:16): auid=1000 uid=1000 gid=1000 ses=15 pid=1491 comm="env" exe="/bin/bash" sig=31 arch=40000028 syscall=983045 compat=0 ip=0xb6fb0bd6 code=0x0
+</pre>
+
+The `syscall=983045` can be resolved with the `scmp_sys_resolver` command (you may also use the `sc-logresolve` command). Eg:<pre>
+$ scmp_sys_resolver 983045
+set_tls
+</pre>
+
+In general, if there are no seccomp denials, it shouldn't be blocking the app, however do keep in mind that if the app is somehow trying to elevate its privileges (eg, via a setuid executable) the app may receive a `Permission denied` error with no denial (see `PR_SET_NO_NEW_PRIVS` discussion above). If there are seccomp denials, you can unblock yourself by modifying the seccomp file in /var/lib/snappy/seccomp/profiles, then launch your app like normal (the launcher will pick up the change on app invocation).
+
+Do note that the local modification will not be preserved on package update. If you believe you have found a bug, please file a bug against: https://bugs.launchpad.net/ubuntu/+source/apparmor/+filebug
+
+==== Helpful degugging commands ====
+* `sudo sysctl -w kernel.printk_ratelimit=0` will disable kernel rate limitingof denials
+* `snappy-debug.security scanlog`: follow /var/log/syslog` and show !AppArmor and seccompg denial
+* `snappy-debug.security disable-rate-limiting`: disable kernel rate limiting
+* `snappy-debug.security reload [<name>.<origin>]`: reloads apparmor security policy into the kernel
+* `snappy-debug.security regenerate [<name>.<origin>]`: regenerate apparmor security policy from snappy packaging
+* `sudo aa-profile-hook -f` will regenerate all the `apparmor-profile` profiles in /var/lib/apparmor/profiles
+* `sudo snappy service stop <snap name>` and `sudo snappy service start <snap name>` to stop and start services
+* This is often helpful when developing your app or policy for it:
+** In one terminal launch `snappy-debug.security scanlog`:<pre>
+$ sudo snappy-debug.security scanlog
+</pre>
+** In another:<pre>
+$ sudo snappy service logs <snap name>
+</pre>
+** Then launch the app with `snappy service start` like above, or launch manually under confinement with:<pre>
+$ aa-exec -p <profile name> -- /apps/<pkgname>/<version>/...
+</pre>
+
+----
+CategorySpec

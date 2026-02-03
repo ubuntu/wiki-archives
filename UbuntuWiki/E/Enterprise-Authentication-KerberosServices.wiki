@@ -1,0 +1,312 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+== Kerberos Services in Ubuntu ==
+
+This article explains a little bit about the Kerberos protocol and how it can be used in Ubuntu. It's not a thorough manual, use more authoritative sources to get more accurate information and update if you see obvious mistakes.
+
+=== Regular authentication, directory and Kerberos ===
+
+In regular, or disjoint services, a user can get access to the service by providing his user+password to the service, which verifies it against its own store. Whenever you change the password there, it is only changed for that particular service. 
+
+As this causes some issues, i.e. the user needs to maintain many different passwords on all the services, a central directory protocol (LDAP) was standardized, so that the service can connect to a directory to verify the user credentials for the service. Although the user still needs to authenticate separately to each service, his password is kept consistent, as it is enough to just update the directory.
+
+There is one other problem left with this scheme: if any of the services gets compromised, the user password can be used to acquire access to any other service. Kerberos was designed to solve this particular issue.
+
+=== Kerberos tickets ===
+
+Kerberos is about tickets: you have a Kerberos ticket for everything: for the master Kerberos server, for any service you authenticate against, for getting service tickets and for the services themselves.
+
+From the client perspecive, it looks like this: you authenticate against the master Kerberos server and acquire a TGT (ticket granting ticket). When you want to authenticate to a service (say https://webserver.example.com), you use your TGT to acquire a ticket for the service you connect to. The service needs to have a previously-acquired Principal ticket and it verifies the ticket from the request with its principal ticket.
+
+This provides a neat single sign-on mechanism - you do not need to enter your password for every service, as there is no password required, just the ticket which is acquired based on the initial log in.
+
+=== Kerberos in Microsoft Directory Services ===
+
+Microsoft Directory Services, also known as the Active Directory, provide both LDAP and Kerberos protocol implementations and they are on by default. The Domain Controllers hold the Kerberos Key Distribution Centre (KDC) role and can generate both the SPN (Service Principal Name) tickets, the TGT tickets and the service client tickets.
+
+All the Windows machines have a machine account in Active Directory. In technical terms this machine account is very similar to a user account - it has its name and password, it can have its TGT ticket and a service ticket. You can also assign a SPN ticket to an account (machine or account). A subtle difference is that in LDAP the machine name has a dollar sign added to it in its samaccountname attribute, whereas a regular user account does not. Also the LDAP attributes may be different between a machine account and a user account.
+
+=== Kerberos from a Ubuntu client perspective ===
+
+For the correct configuration of a Ubuntu client to work in a Kerberos environment, please follow either <nowiki>[[Enterprise-Authentication-sssd|sssd guide]]</nowiki> or <nowiki>[[Enterprise-Authentication-ldap-kerberos|LDAP+Kerberos guide]]</nowiki>. Either of those authentication methods should provide you with a valid TGT upon login. You can verify this by issuing the 'klist' command. The excerpt below was done after logging in:
+<pre>
+$ klist
+Ticket cache: FILE:/tmp/krb5cc_10101_vcZKNX
+Default principal: ballock@EXAMPLE.COM
+
+Valid starting     Expires            Service principal
+02/07/13 14:16:58  03/07/13 00:16:58  krbtgt/EXAMPLE.COM@EXAMPLE.COM
+	renew until 03/07/13 14:16:58
+</pre>
+When you connect using Kerberos to any Kerberized service, klist should also list the ticket for that particular service. The excerpt below shows a klist output upon authenticationg to a Kerberized webserver:
+<pre>
+$ klist
+Ticket cache: FILE:/tmp/krb5cc_10101_vcZKNX
+Default principal: ballock@EXAMPLE.COM
+
+Valid starting     Expires            Service principal
+02/07/13 14:16:58  03/07/13 00:16:58  krbtgt/EXAMPLE.COM@EXAMPLE.COM
+	renew until 03/07/13 14:16:58
+02/07/13 14:58:31  03/07/13 00:16:58  HTTP/webserver.example.com@
+	renew until 03/07/13 14:16:58
+02/07/13 14:58:31  03/07/13 00:16:58  HTTP/webserver.example.com@EXAMPLE.COM
+	renew until 03/07/13 14:16:58
+</pre>
+
+=== What you can do with a machine client ticket ===
+
+If a Ubuntu machine has a respective AD machine account, it can use it for a couple of interesting cases.
+
+First of all, the <code>machine$</code> account behaves similarly to a user account. It is possible to login and act in the name of the machine account. So, it is possible to log into the AD's LDAP with the account to get the list of users. It is possible to grant access to Windows shares to machine accounts and access it from a script which uses the machine account.
+
+Machine account has a machine password which can expire, so it is a good habit to periodically verify that the machine account is valid and to change the machine account password. This also triggers an update to the account's tickets.
+
+In some (most?) AD-based DNS implementations it is also possible to use nsupdate to update DNS entries (A and PTR) and correct them if they are no longer valid, using the Kerberos machine account client ticket.
+
+=== How to acquire the machine ticket ===
+
+To acquire the aforementioned machine client ticket, you need to acquire the TGT ticket of the user that can join the machine to the domain (an admin account in most cases, but you can grant joining rights for the particular machine to a particular user) and use msktutil (http://code.google.com/p/msktutil/) to get the SPN ticket for the machine:
+<pre>
+Password for administrator@EXAMPLE.COM: 
+</pre>
+
+This is how you can verify that your machine has a valid Kerberos client ticket. Note 'sudo su -', not 'sudo -s', as we need the root's environment, including its Kerberos ticket cache.
+<pre>
+$ sudo su -
+Ticket cache: FILE:/tmp/krb5cc_0
+Default principal: machine$@EXAMPLE.COM
+
+Valid starting     Expires            Service principal
+03/07/13 07:28:17  03/07/13 17:28:17  krbtgt/EXAMPLE.COM@EXAMPLE.COM
+	renew until 04/07/13 07:28:17
+</pre>
+
+=== Kerberized SSH ===
+
+Once msktutil is run, the machine gets an SPN ticket for the host service. This service is used by the SSH service. Installing ssh-krb5 configures SSH daemon with GSSAPI enabled. This allows you to ssh to your Ubuntu machine without providing your password (of course, to your account on that machine). You don't even need SSH keys for that.
+
+To verify your Kerberos-based SSH server works
+  1. Check your Kerberos SPN cache:
+<pre>
+Keytab name: FILE:/etc/krb5.keytab
+KVNO Timestamp         Principal
+---- ----------------- --------------------------------------------------------
+  13 02/07/13 09:02:18 machine$@EXAMPLE.COM
+  13 02/07/13 09:02:18 machine$@EXAMPLE.COM
+  13 02/07/13 09:02:18 machine$@EXAMPLE.COM
+  13 02/07/13 09:02:19 host/machine@EXAMPLE.COM
+  13 02/07/13 09:02:19 host/machine@EXAMPLE.COM
+  13 02/07/13 09:02:19 host/machine@EXAMPLE.COM
+  13 02/07/13 09:02:19 host/machine.example.com@EXAMPLE.COM
+  13 02/07/13 09:02:19 host/machine.example.com@EXAMPLE.COM
+  13 02/07/13 09:02:19 host/machine.example.com@EXAMPLE.COM
+</pre>
+    Note that you can see the 'host/' principal here. CASE MATTERS! The ssh service requires a lowercase 'host' service. If it's uppercase, it requires correction.
+  1. Check your /etc/ssh/sshd_config. It should contain the line:
+<pre>
+GSSAPIAuthentication yes
+</pre>
+  1. Check that you can connect to the machine without entering your password. You may need to specify the whole fqdn for connection. Below excerpt is from verbose mode:
+<pre>
+tokarbol@machine:~$ ssh -v machine.example.com
+OpenSSH_5.9p1 Debian-5ubuntu1.1, OpenSSL 1.0.1 14 Mar 2012
+debug1: Reading configuration data /home/ballock/.ssh/config
+debug1: Reading configuration data /etc/ssh/ssh_config
+debug1: /etc/ssh/ssh_config line 19: Applying options for *
+debug1: Connecting to machine.example.com [192.168.12.12] port 22.
+debug1: Connection established.
+debug1: identity file /home/ballock/.ssh/id_rsa type 1
+debug1: Checking blacklist file /usr/share/ssh/blacklist.RSA-2048
+debug1: Checking blacklist file /etc/ssh/blacklist.RSA-2048
+debug1: identity file /home/ballock/.ssh/id_rsa-cert type -1
+debug1: identity file /home/ballock/.ssh/id_dsa type -1
+debug1: identity file /home/ballock/.ssh/id_dsa-cert type -1
+debug1: identity file /home/ballock/.ssh/id_ecdsa type -1
+debug1: identity file /home/ballock/.ssh/id_ecdsa-cert type -1
+debug1: Remote protocol version 2.0, remote software version OpenSSH_5.9p1 Debian-5ubuntu1.1
+debug1: match: OpenSSH_5.9p1 Debian-5ubuntu1.1 pat OpenSSH*
+debug1: Enabling compatibility mode for protocol 2.0
+debug1: Local version string SSH-2.0-OpenSSH_5.9p1 Debian-5ubuntu1.1
+debug1: SSH2_MSG_KEXINIT sent
+debug1: SSH2_MSG_KEXINIT received
+debug1: kex: server->client aes128-ctr hmac-md5 none
+debug1: kex: client->server aes128-ctr hmac-md5 none
+debug1: sending SSH2_MSG_KEX_ECDH_INIT
+debug1: expecting SSH2_MSG_KEX_ECDH_REPLY
+debug1: Server host key: ECDSA c3:f2:18:3e:24:45:46:37:68:a9:30:d1:19:38:41:a7
+debug1: Host 'machine.example.com' is known and matches the ECDSA host key.
+debug1: Found key in /home/ballock/.ssh/known_hosts:206
+debug1: ssh_ecdsa_verify: signature correct
+debug1: SSH2_MSG_NEWKEYS sent
+debug1: expecting SSH2_MSG_NEWKEYS
+debug1: SSH2_MSG_NEWKEYS received
+debug1: Roaming not allowed by server
+debug1: SSH2_MSG_SERVICE_REQUEST sent
+debug1: SSH2_MSG_SERVICE_ACCEPT received
+debug1: Authentications that can continue: publickey,gssapi-keyex,gssapi-with-mic,password
+debug1: Next authentication method: gssapi-keyex
+debug1: No valid Key exchange context
+debug1: Next authentication method: gssapi-with-mic
+debug1: Authentication succeeded (gssapi-with-mic).
+Authenticated to machine.example.com ([192.168.12.12]:22).
+debug1: channel 0: new [client-session]
+debug1: Requesting no-more-sessions@openssh.com
+debug1: Entering interactive session.
+debug1: Sending environment.
+debug1: Sending env LANG = en_IE.UTF-8
+Welcome to Ubuntu 12.04.2 LTS (GNU/Linux 3.2.0-49-generic x86_64)
+
+* Documentation:  https://help.ubuntu.com/
+
+7 packages can be updated.
+0 updates are security updates.
+
+Last login: Wed Jul  3 07:41:13 2013 from machine.example.com
+</pre>
+  1. After a kerberos connection you should get a service ticket on the client machine:
+<pre>
+$ klist
+Ticket cache: FILE:/tmp/krb5cc_10101_vcZKNX
+Default principal: ballock@EXAMPLE.COM
+
+Valid starting     Expires            Service principal
+03/07/13 07:31:40  03/07/13 17:31:41  krbtgt/EXAMPLE.COM@EXAMPLE.COM
+	renew until 04/07/13 07:31:40
+03/07/13 07:41:06  03/07/13 17:31:41  host/machine.example.com@
+	renew until 04/07/13 07:31:40
+03/07/13 07:41:06  03/07/13 17:31:41  host/machine.example.com@EXAMPLE.COM
+	renew until 04/07/13 07:31:40
+</pre>
+
+=== Kerberized HTTP ===
+
+If you wanted to provide single-sign-on to your webserver running on a Ubuntu machine, here's a rough how-to:
+
+  1. Verify you have a valid machine client ticket:
+<pre>
+$ sudo su -
+Ticket cache: FILE:/tmp/krb5cc_0
+Default principal: machine$@EXAMPLE.COM
+
+Valid starting     Expires            Service principal
+03/07/13 07:28:17  03/07/13 17:28:17  krbtgt/EXAMPLE.COM@EXAMPLE.COM
+	renew until 04/07/13 07:28:17
+</pre>
+  1. Acquire the HTTP service ticket from AD. Note CASE MATTERS. It's uppercase HTTP, not lowercase, unlike the 'host' service. Use HTTP even if you plan to use 'https://' (secure http).
+<pre>
+Waiting for password replication (0 seconds past)
+Waiting for password replication (5 seconds past)
+Waiting for password replication (10 seconds past)
+Waiting for password replication (15 seconds past)
+Waiting for password replication (20 seconds past)
+Waiting for password replication (25 seconds past)
+Re-attempting password reset for machine$
+Waiting for password replication (0 seconds past)
+Waiting for password replication (5 seconds past)
+Waiting for password replication (10 seconds past)
+</pre>
+  1. Verify your service ticket is in place. Look only at the highest KVNO (key version number), as the previous ones are kept in the keytab to maintain previous sessions.
+<pre>
+Keytab name: FILE:/etc/krb5.keytab
+KVNO Timestamp         Principal
+---- ----------------- --------------------------------------------------------
+  13 02/07/13 09:02:18 machine$@EXAMPLE.COM (arcfour-hmac) 
+  13 02/07/13 09:02:18 machine$@EXAMPLE.COM (aes128-cts-hmac-sha1-96) 
+  13 02/07/13 09:02:18 machine$@EXAMPLE.COM (aes256-cts-hmac-sha1-96) 
+  13 02/07/13 09:02:19 host/machine@EXAMPLE.COM (arcfour-hmac) 
+  13 02/07/13 09:02:19 host/machine@EXAMPLE.COM (aes128-cts-hmac-sha1-96) 
+  13 02/07/13 09:02:19 host/machine@EXAMPLE.COM (aes256-cts-hmac-sha1-96) 
+  13 02/07/13 09:02:19 host/machine.example.com@EXAMPLE.COM (arcfour-hmac) 
+  13 02/07/13 09:02:19 host/machine.example.com@EXAMPLE.COM (aes128-cts-hmac-sha1-96) 
+  13 02/07/13 09:02:19 host/machine.example.com@EXAMPLE.COM (aes256-cts-hmac-sha1-96) 
+  14 03/07/13 07:32:12 machine$@EXAMPLE.COM (arcfour-hmac) 
+  14 03/07/13 07:32:13 machine$@EXAMPLE.COM (aes128-cts-hmac-sha1-96) 
+  14 03/07/13 07:32:13 machine$@EXAMPLE.COM (aes256-cts-hmac-sha1-96) 
+  14 03/07/13 07:32:13 host/machine@EXAMPLE.COM (arcfour-hmac) 
+  14 03/07/13 07:32:13 host/machine@EXAMPLE.COM (aes128-cts-hmac-sha1-96) 
+  14 03/07/13 07:32:13 host/machine@EXAMPLE.COM (aes256-cts-hmac-sha1-96) 
+  14 03/07/13 07:32:13 host/machine.example.com@EXAMPLE.COM (arcfour-hmac) 
+  14 03/07/13 07:32:13 host/machine.example.com@EXAMPLE.COM (aes128-cts-hmac-sha1-96) 
+  14 03/07/13 07:32:13 host/machine.example.com@EXAMPLE.COM (aes256-cts-hmac-sha1-96) 
+  14 03/07/13 07:32:13 HTTP/machine.example.com@EXAMPLE.COM (arcfour-hmac) 
+  14 03/07/13 07:32:13 HTTP/machine.example.com@EXAMPLE.COM (aes128-cts-hmac-sha1-96) 
+  14 03/07/13 07:32:13 HTTP/machine.example.com@EXAMPLE.COM (aes256-cts-hmac-sha1-96) 
+</pre>
+  1. Install apache2 and libapache2-mod-auth-kerb packages. Configure the location you want to authenticate users:
+<pre>
+  <Location /login>
+    AuthType Kerberos
+    AuthName "Ubuntu webserver - enter domain username and password"
+
+    Krb5Keytab /etc/krb5.keytab
+    KrbAuthRealm EXAMPLE.COM
+    KrbMethodNegotiate on
+    KrbSaveCredentials on
+    KrbMethodK5Passwd on
+    KrbLocalUserMapping on
+
+    Require valid-user
+  </Location>
+</pre>
+    Note that by default, Firefox browser in Ubuntu only trust 'https://' sites for Kerberos authentication, so you need to get a valid SSL certificate and configure https. For debugging you can change the client's about:config setting 'network.negotiate-auth.trusted-uris'.
+
+=== Testing Kerberized HTTP ===
+
+Try logging in to the webpage you configured for Kerberos. You should be automatically logged in, and the tickets cache should show your client service ticket:
+<pre>
+$ klist
+Ticket cache: FILE:/tmp/krb5cc_10101_vcZKNX
+Default principal: tokarbol@EXAMPLE.COM
+
+Valid starting     Expires            Service principal
+03/07/13 07:31:40  03/07/13 17:31:41  krbtgt/EXAMPLE.COM@EXAMPLE.COM
+	renew until 04/07/13 07:31:40
+03/07/13 08:09:22  03/07/13 17:31:41  HTTP/machine.example.com@
+	renew until 04/07/13 07:31:40
+03/07/13 08:09:22  03/07/13 17:31:41  HTTP/machine.example.com@EXAMPLE.COM
+	renew until 04/07/13 07:31:40
+</pre>
+
+If the authentication does not work for some reason, check if the Kerberos ticket version is valid and contains the valid crypttypes. You can 
+<pre>
+$ kvno HTTP/machine.example.com
+HTTP/machine.example.com@EXAMPLE.COM: kvno = 14
+</pre>
+
+I have also noticed that some valid services return kvno higher by 256 than the version in the keytab and this kvno seems to be valid too.
+
+=== Alternative server name ===
+
+Now, what if you wanted to have a service accessible not only with machine.example.com, but, also, say, webserver.example.com? It's possible, but not obvious.
+
+Theoretically getting a DNS CNAME record should be enough. When a client tries to connect to webserver.example.com it will find it's a CNAME for machine.example.com and acquire a ticket for machine.example.com. Unfortunately, that does not always work. From my testing, it works from Windows clients and from Ubuntu, if you override the MIT gssapi with Heimdal's gssapi library. The behaviour, however, is not consistent when you use a proxy. It may or may not work.
+
+So, what you need is to have a Kerberos SPN for that webserver.example.com domain name. Unfortunately, msktutil is only allowed to provide you with the fqdn of your machine. You need an AD admin to grant you a service for a different fqdn. Once you acquired a DNS (preferably CNAME) for your service, you need to have your AD domain admin run something like the commands below.
+
+This one adds a kerberos HTTP service ticket for webserver.example.com and www.webserver.example.com to 'machine' machine account.
+<pre>
+setspn.exe -a HTTP/webserver.example.com machine
+setspn.exe -a HTTP/www.webserver.example.com machine
+</pre>
+Once this is done, you need to update your keytable with 'msktutil -u'. Voila.
+
+=== Web portal served by multiple servers ===
+
+Active Directory generates an integrated Kerberos keytab for all services belonging to an account. So if you want to provide a service called balanced.example.com and you assign the SPN to machine 'machine1' (with setspn.exe as above), it can ONLY be used with that machine. You CANNOT add the same SPN to a 'machine2' machine account. Setspn.exe will allow that but both machines will be roasted, I mean, Kerberos authentication will no longer work.
+
+In order to provide a Kerberos ticket for the same SPN for both machines, you need to acquire an AD user, most likely a regular user, not a machine account and assign the SPN with setspn.exe to that user and to NO ONE ELSE. You can verify duplicate SPNs on Windows 7+ with setspn.exe -X. Note that most likely you will need to set the user account with a password that does not expire.
+
+The functionality in msktutil is only present in the 0.5 release of msktutil.
+
+Use kinit on one of the machines using the user principals and run msktutil to get the user keytab (sorry, I did not test this command):
+{{{
+}}}

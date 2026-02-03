@@ -1,0 +1,238 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+This page describes building an armel Debian/Ubuntu root filesystem.  It's only from scratch in that you are not starting from installer images, and you don't need target hardware to build it; the code is not rebuilt though, pre-build .deb packages are downloaded and installed instead.
+
+=== Using rootstock ===
+
+Simplest and recommended way, just run rootstock to create your rootfs (check <nowiki>[[ARM-RootStock]]</nowiki> for more info about rootstock).
+
+<nowiki>[[https://launchpad.net/project-rootstock/|Rootstock]]</nowiki> will automate the creation of a rootfs tarball and exposes some config options to tweak the contents/setup.
+
+If you're running Ubuntu 9.10 (karmic) or later, you just need to install the rootstock package and it will pull the appropriate dependencies.
+
+If you install rootstock manually or if you are running it from a bzr checkout, you will also need:
+* qemu (see <nowiki>[[Installation-QemuEmulator]]</nowiki> )
+* a recent debootstrap: <nowiki>[[http://ports.ubuntu.com/pool/main/d/debootstrap/| debootstrap_1.0.10ubuntu3_all.deb or newer]]</nowiki>
+
+'''Please note:''' rootstock '''''will not''''' automatically give you a kernel package. You will have to include the kernel package you need for your hardware. For instance, for OMAP3 based hardware, you will need to include "--seed linux-image-omap" somewhere in your rootstock command.
+
+To create an armel rootfs tarball of, for instance, xubuntu-desktop:
+<pre>
+    sudo rootstock \
+        --fqdn myhostname \
+        --login ubuntu \
+        --password temppwd \
+        --imagesize 2G \
+        --seed xubuntu-desktop
+</pre>
+
+Here's another example for ubuntu-desktop:
+<pre>
+    sudo rootstock \
+        --fqdn ubuntu \
+        --login ubuntu \
+        --password ubuntu \
+        --imagesize 3G \
+        --seed ubuntu-desktop
+</pre>
+
+Some typical flags when developing headless (connecting over the network):
+<pre>
+    --seed build-essential,openssh-server
+</pre>
+Note that you should edit /etc/network/interfaces and set up your network device on first login for this.
+
+If you want a really light desktop (lxde), use:
+<pre>
+    --seed lxde,gdm
+</pre>
+
+The options --fqdn (or -f), --login (or -l) and --password (-p) are required for the initial setup. Calling the script with --help shows you all the additional options that can be used to change the setup of the created rootfs.
+
+ /!\ Change the password on the first login!  The above examples use too simple passwords and will expose the password to other users of the machine where rootstock is run.
+
+=== Building a root filesystem image instead of a tarball ===
+
+In case you just need a root filesystem for use with qemu and you don't want a rootfs tarball, e.g. for usage with qemu, pass --notarball to rootstock:
+<pre>
+    sudo rootstock --fqdn qemu-test \
+        --login qemu \
+        --password qemupwd \
+        --notarball
+</pre>
+
+You can also create a root filesystem from a tarball as follows:
+
+Create the blank image file using dd; this example creates a 1GB image; use seek=3072 for 3GB or seek=2048 for 2GB etc.:
+<pre>
+    dd if=/dev/zero of=ubuntu-arm.img bs=1MB count=0 seek=1024
+</pre>
+
+Create linux filesystem on the newly created image:
+<pre>
+    mkfs.ext4 -F ubuntu-arm.img
+</pre>
+
+(You might want to pass some extra flags to mkfs to tweak the reserved blocks, labels, or other filesystem options.)
+
+Loop mount the new image:
+<pre>
+    sudo mount -o loop ubuntu-arm.img /mnt
+</pre>
+
+Extract the rootfs tarball inside the mounted dir and umount:
+<pre>
+    sudo tar -C /mnt -zxf armel-rootfs-200904151837.tgz
+    sudo umount /mnt
+</pre>
+
+Now you are set and ready to use the ubuntu-arm.img, see "Using a qemu image" below for the right command
+
+=== Using a qemu image with full emulation ===
+
+If you created your qemu image and want to start a fully emulated work environment (to compile packages or build applications), grab the kernel from:
+
+<nowiki>[[ http:--ports.ubuntu.com-ubuntu-ports-dists-lucid-main-installer-armel-current-images-versatile-netboot-vmlinuz|qemu kernel ]]</nowiki>
+
+<pre>
+ wget http://ports.ubuntu.com/ubuntu-ports/dists/lucid/main/installer-armel/current/images/versatile/netboot/vmlinuz
+</pre>
+
+and start qemu with the following command (indeed, you need to adjust the rootfs img name to whatever your image is called)
+
+<pre>
+qemu-system-arm -M versatilepb -cpu cortex-a8 -kernel ./vmlinuz -hda arm-rootfs.img -m 256 -append "root=/dev/sda mem=256M devtmpfs.mount=0 rw"
+</pre>
+
+In the booted image you can then log in with the user and password you defined during image creation.
+
+ /!\ To be able to copy files from or to the host system it is helpful to install openssh-server on the host and use the scp command inside qemu.
+
+==== Connect your emulated machine to a real network ====
+
+When no option is specified QEMU uses a non privileged user mode network stack that gives the emulated machine access to the world. But you probably want to make your emulated machine accessible from the outside. It is possible by using the tap mode and bridging the tap interface with the network interface of the host machine.
+
+The first thing to do is to active a bridge on your host machine. For that you have to modify the /etc/network/interfaces file as follow:
+
+Before:
+<pre>
+auto eth0
+iface eth0 inet dhcp
+</pre>
+
+After:
+<pre>
+auto br0
+iface br0 inet dhcp
+  bridge_ports eth0
+  bridge_maxwait 0
+</pre>
+
+Then you need to install the bridge-utils package and restart your network interface:
+
+<pre>
+}}}
+
+Create a script call /etc/qemu-ifup that will be executed upon the start of QEMU:
+
+{{{
+echo "Executing /etc/qemu-ifup"
+echo "Bringing up $1 for bridged mode..."
+sudo /sbin/ifconfig $1 0.0.0.0 promisc up
+echo "Adding $1 to br0..."
+sudo /usr/sbin/brctl addif br0 $1
+sleep 2
+</pre>
+
+As you probably don't want to execute QEMU as root, you need to create a qemu user group and authorize the brctl and ifconfig commands for users of the qemu via sudo. You need to add the following lines to /etc/sudoers (edit the file using visudo):
+
+<pre>
+...
+Cmnd_Alias QEMU = /usr/sbin/brctl, /sbin/ifconfig
+%qemu ALL=NOPASSWD: QEMU
+</pre>
+
+Tap networking requires that the tun module is loaded:
+
+<pre>
+$ sudo modprobe tun
+</pre>
+
+To load it automatically on boot, edit /etc/modules and add a line that says "tun" so that the file looks like this:
+
+<pre>
+
+lp
+tun
+</pre>
+
+Finally you can start your emulated machine using the following command
+
+<pre>
+$ qemu-system-arm -M versatilepb -kernel ./vmlinuz-2.6.28-versatile -hda arm-rootfs.img -m 256 -append "root=/dev/sda mem=256M ro" -net nic,macaddr=00:16:3e:00:00:01 -net tap
+</pre>
+
+You don't need to give a MAC address if you are emulating only one machine, as QEMU will use a default one. However if you have more than one emulated machine (don't forget QEMU can also emulate other architectures than ARM), you will have to specify a unique MAC address for each machine. I advise you to select an address from the range 00:16:3e:xx:xx:xx, which has been assigned to Xen.
+
+=== Using qemu user mode emulation (with chroot) ===
+
+If you don't want to use qemu with full emulation, you can still use qemu, but with user mode emulation together with chroot, to create the emulated work environment (to compile packages or build applications).
+
+First extract the rootfs tarball:
+<pre>
+    mkdir /tmp/rootfs
+    sudo tar -C /tmp/rootfs -zxf armel-rootfs-200904151837.tgz
+</pre>
+
+Copy qemu-arm-static to the rootfs, in order to be able to use qemu:
+<pre>
+    sudo cp $(which qemu-arm-static) /tmp/rootfs/usr/bin/
+</pre>
+
+Mount the /proc filesystem:
+<pre>
+    sudo mount -t proc proc /tmp/rootfs/proc
+</pre>
+
+Set up resolv.conf:
+<pre>
+    sudo cp /etc/resolv.conf /tmp/rootfs/etc/resolv.conf
+</pre>
+
+And finally get inside the emulated environment, with chroot:
+<pre>
+    sudo chroot /tmp/rootfs /bin/bash
+</pre>
+
+Now you can easily install packages with apt-get and build the application you need/want.
+
+=== Download a pre-built image ===
+
+There is a pre-built image of karmic avaliable. It was built following steps above.
+It contains some stuff to compile and run software, such as gcc, g++, X libraries, FLTK, sqlite3, but there is no WM. You can add software using apt-get, if you want.
+You can use this image with Qemu or chroot.
+There is a little script inside the tarball to start Qemu without typing the entire command.
+<pre>
+    wget -c http://w3.impa.br/~gabrield/data/ubuntu-arm-development-rootfs.tar.bz2
+    tar jxfv ubuntu-arm-development-rootfs.tar.bz2
+    chmod +x run.sh
+    ./run.sh
+</pre>
+
+The user to login is '''ubuntu''' and password '''temppwd'''.
+
+=== Bugs and Problems ===
+
+If you run into any problems with the rootstock script, please contact "ogra" or "rsalveti" in #ubuntu-arm on irc.freenode.net or send a mail to ogra@ubuntu.com / ricardo.salveti@ubuntu.com.
+
+If you run into an error '''please keep the log''' of your failed build.
+
+A known issue is that language-pack handling is not implemented yet, please install the packages for your language manually post install.

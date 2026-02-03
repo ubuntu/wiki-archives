@@ -1,0 +1,384 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+
+== Installation ==
+
+The required packages are different depending on if the system is a client or a server.  In this Howto, the server is the host that has the files you want to share and the client is the host that will be mounting the NFS share.
+
+* NFSv4 client
+ <pre>
+sudo apt-get install nfs-common }}}
+* NFSv4 server
+ {{{
+sudo apt-get install nfs-kernel-server }}}
+
+After you finish installing nfs-kernel-server, you might see failure to start nfs-kernel-server due to missing entries in /etc/exports. Remember to restart the service when you finish configuring.
+
+For the error message: 
+{{{
+mount.nfs4: No such device
+</pre>
+You will have to load the nfs module with the command
+<pre>
+modprobe nfs
+</pre>
+
+=== NFSv4 without Kerberos ===
+
+==== NFSv4 Server ====
+
+NFSv4 exports exist in a single ''pseudo filesystem'', where the
+real directories are mounted with the <code>--bind</code> option. <nowiki>[[http://www.citi.umich.edu/projects/nfsv4/linux/using-nfsv4.html|Here]]</nowiki> is some additional information
+regarding this fact.
+
+* Let's say we want to export our users' home directories in <code>/home/users</code>. First
+ we create the export filesystem: <pre>
+sudo mkdir /export
+sudo mkdir /export/users }}}
+
+and mount the real users directory with: {{{
+sudo mount --bind /home/users /export/users }}}
+
+To save us from retyping this after every reboot we add the following line to <code>/etc/fstab</code>: {{{
+/home/users    /export/users   none    bind  0  0 }}}
+
+* In <code>/etc/default/nfs-kernel-server</code> we set:
+ {{{
+NEED_SVCGSSD=no # no is default}}}
+ because we are not activating NFSv4 security this time.
+
+* To export our directories to a local network 192.168.1.0/24
+ we add the following two lines to <code>/etc/exports</code>
+ {{{
+/export       192.168.1.0/24(rw,fsid=0,no_subtree_check,sync)
+/export/users 192.168.1.0/24(rw,nohide,insecure,no_subtree_check,sync)
+ }}}
+
+* Be aware of the following points:
+
+** there is no space between the IP address and the options
+
+** you can list more IP addresses and options; they are space separated as in:
+     /export/users 192.168.1.1(rw,no_subtree_check) 192.168.1.2(rw,no_root_squash)
+
+** using the insecure option allows clients such as Mac OS X to connect on ports above 1024. This option is not otherwise "insecure".
+
+** Setting the crossmnt option on the main psuedo mountpoint has the same effect as setting nohide on the sub-exports: It allows the client to map the sub-exports within the psuedo filesystem.  These two options are mutually exclusive.
+
+** Note that when locking down which clients can map an export by setting the IP address, you can either specify an address range (as shown above) using a subnet mask, or you can list a single IP address followed by the options. Using a subnet mask for single client's full IP address is **not** required. Just use something like 192.168.1.123(rw). There are a couple options for specifying the subnet mask. One style is 255.255.255.0. The other style is /24 as shown. Both styles should work. The subnet mask marks which part of IP address must be evaluated.
+
+* Restart the service {{{
+sudo service nfs-kernel-server restart}}}
+
+ On ubuntu 11.04 or later you may also need to start or restart the idmapd with: {{{
+sudo service idmapd restart }}}
+
+==== NFSv4 Client ====
+
+* On the client we can mount the complete export tree with one command: {{{
+sudo mount -t nfs4 -o proto=tcp,port=2049 nfs-server:/ /mnt}}}
+
+* We can also mount an exported ''subtree'' with: {{{
+sudo mount -t nfs4 -o proto=tcp,port=2049 nfs-server:/users /home/users}}}
+
+* To save us from retyping this after every reboot we add the following
+ line to <code>/etc/fstab</code>: {{{
+nfs-server:/   /mnt   nfs4    _netdev,auto  0  0}}}
+   where the <code>auto</code> option mounts on startup and the <code>_netdev</code> option can be used by scripts to mount the filesystem when the network is available.  Under NFSv3 (type nfs) the _netdev option will tell the system to wait to mount until the network is available.  With a type of nfs4 this option is ignored, but can be used with mount -O _netdev in scripts later.  Currently Ubuntu Server does not come with the scripts needed to auto-mount nfs4 entries in /etc/fstab after the network is up.
+
+* Note with remote NFS paths
+
+    They don't work the way they did in NFSv3. NFSv4 has a global root directory and all exported directories are children to it. So what would have been nfs-server:/export/users on NFSv3 is nfs-server:/users on NFSv4, because /export is the root directory.
+
+* Note regarding UID/GID permissions on NFSv4 without Kerberos
+
+   To make UID/GUD work as with NFSv3, set sec=sys both in the server's /etc/export and in the client's /etc/fstab. This will make NFSv4 work with the old host-based security scheme.
+
+   They do not work.  Can someone please help investigating?  Following this guide will result in UID/GID on the export being generic despite having same UID on client and server. (According to my experience it works at least with "precise", if uid/gid are equal on both sides. hwehner) Mounting same share on NFSv3 works correctly with regards to UID/GID.  Does this need Kerberos to work fully? According to http://arstechnica.com/civis/viewtopic.php?f=16&t=1128994 and http://opensolaris.org/jive/thread.jspa?threadID=68381 you need to use Kerberos for the mapping to have any effect.
+
+   This is a possibly related bug: http://bugs.debian.org/cgi-bin/bugreport.cgi?bug=500778
+
+Not clear what is meant by UID/GID on the export being generic. This guide does not explicitly state that idmapd must also run on the client side, i.e. <code>/etc/default/nfs-common</code> needs the same settings as described in the server section. If idmapd is running the UID/GID are mapped correctly.  Check with <code>ps ax|grep rpc</code> that <code>rpc.idmapd</code> is running. 
+
+   If all directory listings show just "nobody" and "nogroup" instead of real user and group names, then you might want to '''check the Domain parameter''' set in <code>/etc/idmapd.conf</code>. NFSv4 client and server should be in the same domain. Other operating systems might derive the NFSv4 domain name from the domain name mentioned in /etc/resolv.conf (e.g. Solaris 10).
+
+* If you have a slow network connection and are not establishing mount at reboot, you can change the line in <code>etc/fstab</code>:
+ {{{
+nfs-server:/    /mnt   nfs4    noauto  0  0}}}
+and execute this mount after a short pause once all devices are loaded. Add the following lines to <code>/etc/rc.local</code>
+ {{{
+
+* In Ubuntu 11.10 or earlier, f you experience Problems like this:
+ {{{
+Warning: rpc.idmapd appears not to be running.
+         All uids will be mapped to the nobody uid.
+mount: unknown filesystem type 'nfs4'}}}
+
+ (all directories and files on the client are owned by uid/gid 4294967294:4294967294) then you need to set in <code>/etc/default/nfs-common</code>:
+ {{{
+NEED_IDMAPD=yes}}}
+
+ and restart nfs-common.
+ {{{
+
+ The "unknown Filesystem" Error will disappear as well.
+
+ (Make sure you restart the idmapd on both client and server after making changes, otherwise uid/gid problems can persist.)
+
+=== NFSv4 and Autofs ===
+
+Automount (or autofs) can be used in combination with NFSv4. Details on the configuration of autofs can be found in <nowiki>[[Autofs]]</nowiki>. The configuration is identical to NFSv2 and NFSv3 except that you have to specify <code>-fstype=nfs4</code> as option. Automount supports NFSv4's feature to mount all file systems exported by server at once. The exports are then treated as an entity, i.e. they are "all" mounted when you step into "one" directory on the NFS server's file systems. When auto-mounting each file system separately the behavior is slightly different. In that case you would have to step into "each" file system to make it show up on the NFS client. 
+
+=== NFSv4 and NFSv3 simultaneously ===
+
+NFSv4 and NFSv3 can be used simultaneously on a NFS server as well as on a NFS client. You have to setup NFSv3 on your NFS server (see <nowiki>[[SettingUpNFSHowTo]]</nowiki>). You can then export a file system with NFSv4 and NFSv3 simultaneously. Just put the appropriate export statements into <code>/etc/exports</code> and you are done. You might want to do this when you have NFS clients that don't support NFSv4, e.g. Mac OS X and Windows clients. But don't forget about the security risks of NFS with clients that can not be trusted.     
+ 
+=== NFSv4 with Kerberos ===
+
+When using NFS without kerberos the security of all data in the NFS share depends on the integrity of all clients and the security of the network connections.
+If you use kerberos the security doesn't depend on all client machines because the server gives access '''''to users with a valid kerberos ticket only'''''. The security isn't completely delegated to the client machines (unlike without kerberos). Therefore you need a principal in your kerberos realm for each user who want's to access the NFS share. See <nowiki>[[https://help.ubuntu.com/stable/serverguide/kerberos.html|Kerberos]]</nowiki> in the Ubuntu Server Guide on this topic. The section "Kerberos Linux Client" applies also to Ubuntu 8.04.
+
+You need a working Kerberos (MIT or Heimdal) KDC (Key Distribution Center)
+before continuing. NFS4 and Kerberos work fine with Ubuntu 8.04; they do not seem to work with the (much) older Ubuntu 6.06, or at least I couldn't get Heimdal to work correctly.
+
+Please note, that we have three different entities: the Kerberos-server; the NFS-server and the NFS-client. Your Kerberos-server (or KDC) and NFS-server could be the same machine, but they could also very well be separate entities. We will use separate "prompts" to distinguish, i.e. if you see
+ {{{
+KDC$ echo "hello"
+ }}}
+... this means you need to type echo "hello" on the KDC.
+
+Please note that you can now (with Ubuntu 8.04 and later) use any encryption type you want, there is no more need to extract only ''des-cbc-crc'', as most sites suggest.
+
+Please also note, that des-cbc-crc encryption is depreciated and, starting with Ubuntu 10.04, is no longer supported by default in the Kerberos libraries. For nfs4 to work, you need to add <code>allow_weak_crypto = true</code> to <code>/etc/krb5.conf</code>
+
+===== MIT =====
+* On the nfs-server and nfs-client you need at least the ''krb5-user''
+ and optional ''libpam-krb5'' if you wish to authenticate against krb5.
+ {{{
+
+===== Heimdal =====
+* On the nfs-server and nfs-client you need ''heimdal-clients''
+ and optional ''libpam-krb5'' if you wish to authenticate against krb5.
+ {{{
+
+* You need the gss kernel modules on nfs-servers and nfs-clients.
+ {{{
+ Add ''rpcsec_gss_krb5'' to ''/etc/modules'' to have it loaded
+ automatically. (I'm pretty sure they're loaded automatically though).
+
+==== Create and distribute credentials ====
+
+NFSv4 needs machine credentials for the server and every client, which wants
+to use the NFSv4 security features.
+
+Create the credentials for the nfs-server and all nfs-clients on the Kerberos KDC
+and distribute the extraced keys with scp to the destination
+
+You can make sure that only this entry has been created by executing "sudo klist -e -k /etc/krb5.keytab".
+===== Create nfs/ principals =====
+Authenticate as your admin user. You can do this from any machine in your
+kerberos-domain, as long as your kadmind is running; then add principals for your server and client machines. Replace "nfs-server.domain" with the fully qualified domain name of the machines. For example, if your server is called "snoopy" and your domain is "office.example.com", you would add a principal named "nfs/snoopy.office.example.com" for the server.
+Note: kadmin must be run with -l (locally) on the KDC if there is no kadmind.
+Please be aware of <nowiki>[[Bug:309738|Bug 309738]]</nowiki>.
+====== Heimdal ======
+{{{
+$ kinit kadmin/admin
+$ kadmin add -r nfs/nfs-server.domain
+$ kadmin add -r nfs/nfs-client.domain
+</pre>
+Now add these to the keytab-files on your NFS-server and client. Log in to your NFSserver (as root, because you will need to edit the /etc/krb5.keytab file) and initialize as Kerberos administrator. If your domain is fully kerberized, logging in as root will automatically give you the right access, in which case you don't need to use "kinit" anymore.
+<pre>
+NFSserver# kinit kadmin/admin
+NFSserver# ktutil get nfs/nfs-server.domain
+</pre>
+
+And add it to the client's keytab file:
+<pre>
+NFSclient# kinit kadmin/admin
+NFSclient# ktutil get nfs/nfs-client.domain
+</pre>
+
+====== MIT ======
+<pre>
+$ kinit admin/admin
+$ kadmin -q "addprinc -randkey nfs/nfs-server.domain"
+$ kadmin -q "addprinc -randkey nfs/nfs-client.domain"
+</pre>
+Now add these to the keytab-files on your NFS-server and client. Log in to your NFSserver (as root, because you will need to edit the /etc/krb5.keytab file) and initialize as Kerberos administrator.
+<pre>
+NFSserver# kadmin -p admin/admin -q "ktadd nfs/nfs-server.domain"
+</pre>
+
+And add it to the client's keytab file:
+<pre>
+NFSclient# kadmin -p admin/admin -q "ktadd nfs/nfs-client.domain"
+</pre>
+
+==== NFSv4 Server with Kerberos ====
+
+* Check your machine credentials in ''/etc/krb5.keytab''. Use "ktutil" (MIT) or "ktutil list" (Heimdal)
+MIT: <pre>
+ktutil:  rkt /etc/krb5.keytab
+ktutil:  list
+slot KVNO Principal
+---- ---- ---------------------------------------------------------------------
+   1    2 nfs/nfs-server.domain@DOMAIN
+</pre>
+Heimdal: <pre>
+FILE:/etc/krb5.keytab:
+
+Vno  Type                     Principal
+  6  des-cbc-md5              nfs/snoopy.office.example.com@OFFICE.EXAMPLE.COM
+  6  des-cbc-md4              nfs/snoopy.office.example.com@OFFICE.EXAMPLE.COM
+  6  des-cbc-crc              nfs/snoopy.office.example.com@OFFICE.EXAMPLE.COM
+  6  aes256-cts-hmac-sha1-96  nfs/snoopy.office.example.com@OFFICE.EXAMPLE.COM
+  6  des3-cbc-sha1            nfs/snoopy.office.example.com@OFFICE.EXAMPLE.COM
+  6  arcfour-hmac-md5         nfs/snoopy.office.example.com@OFFICE.EXAMPLE.COM
+</pre> etcetera (I removed the krb4 entries as you probably won't use them anyway).
+
+MIT extra information:
+ <pre>
+Keytab name: FILE:/etc/krb5.keytab
+KVNO Principal
+---- --------------------------------------------------------------------------
+   1 nfs/nfs-server.domain@DOMAIN (DES cbc mode with CRC-32)
+</pre>
+
+* In <code>/etc/default/nfs-kernel-server</code> we set:
+ <pre>
+NEED_SVCGSSD=yes }}}
+
+* To export our directories from the example above to a
+ local network 192.198.1.0/24 and addt
+ we add the following two lines to <code>/etc/exports</code>
+ {{{
+/export       192.168.1.0/24(rw,fsid=0,insecure, \
+  no_subtree_check,async,anonuid=65534,anongid=65534)
+/export       gss/krb5(rw,fsid=0,insecure, \
+  no_subtree_check,async,anonuid=65534,anongid=65534)
+/export/users 192.168.1.0/24(rw,nohide,insecure, \
+  no_subtree_check,async,anonuid=65534,anongid=65534)
+/export/users gss/krb5(rw,nohide,insecure, \
+  no_subtree_check,async,anonuid=65534,anongid=65534) }}}
+
+Please note that you can specify allowed hosts only in
+the ''any authentication'' flavor. gss/krb5 flavours
+are accessible from anywhere, if you do not use additional
+firewall rules.
+
+To export only with secure authentication flavors do
+not include a ''host(...)'' line in ''/etc/exports''
+
+The gss/krb5 flavours are:
+* krb5: users are authenticated
+* krb5i: this includes krb5. Additionaly data integrity is provided.
+* krb5p: this includes krb5i. Additionaly privacy is provided.
+
+To display your exports enter:
+{{{
+
+==== NFSv4 Client with Kerberos ====
+
+* Check your machine credentials in ''/etc/krb5.keytab''
+MIT: {{{
+ktutil:  rkt /etc/krb5.keytab
+ktutil:  list
+slot KVNO Principal
+---- ---- ---------------------------------------------------------------------
+   1    2 nfs/nfs-client.domain@DOMAIN
+</pre>
+Heimdal: <pre>
+FILE:/etc/krb5.keytab:
+
+Vno  Type                     Principal
+  6  des-cbc-md5              nfs/client.office.example.com@OFFICE.EXAMPLE.COM
+  6  des-cbc-md4              nfs/client.office.example.com@OFFICE.EXAMPLE.COM
+  6  des-cbc-crc              nfs/client.office.example.com@OFFICE.EXAMPLE.COM
+  6  aes256-cts-hmac-sha1-96  nfs/client.office.example.com@OFFICE.EXAMPLE.COM
+  6  des3-cbc-sha1            nfs/client.office.example.com@OFFICE.EXAMPLE.COM
+  6  arcfour-hmac-md5         nfs/client.office.example.com@OFFICE.EXAMPLE.COM
+
+</pre>
+
+* We can ''secure'' mount the complete export tree with:
+ <pre>
+
+* We can also ''secure'' mount an exported ''subtree'' with:
+ {{{
+
+* If your client is NATed, use the clientaddr option (see "man 5 nfs"), assuming your client public ip address is a.b.c.d:
+ {{{
+
+=== Troubleshooting ===
+
+First, take care of proper logging - by default almost nothing is logged.
+
+To enable debug messages from NFS, edit /etc/default/nfs-kernel-server (quotes are important here):
+{{{
+RPCMOUNTDOPTS="--manage-gids --debug all"
+</pre>
+
+To enable ipmapd debug output, edit /etc/idmpad.conf, and change the Verbosity level:
+<pre>
+Verbosity = 5
+</pre>
+
+To enable 3rd level verbose logging for rpc.gssd, run the following command as root:
+
+<pre>
+echo 'exec rpc.gssd -vvv' > /etc/init/gssd.override
+</pre>
+
+After restarting gssd (<code>service gssd restart</code>) check that the daemon has received new arguments:
+
+<pre>
+ps xuwa | grep grep rpc.gssd
+root      9857  0.0  0.4   2496  1220 ?        Ss   02:17   0:00 /usr/sbin/rpc.gssd -vvv
+</pre>
+
+Then look for its log output in damon.log:
+
+<pre>
+tail -f /var/log/daemon.log
+</pre>
+
+For the server, you can e.g. raise rpc.svcgssd log level in <code>/etc/default/nfs-kernel-server</code>:
+
+<pre>
+RPCSVCGSSDOPTS="-vvv"
+</pre>
+
+Browse the <code>/etc/init.d/nfs-*</code> init scripts to see other variables that you can set in <code>/etc/defaults</code>.
+
+If using Kerberos, enable logging in <code>/etc/krb5.conf</code>:
+
+<pre>
+[logging]
+     kdc = SYSLOG:INFO:DAEMON
+     admin_server = SYSLOG:INFO:DAEMON
+     default = SYSLOG:INFO:DAEMON
+</pre>
+
+It's possible to increase verbosity in <code>/etc/idmapd.conf</code> .
+It can be useful to study the sources for better understandig error messages:
+
+<pre>
+apt-get source nfs-common nfs-kernel-server libgssapi2-heimdal librpcsecgss3 libnfsidmap2
+</pre>
+
+=== Links ===
+
+* <nowiki>[[http://www.citi.umich.edu/projects/nfsv4/linux|Umich CITI intructions]]</nowiki>
+
+----
+
+CategoryNetworking

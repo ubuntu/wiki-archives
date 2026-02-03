@@ -1,0 +1,310 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+* '''Launchpad Entry''': UbuntuSpec:mobile-maverick-softboot-loader
+* '''Created''': January 13th, 2009
+* '''Contributors''': Michael Casadevall, Emmet Hikory
+* '''Packages affected''': kernel postinst, kboot-armel
+
+=== Summary ===
+
+Provide a softboot loader for ARM to address outstanding issues with the wide variety of methods used to boot ARM devices, in a similar manner to that does to support ps3.  Such a softboot loader would be installed on system flash or trusted boot media, to sufficiently enable the system to boot from more common devices (USB sticks, optical drives, hard drives, etc.).
+
+=== Release Note ===
+
+To facilitate standardization of ARM use with that of other architectures, a new softboot loader is provided for porting to specific system boards, providing a standard boot interface for all ARM users.
+
+=== Rationale ===
+
+One of the major problems we have with the ARM architecture is that there is no standardized boot framework like EFI/BIOS on a PC, or <nowiki>[[http://www.openfirmware.org/|OpenFirmware]]</nowiki> on a Mac, which makes supporting Ubuntu on ARM a rather difficult process since not only the kernel must be tweaked, we also must add support to d-i for each boot configuration we want to support.  Additionally, some ARM hardware is designed for embedded solutions, and may not be capable of booting in an expected manner, or using existing procedures to allow for selection of updated kernels when upgrading. Having a bootloader shim will create a much more robust booting solution.
+
+Debian does support the ARM platform despite the non-standardized boot environment, often times directly writing to the flash chip, without having a fallback mechanism in case of a bad flash. This is fine for developer systems, or other individuals who will know how to access the bootloader directly, but unacceptable for end-users who are unlikely to have a serial console, or be willing to try and telnet into <nowiki>[[http://sourceware.org/redboot/|RedBoot]]</nowiki>, and then type cryptic commands to download and flash a new kernel and ramdisk.
+
+=== Use Cases ===
+
+* Alpha buys a new ARM laptop, and is able to (re)install Ubuntu without having to worry about changing the bootloader or entering cryptic commands at a bootloader.
+* Beta wants to go back to the previous kernel after the new one stopped his system from booting and doesn't need to access the internal bootloader to load a new image over a serial terminal or something equivalent. 
+* Gamma's ARM device can't directly boot off the hard drive, which is the only connected storage large enough to support kernel updates, the soft bootloader stored in flash however can, and allows him to have an up to date kernel.
+* Delta wants to reinstall Ubuntu ARM, and uses the soft bootloader to load a kernel and inital image off the installation media.
+
+=== Assumptions ===
+
+* Devices for which such a softboot loader are required are capable of booting off persistent on-board flash or similar location.
+* Vendor supplied bootloaders are able to automatically load a starter kernel and softboot environment
+* A starter kernel can be constructed with support for all necessary drivers to mount target boot filesystems.
+* Don't care if the on-flash kernel matches the system kernel, or has all the patches since under normal operating conditions, it will be running up to 30 seconds - 1 minute max
+* There is no standardized ARM BIOS
+* kexec() will work on all target ARM hardware
+
+=== Design ===
+
+The basis of any soft boot loader is to get a system to a point where it can load its main operating system. As most ARM bootloaders are unable to access IDE/USB/SCSI/etc. devices, it makes more sense from an engineering point of view to use the Linux kernel to load all the necessary devices, load the main kernel image, and the boot into it.
+
+Most ARM boards, when powered up, load a simple bootloader such as <nowiki>[[http://sourceware.org/redboot/|RedBoot]]</nowiki> or <nowiki>[[http://www.denx.de/wiki/U-Boot|uBoot]]</nowiki>. These bootloaders usually have no concept of USB, SATA, or other storage devices aside from the flash chip that they were started from. Since we wish to keep and store our main kernel on a larger storage device such as an SATA hard drive, we need to bring the system up to a point where it can mount the root file system, via means of a starter kernel embedded in flash along with the initial bootloader. As a short term solution, using a first-stage softbootloader is a quick and easy alternative. This first-stage bootloader can bring up whatever media necessary to find the main kernel and its initramfs, and then kexec() into said kernel, allowing normal system startup.
+
+In the long term, we should be working with ARM to create a standardized boot environment such as open firmware that can load a kernel directly from all sources and boot it, vs having deal with chainloading kernels.
+
+=== Implementation ===
+
+==== Existing Solutions ====
+
+Several pre-existing solutions already exist to solve this problem, working by using the kexec() method in the kernel to do the chainloading.
+
+* kboot
+** http://kboot.sourceforge.net/
+** Original proof of concept soft bootloader created around kexec
+** Only supported on ia32, but written in shell script, so should work on ARM since its just a wrapper over kexec
+** Allows direct shell access in initramfs environment
+** Uses a kboot: prompt similar to lilo or silo
+** No longer developed upstream
+* petitboot
+** http://ozlabs.org/~jk/projects/petitboot/
+** Graphical bootloader for the PS3
+** Based around kboot+ps3, uses libtwin and the framebuffer to display the contents of menu files
+** Mixture of C and shell
+** Development stems to be dead
+** Required framebuffer be usable at early boot
+** No default boot support
+** Requires udev to be fully setup before it is able to detect devices
+* kexecboot
+** http://projects.linuxtogo.org/projects/kexecboot/
+** Graphical bootloader for Angstorm Linux (which is an ARM based distribution)
+** Written in C
+** Seems to support ext2-3, cramfs, reiser3, xfs, jfs, and lvm from looking at the source code
+** Graphical, works via /dev/fbX
+** Semi-active upstream
+** Worked on ARM
+** Will need branding changes (based off screenshot, it clearly shows Angstrom Linux in the menu screen)
+** Does not support multiple kernels or menu entries from a single device
+** Requires special directory layout for kernel, no support for initramfs as of writing
+** Support for config files limited, and in branch, not mainline kexecboot
+** Requires working framebuffer at early boot, no text fallback
+
+Based off the limitations of the existing solutions, I wrote the start softbootloader of my own during DebConf 9 called mukluk
+
+==== Mukluk Softbootloader ====
+* https://launchpad.net/mukluk
+* Simple, text-based, only depends on C library, /sys, /proc and a kexec binary to be available
+* Prevents mode-switching/flicker since its text-based
+* Written in C
+* Works with any filesystem supported by the kernel
+* Uses sysfs to determine mountable devices
+* Supports stacking config files from multiple devices into a single boot menu
+* Platform-independent
+* Pre-packaged for Ubuntu and Debian systems
+* Supports per-target command line arguments
+* No support for default kernels yet
+* No tool to automatically create boot menu list
+
+This soft-bootloader is designed to work around the shortcomings of the other available solutions, as well as use a text-based interface versus a graphical interface. 
+
+==== Code Changes ====
+
+The installer will still have to have new subarchitectures handled as per usual due to the different kernels required per architecture (which the softboot loader does not resolve as of yet). The kernel will have to be setup to build both the boot kernel, and the standardized kernel, and the update-*bootloader* script will have to be created to handle management of whatever boot configuration file is used.
+
+==== Standalone Build Package ====
+Based on discussions at UDS, having such a package to generate the kernel and initramfs out of the box for the softbootloader outside of an installed is desirable. This is a secondary goal that will be looked at after implementation of this spec, or for the 10.10 cycle.
+
+=== Test/Demo Plan ===
+
+Install the softboot loader image to flash. Boot the device from the HDD or other similar location, and make sure that Ubuntu properly starts.
+
+=== Unresolved issues ===
+
+=== BoF/Discussion ===
+
+Karmic UDS:
+<pre>
+=== Current Situation ===
+* While there are a couple common boot loaders, commonly each SoC has a device-specific bootloader
+* In the case of kernel issues, the user often has to use low-level debugging tools
+* kernel must usually be place in specific media of limited size
+
+=== Objective ===
+* Create an interface between the SoC-installed kernel and the distribution-supplied kernel
+
+=== Boot loader mechanism ===
+* Start a tiny kernel and minimal ramdisk
+* Discover hardware and available kernels
+* kexec() into a selected kernel from alternate media
+
+=== Existing Solutions ===
+* Based on Linux
+* Start a tiny kernel and minimal ramdisk
+* Discover hardware and available kernels
+* kexec() into a selected kernel from alternate media
+** Angstrom
+** kboot
+** petitboot
+* OpenFirmware and DeviceTree
+** For the SoCs we currently target will only work by chainloading from
+     RedBoot / U-Boot
+* Grub2?
+* UEFI?
+
+=== Requirements ===
+* Be able from the installed system to:
+** Maintain (add/remove/update) multiple kernels + initramfs
+** Change the default kernel cmdline
+** Select the kernel and change its cmdline for a single boot
+*** Output list of kernels on the graphical outputs
+*** Take input from mouse/keyboard
+
+=== Assumptions ===
+* Vendor boot solution is capable of loading separate kernel and initramfs
+* Users will be happy with a text-based interface
+* Boot speed is not a critical determinant in the solution selection
+
+=== Issues ===
+* kexec broken
+* Slower boot
+* Needs two kernels flavours (normal and lite-version) for each SoC
+* Some drivers have issues under kexec()
+
+=== Long term versus short term solutions ===
+* Need display output and mouse/keyboard input right now, which only the linux
+   kernel provides for the SoC we target for karmic; short term we need linux in
+   the stack
+* Might want to recommend OpenFirmware / DeviceTree as the long term solution
+
+=== Short Term Solution ===
+* Stripped minimal kernel
+** What about using the same kernel, and just trimming initramfs?
+* '''very''' small initramfs, only handling the limited activities desired (e.g.
+    scanning USB can take 10 seconds); no udevadm settle
+* Stripped down initramfs without glibc?
+* Might write a C binary which does the scanning and all in the future, but
+   should use our initramfs-tools infrastructure for now -- even if it's a bit
+   slow
+* http://people.ubuntu.com/~ogra/arm/bootmenu has a (way to big) PoC script
+* Target 2M flash, with ~ 1.5 M available for kernel + initramfs
+
+=== Actions ===
+* Review current solutions (NCommander)
+* Investigate building initramfs without glibc (ogra)
+* Investigation of the state of OpenFirmware (cking)
+* Investigation of second-stage bootloaders (jerone)
+</pre>
+
+UDS-L
+<pre>
+== ARM Soft Bootloader ==
+
+This issue has been talked about at two previous UDSs
+
+The basic idea here is to use the kernel as a bootloader.  This would be implemented using kernel kexec as the enabling factor.
+
+Why do we care?  Because ARM bootloaders are number #2's ie very limited and all incompatible with each other.  In some cases they must flash the 'to be booted' kernel.
+
+Hence the idea of a bootloader built round the linux kernel was born.  In karmic we got to prototype it.  Do we still need this.
+
+From a distro point of view we only need to support this new bootloader, this would be a win.  We are expecting to see a uEFI based bootloaders from some vendors, but they will be late on in the cycle at best.
+
+We want the 'first' kernel to be a very primative kernel.  Not probing things we don't need.  It is likely it is not going to be correct if its initially made by the various vendors.  Goal should be to get the vendor to install the softbootloader, but we do need to understand that if it is broken then we may need to cope and recover from this.
+
+Some discussion on whether the kexec base needed for the softbootloader reliable enough for arm use.  It is SOC specific, have we tested recently, does it work on the SOCs we care to support this cycle?  Some hardware needs to be gotten to the testers to sort this.
+
+QUESTION: why are we writing our own softbootloader?  There are several kexec based bootloaders and we could even handle it in grub?
+ANSWER: Basically its not interesting, any implementation which allows control over booting is fine, its whether we want this mode at all in software land.
+
+QUESTION: can we have a good first kernel and stay in that if its the one we want.
+ANSWER: to be real fast we presumably would want a special boot path for that version and use the bootloader version only for failure.
+
+=== Goals ===
+
+* simplify the spagetti mess for bootloaders on arm
+* simple and quick and easy for the vendors to install
+* easily fixable by distro should it not be working
+* small size wise (4-6 MB of flash needed currently, likely needs to be <1MB to fit)
+** initial goal of say 2MB for prototype
+** longer term goal of "as small as we can make it"
+* quick, we are booting at least twice in this model
+ 
+=== Actions ===
+* confirm whether uEFI might be a sensible solution from vendors which support it
+** ie. would they use softbootloader or not?
+* retesting of kexec needed on 2.6.31 & karmic final for:
+** [ogra] imx51
+** [Ncommander] dove
+  
+=== Position ===
+* we are going to place this as our main bootloader option
+** if you want to play in ubuntu we expect to do it this way (unless you have something at least as functional)
+** if you need fast boot from flash etc then you can use that for primary boot (you do the work)
+  
+=== Risks ===
+* kexec not working stops us dead
+</pre>
+
+UDS-M
+<pre>
+=== Discussion of ARM Softbootloader ===
+
+Quick summary
+* better boot process compatible to grub
+* kexec based
+* 1st kernel can be loaded by bootloader or directly from BootROM
+* kexec is recently fixed on armv7 (not heavily stress tested though)
+* mukluk - on launchpad, small C program - reading config file, busybox based  (https://launchpad.net/mukluk)
+   looks at /proc/partitions - mounts everything, lookup for all bootable kernels
+   for user to select
+ 
+ Biggest problems:
+* lack polishment
+* no proper way to handle default kernel
+   - remember the last boot kernel
+   - boot sequence (USB disk, SD card, internal NAND)
+   - vendor may need graphics - mukluk is open source and can be changed
+* takes a while to load
+* have to bruteforcedly mount *every* partition
+   - kexecboot has code to identify most of used filesystems
+* way to handle 2nd kernel failed by kexec
+* standalone image creator - build kernel + minimum C lib + soft bootloader
+
+userspace issues:
+* Add mount syscall to mukluk?
+  - kexecboot works that way
+* roll mukluk into busybox itself?
+
+Michael wants to be able to lock down the booting interface soon.
+- Questions raised about how Mukluk fits into the larger boot infrastructure
+
+Licencing issues:
+* Currently GPLv2
+* Vendors may want non-gpl implementations
+* Currently flexable, open to change
+* options
+ - allow non-gpl plugins
+ - Change to a MIT or similar license
+ - Do nothing (decide later)
+* question: does Ubuntu actually want to enable/support non-open source boot userspace?
+
+Currently no mailing list for mukluk - should probably set one up
+http://launchpad.net/~mukluk-dev
+
+Goals for Mavrick:
+* Default kernel booting
+* general polish and shine
+* Fix filesystem detection (remove brute-force mount tests)
+* Add support for MTD devices
+* Need image creation tool
+* Use initramfs?
+* document specifications (configuration method, entry and exit conditions)
+* use uevent for handling devices
+* Specific SoCs/boards... tbd
+* Configuration storage location?  What do the boards provide?  How does mukluk find it?
+ - board specific stub
+ - Potentially use internal storage on SoCs that provide it.
+* Use the kernel command line to tell mukluk where to find its configuration file
+* vendor branding (for M++)
+</pre>
+----
+CategorySpec

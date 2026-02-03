@@ -1,0 +1,228 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== WORK IN PROGRESS - Test cases for cluster components in Ubuntu 12.04 - WORK IN PROGRESS ==
+
+'''Contents'''
+
+=== Overview ===
+This HOWTO is a guide on setting GFS2 and OCFS2 filesystems on Ubuntu 12.04. It doesn't cover how to set up STONITH or any other service. This doc will be updated regularly with even more examples.
+
+Soon, there will be a guide on upgrading from 10.04 (+ ubuntu-ha-maintainers PPA) to 12.04. Additionally, we'll also add LVM HOWTO.
+
+=== Pacemaker + cman for GFS2 and OCFS2 ===
+
+==== 1. [ALL] Initial setup ====
+Install required packages:
+<pre>
+sudo apt-get install pacemaker cman resource-agents fence-agents gfs2-utils gfs2-cluster ocfs2-tools-cman openais
+</pre>
+Make sure each host can resolve all other hosts. Best way to achive this is by adding their IPs and hostnames to /etc/hosts on all nodes. In this example, that would be:
+<pre>
+192.168.123.2  server1
+192.168.123.3  server2
+192.168.123.4  server3
+</pre>
+Disable o2cb from starting:
+<pre>
+update-rc.d -f o2cb remove
+</pre>
+==== 2. [ALL] Create /etc/cluster/cluster.conf ====
+Paste this into /etc/cluster/cluster.conf:
+<pre>
+<?xml version="1.0"?>
+<cluster config_version="4" name="pacemaker">
+    <fence_daemon clean_start="0" post_fail_delay="0" post_join_delay="3"/>
+    <clusternodes>
+            <clusternode name="server1" nodeid="1" votes="1">
+                <fence>
+                        <method name="pcmk-redirect">
+                                <device name="pcmk" port="server1"/>
+                        </method>
+                </fence>
+            </clusternode>
+            <clusternode name="server2" nodeid="2" votes="1">
+                <fence>
+                        <method name="pcmk-redirect">
+                                <device name="pcmk" port="server2"/>
+                        </method>
+                </fence>
+            </clusternode>
+            <clusternode name="server3" nodeid="3" votes="1">
+                <fence>
+                        <method name="pcmk-redirect">
+                                <device name="pcmk" port="server3"/>
+                        </method>
+                </fence>
+            </clusternode>
+    </clusternodes>
+  <fencedevices>
+    <fencedevice name="pcmk" agent="fence_pcmk"/>
+  </fencedevices>
+    <cman/>
+</cluster>
+</pre>
+
+==== 3. [ALL] Edit /etc/corosync/corosync.conf ====
+Find pacemaker service in /etc/corosync/corosync.conf and bump version to 1:
+<pre>
+service {
+## Load the Pacemaker Cluster Resource Manager
+ 	ver:       1
+ 	name:      pacemaker
+}
+</pre>
+Replace bindnetaddr with the IP of your network. For example:
+<pre>
+		bindnetaddr: 192.168.123.0
+</pre>
+'0' is not a typo.
+
+==== 4. [ALL] Enable pacemaker init scripts ====
+<pre>
+update-rc.d -f pacemaker remove
+update-rc.d pacemaker start 50 1 2 3 4 5 . stop 01 0 6 .
+</pre>
+
+==== 5. [ALL] Start cman service and then pacemaker service ====
+<pre>
+service cman start
+service pacemaker start
+</pre>
+
+==== 6. [ONE] Setup resources ====
+Wait for a minute until pacemaker declares all nodes online:
+<pre>
+============  ==
+Last updated: Thu Apr 26 20:18:12 2012
+Last change: Thu Apr 26 20:06:11 2012 via crmd on server1
+Stack: cman
+Current DC: server1 - partition with quorum
+Version: 1.1.6-9971ebba4494012a93c03b40a2c58ec0eb60f50c
+3 Nodes configured, unknown expected votes
+15 Resources configured.
+============  ==
+
+Online: [ server1 server2 server3 ]
+</pre>
+Set up dlm_controld, gfs_controld and o2cb in cluster's CIB. Easiest way to do this is by running:
+<pre>
+crm configure edit
+</pre>
+and adjusting it to look somewhat like this:
+<pre>
+node server1
+node server2
+node server3
+primitive resDLM ocf:pacemaker:controld \
+	params daemon="dlm_controld" \
+	op monitor interval="120s"
+primitive resGFSD ocf:pacemaker:controld \
+	params daemon="gfs_controld" args="" \
+	op monitor interval="120s"
+primitive resO2CB ocf:pacemaker:o2cb \
+	params stack="cman" \
+	op monitor interval="120s"
+clone cloneDLM resDLM \
+	meta globally-unique="false" interleave="true"
+clone cloneGFSD resGFSD \
+	meta globally-unique="false" interleave="true" target-role="Started"
+clone cloneO2CB resO2CB \
+	meta globally-unique="false" interleave="true"
+colocation colGFSDDLM inf: cloneGFSD cloneDLM
+colocation colO2CBDLM inf: cloneO2CB cloneDLM
+order ordDLMGFSD 0: cloneDLM cloneGFSD
+order ordDLMO2CB 0: cloneDLM cloneO2CB
+property $id="cib-bootstrap-options" \
+	dc-version="1.1.6-9971ebba4494012a93c03b40a2c58ec0eb60f50c" \
+	cluster-infrastructure="cman" \
+	stonith-enabled="false" \
+	no-quorum-policy="ignore"
+</pre>
+'''EXTREMELY IMPORTANT''': Notice that this example has STONITH disabled. This is just a HOWTO for a basic setup. You should't be running shared resources with disabled STONITH. Check pacemaker's documentation for guidance on setting this up. If you are not sure about this, stop right now!
+
+Save and quit. Running
+<pre>
+crm status
+</pre>
+should now show all these services running:
+<pre>
+============  ==
+Last updated: Thu Apr 26 20:18:12 2012
+Last change: Thu Apr 26 20:06:11 2012 via crmd on server1
+Stack: cman
+Current DC: server1 - partition with quorum
+Version: 1.1.6-9971ebba4494012a93c03b40a2c58ec0eb60f50c
+3 Nodes configured, unknown expected votes
+15 Resources configured.
+============  ==
+
+Online: [ server1 server2 server3 ]
+
+ Clone Set: cloneDLM [resDLM]
+     Started: [ server1 server2 server3 ]
+ Clone Set: cloneO2CB [resO2CB]
+     Started: [ server1 server2 server3 ]
+ Clone Set: cloneGFSD [resGFSD]
+     Started: [ server1 server2 server3 ]
+</pre>
+Create GFS2 and OCFS2 filesystems:
+<pre>
+mkfs.gfs2 -p lock_dlm -j4 -t pacemaker:pcmk /dev/vdc 
+mkfs.ocfs2 /dev/vdb 
+</pre>
+When running mkfs.gfs2, make sure that cluster name is identical with the name setup in /etc/cluster/cluster.conf. In this case, this is 'pacemaker'.
+Now add remaining resources (filesystems). Run
+<pre>
+crm configure edit
+</pre>
+and add:
+<pre>
+primitive resFS ocf:heartbeat:Filesystem \
+	params device="/dev/vdb" directory="/opt" fstype="ocfs2" \
+	op monitor interval="120s"
+primitive resFS2 ocf:heartbeat:Filesystem \
+	params device="/dev/vdc" directory="/mnt" fstype="gfs2" \
+	op monitor interval="120s"
+clone cloneFS resFS \
+	meta interleave="true" ordered="true" target-role="Started"
+clone cloneFS2 resFS2 \
+	meta interleave="true" ordered="true" target-role="Started"
+colocation colFSGFSD inf: cloneFS2 cloneGFSD
+colocation colFSO2CB inf: cloneFS cloneO2CB
+order ordGFSDFS 0: cloneGFSD cloneFS2
+order ordO2CBFS 0: cloneO2CB cloneFS
+</pre>
+Once saved, cluster will show all services running:
+<pre>
+
+============  ==
+Last updated: Thu Apr 26 20:28:21 2012
+Last change: Thu Apr 26 20:06:11 2012 via crmd on server1
+Stack: cman
+Current DC: server1 - partition with quorum
+Version: 1.1.6-9971ebba4494012a93c03b40a2c58ec0eb60f50c
+3 Nodes configured, unknown expected votes
+15 Resources configured.
+============  ==
+
+Online: [ server1 server2 server3 ]
+
+ Clone Set: cloneDLM [resDLM]
+     Started: [ server1 server2 server3 ]
+ Clone Set: cloneO2CB [resO2CB]
+     Started: [ server1 server2 server3 ]
+ Clone Set: cloneFS [resFS]
+     Started: [ server1 server2 server3 ]
+ Clone Set: cloneGFSD [resGFSD]
+     Started: [ server1 server2 server3 ]
+ Clone Set: cloneFS2 [resFS2]
+     Started: [ server1 server2 server3 ]
+</pre>

@@ -1,0 +1,360 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+== Overview ==
+OpenVPN is a Virtual Private Networking (VPN) solution provided in the Ubuntu Repositories. It is flexible, reliable and secure. It belongs to the family of SSL/TLS VPN stacks (different from IPSec VPNs).
+
+This page refers to the '''community version''' of the OpenVPN server. Setup examples are also provided on the <nowiki>[[http://www.openvpn.net/index.php/open-source.html|OpenVPN community website]]</nowiki>. There is also a <nowiki>[[http://openvpn.net|commercial Web GUI]]</nowiki> which might be easier to set up and maintain, especially for non-experts, and which allows clients to download VPN configurations themselves using the web browser.
+
+== What is a bridged VPN? ==
+A bridged VPN allows the clients to appear as though they are on the same local area network (LAN) as the server system.  The VPN accomplishes this by using a combination of virtual devices -- one called a "bridge" and the other called a "tap device".  A tap device acts as a virtual Ethernet adapter and the bridge device acts as a virtual hub.  When you bridge a physical Ethernet device and a tap device, you are essentially creating a hub between the physical network and the remote clients.  Therefore, all LAN services are visible to the remote clients.
+
+== Setting up a Bridged VPN using OpenVPN ==
+Note that good networking knowledge and enough time is required to follow this manual setup guide. These instructions are for setting up a Bridged VPN on Ubuntu 8.04 using x509 certs and some general administration tasks.
+
+This example installation was performed using Ubuntu Jeos 8.04 in a KVM virtual machine (but could just have easily been performed on a standalone Ubuntu Server).  In my configuration eth0 is connected to the Internet and eth1 is connected to the LAN network that will be bridged. Comments in configuration files are preceeded by two pound signs (##).
+
+=== Installing the Server ===
+Install OpenVPN: 
+
+<pre>
+sudo apt-get install openvpn bridge-utils
+</pre>
+
+==== Setting up the Bridge ====
+* Edit /etc/network/interfaces
+
+When a Linux server is behind a NAT firewall, the /etc/network/interfaces file commonly looks like
+
+<pre>
+
+auto lo eth0
+iface lo inet loopback
+
+iface eth0 inet static
+  address 192.168.1.10
+  netmask 255.255.255.0
+  gateway 192.168.1.1
+
+</pre>
+
+Edit this and add a bridge interface:
+{{{ 
+sudo nano /etc/network/interfaces
+}}}
+
+so that it look similar to:
+<pre>
+
+auto lo br0
+
+iface lo inet loopback
+
+iface br0 inet static 
+  address 192.168.1.10 
+  netmask 255.255.255.0
+  gateway 192.168.1.1
+  bridge_ports eth0
+
+iface eth0 inet manual
+  up ip link set $IFACE up promisc on
+  down ip link set $IFACE down promisc off
+</pre>
+
+* If you are running Linux inside a virtual machine, you may want to add the following parameters to the bridge connection:
+
+<pre>
+  bridge_fd 9      ## from the libvirt docs (forward delay time)
+  bridge_hello 2   ## from the libvirt docs (hello time)
+  bridge_maxage 12 ## from the libvirt docs (maximum message age)
+  bridge_stp off   ## from the libvirt docs (spanning tree protocol)
+</pre>
+
+* Restart networking:
+<pre>
+sudo /etc/init.d/networking restart
+</pre>
+
+The bridging declarations come from the libvirt documentation.  (I really only understand the bridge_ports directive and the bridge_stp directive. Please add more instructions here.)
+
+==== Generating Certificates ====
+* Generate certificates for the server.  In order to do this I will setup my own Certificate Authority using the provided easy-rsa scripts in the /usr/share/doc/openvpn/examples/easy-rsa/ directory.  Another alternative is using the graphical program tinyca to create your CA.  
+
+Step 1:
+   Create a *new* directory and prepare it to be used as a (CA) key management directory (to create and store keys and certificates).
+   <pre>
+sudo make-cadir /etc/openvpn/easy-rsa/
+</pre>
+Step 2:
+   Edit /etc/openvpn/easy-rsa/vars
+   <pre>
+sudo vi /etc/openvpn/easy-rsa/vars
+</pre>
+   Change these lines at the bottom so that they reflect your new CA.
+   <pre>
+export KEY_COUNTRY="US"
+export KEY_PROVINCE="CA"
+export KEY_CITY="SanFrancisco"
+export KEY_ORG="Fort-Funston"
+export KEY_EMAIL="me@myhost.mydomain"
+</pre>
+Step 3:
+   Setup the CA and create the first server certificate
+   <pre>
+
+cd /etc/openvpn/easy-rsa/ ## move to the easy-rsa directory
+sudo chown -R root:sudo .  ## make this directory owned by the system administrators
+sudo chmod g+w . ## make this directory writable by the system administrators
+source ./vars ## execute your new vars file
+./clean-all  ## Setup the easy-rsa directory (Deletes all keys)
+./build-dh  ## takes a while consider backgrounding
+./pkitool --initca ## creates ca cert and key
+./pkitool --server server ## creates a server cert and key
+cd keys
+openvpn --genkey --secret ta.key  ## Build a TLS key
+sudo cp server.crt server.key ca.crt dh2048.pem ta.key ../../
+
+    }}}
+
+The Certificate Authority is now setup and the needed keys are in /etc/openvpn/
+      
+==== Configuring the Server ====
+By default all servers specified in *.conf files in the /etc/openvpn/ directory are started on boot.  Therefore, all we have to do is creating a new file named server.conf in the /etc/openvpn/ directory.  
+
+First, we're going to create a couple of new scripts to be used by the openvpn server.
+
+{{{
+sudo vi /etc/openvpn/up.sh
+</pre>
+
+This script should contain the following
+
+<pre>
+
+BR=$1
+DEV=$2
+MTU=$3
+/sbin/ip link set "$DEV" up promisc on mtu "$MTU"
+/sbin/brctl addif $BR $DEV
+</pre>
+
+Now, we'll create a "down" script.
+
+<pre>
+sudo vi /etc/openvpn/down.sh
+</pre>
+
+It should contain the following.
+
+<pre>
+
+BR=$1
+DEV=$2
+
+/sbin/brctl delif $BR $DEV
+/sbin/ip link set "$DEV" down
+</pre>
+
+Now, make both scripts executable.
+
+<pre>
+sudo chmod +x /etc/openvpn/up.sh /etc/openvpn/down.sh
+</pre>
+
+And now on to configuring openvpn itself.
+
+<pre>
+sudo vi /etc/openvpn/server.conf
+</pre>
+
+<pre>
+mode server
+tls-server
+
+local <your ip address> ## ip/hostname of server
+port 1194 ## default openvpn port
+proto udp
+
+dev tap0 ## If you need multiple tap devices, add them here
+script-security 2 ## allow calling up.sh and down.sh
+up "/etc/openvpn/up.sh br0 tap0 1500"
+down "/etc/openvpn/down.sh br0 tap0"
+
+persist-key
+persist-tun
+
+ca ca.crt
+cert server.crt
+key server.key  # This file should be kept secret
+dh dh2048.pem
+tls-auth ta.key 0 # This file is secret
+
+cipher BF-CBC        # Blowfish (default)
+comp-lzo
+
+ifconfig-pool-persist ipp.txt
+server-bridge 192.168.1.10 255.255.255.0 192.168.1.100 192.168.1.110
+push "dhcp-option DNS your.dns.ip.here"
+push "dhcp-option DOMAIN yourdomain.com"
+max-clients 10 ## set this to the max number of clients that should be connected at a time
+
+user nobody
+group nogroup
+keepalive 10 120
+status openvpn-status.log
+verb 3
+</pre>
+
+The server initialization script will complain about '''WARN: could not open database for 4096 bits. Skipped''' and you can work around it by running this command:
+<pre>
+touch /usr/share/openssl-blacklist/blacklist.RSA-4096
+</pre>
+
+==== Pre-systemd setup ====
+Don't forget to either reboot or run the command below. This will restart openvpn and load the new config.
+<pre>
+sudo /etc/init.d/openvpn restart
+</pre>
+
+==== systemd setup ====
+For `systemd`, the `/lib/systemd/system/openvpn@.service` file is defined so that multiple OpenVPN servers can be active concurrently. This is accomplished by the `%i` in the service definition file, which will be used as the name of the configuration file. Since we created a `server.conf` file, use the following commands to enable OpenVPN:
+<pre>
+    systemctl start openvpn@server
+    systemctl enable openvpn@server
+</pre>
+
+==== Firewall notes ====
+In case you run a firewall like ufw, please consider enabling ip forwarding, otherwise the clients will only be able to connect to the server, but not to other LAN servers.
+
+=== Getting Clients Connected ===
+This section concerns creating client certificate and key files and setting up a client configuration file.  The files can then be used with OpenVPN on a client platform.  The described configuration will work with OpenVPN installations of <nowiki>[[http://openvpn.se/|OpenVPN GUI]]</nowiki> for Windows and <nowiki>[[http://code.google.com/p/tunnelblick/|Tunnelblick]]</nowiki> for Mac OS X clients.  For a detailed discussion of each, refer to their respective home pages.  It should also be compatible with Linux OpenVPN clients.
+
+==== Generating Client Certificate and Key ====
+Generating certificates and keys for a client is very similar to the process used for generating server certificates.  It is assumed that you have already set up the <code>/etc/openvpn/easy-rsa/</code> directory and updated the <code>/etc/openvpn/easy-rsa/vars</code> file as described above.  You should have already setup your Certificate Authority and created a server certificate and keys.
+
+<pre>
+cd /etc/openvpn/easy-rsa/ ## move to the easy-rsa directory
+source ./vars             ## execute the vars file
+./pkitool client          ## create a cert and key named "client"
+</pre>
+
+==== Configuring the Client ====
+The client configuration has been adapted from the OpenVPN 2.0 sample configuration file.  For Windows, the file should be named client.ovpn and for other operating systems, the file should be named client.conf.  The file can be created using vi or other editor that can create plain text files.
+
+The configuration file assumes that there is only one TUN/TAP device configured on the client.
+<pre>
+
+client
+
+dev tap
+
+remote your.server.example.com 1194
+
+nobind
+
+resolv-retry infinite
+
+persist-key
+persist-tun
+
+ca ca.crt
+cert client.crt
+key client.key
+
+tls-auth ta.key 1
+
+cipher BF-CBC
+
+comp-lzo
+
+verb 3
+
+</pre>
+
+Place the client.ovpn (or client.conf) configuration file along with the certificate and key files in the openvpn configuration directory on the client.  With the above setup, the following files should be in the configuration directory.
+
+<pre>
+client.ovpn
+ca.crt
+client.crt
+client.key
+ta.key
+</pre>
+
+(For the <nowiki>[[http://openvpn.se/|OpenVPN GUI]]</nowiki> for Windows, the default location for the files is <code>C:\Program Files\OpenVPN\config</code>.)
+
+(For <nowiki>[[http://code.google.com/p/tunnelblick/|Tunnelblick]]</nowiki> for Mac OS X, the default location for the files is ''<code>~username</code>''<code>/Library/openvpn</code>.
+
+==== Resolv.conf (optional) ====
+If you deployed a full vpn tunnel, in which all or most routes traverse the tunnel, then you might need to install helper scripts to update /etc/resolv.conf with your tunneled dns servers. This will allow you to access private name resolution while the tunnel is connected and restore your non-tunneled dns servers when disconnected. If you do not have an internal authoritative zone then you might not benefit from this optional script.
+
+<pre>
+apt-get install resolvconf
+</pre>
+
+Then insert these up down statements into your clients configuration file in /etc/openvpn/
+
+<pre>
+up /etc/openvpn/update-resolv-conf
+down /etc/openvpn/update-resolv-conf
+</pre>
+
+==== Suspend (Optional) ====
+If your vpn tunnel is not re-establishing after resuming from a sleep or suspended state, you may need to create the following script to restart the openvpn service. This is useful for always-on full tunneled connections.
+
+<pre>
+sudo cat <<EOF > /lib/systemd/system-sleep/openvpn
+set -e
+
+if [ "${2}" = "suspend" ] || [ "${2}" = "hybrid-sleep" ]; then
+    case "$1" in
+        post)
+                killall -9 /usr/sbin/openvpn
+                systemctl stop openvpn
+                sleep 3
+                systemctl start openvpn
+
+        ;;
+    esac
+fi
+EOF
+</pre>
+
+<pre>
+sudo chmod +x /lib/systemd/system-sleep/openvpn
+</pre>
+=== Firestarter configuration for OpenVPN ===
+Firestarter requires some configuration on both client and server machines to allow services like SAMBA over a VPN tunnel. In addition the creation of rules within the GUI, it was also necessary to edit the /etc/firestarter/user-pre file.  I used the instructions found here: 
+
+http://www.howtoadvice.com/FirestarterVPN/
+
+Also, though the tutorial didn't discuss it,  I found it necessary to save the original user-pre file as a copy, then rename the original and rename the copy to user-pre due to permissions issues.
+
+== Upstream Packages ==
+Ubuntu LTS 22.04 has OpenVPN 2.5.5, if you are on a previous Ubuntu release and need an OpenVPN 2.5 feature set (i.e. v2crypt), <nowiki>[[https://community.openvpn.net/openvpn/wiki/OpenvpnSoftwareRepos|openvpn.net upstream has packages]]</nowiki> available. Using these may break your Ubuntu support warranty.
+
+LTS 20.04 example:
+<pre>
+wget -O - https://swupdate.openvpn.net/repos/repo-public.gpg|apt-key add -
+echo "deb http://build.openvpn.net/debian/openvpn/stable focal main" > /etc/apt/sources.list.d/openvpn-aptrepo.list
+</pre>
+
+== Other Resources ==
+* Consult the official <nowiki>[[http://openvpn.net/howto.html|OpenVPN Howto]]</nowiki>.
+
+* Consult this tutorial <nowiki>[[https://www.septimius.net/linux-howto-setup-openvpn-server/|Howto setup and OpenVPN Server]]</nowiki>.
+
+* Consult <nowiki>[[http://www.juanpablo.netne.net/index.php/en/manuales-linux/red-privada-virtual-openvpn/item/58|this tutorial]]</nowiki>. 
+
+* Consult <nowiki>[[http://ubuntuguide.org/wiki/OpenVPN_server|(K)Ubuntuguide -- OpenVPN server installation]]</nowiki>
+
+----
+CategoryVPN <nowiki>[[CategoryVPN]]</nowiki>

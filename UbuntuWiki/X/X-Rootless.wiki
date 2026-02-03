@@ -1,0 +1,198 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+=== Summary ===
+
+For video drivers that support kernel mode-setting (KMS), X can be set up to run as a non-root user.
+
+=== Background ===
+
+Historically, X has been responsible for setting up the graphics modes (resolutions, refresh rates, etc.)  X did this by talking to the hardware directly, which it could only do if it ran with root privileges.  The reason X was tasked with doing this work was to keep graphics as platform-agnostic as possible, so the same graphics code could be used for BSD and other *nix flavors.
+
+Today, the feeling is that this mode-setting logic should be moved into the kernel.  Several video drivers now have this 'kernel mode-setting' (KMS) ability implemented.  In lucid, -intel, -nouveau, and -radeon all use KMS.  But other drivers, including those for uncommon hardware and the proprietary -fglrx and -nvidia, do not support KMS at all.
+
+=== Requirements ===
+
+* Framebuffer or <nowiki>[[X-KernelModeSetting|kernel mode-setting]]</nowiki> enabled video drivers ONLY (see also <nowiki>[[X-Drivers|X-Drivers]]</nowiki>):
+** fbdev (ARM, etc.) - Not sure of status here.  May need some driver development effort?
+** -intel [DONE] - On by default in Lucid (except on <nowiki>[[X-Bugs-Lucidi8xxFreezes|i8xx hardware]]</nowiki>)
+** -ati [DONE] - Available since Karmic (but buggy), turned on by default in Lucid
+** -nouveau [DONE] - Turned on in Lucid
+** -psb [IN PROGRESS] - <nowiki>[[http://www.phoronix.com/scan.php?page=news_item&px=NzY2Mg|Coming soon? (no news since Nov 2009)]]</nowiki>
+** -openchrome [IN PROGRESS]
+** -nv, -nvidia, -fglrx, others:  Not planned at this time
+
+* Non-root access to certain device files
+** tty/VT probing and ownership
+** input devices
+** DRM ioctls - (should be largely done already)
+
+* Drop suid bit on /usr/bin/X
+
+=== Example ===
+
+In one console:
+<pre>
+sudo chown $USER /dev/tty${VT}
+sudo chmod o+rw /dev/input/*
+/usr/bin/Xorg vt8 -retro -sharevts -nohwaccess -logfile /tmp/Xorg.U.log :1
+</pre>
+
+Then SSH in and launch clients as desired:
+<pre>
+DISPLAY=:1 xeyes &
+DISPLAY=:1 xterm
+</pre>
+
+When done, terminate X:
+<pre>
+pkill X
+</pre>
+
+=== Discussion ===
+
+While the kernel and Xorg are set up to run X without root permissions, device permissions and other plumbing work needs done.  Some decisions need made such as where X should store its log files, and whether it should run as the user, or if a special user or group should be created for X.
+
+For single user devices (where there is no login screen or account management), the simplest approach would be to use that user and store files in its user space.
+
+For multi-user situations (such as a traditional desktop), either X could run as a service and flip its ownership to the logged in user via udev rules, or else the login session should run as one X session and allow for instantiating secondary X sessions as the user.  This latter approach is most secure, but may be tougher to ensure a smooth transition.
+
+==== What user should X be run as? ====
+
+>  $ sudo chown $USER /dev/tty8
+>  $ sudo chmod o+rw /dev/input/*
+
+This is the main thing to be solved, and I think it's doable with only
+minor additions.
+
+Right now, root launches the gdm greeter, running as "gdm", which launches
+the setuid X.  Once the user authenticates, the cookie is transfered
+to the new user, and things continue.  However, this means the same X
+server is running for both users (a design issue that I believe is a
+risk, actually).
+
+So, the question here for rootless X needs to be: "what user should X
+run as?"
+
+If it should match the logged-in user, then X needs to be restarted once
+the gdm-greeter authenticates the new user.  This is rather different
+from the current design.  To handle the permissions, the gdm start-up
+just needs to add file ACL perms for the "gdm" user to /dev/tty7 and
+/dev/input/* in the same way that HAL used to add ACLs for things like
+FUSE, scanners, etc, and then once the new user auths, transfer the
+permissions instead of the cookie, and let the user start X.
+    setfactl -m user:$USER:rw /dev/tty7 $(find -type c /dev/input)
+Additionally, udev would need to be modified to add these ACLs for as
+long as the user is considered "on the local console" so that newly
+attached input devices are available to the user.
+
+If, on the other hand, we want X to effectively remain a "service",
+running as a different user (and non-root), then we just need to add udev
+rules to flip the ownership to that user, and everything stays the same,
+except that there is a new system user who's entire purpose is to run X.
+
+The latter option is by far the simplest to implement but still creates
+a situation where finding flaws in the X server leads to potential
+exploitation of other users that log in to X.  As such, I would prefer
+we find a way to do the former, but the latter is certainly a good
+first-step for a working proof-of-concept.
+
+The work for the former is also, I think, possible to be done in parallel
+with a regular setuid X.  My only question is how input devices are
+currently shared between simultaneous X sessions.  And perhaps it creates
+a situation where users can snoop on the input from other user sessions?
+And what kind of expense is there in restarting the X process if we launch
+it once for the gdm greeter, and then again for the authenticated user?
+
+-Kees
+
+==== Permissions ====
+
+Bryce Harrington [2010-02-06  0:08 -0800]:
+> As I've mentioned previously, *most* of the work is getting permissions
+> sorted out on device files.  This needs a foundations type person (like
+> Steve Langasek or Martin Pitt) to figure out.  Alberto and I succeeded
+> in hacking around this today, but the hack we came up with, while it
+> works, I think it may actually make the system *less* secure than if we
+> ran X as root.  It would be a good idea to have someone from foundations
+> put some thought into how we can do this in a proper manner.
+
+As far as I remember, there were two major problems:
+
+(1) input device access
+
+We really shouldn't allow access to /dev/input/* to normal users,
+since that would make it way too easy to install key loggers and so
+on. Solutions:
+
+* Run X.org not as the human user, but as a system user in an "input"
+   group, and install udev rules to make the devices root:input 664.
+
+* (Slight variation) Make X.org setgid "input", same udev rules.
+
+(2) backlight access
+
+Since these aren't device files, but kernel bits in /sys, we cannot
+control these with userspace magic like udev/ConsoleKit/etc.
+Solutions:
+
+* Change kernel drive to expose a real device node for this for
+   controlling, instead of writing to /sys, and use udev's automatic
+   ACLs to grant access to current foreground user. IANAKD, so I have
+   no idea how much effort this is.
+
+* Split out a kind of "ubacklight" service which runs as root,
+   writes /sys, and uses the usual ConsoleKit/PolicyKit policy of
+   allowing access to the current foreground console. X.org would then
+   talk to it through D-Bus. Quite some overhead, though.
+
+Martin
+
+==== Upgrade Considerations ====
+
+There is another issue here, which is that if the -intel driver in Lucid
+doesn't support UMS, the kernel and X have to be upgraded in lockstep for
+LTS->LTS upgrades.  A power event mid-upgrade (where *either* of the kernel
+or the X packages upgraded without the other) will leave the system unable
+to bring X up, which means desktop users will have a very hard time
+completing the upgrade.
+
+If we keep the support for UMS around through Lucid (and drop it in
+Lucid+1), then we have a reliable upgrade path because the new X driver
+works with both the old and new kernels, so the user can recover from a
+power event by booting the previous kernel.
+
+I think the right way round is for Lucid to have UMS support re-enabled, and
+to have a KMS-only package in PPA.  Having UMS support in a PPA is clearly
+not going to help users in the middle of an upgrade from hardy.
+
+==== Revoke Syscall ===
+
+Kees's summary of the plumbing requirements for X-as-service is accurate
+(udev rules to grant access to the input and vt devices to just the service
+user).
+
+To safely permit the individual user accounts to run an X server would
+require implementation of a "revoke" syscall in the kernel, to ensure that
+each server has exclusive access to the input devices when it's in the
+foreground; and a root daemon (perhaps consolekit) to arbitrate this access
+on behalf of the servers.  I strongly counsel against attempting anything of
+this sort on a Lucid time frame.  The lack of a revoke syscall in Linux has
+been a known limitation for over a decade, it's not something that's going
+to be fixed right (securely) in three months - rushing that implementation
+is only going to *decrease* security.
+
+Steve Langasek
+
+=== References ===
+
+* <nowiki>[[http://lwn.net/Articles/341033/|Rootless X]]</nowiki> By Jonathan Corbet, Linux Weekly News
+* <nowiki>[[http://lwn.net/Articles/341035/|non-root X]]</nowiki> Email from Jesse Barnes, Linux Weekly News
+* http://www.phoronix.com/scan.php?page=news_item&px=NzM2MA

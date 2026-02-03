@@ -1,0 +1,208 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+{| class="wikitable"
+|-
+| <#FF0000>'''TODO: Resolve how we use hooks to rebucket crashes to library packages on the server, or if that's implemented separate from this (likely, given that it runs only on the server and has no restrictions for duration or size).'''
+|}
+
+=== Rationale ===
+
+What does a developer do when a stack trace is not enough to completely debug an issue? They could find a user who is experiencing this problem and contact them, asking them to provide additional information. This is very time consuming and fraught with long delays.
+
+A developer should be able to identify an issue that needs additional information, write a small amount of code to collect additional details on a system exhibiting the problem, and quickly get that run on such systems. This code should require no human interaction and should report back quickly, notifying the developer when there is something actionable.
+
+=== Security ===
+
+Both daisy.ubuntu.com and errors.ubuntu.com are signed with the Ubuntu certificate from Go Daddy. This certificate is included by default in the ssl-certs package.
+
+Whoopsie needs to check that the SSL certificate matches. There is a strict checking option in libcurl for this. With that in place, downloading and uploading should be safe.
+
+We will restrict the set of users who can create new hooks to the members of ~core-dev. In the future we can expand this by querying the Launchpad ACLs for the per-package upload rights and match these to the respective binary packages in the Error Tracker.
+
+==== Peer review ====
+
+Pressure is often put on developers to fix issues urgently and sometimes they rush changes out. Poorly-coded hooks have the potential to consume system resources in a manner that adversely affects the user experience.
+
+New package hooks or changes to existing ones will require review from at least two other core developers.
+
+=== Non-interactive ===
+
+Reporting errors in Ubuntu is simple by design.
+
+If the dialogs were particularly complex or if they asked a series of questions, users would be less willing to work through them to submit reports to us. One bad dialog will leave a lasting impression that will make users hesitant when prompted the next time.
+
+Interactive questions are also more often than not poorly worded for the audience. A current sampling of apport package hooks includes:
+"Apport has detected a possible GPU hang. Did your system recently lock up and/or require a hard reboot?"
+"It seems you have modified the contents of /etc/cups/cupsd.conf. Would you like to add the contents of it to your bug report?"
+
+Because there is no guarantee that an Internet connection is available at the time of a crash, apport collects what information it can and hands the error reports off to whoopsie to be sent when possible. It is from this point that interactivity stops. If an internet connect appeared even just a few moments later it would already be far too late to ask the user additional questions. Anything more than 10 seconds would be unreasonable.
+
+==== Security ====
+Some package hooks will need to be able to attach files not normally viewable by a regular user or attach the output of a command as root. xorg needs to attach the contents of <code>/var/log/lightdm</code>. update-manager needs to attach the current dmsesg. Plymouth needs to attach <code>/var/log/plymouth-debug.log</code>.
+
+At present, apport uses pkexec to present a password dialog in these cases. While this is an improvement over the previous gksu-based implementation in that it allows us to set more password dialog text, providing some context as to why the user is suddenly seeing this dialog, it is still abrupt.
+
+This presents an interesting problem.
+
+We cannot wait until the hook is run to show these authentication dialogs. It will likely be far more than 10 seconds after the initial error dialog was presented, and could be hours or days later, depending on when the user next connects to the Internet.
+
+One option is to map attach_root_command_outputs to a new com.ubuntu.apport.package-hook PolicyKit permission that is granted to the whoopsie user. While this means the hook mechanism is able to run remote code as root, it is restricted to code from the same group of developers that can modify maintainer scripts in all of the Ubuntu packages (~core-dev). Still, users can run apt in --download-only mode and review the code to be run before installing a package. They cannot review a server-side hook before running it.
+
+'''Until we can find a secure way of solving this, we will limit hooks to only running with regular user permissions.'''
+
+==== Running hooks as a regular user ====
+We will need to find a way for whoopsie to run code as the user the crash occurred for, or grant sufficient permissions to whoopsie so that it can access the user's files.
+
+Barring upstart inotify support, there appear to be two ways to do this:
+
+# Leave part of whoopsie running as root, so that it can switch to the target user and run the hooks.
+# Add another watch to update-notifier.
+
+Adding another watch to update-notifier means more stamp files and another round of asynchronous communication. Leaving part of whoopsie running as root, therefore, is the preferred option. We will consult with the security team to ensure they're happy with this behaviour.
+
+=== Web interface ===
+
+<nowiki>[[File:new-hook-mockup.jpg]]</nowiki>
+
+We will soon restrict access to sensitive information on https://errors.ubuntu.com to just ~canonical-ubuntu-platform (<nowiki>[[http://pad.lv/1087361|1087361]]</nowiki>). It logically follows that the interface for modifying server-side hooks will also be restricted to this set of users.
+
+=== Types ===
+
+Hooks will be applied in one of two locations.
+
+The first option is to set a hook at the problem level, as keyed by the crash or duplicate signature. We will need to maintain a mapping between the StacktraceAddressSignature on the client and the crash signature on the server. This may need to account for a duplicate signature as generated on server-side mapping (as used by developers to combine or split apart buckets) back to a StacktraceAddressSignature on the client. This should be straightforward as the server already needs to maintain this mapping to identify when it should request a core file.
+
+The hooks can also be set at the package level, where they will be run for any crash of the given package.
+
+We're purposefully leaving out global, problem type-specific hooks for now as these should ideally live in the apport package.
+
+=== Modification from existing behaviour ===
+
+We will leave in place the existing packaged package-hooks for now, taking care to fix the bug whereby they are run on released versions (<nowiki>[[http://pad.lv/1084979|1084979]]</nowiki>). However, we will only run these when creating a bug report through the <code>ubuntu-bug</code> command, not when processing a <code>.crash</code> file with apport-gtk.
+
+We will SRU whoopsie and apport for the server-side hook changes.
+
+=== Expiry ===
+
+We will support two types of editable expiration fields: quantity (how many times have we received one of these reports?) and timeout (how many days has the hook been available for?). The sum of the reports reaching the value of one of fields will cause further collection to stop with the hook disabled. If this happens while a client is sending data for the hook, the connection will be dropped and the hook automatically disabled.
+
+Both of these fields will have upper bounds for valid values. Developers will not be able to collect thousands of reports or run the hook for months.
+
+There will be a third, non-editable field, for the amount of disk space the sum of the reports can use. In extreme cases, a database administrator should be able to override this field for individual hooks.
+
+There will be a hardcoded upper limit on the client for disk usage, just to be safe. This is likely to be 50MB or less.
+
+=== How do we get the reports with these fields? ===
+
+Only the Package, Dependencies, and DuplicateSignature fields can be modified. This is so the hooks can effectively reassign the crash to a library. Modifications to any other field will be ignored.
+
+The results of running the hook code will be written by submit.wsgi into the <code>HookResults</code> Column Family:
+
+{| class="wikitable"
+|-
+| <style="border:1px solid black;">28ec72f4-e86a-43f8-bd09-420d05124cb4
+| <style="border:1px solid black;">Package
+| <style="border:1px solid black;">BiscuitCount
+| <style="border:1px solid black;">BiscuitType
+|-
+| 
+| <style="border:1px solid black;">omnomnom
+| <style="border:1px solid black;">3
+| <style="border:1px solid black;">Jaffa Cakes
+|}
+
+The row key will be the OOPS ID from the original report.
+
+The <code>BucketHooks</code> Column Family will maintain a mapping of hook results to the bucket or package they were run for.
+{| class="wikitable"
+|-
+| <style="border:1px solid black;">bucket ID or package
+| <style="border:1px solid black;">OOPS ID
+| <style="border:1px solid black;">OOPS ID
+| <style="border:1px solid black;">OOPS ID
+|-
+| 
+| <style="border:1px solid black;">null
+| <style="border:1px solid black;">null
+| <style="border:1px solid black;">null
+|}
+
+If the hook fails, the Python traceback will be written in a column.
+
+{| class="wikitable"
+|-
+| <style="border:1px solid black;">28ec72f4-e86a-43f8-bd09-420d05124cb4
+| <style="border:1px solid black;">PythonTraceback
+|-
+| 
+| <style="border:1px solid black;">...
+|}
+
+* Failed hooks will send an alert to the hook creator via SMS (mup) or email.
+* Whoopsie and Daisy will pass a token back and forth to ensure the results of a hook are being written to the correct location. This is likely to be the OOPS ID.
+* We will provide a REST API for getting the results for the hook for a bucket or package. A page of these results, linked to from the hook configuration page, will consume this API method.
+* The first result for a given hook will trigger the alerts system, notifying the developer responsible for that hook.
+
+=== Delivery mechanism ===
+
+Provide a list (BSON) of URLs to the individual hooks. It doesn’t need the package name or the bucket ID because it already has those locally. 
+
+We send to the client with a token that maps to the bucket. In the simple case this would be the Crash Signature that the SAS maps to. We still need a SAS to Crash Signature mapping so we can tell the right clients to get the specific hook for a crash signature.
+
+=== Restricting hooks to a particular release ===
+
+If hooks want to restrict to a particular release, they should check the DistroRelease field.
+
+=== Compression ===
+
+If there is time in the initial implementation, we should evaluate using compression for the increasingly large amount of data transfered between whoopsie and daisy. Candidates for this are snappy and zlib. xz could also be considered if we keep decompression time low on the server.
+
+We should work with the webops team on this, as they may have strong opinions on the implementation. We will only get a few instances of this extra information out of the 100,000 reports we receive a day, given the limits we're putting on size, so this shouldn’t overload us.
+
+=== Sending ===
+
+Whoopsie gets a few hooks, downloads them, runs them with the python-apport code to update the report, sends the new keys in the report back (not any existing or modified), report gets written to the HookResults CF
+
+=== Audit ===
+
+A new page will be added to https://errors.ubuntu.com that provides a report of hook usage.
+
+This will include:
+* Active hooks with their expiry date. For each of the hooks, the number of reports received and the size of data transmitted so far will be included.
+* We will also record by day hook usage statistics (active, inactive, working, failed) to determine whether or not the hook mechanism is actually being used and working.
+
+=== Test mechanism ===
+
+We would like to make testing a hook before feeding it to systems as easy as possible. We should write a small script to test a new hook against a local or cloud-based system easy.
+
+=== Launchpad bugs ===
+
+A new checkbox will be added in the server-side hooks UI for “Get someone to file this on Launchpad”.
+
+This is checked by apport via a REST API on daisy.ubuntu.com, where it asks if we want LP bugs for the SAS for which the report is about. If the answer is yes, then we create a LP bug with a specific errors.ubuntu.com tag that crash-digger is looking for and provide the SAS.
+
+crash-digger then finds this, looks up the SAS in daisy.ubuntu.com and gets the crash signature back. It then writes the errors.ubuntu.com URL for that bucket into the bug and tells daisy to send off a notification that the server-side hook now has a LP bug. It also updates the BugToCrashSignatures CF.
+
+This will let us mostly turn off retracing of Launchpad crashes.
+
+=== More notes ===
+<pre>
+16:26:53] <ev>	 switching uid -> have something privileged that looks for the hooks and runs them, first dropping privs to the right uid?
+[16:27:24] <cjwatson>	 Right, if you're planning on doing things as arbitrary users then you must have a privileged dispatcher anyway
+[16:27:36] <ev>	 prsumably upstart can be the privileged dispatcher?
+[16:27:42] <cjwatson>	 Might be worth remembering to set $HOME.  Aside from that it really depends what else you need
+[16:27:56] <cjwatson>	 It could be, but that might be more trouble than it's worth if you just want to spawn a subprocess and wait for it to finish
+[16:28:05] <ev>	 yeah, good point
+[16:28:12] <cjwatson>	 click certainly doesn't use Upstart jobs when it's executing user-level hooks, for instance
+[16:28:21] <cjwatson>	 It would be possible but would really involve way too much runaround
+
+16:34:33] <cjwatson>	 If it relates to click packages then I'd suggest that the extra chunk of code should run with the apparmor profile of the click app
+</pre>

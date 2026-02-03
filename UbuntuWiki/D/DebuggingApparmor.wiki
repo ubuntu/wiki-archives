@@ -1,0 +1,152 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+== Introduction ==
+
+AppArmor is used by Ubuntu to protect the system from misbehaving or compromised applications. When looking at or creating bug reports, it is important to distinguish between bugs in the application and bugs in the apparmor profile for the application.
+
+== How to file a bug ==
+
+When filing a bug report regarding an apparmor profile, you need three things:
+
+ 1. The package containing the profile. Bugs should be filed against this package. Profiles are found in /etc/apparmor.d/ and you can find what package the profile belongs to with 'dpkg -S'.  For example, to find out which package provides /etc/apparmor.d/usr.sbin.cupsd, use:<pre>
+$ dpkg -S /etc/apparmor.d/usr.sbin.cupsd
+</pre>
+# The 'audit' entries from /var/log/kern.log, and any files in /var/log/apparmor.
+# The steps needs to trigger the bug in the profile
+
+Bugs should be filed against the package shipping the profile, not simply against the ```apparmor``` package (the exception is when the profiling bug is against an abstraction shipped by the ```apparmor``` package). Please tag apparmor profile bugs with the ```apparmor``` tag.
+
+'''Note:''' please remember that it is generally not a bug in the profile if a non-default configuration is being used by the application. One example might be having mysql store its databases in /home/mysql instead of /var/lib/mysql. In these cases, the profile should just be changed by the admin.
+
+== Debugging procedure ==
+To debug an apparmor profile, look in /var/log/kern.log for 'audit' entries.  An example will look something like:
+<pre>
+Feb  4 14:30:33 example-client kernel: [   73.459739] audit(1202153433.710:6): operation="file_mmap" request_mask="mrw::" denied_mask="m::" name="/var/lib/ldap/__db.005" pid=5375 profile="/usr/sbin/slapd" namespace="default"
+</pre>
+
+* If you have auditd installed, !AppArmor messages are logged to /var/log/audit/audit.log instead, and have ```apparmor="DENIED"``` in the log entry
+
+The important things to look for are:
+# 'audit(...):' -- this tells you it is an apparmor generated log entry
+# 'profile="/usr/sbin/slapd"' -- this tells you what profile generated this message. Profiles are located in /etc/apparmor.d, and when looking for the profile, substitute '.' for the '/' from the log entry.  For example, the above entry's apparmor profile is located in /etc/apparmor.d/usr.sbin.slapd
+
+'''IMPORTANT:''' If you do not have any 'audit' entries in /var/log/kern.log at the time the application had a problem, then this is not an apparmor bug.  Please see DebuggingProcedures for more information on filing a bug.
+
+When debugging, it may also be useful to put apparmor into 'complain' mode.  This will allow your application to function normally while apparmor reports accesses that are not in the profile. To enable 'complain' mode, use:
+<pre>
+sudo aa-complain /path/to/bin
+</pre>
+where '/path/to/bin' is the absolute path to the binary, as reported in the 'profile=...' portion of the 'audit' entry. Eg:
+<pre>
+sudo aa-complain /usr/sbin/slapd
+</pre>
+
+To re-enable enforcing mode, use 'aa-enforce' instead:
+<pre>
+sudo aa-enforce /path/to/bin
+</pre>
+
+To disable a profile in Ubuntu 10.10 and earlier:
+<pre>
+sudo touch /etc/apparmor.d/disable/path.to.bin
+sudo apparmor_parser -R /etc/apparmor.d/path.to.bin
+</pre>
+in 11.04 and later:<pre>
+sudo aa-disable /etc/apparmor.d/path.to.bin
+</pre>
+
+To disable all of !AppArmor for testing purposes, boot with 'apparmor=0' on the kernel command line.
+
+== Adjusting Tunables ==
+AppArmor provides a mechanism for tuning your configuration without having to adjust your profiles. These tunables are stored in various files in ```/etc/apparmor.d/tunables```. The most common tunable to adjust is ```/etc/apparmor.d/tunables/home```. If AppArmor is denying access to files in your home directory and your home directory is not in ```/home```, then you need to edit ```/etc/apparmor.d/tunables/home``` accordingly. For example, if your home directory is under ```/exports/home``` then change:
+<pre>
+@{HOMEDIRS}=/home/
+</pre>
+to be:
+<pre>
+@{HOMEDIRS}=/home/ /exports/home/
+</pre>
+
+There are other tunables available to you in ```/etc/apparmor.d/tunables```. Most often, issues that are resolved by adjusted a tunable are not considered to be bugs in the profile.
+
+== Fixing profile bugs ==
+
+When using the default kernel logging mechanism (ie, when not using auditd), you will want to be aware that the kernel will rate limit !AppArmor log entries, which can lead to confusion when debugging an !AppArmor profile. As such, it is recommended that you temporarily disable kernel rate limiting during this process with:<pre>
+sudo sysctl -w kernel.printk_ratelimit=0
+</pre>
+
+Fixing apparmor profile bugs is usually straightforward. Enable 'complain' mode (see above), then exercise your application. You can then either use 'aa-logprof' to walk you through the process of updating the profile, or simply edit the profile directly. Please use the 'tunables' found in /etc/apparmor.d/tunables when appropriate. Eg, rather than using a rule like:<pre>
+  /home/*/ r,
+</pre>use:<pre>
+  @{HOME}/ r,
+</pre>
+
+Once the profile is updated, reload the the profile with:
+<pre>
+sudo apparmor_parser -r /etc/apparmor.d/<profile file>
+</pre>
+
+After the profile is working as desired, you can attach it to the bug report, stating that you have a working profile. For more on editing and creating profiles, see the community <nowiki>[[https://help.ubuntu.com/community/AppArmor|AppArmor]]</nowiki> documentation.
+
+Starting with Ubuntu 10.10, users can also use the local include mechanism by adding rules to the /etc/apparmor.d/local/... file instead of adjusting the profile directly. This is particular helpful for small additions that aren't suitable for all of Ubuntu, but there are caveats with this approach. Please see /etc/apparmor.d/local/README for details.
+
+== AppArmor and chroot environments ==
+
+AppArmor can be used to confine chroots but there are currently some limitations, because chroots will share the system profile set unless the profile namespace is changed for the chroot.
+When debugging AppArmor's interaction there are a few things to know
+
+* AppArmor evaluates all paths within a chroot relative to the fs namespace not the chroot.  This means that all file rules and profiles names need to begin with the chroot base if they are to work with the chroot.  {{{ 
+    /var/chroot/etc/password r,   #post chroot path looks like access to file prechroot
+    /etc/passwd r, }}}
+* files opened prechroot are still evaluated using their fs root path (ie do not have the chroot base prepended).
+* Unless the chroot is given a different AppArmor namespace it will use the same profile set as the shell it is launched from (usually the default profile set).  There currently is not a way to automatically switch AppArmor namespaces.
+* Confined applications need capability sys_chroot, to be able to do chroot.  Applications run from with in the chroot do not need capability sys_chroot.
+* If a confined application performs a chroot, it requires rules for pre chroot and another set of rules for post chroot accesses.  This is because all post chroot paths are evaluated with the chroot base prepended. 
+* Profiles loaded from within the chroot apply to the AppArmor profile namespace the chroot is run under.  So unless action is taken to change the chroots profile namespace profile loads will apply against the system's default namespace.
+
+== How to Triage ==
+
+Help with triaging bugs for apparmor profiles is very welcome. To find out what exactly is the problem, we always need the 'audit' in /var/log/kern.log and if they exist, the log files in /var/log/apparmor/*. Most of the time these provide enough information to know what went wrong. If these are missing, it is recommended to ask for them with a phrase like:
+
+Thanks for taking the time to report this bug and helping to make Ubuntu better. Could you please add '/var/log/kern.log' and the log files in '/var/log/apparmor/*' as attachments to your bug report? Thanks in advance.
+
+If the log shows that the problem is not apparmor related (eg, there are no 'audit' entries in kern.log), then please reassign the bug to the package with the bug.
+
+=== How to Forward ===
+
+Forwarding of apparmor profile bugs upstream is not necessary as these profiles are Ubuntu-specific.
+
+== Known bugs ==
+
+* Bugs against packages <nowiki>[[https://bugs.launchpad.net/ubuntu/+bugs?field.searchtext=&orderby=-importance&field.status%3Alist=NEW&field.status%3Alist=INCOMPLETE_WITH_RESPONSE&field.status%3Alist=INCOMPLETE_WITHOUT_RESPONSE&field.status%3Alist=CONFIRMED&field.status%3Alist=TRIAGED&field.status%3Alist=INPROGRESS&field.status%3Alist=FIXCOMMITTED&assignee_option=any&field.assignee=&field.bug_reporter=&field.bug_supervisor=&field.bug_commenter=&field.subscriber=&field.component-empty-marker=1&field.status_upstream-empty-marker=1&field.omit_dupes.used=&field.omit_dupes=on&field.has_patch.used=&field.has_cve.used=&field.tag=apparmor&field.tags_combinator=ANY&field.has_no_package.used=&search=Search|tagged with 'apparmor']]</nowiki>
+* Bugs against <nowiki>[[https://bugs.launchpad.net/ubuntu/+source/apparmor|apparmor itself]]</nowiki>
+* Bugs with <nowiki>[[https://bugs.launchpad.net/ubuntu/+bugs?assignee_option=any&field.assignee=&field.bug_commenter=&field.bug_reporter=&field.bug_supervisor=&field.component-empty-marker=1&field.has_cve.used=&field.has_no_package.used=&field.has_patch.used=&field.omit_dupes=on&field.omit_dupes.used=&field.searchtext=apparmor&field.status%3Alist=CONFIRMED&field.status%3Alist=INCOMPLETE_WITHOUT_RESPONSE&field.status%3Alist=INCOMPLETE_WITH_RESPONSE&field.status%3Alist=INPROGRESS&field.status%3Alist=NEW&field.status%3Alist=TRIAGED&field.status_upstream-empty-marker=1&field.subscriber=&field.tag=&field.tags_combinator=ANY&orderby=-importance&search=Search&start=0|apparmor anywhere in the bug]]</nowiki>
+
+Description of known bug reports that may receive duplicates and how to recognise them.  This information should be obtained by looking for bugs tagged as 'metabug'. 
+
+'''Open'''
+{| class="wikitable"
+|-
+| <rowbgcolor="#eeeeee"> '''Bug#'''
+| '''Description'''
+|}
+
+'''Closed'''
+{| class="wikitable"
+|-
+| <rowbgcolor="#eeeeee"> '''Bug#'''
+| '''Description'''
+|}
+
+----
+CategoryBugSquad
+CategoryDebugging

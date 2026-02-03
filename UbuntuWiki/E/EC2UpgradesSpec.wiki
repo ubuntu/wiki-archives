@@ -1,0 +1,165 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+* '''Launchpad Entry''': UbuntuSpec:server-karmic-ec2-upgrade
+* '''Created''': 2009-05-30
+* '''Contributors''': SorenHansen 
+* '''Packages affected''': ec2-init
+
+=== Summary ===
+
+This spec describes the plan for dealing with kernel updates on EC2, both in terms of how users will be notified of available upgrades and how they will apply them.
+
+=== Release Note ===
+
+Ubuntu on EC2 now alerts users about available kernel security updates.
+
+=== Rationale ===
+
+EC2 deals quite differently with kernels compared to other platforms. Upgrades are difficult, because the kernel is external from the machine image. Kernel modules are difficult, because they need to match the booted kernel, but reside in the machine image. These are old challenges that need to be resolved.
+
+=== User stories ===
+
+# George is running the final Ubuntu Karmic release AMI on EC2. On the Intarwebs, he learns about a critical vulnerability in the kernels he's using, so he wants to upgrade. He logs into his instance, at which point he's alerted that there's a new AMI available with a fix. This AMI is based on the /exact/ same filesystem image, but with a new default AKI+ARI setting.
+# Hamish is running a rebundled AMI, based off of the Ubuntu Karmic release AMI on EC2. He learns about a critical vulnerability in the corresponding kernel and wants to upgrade. The USN references a wiki page explaining the steps he needs to take to switch to the new kernel.
+
+=== Design ===
+
+* We need a simple interface to query the up-to-date AMI id's of all current versions of Ubuntu.
+* We need a hook into update-motd that will query said interface and report about updates.
+* We need to write a wiki page explaining how to upgrade homegrown AMI's.
+* We need a mechanism to keep the kernel and kernel modules in sync.
+
+=== Implementation ===
+
+==== Query interface ====
+* published at: http://uec-images.ubuntu.com/query/
+* directory tree: <pre>
+   released.latest.txt
+   daily.latest.txt
+   <suite>/<build_name>/released.txt
+   <suite>/<build_name>/released.current.txt
+   <suite>/<build_name>/all.txt
+   <suite>/<build_name>/all.current.txt
+</pre>
+* files in top dir (released.latest.txt, daily.latest.txt) contain 4 fields per record:<pre>
+   <suite> <build_name> <release_name> <serial>
+   hardy   server       release        20100128
+</pre>
+
+* files in <suite>/build_name contain (tab delimited):<pre>
+   <suite>	<build_name>	<name>	<serial> <img-type> <arch>	<region>	<ami>	<aki>	<ari>
+   karmic	server	release	20100101	instance-store amd64	us-east-1	ami-c32e7f86	aki-773c6d32	ari-abcdefgh
+</pre>
+* variables:
+** suite (example: hardy, karmic, lucid)<<BR>>
+   in image, query with: lsb_release -c 
+** build_name (ex: server, desktop)<<BR>>
+    in image, read from /etc/cloud/build.info . <<BR>>
+    if not present, could attempt to guess from metadata service
+** serial: ( 20100228, 20100122.1, 20100101 )<<BR>>
+    in image, read from /etc/cloud/build.info. if not present, no default<<BR>>
+    if not present, could attempt to guess from metadata service
+** arch: ( i386 amd64 )<<BR>>
+    in image, read from 'uname -m' (sed 's,x86_64,amd64,')
+** region ('us-east-1', 'us-west-1', 'eu-west-1')<<BR>>
+    in image, query metadata service
+ - image type ( instance-store, ebs )<<BR>>
+   in image, query metadata service
+ - name: (daily, alpha*, release)<<BR>>
+   no default.  If 'testing' or 'daily' given, then query the 'all.txt' or 'all.current.txt'.  otherwise, query 'released.txt'
+
+* in order to determine 'latest', things about the image required are:
+** build_name (server / desktop ) : if not found, fall back to 'server'
+** release-line ( testing / release ): if not specified assume release
+** image type (ebs, instance-store): 
+
+* build_name, release_line, serial, suite indicates a globally unique build
+
+* Goals:
+** given ami-id, fetch latest ami of same <build_name>
+** given ami-id, fetch latest matching kernel/ramdisk
+** given build-type, release-type, suite, arch, region, fetch the ami ami
+** given ami, fetch download location
+    http://uec-images.ubuntu.com/releases/karmic/release/
+
+===== old info (2010-02-10) =====
+We need a way to determine the following:
+
+# Is the current AMI an original Ubuntu one or is it rebundled?
+# Is the current AMI up-to-date (in terms of security fixes)?
+
+$BASE_URL/all_amis will return a list of every AMI we ever published, one AMI per line.
+
+$BASE_URL/current/$region/$arch/$series/ami contains the current AMI for the given region (one of "us-east-1" or "eu-west-1"), arch (one of "i386" or "x86_64"), and $series (one of "hardy", "intrepid", or "jaunty"). Replace "ami" with "aki" or "ari" to get the most up-to-date kernel or ramdisk ID's, respectively.
+
+A preliminary version can be found at: http://people.ubuntu.com/~soren/ec2-version-query
+
+==== update-motd hook ====
+
+Pseudo code:
+
+<pre>
+running_ami = ec2_metadata_service.get_running_ami()
+all_ubuntu_amis = ec2_version_query_interface.all()
+
+up_to_date_ami = ec2_version_query_interface.current(ec2_metadata_service.get_current_region, os.uname()[4], current_series())
+
+if running_ami not in all_ubuntu_amis:
+	for ami in ec2_metadata_service.get_ancestors():
+		if ami in all_ubuntu_amis and ami != up_to_date_ami:
+            print "One of the AMI's upon which this AMI is based has a critical security update available. For upgrade instructions, see http://wiki.ubuntu.com/SomePage"
+			sys.exit(0)
+else:
+    if running_ami != up_to_date_ami:
+        print "There's a critical security update available for your AMI. The new current AMI is %s. For upgrade instructions, see http://wiki.ubuntu.com/SomePage" % up_to_date_ami
+
+</pre>
+
+==== HowToUpgrade wiki page ====
+
+For AMIs that have not been rebundled, upgrading is simply a matter of changing one's AMI reference to the new one.
+
+For rebundled AMI's, upgrading involves changing the default kernel during rebundling or changing one's ec2-run-instances invocation to use the new kernel.
+
+This needs to be explained in great detail.
+
+==== Keep modules in filesystem in sync with booted kernel ====
+
+For the ramdisks on EC2, we'll put all the modules into the ramdisk, and export it to userspace from within the ramdisk, somewhat like udev does it.
+
+So, in init-bottom (which is run after the root filesystem is mounted), we'll 
+# source $rootmnt/etc/default/ec2-init
+# if not $EC2_EXPORT_MODULES_FROM_INITRAMFS == 1, bail out.
+# create a new tmpfs, /modules
+# bind mount the $rootmnt/lib/modules/* into /modules/
+# if it exists, rename /modules/`uname -r` to /modules/`uname -r`.ec2-init-moved
+# copy /lib/modules/`uname -r` (in the initramfs) to /modules/ 
+# "move mount" /modules onto $rootmnt/lib/modules
+
+The fallback plan, if this makes the ramdisk too large, is to make sure there's enough stuff in the initramfs to get to the network and then publish the modules as a tarball named after the AKI id, and have ec2-init download that.
+
+=== Test/Demo Plan ===
+
+It's important that we are able to test new features, and demonstrate them to users.  Use this section to describe a short plan that anybody can follow that demonstrates the feature is working.  This can then be used during testing, and to show off after release. Please add an entry to http://testcases.qa.ubuntu.com/Coverage/NewFeatures for tracking test coverage.
+
+This need not be added or completed until the specification is nearing beta.
+
+=== Unresolved issues ===
+
+This should highlight any issues that should be addressed in further specifications, and not problems with the specification itself; since any specification with problems cannot be approved.
+
+=== BoF agenda and discussion ===
+
+Use this section to take notes during the BoF; if you keep it in the approved spec, use it for summarising what was discussed and note any options that were rejected.
+
+----
+CategorySpec

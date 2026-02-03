@@ -1,0 +1,215 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+* '''Launchpad Entry''': UbuntuSpec:rsync-based-deb-downloads
+* '''Created''': 2009-05-29
+* '''Contributors''': LarsWirzenius
+* '''Packages affected''': apt, apt-sync (to be added to Ubuntu)
+
+=== Summary ===
+
+When updating the list of available packages, or upgrading to a new
+version of a package, most of the data is already on the system. Using
+an rsync-based download method should significantly speed up the
+download. The apt-sync program already does this, or at least most of
+it. apt-sync should be packaged and uploaded to Ubuntu karmic, and
+benchmarked to evaluate its impact on the archive, mirrors, and various
+kinds of systems running Ubuntu.
+
+=== Release Note ===
+
+The apt-sync package is now included in Ubuntu and will make upgrades
+faster.
+
+=== Rationale ===
+
+Bandwidth is scarce or expensive in large parts of the world. Users may
+have Internet access only via a dial-up modem, GPRS, 3G. Even users on
+fast connections may be paying by the byte, or have monthly download
+limits. Avoiding needless downloads is a worthy goal and would benefit
+a lot of Ubuntu users.
+
+When downloading a new version of the Packages file, it will almost
+always be only slightly different from the one on the system already.
+By using the rsync algorithm, it is possible to download only the
+changed parts.
+
+Likewise, when upgrading packages to newer versions, the new version
+is often mostly identical to the old one, with parts of it changed.
+Again, it would be good to only download the changed parts.
+
+The rsync program of the rsync algorithm is unsuitable for this,
+primarily because it requires a lot of server-side resources. However,
+the zsync implementation works around this: the server is a standard
+HTTP server, and a new data file is added (containing the rsync
+"signature" data). All the rest of the computation will then happen
+on the client, which uses HTTP Range requests to fetch parts of
+the file from the server.
+
+The apt-sync program was written in 2006 to implement this. It is not,
+however, deployed in Debian or Ubuntu at the current time.
+
+apt-sync should be packaged for Debian and Ubuntu, and deployed in
+an experimental manner, to gather feedback from users. Additionally,
+some benchmarks should be run to see how big an impact it has on
+the archive mirrors, various kinds of client systems, and how much benefit
+it has as far as the amount of bandwidth spent downloading.
+
+apt-sync may require changes to combine .aptsync files per source
+package: otherwise the number of files in the archive will increase
+by the number of .deb files, i.e., probably about a quarter million,
+and this is a big impact on the archive and mirror network.
+
+=== User stories ===
+
+* Alfred is connected to the Internet over GPRS. He has just installed
+ hardy and wants to install all security updates that have happened
+ since the hardy ISO was created. There are several hundreds or thousands
+ of megabytes of such updates.
+
+=== Assumptions ===
+
+* Alfred's system has installed all packages for which there are security
+ updates.
+* We are mainly interested in optimizing the actual transfer and avoiding
+ big impacts on the mirrors. The client system is assumed to have sufficient
+ processing power. (If it turns out to be inefficient at the client end,
+ we'll optimize that later.)
+
+=== Design ===
+
+The RPM world has presto, which relies on the package archive generating
+delta-RPM packages. These are then downloaded normally, and applied by
+the client differently from normal RPMs. This requires upgrades to happen
+from a specific version, which the rsync/zsync/apt-sync approach avoids.
+
+==== Benchmarks ====
+
+At least the following results need to be produced by the benchmarks:
+
+* How much data is transferred by plain HTTP (full download),
+ apt-sync. This should be compared to the size of the delta produced by
+ xdelta or similar tools (compressed delta of uncompressed data).
+ For every package.
+* Time it takes by the client to reconstruct the new .deb, in addition
+ to the actual download. For every package.
+* CPU/memory impact on httpd resulting from a lot of clients doing
+ HTTP Range requests.
+* Size impact on mirror from .aptsync files: both number of files, and
+ their size.
+* How much data is transferred when updating Packages files daily, for
+ a development branch of Ubuntu.
+
+=== Implementation ===
+
+==== Benchmarks ====
+
+For bandwidth use:
+
+* Take snapshot of hardy and hardy-security archives.
+* Find a way to measure the bandwidth used to update a package with apt-sync.
+ Preferably without actually transferring files. If necessary, just use zsync
+ for this.
+* Measure the bandwidth to download all security updates, both plain HTTP
+ and via apt-sync.
+* If necessary, re-pack the .debs so that apt-sync can deal with them, by
+ using gzip --rsyncable. Test also bzip2.
+** ''Note that if this proves useful then dpkg-deb will need to be changed to use --rsyncable by default. This is a little bit non-trivial due to <nowiki>[[http://bugs.debian.org/cgi-bin/bugreport.cgi?bug=290049|Debian bug 290049]]</nowiki>, although it ought to be possible to arrange for dpkg-deb simply not to use zlib for compression. --ColinWatson''
+** ''If --rsyncable is required (which seems likely to me), then presumably bzip2 and lzma packages will just be out of luck? I don't think they have equivalents. --ColinWatson''
+* ''Yeah, my gut feeling right now is that --rsyncable is going to be required and that bzip2 and lzma are going to be out of luck. But perhaps we can find some solution. --LarsWirzenius''
+** ''Actually --rsyncable is not currently used by aptsync, instead zsync --look-inside is used and the correct checksum is reconstructed by storing the gzip header and recompressing the data. I'm not sure how to deal with bzip2 or lzma, they are not supported at the moment but it might be possible to integrate them into zsync. --FelixFeyertag''
+
+For .deb reconstruction:
+
+* Instrument apt-sync to measure the amount of time and CPU (and memory,
+ if feasible) it takes to get the updated .deb onto the system, measuring
+ separately pre-download, download, and post-download phases, as well
+ as totals.
+* Run instrumented apt-sync on various clients: a high-end desktop
+ machine, a "normal" laptop, a netbook.
+
+Impact on server resources:
+
+* Set up a machine with httpd and an Ubuntu mirror of hardy and
+ hardy-security.
+* Set up as many client machines as possible to run upgrades,
+ with and without apt-sync, preferably enough to saturate server machine's
+ LAN connection.
+* Measure CPU and memory load on server.
+
+Archive size impact:
+
+* Generate .aptsync files for every deb. Count their total size, both
+ actual file size (st_size) and disk usage (st_blocks).
+* Also tabulate combined size of .aptsync files per source package:
+ cat them to one file, check both st_size and st_blocks.
+** ''I strongly recommend considering whether a single aptsync file is possible: it could be stored under dists/ and could itself be updated using zsync. It seems to me that this would tend to have minimal impact on mirrors. rsync (which will still be used for inter-mirror syncs) has scaling properties related to the number of files, and an extra 28000 files will probably not do them any good. I think this would also be the politically easiest option to get implemented, since dists/ is where index files have always lived. --ColinWatson''
+* ''A single .aptsync file under dists/ would certainly be possible. I'll add that to the benchmark plan. --LarsWirzenius''
+** ''The mean *.aptsync file size is ~8kB (from a sample of 1508 files), but space on disk is often higher because many files are below the minimum block size. I support the idea of merging them, for the entire archive the size would be 200-300MB, and it could be compressed. --FelixFeyertag''
+** ''The merged file itself could be fetched with zsync. :-) A better way might be to generate an index for it and have clients only fetch the parts they need based on the index. --JohanKiviniemi''
+
+Packages files:
+ 
+* Find snapshots of Packages files for as long a period of time as possible,
+ from karmic. At least ten days' worth of them.
+* Measure the amount of data transferred when updating from oldest to newest
+ version of the Packages file, both for plain HTTP and for zsync.
+
+===== Benchmarks =====
+
+* ''Benchmarks for a <nowiki>[[AptSyncInKarmicSpec-JauntyBenchmark|Jaunty upgrade]]</nowiki> and <nowiki>[[AptSyncInKarmicSpec-KarmicBenchmark|Karmic dist-upgrade]]</nowiki> are available --FelixFeyertag''
+
+==== UI Changes ====
+
+There should be no UI changes, except that apt-get and Synaptic and 
+update-manager might be modified to tell how much data apt-sync managed
+to NOT transfer. This would allow users to see that it is working.
+
+==== Code Changes ====
+
+The apt package may require minor changes to support apt-sync as a
+download method, but probably not.
+
+The apt-sync program should need fairly little changes to get it usable.
+
+Launchpad will require code to generate .aptsync files for the entire
+archive, but this can happen later, after apt-sync has been proven to
+be a useful thing. For testing, the .aptsync files can be provided by
+different servers than the usual mirrors.
+* ''It obviously makes sense to defer this until after benchmarks are complete, but once that's done I suggest prioritising this part. Launchpad feature changes usually have some lead time, and it would be best to make sure that things like file locations are agreed upon as early as possible. --ColinWatson''
+
+==== Migration ====
+
+If the user is using a mirror without .aptsync files, everything should
+work just fine, the way it works now. Once .aptsync files get added to
+the mirrors, upgrade downloads should happen faster. The archives can
+add only those .aptsync files that are deemed necessary (e.g., only
+for -security).
+
+If apt-sync turns out to work well, it should be installed and enabled
+by default, and users should not have to change anything.
+
+=== Test/Demo Plan ===
+
+Suggestion: we modify apt and update-manager to report how much data it
+managed to NOT transfer, thanks to apt-sync. This will subtly tell users
+that things work well.
+
+=== Unresolved issues ===
+
+Using HTTP content negotiation would allow another way to hide the large number
+of extra files from mirrors that don't want the impact. The apt-sync client
+would specifically tell the HTTP server it can handle apt-sync files, and
+the server would give it if necessary. However, this would complicate things
+for all mirrors who do want to support apt-sync, so the single apt-sync file
+per release, suggested by Colin, would probably work better.
+
+----
+CategorySpec

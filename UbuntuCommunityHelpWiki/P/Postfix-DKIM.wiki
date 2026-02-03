@@ -1,0 +1,199 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+== Introduction ==
+
+DomainKeys Identified Mail (DKIM) is a method for E-mail authentication, allowing a person who receives email to verify that the message actually comes from the domain that it claims to have come from. The need for this type of authentication arises because spam often has forged headers.
+
+DKIM uses public-key cryptography to allow the sender to electronically sign legitimate emails in a way that can be verified by recipients.
+
+DKIM also guards against tampering with mail, offering almost end-to-end integrity from a signing to a verifying Mail transfer agent (MTA).
+
+<nowiki>[[http://en.wikipedia.org/wiki/DKIM|Read more on Wikipedia]]</nowiki>
+
+dkim-milter is a milter-based application (dkim-filter) which plugs in to <nowiki>[[Postfix]]</nowiki> to provide DomainKeys Identified Mail service for your mail server. dkim-milter is no longer being developed, and it's original author has forked the source and is now developing opendkim.  For Lucid and later releases, opendkim is preferred over dkim-filter.  The instructions on this page should be the same (just with adjusted package names as needed).
+
+== Installation ==
+
+We assume you already successfully installed Postfix MTA, if not, please read the <nowiki>[[Postfix]]</nowiki> dedicated page.
+
+To install '''opendkim''', you need Universe repositories added, if so, use your favorite package manager and install the package.
+
+<pre>
+sudo aptitude install opendkim opendkim-tools
+</pre>
+
+'''Important:''' For 12.04 Precise you must install '''opendkim''' from the precise <nowiki>[[https://help.ubuntu.com/community/HelpOnLinking|backports]]</nowiki>. Note that backports are enabled only by using <code>/precise-backports</code> on a given package, so this will not affect any other packages you have installed.
+
+<pre>
+sudo aptitude install opendkim/precise-backports
+sudo aptitude install opendkim-tools/precise-backports
+</pre>
+
+== Configuration ==
+
+'''opendkim''' configuration consists of two files:
+<pre>
+/etc/opendkim.conf
+/etc/default/opendkim
+</pre>
+
+Use your favorite editor to edit those files.
+Here's an example of '''/etc/opendkim.conf''' file already edited to suit my needs:
+<pre>
+Syslog			yes
+
+Domain			ubuntu.ro
+KeyFile			/etc/mail/dkim.key # See bellow how to generate and set up the key
+Selector		mail
+
+AutoRestart		yes
+Background		yes
+Canonicalization	relaxed/relaxed
+DNSTimeout		5
+Mode			sv
+SignatureAlgorithm	rsa-sha256
+SubDomains		no
+X-Header		no
+
+Statistics		/var/log/dkim-filter/dkim-stats
+</pre>
+
+Actually '''/etc/opendkim.conf''' is the most important file. It provides our milter with required information about selector (used for DNS requests and email verifications) and used signing key (the key is used for signing the outgoing emails).
+
+Here's an example of '''/etc/default/opendkim''' This file is used to connect the milter to MTA:
+<pre>
+SOCKET="inet:8891@localhost" # Ubuntu default - listen on loopback on port 8891
+</pre>
+
+In my case, this file needs no additional editing.
+
+Now, to tell the Postfix about the existing milter, and where to connect with it, edit your Postfix main.cf file '''/etc/postfix/main.cf''', and append to its content the following data:
+<pre>
+milter_default_action = accept
+milter_protocol = 2
+smtpd_milters = inet:localhost:8891
+non_smtpd_milters = inet:localhost:8891
+</pre>
+
+If you are using already some milter (for example <nowiki>[[Postfix-DomainKeys]]</nowiki>), you can add the new one like this:
+<pre>
+milter_default_action = accept
+milter_protocol = 2
+smtpd_milters = inet:localhost:8891,inet:localhost:8892
+non_smtpd_milters = inet:localhost:8891,inet:localhost:8892
+</pre>
+
+== Key generation for dkim-milter and its setup with DNS ==
+
+The '''opendkim-tools''' package provides a tool, '''opendkim-genkey''' for creating your key pairs:
+<pre>
+opendkim-genkey -t -s mail -d ubuntu.ro
+</pre>
+This will generate two files: '''mail.private''' which is your private key, and '''mail.txt''' which is your DNS record containing your public key.
+
+The '''-s''' argument supplies the selector (in our case "mail"), the '''-d''' argument supplies the domain, and the '''-t''' argument says that we are running DKIM in <nowiki>[[http://www.dkim.org/specs/rfc4871-dkimbase.html#key-text|test mode]]</nowiki>. This indicates that verifiers shouldn't drop your mail if something's wrong with the signature. Its seems that the majority using DKIM run it in test mode.
+
+Copy your private key in place:
+<pre>
+cp mail.private /etc/mail/dkim.key
+</pre>
+Now create your DNS record as supplied in '''mail.txt''', which should look like this:
+<pre>
+mail._domainkey.ubuntu.ro. IN TXT "v=DKIM1; g=*; k=rsa; p=PpYHdE2tevfEpvL1Tk2dDYv0pF28/f 5MxU83x/0bsn4R4p7waPaz1IbOGs/6bm5QIDAQAB" ; ----- DKIM mail for ubuntu.ro
+</pre>
+
+== Startup and testing ==
+
+Once configuration above was done, the daemon can be started with:
+<pre>
+sudo service opendkim start
+</pre>
+If it doesn't start, search the logs for problems and see what it requires more:
+<pre>
+grep -i dkim /var/log/mail.log
+</pre>
+
+Instead of using '''sudo service opendkim start''' you can run dkim-filter directly:
+<pre>
+dkim-filter -x /etc/dkim-filter.conf
+</pre>
+If you get the error like: '''dkim-filter: milter socket must be specified'''
+Then try manually specifying the socket.  Use this to specify local (which does not match '''/etc/default/dkim-filter''' above):
+<pre>
+dkim-filter -x /etc/dkim-filter.conf -p local
+</pre>
+
+Now restart the Postfix MTA, and check for email signing:
+<pre>
+sudo service postfix restart
+</pre>
+
+For testing purposes, I recommend you tools like:
+* http://www.sendmail.org/dkim/tools
+* or just send an email to autorespond+dkim[at]dk.elandsys.com
+
+Testing results should look like this in Gmail:
+{{http://stas.nerd.ro/blog/data/dkim-filter.png}}
+
+== Common errors and fixes ==
+=== Missing signature ===
+If something is not functioning properly (emails are not being signed) look for errors in the log:
+<pre>
+grep -i dkim /var/log/mail.log
+</pre>
+
+The following error indicates the filter ran properly however could not match the outgoing email domain with a filter (and thus no signature was generated):
+<pre>
+Nov 21 06:59:56 appname dkim-filter[2911]: 81AA7E688: no signature data
+</pre>
+
+Consider changing the domain to a wildcard in '''/etc/opendkim.conf''':
+<pre>
+Domain			*
+KeyFile			/etc/mail/dkim.key
+Selector		mail
+</pre>
+
+Using a domain of * will require putting the dkim key into EACH domain's DNS zone file for those domains that send email using this server.  The dkim signing will work for your server, but without updating each DNS zone file, the public key will not be found by the recipient mail server.
+
+=== Multiple signatures ===
+If amavis-new is installed and dkim signs emails multiple times with same domain and selector, is the configuration error likely to be how you feed messages back to postfix from amavis. 
+
+Head to '''/etc/postfix/master.cf''' look for the section starting with:
+<pre>
+127.0.0.1:10025 inet    n       -       -       -       -       smtpd
+</pre>
+
+Find the option '''-o receive_override_options=''' and add ''',no_milters''' to the end of that line.
+A corrected config could look something like this:
+
+<pre>
+127.0.0.1:10025 inet    n       -       -       -       -       smtpd
+        -o content_filter=
+        -o local_recipient_maps=
+        -o relay_recipient_maps=
+        -o smtpd_restriction_classes=
+        -o smtpd_delay_reject=no
+        -o smtpd_client_restrictions=permit_mynetworks,reject
+        -o smtpd_helo_restrictions=
+        -o smtpd_sender_restrictions=
+        -o smtpd_recipient_restrictions=permit_mynetworks,reject
+        -o smtpd_data_restrictions=reject_unauth_pipelining
+        -o smtpd_end_of_data_restrictions=
+        -o mynetworks=127.0.0.0/8
+        -o smtpd_error_sleep_time=0
+        -o smtpd_soft_error_limit=1001
+        -o smtpd_hard_error_limit=1000
+        -o smtpd_client_connection_count_limit=0
+        -o smtpd_client_connection_rate_limit=0
+        -o receive_override_options=no_header_body_checks,no_unknown_recipient_checks,no_milters
+</pre>

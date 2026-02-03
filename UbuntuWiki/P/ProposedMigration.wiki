@@ -1,0 +1,278 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+== Migrating packages from -proposed to release ==
+
+Uploads to the Ubuntu development series are directed to the `-proposed` pocket, and must build there and pass certain tests before they are promoted to the release pocket for general use.  This process is derived from that used by Debian to maintain the <nowiki>[[http://www.debian.org/devel/testing|testing]]</nowiki> suite, but there are a few Ubuntu-specific differences.  Although the observant will note that this document is also derived from Debian's documentation, it is intended to be a self-contained description for Ubuntu developers.
+
+One important difference that those familiar with the Debian process should be aware of is that `-proposed` is a '''partial suite''': that is, it only contains packages that have not yet migrated, and must be used on top of the release pocket.  This can cause some confusion where removals are concerned.  Furthermore, the Ubuntu process has no arbitrary delays and no consideration of release-critical bugs, so there is very little benefit to users in using `-proposed` during the development cycle and such use is strongly discouraged.  (On the other hand, the official build infrastructure builds packages against `-proposed`, and this is normally also a good idea when test-building packages locally.)
+
+A (particular version of a) package will move into the release pocket when it satisfies all of the following criteria:
+
+# It must be built and published on all architectures it is currently published for in the release pocket (this applies to each binary, but it is acceptable if other binaries from the same source for the same architecture are up to date in `-proposed` and the binary in question has been removed);
+# All of its dependencies must ''either'' be satisfiable by packages already in the release pocket, or be satisfiable by the group of packages which are going to be installed at the same time;
+# If the package or any of its binary or test reverse-dependencies defines any <nowiki>[[http://packaging.ubuntu.com/html/auto-pkg-test.html|autopkgtest]]</nowiki> test suites, they must either pass or never have passed ("Always failed");
+# No bugs with the `block-proposed` tag are open against the package (this can be used to temporarily block a package on manual testing);
+# The operation of installing the package into the release pocket must not break any packages currently in the release pocket.
+
+A package which satisfies the first three of the above is said to be a ''"Valid Candidate"''. A package which does not satisfy the first three of the above is said to be ''"Not considered"''.
+
+There is another related tag, `update-excuse`, which makes the tagged bug linked from the <nowiki>[[http://people.canonical.com/~ubuntu-archive/proposed-migration/update_excuses.html|update excuses]]</nowiki> page under the package the bug is opened against. A bug with the `update-excuse` tag does not block the package from migration, it just documents a problem which prevents migration. The tag is typically used to track triaging effort for non-trivial problems and if the bug is closed from the package's changelog it gets closed when the package enters the release pocket. `update-excuse` applies only to the development series, for stable releases `update-excuse-$SERIES` tags can be used.
+
+The update script shows when each package might move from `-proposed` into the release pocket.  The output is twofold:
+
+* The <nowiki>[[http://people.canonical.com/~ubuntu-archive/proposed-migration/update_excuses.html|update excuses]]</nowiki>: list of all candidate package versions and the basic status of their propagation into the release pocket; this is the first stage of migration, and only packages that pass it proceed to
+* The <nowiki>[[http://people.canonical.com/~ubuntu-archive/proposed-migration/update_output.txt|update output]]</nowiki>: the complete, rather crude output of the proposed-migration scripts as they recurse through the candidates.
+** The <nowiki>[[http://people.canonical.com/~ubuntu-archive/proposed-migration/update_output_notest.txt|notest update output]]</nowiki>: much like update output, but it shows what it would look like if all autopkgtests were passing.
+
+=== autopkgtests ===
+
+autopkgtest tests are run in ephemeral cloud instances as described on <nowiki>[[AutopkgtestInfrastructure||autopkgtest infrastructure]]</nowiki>. The autopkgtests can be configured to run on different types of workers in <nowiki>[[https://code.launchpad.net/~ubuntu-release/autopkgtest-cloud/+git/autopkgtest-package-configs]]</nowiki>. The <nowiki>[[https://git.launchpad.net/~ubuntu-release/autopkgtest-cloud/+git/autopkgtest-package-configs/tree/README.md|README.md]]</nowiki> provides more details, but briefly, this repo specifies which VM worker should be used for a given autopkgtest execution. The '''big_packages''' file specifies packages which need more memory and CPU - by default tests run on something similar to an m1.small unit (1 vCPU and 1592 MiB Memory), while '''big_packages''' run on an m1.large (4 vCPU and 8192 Mib Memory) unit. [The Debian Continuous Intergration test environment runs tests on systems with 8G of memory so if a package is passing in Debian but not Ubuntu consider running the test with more memory.] The list of packages in '''long_tests''' are passed an increased timeout value ('--timeout-test=40000') to autopkgtest. Additionally, any '''big_packages''' are passed '--timeout-test=20000'.
+
+The <nowiki>[[http://people.canonical.com/~ubuntu-archive/proposed-migration/update_excuses.html|update excuses]]</nowiki> link to relevant test results, and all results can be browsed on <nowiki>[[http://autopkgtest.ubuntu.com]]</nowiki>. In addition to the files linked to on the autopkgtest website every test also produces a "result.tar" file which contains the files exitcode, testbed-packages, testpkg-version, duration, testinfo.json, and requester. The file testinfo.json contains information on the number of processors the unit on which the test ran had which can be useful for confirming that a test ran on a big worker.
+
+In most cases test results should be <nowiki>[[http://packaging.ubuntu.com/html/auto-pkg-test.html#executing-the-test|reproducible in a local QEMU VM]]</nowiki>.  To confirm whether a failing package should be added to '''big_packages''', run it locally with 'qemu --ram-size=4096 --cpus=2' and then again with 'qemu --ram-size=8192 --cpus=4'.
+
+==== Openstack Flavor Details for Architectures ====
+
+{| class="wikitable"
+|-
+| '''Architecture(s)'''
+| '''RAM Size'''
+| '''CPU Cores'''
+| '''Disk size'''
+|-
+| amd64, i386, arm64, ppc64el, riscv64 (emulated), s390x (default)
+| 4096
+| 2
+| 20G
+|-
+| amd64, i386, arm64, ppc64el, riscv64 (emulated), s390x (large)
+| 8192
+| 4
+| 100G
+|-
+| armhf (3 LXD containers sharing a same arm64 host)
+| 16G
+| 8
+| 150G
+|}
+
+==== Reproducing tests in the cloud ====
+
+Reproducing tests as they are run in production requires access to an OpenStack-based cloud (e.g. Canonistack). Source the relevant `nova.rc` file with the cloud credentials. Ensure that you have autopkgtest 3.16 or newer installed (the deb installs on all supported Ubuntu releases without further dependencies). Also make sure to allow SSH/ICMP access in the corresponding security group to enable autopkgtest to access your cloud instances via SSH.
+
+First make sure that your cloud knows your public SSH key, in `nova keypair-list`. If you don't have one yet, add it with `nova keypair-add`. Let's call this `testkey` here.
+
+You can now run your tests with the `ssh` runner and the `nova` setup script, e. g. for the `gzip` package:
+<pre>
+    autopkgtest gzip --apt-pocket proposed --setup-commands setup-testbed --apt-upgrade \
+      -- ssh -s nova -- --flavor m1.small --image ubuntu/ubuntu-groovy-daily-amd64-server-20201022.1-disk1.img --keyname testkey
+</pre>
+
+The complete command as used in production (including all proxy settings) can also be seen at the top of test logs.
+
+==== Testing against a PPA ====
+
+It can be useful to test autopkgtest results (particularly when attempting to test a regression fix) via PPA uploads. To launch an autopkgtest run against a PPA, open:
+<pre>
+https://autopkgtest.ubuntu.com/request.cgi?release=RELEASE&arch=ARCH&package=SRCPKG&ppa=LPUSER/PPA&trigger=SRCPKG/VERSION
+</pre>
+where `RELEASE` is the codename for the release to test; `ARCH` is the architecture to test against; `SRCPKG` is the package to test in the PPA; `LPUSER` is the launchpad username of the owner of the PPA; `PPA` is the PPA name; and `VERSION` is the version to indicate triggered the test (for the purposes of PPA testing, this seems like logically it should be the last version in the release in the PPA), and must be published in the PPA. If the version string contains characters like '+', `VERSION` should be URL-encoded.
+
+The request for the test will only be successful if you have upload rights for the package (SRCPKG from above), and then you should shortly see the running test at http://autopkgtest.ubuntu.com/running.
+
+Once completed, the test results will be available via an index at
+<pre>
+https://autopkgtest.ubuntu.com/results/autopkgtest-RELEASE-LPUSER-PPA/?format=plain
+</pre>
+The index will contain the results for each autopkgtest run against this particular PPA for this `RELEASE`. You can append the appropriate path from the index to
+<pre>
+https://autopkgtest.ubuntu.com/results/autopkgtest-RELEASE-LPUSER-PPA/
+</pre>
+
+==== How to re-run autopkgtests with dependencies on other packages in the proposed pocket ====
+
+By default, autopkgtest will only use the trigger src package from the proposed pocket, and by default only one trigger package is mentioned. However, additionally packages can be specified in the retry URL by suffixing `&trigger=SRCPKG/VERSION` for each source package to use from proposed. Simply right-click the retry URL, copy & paste it into your browser and append an appropriate string.
+
+Alternatively, if you want to install *all* of the packages involved in your test from the proposed pocket, you can append "&all-proposed=1" to your request url, and every package installed on the testbed will be installed from proposed.
+
+==== How to run autopkgtests of a package against the version in the release pocket ====
+
+Sometimes it is useful to know the test result of an autopkgtest run for a package against the release/updates pocket only, without considering any versions that are in -proposed. One example would be when we see an autopkgtest regression in tests run for a package version in -proposed but we suspect that the regression is already present in the package that's already in the release/updates pocket.
+
+To do this, simply open an autopkgtest request in the likes of:
+<pre>
+https://autopkgtest.ubuntu.com/request.cgi?release=RELEASE&arch=ARCH&package=SRCPKG&trigger=migration-reference/0
+</pre>
+
+In cases where we want to investigate if the given failure we see is already present in release, usually you just need to copy the retry url and modify the trigger to `migration-reference/0`. Once the run is finished, it will be visible on the autopkgtest result page for the package (not on the update_excuses page though).
+
+If the test fails with the migration-reference/0 trigger, the test failure for the proposed version will be ignored.
+
+More details about the 'test request format' can be found at the <nowiki>[[https://autopkgtest-cloud.readthedocs.io/en/latest/architecture.html|autopkgtest-cloud]]</nowiki> wiki page, section <nowiki>[[https://autopkgtest-cloud.readthedocs.io/en/latest/architecture.html#test-request-format|Test request format]]</nowiki>.
+
+==== How to run cross-architecture autopkgtest locally using QEMU ====
+
+QEMU is able to emulate many different architecture. Even though it is much slower than accelerated VMs, it's still useful sometimes to have the tests run on a foreign architecture locally, for quicker debug loops.
+
+First ensure you have a suitable VM image (the `--timeout` is almost necessary when it comes to emulation):
+<pre>
+autopkgtest-buildvm-ubuntu-cloud -v --arch arm64 --release jammy --timeout 7200
+</pre>
+
+Then run the tests by specifying the architecture to QEMU. The following command also increases the reboot timeout, because VMs are slower in emulation, and may not be able to reach the login prompt in less than one minute:
+<pre>
+autopkgtest gzip -- qemu --qemu-architecture=aarch64 --timeout-reboot 90 autopkgtest-jammy-arm64.img
+</pre>
+
+===== Foreign arch testing =====
+
+A particular case of cross-arch testing, is running package for a foreign architecture than the VM's. The typical use-case is testing `i386` packages on an `amd64` VM. For that, you can specify the `-a` flag to autopkgtest, and it will automatically setup the required `dpkg` configuration and install the packages from the right sources (`-U` mostly here to make sure this example command still runs in the future):
+<pre>
+autopkgtest mawk -a i386 -U -- qemu autopkgtest-jammy-amd64.img
+</pre>
+
+Of course, this can be combined with emulated cross-arch, for example to test `armhf` on emulated `arm64`:
+<pre>
+autopkgtest mawk -a armhf -U -- qemu --qemu-architecture=aarch64 --timeout-reboot 180 autopkgtest-jammy-arm64.img
+</pre>
+
+=== Frequently Asked/Answered Questions ===
+
+==== How could installing a package into the release pocket possibly break other packages? ====
+
+The structure of the distribution archives is such that they can only contain one version of a package; a package is defined by its name.  So, when the source package `acmefoo` is installed into the release pocket, along with its binary packages `acme-foo-bin`, `acme-bar-bin`, `libacme-foo1` and `libacme-foo-dev`, the old version is removed.
+
+However, the old version may have provided a binary package with an old soname of a library, such as `libacme-foo0`.  Removing the old `acmefoo` will remove `libacme-foo0`, which will break any packages which depend on it.
+
+Evidently, this mainly affects packages which provide changing sets of binary packages in different versions (in turn, mainly libraries).  However, it will also affect packages upon which versioned dependencies have been declared of the `==`, `<=` or `<<` varieties.
+
+When the set of binary packages provided by a source package change in this way, all the packages that depended on the old binaries will have to be updated to depend on the new binaries instead.  Because installing such a source package into the release pocket breaks all the packages that depended on it in the release pocket, some care now has to be taken: all the depending packages must be updated and ready to be installed themselves so that they won't be broken.  In some cases, manual intervention by the release team may be required.
+
+If you are having problems with complicated groups of packages like this, contact the ubuntu-devel mailing list or the #ubuntu-release IRC channel for help.
+
+==== I still don't understand!  The proposed-migration scripts say that this package is a valid candidate, but it still hasn't gone into the release pocket. ====
+
+This tends to happen when in some way, directly or indirectly, installing the package will break some other package.
+
+Remember to consider your package's dependencies.  Suppose your package depends on `libtool`, or `libltdlX`.  Your package won't go into the release pocket until the right version of libtool is ready to go in with it.
+
+In turn, that won't happen until installing `libtool` doesn't break things already in the release pocket.  In other words, until all other packages which depend on `libltdlY` (where `Y` is the earlier version) have been recompiled, and all their autopkgtests pass, etc, none of these packages will enter the release pocket.
+
+This is where the <nowiki>[[http://people.canonical.com/~ubuntu-archive/proposed-migration/update_output.txt|textual output]]</nowiki> is useful: it gives hints (albeit very terse ones) as to which packages break when a valid candidate is added to the release pocket.
+
+==== My package is stalled because it's out of date on some architecture.  What do I do? ====
+
+Check the status of your package in Launchpad.  If the package doesn't build, it will be marked as ''failed''; investigate the build logs and fix any of the problems that are caused by your package's sources.
+
+If you happen to notice that some architectures have built the new version of your package, but it isn't showing up in the output of the proposed-migration scripts, then you just have to be a bit more patient until the publisher runs.  This should happen well within half an hour.
+
+If you have explicitly dropped the architecture from the Architecture list in the control file, and the package has been built for that architecture before, you will need to request that the old binary package for this architecture be removed from the archive before your package can transition to the release pocket.  You need to file a bug on your package requesting removal of the dropped architecture's packages, and subscribe the `ubuntu-archive` team.
+
+==== Are there any exceptions?  I'm sure acmefoo has just made it into the release pocket despite not satisfying all of the requirements. ====
+
+The release team can override the rules in a few ways:
+
+* They can decide that the breakage caused by the installation of a new library will make things better rather than worse, and let it go in along with its flotilla of dependents.
+* They can also manually remove packages from the release pocket that would be broken, so that new stuff can be installed.
+* They can force autopkgtest failures to be ignored. The <nowiki>[[https://code.launchpad.net/~ubuntu-release/britney/+git/hints-ubuntu|hints]]</nowiki> contain the ignored failures and explanation why they are ignored. If you would like to add more hints please open a merge request against the hints repository.
+
+==== Can you provide a real, non-trivial example? ====
+
+Here's one: when the source package `apache` is installed into the release pocket, along with its binary packages `apache`, `apache-common`, `apache-dev` and `apache-doc`, the old version is removed.
+
+However, all Apache module packages depend on `apache-common (>= something), apache-common (<< something)`, so this change breaks all of those dependencies.  Consequently, all Apache modules need to be recompiled against the new version of Apache in order for the release pocket to be updated.
+
+Let's elaborate on this a bit further: after all of the modules have been updated in unstable to work with a new Apache, the proposed-migration scripts try `apache-common` and find out that it breaks all the Apache modules because they have `Depends: apache-common (<< the current version)`, and then try `libapache-foo` to find out that it doesn't install because it has `Depends: apache-common (>= the new version)`.
+
+However, later they'll apply a different logic (sometimes prompted by a manual intervention): they'll ignore the fact `apache-common` breaks stuff, and keep going with things that work; if it still doesn't work after we've done everything we can, too bad, but maybe it '''will''' work.  Later they'll try all the random `libapache-foo` packages and see that they indeed work.
+
+After everything's been tried, they check how many packages have been broken, work out if that's better or worse than what there was originally and either accept everything or forget about it.  You'll see this in `update_output.txt` on "`recur:`" lines.
+
+For example: <pre>
+   recur: [foo bar] baz
+</pre> basically says "having already found that foo and bar make things better, I'm now trying baz to see what happens, even though that breaks things".  The lines of `update_output.txt` that start with "`accepted`" indicate things that appear to make things better, and "`skipped`" lines make things worse.
+
+==== The update_output.txt file is completely unreadable! ====
+
+That is not a question. ;-)
+
+Let's take an example: <pre>
+ skipped: cln (0) (150+4)
+     got: 167+0: a-40:a-33:h-49:i-45
+*** i386: ginac-cint, libginac-dev
+</pre>
+
+This means that if `cln` goes into the release pocket, `ginac-cint` and `libginac-dev` become uninstallable in the release pocket on i386.  Note that the architectures are checked in a fixed order and only the problems on the first architecture with problems are shown - that's why the i386 architecture is shown so often.
+
+The "got" line includes the number of problems in the release pocket on the different architectures (until the first architecture where a problem is found &mdash; see above).  The "i-45" means that if `cln` would go into the release pocket, there would be 45 uninstallable packages on i386.  Some of the entries above and below `cln` show there were 43 uninstallable packages in the release pocket on i386 at the time.
+
+The "skipped: cln (0) (150+4)" line means that there are still 150 packages to go through after this package until this check of all packages is completed, and that 4 packages have been found already that won't be planned to be upgraded because they would break dependencies.  The "(0)" is irrelevant; you can safely ignore it.
+
+Note that there are several checks of all packages in one proposed-migration script run.
+
+''Jules Bean initially assembled the frequently asked questions and answers.  Colin Watson modified them for Ubuntu.''
+
+==== I'm seeing a squid proxy?  My tests behave differently there! ====
+
+Thanks to LXD or VMs you should be able to reproduce the environment pretty easily.  Try the following:
+
+Create one LXD or VM to host squid:
+
+<pre>
+lxc launch ubuntu: squid-proxy
+lxc exec squid-proxy bash
+apt-get update
+apt-get install squid
+service restart squid
+exit
+</pre>
+
+Run your autopkgtest in another LXD, and point it at your squid.  Note that this is a big long commmand that is  updated as of this writing (2017-Jun-16), but you can always see the first few lines of test output for your failure log as the command line is printed right at the top, then just customize to your needs:
+
+<pre>
+PKG_NAME=<pkg name here>
+autopkgtest-build-lxd images:ubuntu/artful/amd64
+autopkgtest --shell-fail -U --setup-commands 'printf "http_proxy=http://squid-proxy.lxd:3128\nhttps_proxy=http://squid-proxy.lxd:3128\nno_proxy=127.0.0.1,127.0.1.1,localhost,localdomain,novalocal,internal,archive.ubuntu.com,security.ubuntu.com,ddebs.ubuntu.com,changelogs.ubuntu.com,launchpad.net\n" >> /etc/environment' --apt-pocket=proposed=src:$PKG_NAME $PKG_NAME -- lxd autopkgtest/ubuntu/artful/amd64
+</pre>
+
+==== A package builds fine and passes autopkgtests up to Hirsute and on Debian, but the same source hits strange FTBFS or autopkgtest failures (e.g. segfaults) on >= Impish. What could it be? ====
+
+The regression may be caused by LTO being enabled by default in newer Ubuntu releases, see <nowiki>[[ToolChain-LTO]]</nowiki>. Try building with <code>DEB_BUILD_MAINT_OPTIONS=optimize=-lto</code> and see if the problem goes away. If that's the case, the issue is tackled differently if the package is in main or universe, see <nowiki>[[ToolChain-LTO]]</nowiki> for more details.
+
+==== On i386 a test fails with 'Depends: somemodule-perl:i386 but it is not installable' ====
+
+Because i386 autopkgtests are run in a cross environment, perl:i386 will never be installable and therefore these packages will not be testable.  If this is an autopkgtest regression (for example, a new test dep), a hint will need to be added temporarily; as an example see https://code.launchpad.net/~ubuntu-release/britney/+git/hints-ubuntu/+merge/423952.
+
+==== How do we debug i386 issues ====
+
+https://lists.ubuntu.com/archives/ubuntu-devel/2020-February/040889.html is providing details on how to do local debugging, basically
+
+<pre>
+git clone -b ubuntu/production https://salsa.debian.org/ubuntu-ci-team/autopkgtest.git
+
+sudo ~/autopkgtest-checkout/runner/autopkgtest <SOURCE>.dsc \
+  --setup-commands="dpkg --add-architecture i386; apt-get update" -a i386 \
+  -- qemu ~/work/autopkgtest-RELEASED-amd64.img
+</pre>
+
+=== Additional information ===
+
+The proposed-migration code is spread across <nowiki>[[https://code.launchpad.net/~ubuntu-release/britney/britney1-ubuntu|britney1-ubuntu]]</nowiki> and <nowiki>[[https://code.launchpad.net/~ubuntu-release/britney/+git/britney2-ubuntu]]</nowiki>.
+
+You can <nowiki>[[LocalSetup|run britney locally]]</nowiki> for testing or to set it up to run against PPAs.
+
+If you would like to filter update_excuses.html for packages that just have autopkgtest regressions, run the following command:
+
+`wget -q -O - http://people.canonical.com/~ubuntu-archive/proposed-migration/update_excuses.html | grep Regression | sed 's/^<li>autopkgtest for \([a-z0-9-]*\).*/\1/'| sort | uniq`
+
+Anthony Towns takes credit for the original implementation of testing in Debian.  Colin Watson is at fault for most of the Ubuntu adaptations.

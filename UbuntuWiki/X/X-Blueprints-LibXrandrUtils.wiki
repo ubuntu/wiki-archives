@@ -1,0 +1,105 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+* '''Launchpad Entry''': UbuntuSpec:desktop-p-libxrandr-utils
+* '''Created''':  * '''Contributors''':  BryceHarrington, ChrisHalseRogers
+* '''Packages affected''': xorg
+
+=== Summary ===
+Monitor layout logic from X.org's xrandr tool is generalized into a high level monitor configuration library for use by GUI tools.
+
+=== Background ===
+Currently, there are a number of different systems for handling monitor configuration.  Each system has its own algorithms, and are maintained by different groups.
+
+First is 'xrandr', the command line utility that the X.org project supports.  We have found this to be a very robust and powerful tool, and its algorithms cover a very wide variety of configuration options, even including adding new resolutions, adjusting gamma and brightness, etc.  The X.org project actively maintains and extends this tool as new capabilities become available in X and the kernel.
+
+Second is 'gnome-rr', a high level wrapper around X's monitor functionality that provides an abstraction layer for use by GUI's config tools.  In addition it also sets configuration policy for hotplugging actions.  There is one GUI config tool available that uses gnome-rr (the logic and tool are loosely coupled).
+
+A third system is NVIDIA’s ‘nvidia-settings’ configuration GUI, which is specific to the -nvidia driver.
+
+Kubuntu also maintains multihead configuration logic in their own tools.
+
+In Ubuntu, we don't expect users to do configuration work on the command line, so we focus on the 'gnome-rr' system for doing monitor configuration.
+
+All of these tools use the same underlying X library, called libXrandr.  However, this is a very, very low level library.  As such, it requires some higher level logic to perform configuration changes.
+
+Both 'xrandr' and 'gnome-rr' include code to provide this higher level logic, but there are differences in their implementation.  It's not uncommon to find bugs that only occur with one tool but not the other.
+
+Bugs found in xrandr go to the X.org project and thus are analyzed by people very well versed in X.org internals.  The X.org developers typically do not look at bugs isolated to gnome-rr; unfortunately the GNOME maintainers that do give attention to these bugs do not have the same depth of experience in X internals.
+
+The Ubuntu-X team would also like to provide better monitor debugging tools than can be done with the gnome-rr infrastructure.  libxrandr is too low level to be used directly for this, and interfacing to the xrandr commandline tool (which is what we're doing), is a bit clunky and limited.
+
+=== Proposal ===
+X.org already provides a robust, well-tested monitor configuration logic in the xrandr command line tool.  It just isn't in a form that can be easily utilized by GUI config tools.
+
+So, the proposal is to refactor this codebase into a higher level library.  This library-ified codebase would still be owned and maintained by the X.org project, and (importantly) we are better situated for escalating monitor configuration issues directly to the experts.
+
+The library would be designed to provide a similar high level interface as the gnome-rr codebase does, so it will be suitable for building GUIs from.  We will provide branches that migrate xrandr and gnome-rr to using this library.  nvidia-settings currently has very limited RANDR support (mainly just rotation), but as the driver gains better support it may be able to leverage this library as well (depending on NVIDIA’s interest).
+
+=== Plan of Attack ===
+1.  Finalize decision on library name (libXrandr-utils?), and establish git tree at freedesktop.org.
+
+2.  Announce library intentions on freedesktop, GNOME & KDE lists.
+
+3.  Add enums and other constants (as appropriate) from xrandr.c into the new library codebase.  Also add some of the more basic structures (rectangle_t, box_t, point_t, etc.) and any trivial general purpose functions (rotation_name, reflection_name, etc.) Write appropriate unit tests for these bits.
+
+These tests simply need to validate that the routines produce the output they should; the tests aren’t intended to drive actual hardware.
+
+4.  Create a copy of xrandr.c which utilizes the structures and enums from this library instead of locally.  Run tests to verify.
+
+5.  Move the name_t and output_prop_t structures and related routines into the library.  Write tests.  Migrate xrandr.c to use it.  Verify tests.
+
+6.  Migrate the transform_t structure and routines into the library. init_transform, set_transform, copy_transform, et al.  Write tests. Migrate the xrandr.c copy to use the library's transform_t code.
+
+7.  Then same for crtc_t.  Be aware that some routines make use of global variables; either postpone porting of these, or restructure the code to accept those as parameters instead.
+
+8.  And finally do output_t.
+
+9.  xrandr.c has a number of global variables.  A new structure should be added that encapsulates many of these into a single object. This is the analog to gnome-rr's ScreenInfo structure.
+
+This object will have the responsibility to create, init, populate, and free the corresponding sub-elements.
+
+Tests should be relatively comprehensive at this point.  They needn’t drive actual hardware.  Tests should check that routines generate the appropriate RANDR operations given various high level configuration requests, without needing those operations to actually affect real (or virtual) hardware.
+
+The library should also include diagnostic information for debugging purposes that is written to stderr, which can be switched on or off at run time dynamically.
+
+At this stage it should be possible to create a demo program that does some basic querying of monitor states.  (Maybe try doing a python binding at this point?)
+
+10. Review any remaining routines not yet migrated.  Some bits are probably not going to be suitable for being in the library and should stay.
+
+11. Prepare branch of xrandr using libxrandr-utils
+
+12. gnome-rr provides several routines for querying details about configuration (output_by_id, crtc_by_id, mode_by_id, etc.)  Check that equivalent routines are now provided by the library.
+
+13. gnome-rr also provides several helper routines which likely could be done analogously within this library.  gather_clone_modes, gnome_rr_output_is_laptop, gnome_rr_output_supports_mode, etc.
+
+14. gnome-rr provides several handler routines, that enact changes on certain events.  Consider whether it makes sense to include these in the library.  Or, if not, if helpers could be provided to cover some of the internals of these routines.  screen_on_event, gnome_rr_crtc_set_config_with_time, gnome_rr_screen_refresh, etc.
+
+15. Review the nvidia-settings codebase, specifically ctkrandr.c, which has its own wrapper around the RANDR routines for rotation.  Ensure libxrandr-utils provides adequate API support for replacing that wrapper code too.
+
+16. Add some additional helper routines for monitor identification - is this output a projector, a laptop panel, a TV, etc.
+
+17. Prepare branch of gnome-rr using libxrandr-utils
+
+=== Possible Follow-up Projects ===
+==== A.  Port nvidia-settings to use libxrandr-utils. ====
+Currently nvidia provides very limited support for RANDR-based configuration in ctkrandr.c (mainly just rotation), but they’ve stated an interest in improving this once RANDR 1.4 is released.  This would imply that they would need to reimplement all the same logic in nvidia-settings.
+
+Instead, nvidia-settings should use libxrandr-utils, so that we have the same logic being used consistently across all video drivers for multi-head.
+
+==== B.  xorg.conf reading and writing ====
+RANDR is used for dynamic configuration at run time, but xorg.conf (or xorg.conf.d/) is still used sometimes for static boot time configuration.  There are numerous driver and debug parameters which are exposed only through the config file.
+
+Code for reading and writing xorg.conf files exists in a number of projects:  Xserver itself, nvidia-settings, python-xkit, and displayconfig (long deprecated) to name a few.
+
+A similar library to libxrandr-utils should be created that can be used in parallel with it for situations where configuration needs written to (or read from) a configuration file.  This should leverage Xserver’s own config reading/writing code, and provide interfaces that solve the needs of tools like nvidia-settings.
+
+==== C.  Hardware Stress Test Suite ====
+Create a set of stress tests that utilize the libxrandr-util library to exercise attached hardware in various ways likely to reveal bugs.  The test would need to be monitored by a human since monitor/gpu faults can be difficult to reliably detect programmatically.

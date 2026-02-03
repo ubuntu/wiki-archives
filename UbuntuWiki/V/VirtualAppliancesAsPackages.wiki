@@ -1,0 +1,120 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+=== Summary ===
+
+This document wants to provide some insight into the techniques that can be used to create virtual appliances as plain Debian packages and propose the development of a . It also introduces some ideas for managing appliances and closes with instructions on how to install a prototype that implements a part of those ideas.
+
+=== Rationale ===
+
+There needs to be a reproducible way to create virtual appliances and to maintain them. It would also be a great thing if we could reuse the applications that are already available as packages in Ubuntu.
+
+Users will also want to manage their appliances to a degree which is not possible with only the facilities provided by most of the applications we want to provide as appliances. Part of the last problem is that sometimes those tools are just not powerful enough but there also situations where managing certain aspects of an appliance needs to integrate the actual application with other software that is part of the appliance like a web or mail server. Apart from that it would also do no harm if the management of different appliances was as similar as possible so the users don't have to relearn the same stuff over and over again.
+
+=== Design ===
+
+The basic idea is to create a metapackage for each appliance which depends on the application and all the other packages needed to create the appliance. These metapackages provide a common virtual package called ''virtual-appliance'' and also conflict with this virtual package so that only one such appliance package can be installed at a time. The common virtual package allows us to tell appliance packages from normal packages and this fact is used by the prototype program ''valist'' to list all appliance packages known to the system. The same approach could be used with vmbuilder to add a option ''--appliance=<APPLIANCEPACKAGE>'' and check if such an appliance actually exists and turn the VM created into such an appliance if it does.
+
+By installing these packages we will have all the software on the machine but the default configuration of those packages won't be the configuration we want for an appliance. Because of this the maintainer scripts of the appliance metapackage will do the final configuration and change the configuration files of these software packages (the application itself, web server, mail server, database server, etc.).
+
+==== The Seeding Problem ====
+
+The biggest problem with this approach is that most application package ask debconf questions during installation. We don't want the user to answer these questions and apply default answers to this questions instead. The first idea was to seed the debconf packages from within the maintainer scripts of the metapackage package. This doesn't work though, since those scripts are executed after all the other packages are already installed. The solution so far is to place a seed file into the same directory of the package repository as the appliance metapackege and use a wrapper program called "vainstall" instead of apt-get to install the appliance. This program will first download the seed file and use it to seed the debconf database and after that it will call apt-get to actually install the metapackage.
+
+Better solutions are welcome but for the moment this seems to be the best.
+
+'''Possible alternative''': The seed file could be put into the package and there might be a central location on the system where all those seed files are saved (similar to how ''/var/lib/dpkg/info'' is used). The wrapper program could then look into the package and apply the seedfile before it calls ''apt-get install'' to install it. Later on it might be a possible solution to patch apt-get or dpkg so that they apply this seedfile automatically.
+
+Currently I don't take such an approach because keeping the seedfile separate is easier for now (Proof-Of-Concept).
+
+==== Managing appliances ====
+
+To allow the user to configure an appliance and do basic system maintanence tasks such as backup or installing security fixes we need such a webbased configuration interface that already supports the basic tasks common to all appliances but also allows us to write plugins that provide the functionality specific to the respective appliance. I've developed an proof-of-concept of such a program and called it "appliance-control".
+
+There has to be a package of "appliance-control" and one for each plugin where each plugin contains all the functionality for one specific appliance and is written by the people who create the respective appliance. The plugin package will then depend on "appliance-control" and the appliance metapackage will depend on the plugin package.
+
+Currently it implements the following features:
+
+* Displaying basic information about the appliance
+* Updating the package list of apt
+* Installing updates (works but user feedback missing)
+* Plugin mechanism to add appliance specific functionality
+* Plugin for a moinmoin appliance that supports backup and restore
+
+More features would be needed for a production version:
+
+* Authentication (password based and maybe by SSL client certificate)
+* Don't run as root
+* Displaying more system information and nicer presentation
+* Restart and shutdown of the appliance and the application, respectively
+* More appliance specific functionality provided by the moinmoin plugin
+* Do interesting things that involve changing system configuration files like setting a smarthost for the systems mailserver which is used by moinmoin to send email (http://augeas.net/ could be used for such tasks)
+* Much more polishing
+
+{| class="wikitable"
+|-
+| <nowiki>[[File:appliance-control.png|appliance-control prototype|width=99% height=99%]]</nowiki>
+|-
+| '''appliance-control prototype:''' The features under ''General'' are provided by appliance-control itself and therefore are common to all appliances that use appliance-control while the features under ''Application'' are provided by the moinmoin plugin and therefore are appliance specific
+|}
+==== Backup Format ====
+
+The proof-of-concept implementation uses a simple backup format to backup everything that is needed to restore this particular appliance later. Each backup file is a zip file with the extension ".abf" (Appliance Backup File) and the following contents:
+
+<pre>
+version             -- Version number of the fileformat
+sysconfig.tar.gz    -- System config file that are needed to recreate the appliance
+sha1sums            -- SHA1 checksums of all files in the archive except for this one
+info.yaml           -- Metainfo of the backup archive with appliance specific information
+appdata.tar.gz      -- The data used by the application and created by the user (e.g. wiki pages)
+</pre>
+
+An example info.yaml file can look like this:
+
+<pre>
+appdata:
+  dirs:
+  - /usr/share/moin/mywiki
+appliance: moinmoin
+sysconf:
+  dirs:
+  - /etc/moin
+timestamp: '2009-10-31 20:12:33'
+version: '0.1'
+</pre>
+
+The backup code is implemented as a module provided by appliance-control so that all plugins can use this common code but decide on their own what should go into "sysconfig.tar.gz" and "appdata.tar.gz" and add their own fields to "info.yaml".
+
+=== Proof of Concept ===
+
+I've built a proof of concept appliance of the moinmoin wiki software. To try it out just start a fresh virtual machine image of Ubuntu Karmic Server in some hypervisor and issue the following commands:
+
+<pre>
+sudo bash -c "echo 'deb http://85.214.96.199/debs binary/' >> /etc/apt/sources.list"
+sudo aptitude update
+
+bzr branch lp:~vmbuilder/vmbuilder/virtual-appliance-tools
+cd virtual-appliance-tools
+sudo ./vainstall moinmoin-appliance
+</pre>
+
+You should now be able to access the wiki on http://<hostip>/ and on http://<hostip>:8080/ there should be an instance of appliance-control running where you see some information about the appliance and can backup and restore it.
+
+The sourcecode can be found at lp:~vmbuilder/vmbuilder/virtual-appliance-tools and lp:~aheck/vmbuilder/appliances.
+
+=== Unresolved issues ===
+
+* Some software packages that we want to turn into an appliance might ask debconf questions that we can't answer with an default answer since that would break the package.
+* I'm not really happy with the backup format, yet. Currently appcontrol.tar.gz and sysconfig.tar.gz contain the backuped files with leading slashes and are just extracted on restore. This should be more portable ideally so appliances with other operating systems can also import such a backup created on Ubuntu. But at least there should be a way for the restore program to do data conversion in the case that the backup was created with a very old version of the appliance (and application) and there was a major change of the data format.
+
+=== Ideas ===
+
+* Build appliances that allow the user to split an appliance into subappliances that run on multiple machines to provide the same application. This way you could build a load-balanced setup for a single application with ease. An example could be a content management appliance that can be split up into one database backend appliance and multiple frontend appliances that are configured with appliance-control to find each other
+* Write a GUI program that takes the ssh credentials of root or a sudoer on a freshly installed server. The program allows the user to select the type of appliance the server should be turned into from a list. When the users selects an appliance and presses OK the program opens a ssh connection and sets up the right package mirror, installs vainstall, and  uses it to install the right appliance metapackage which then turns the server into the type of appliance selected by the user. This would allow people with very limited knowledge about server administration to get a cheap virtual root server for about 10€/month and turn it into an easy to administer server for a blog/wiki/cms or whatever.

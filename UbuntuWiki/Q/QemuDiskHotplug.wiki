@@ -1,0 +1,211 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+For guests that support PCI hotplug (usually enabled via modules: acpiphp pci_hotplug) disks can be hotplugged at run time through the monitor (Human Monitor Protocol, HMP, aka -monitor).  This page documents HMP commands used to hotplug virtio-blk and scsi disks into a Linux guest with PCI hotplug support enabled.
+
+== Verifying Guest Support ==
+The following kernel config options must be enabled (included or as modules):
+
+* CONFIG_HOTPLUG=y
+* CONFIG_ACPI_HOTPLUG_CPU=y
+* CONFIG_HOTPLUG_PCI=y
+
+If not built in, then the the following modules need to be loaded *before* attempting hotplug operations in QEMU.
+
+* acpiphp
+* pci_hotplug
+
+== Adding a 'drive' object in qemu ==
+Using HMP command '''drive_add''' we'll specify which bus and pass drive parameters to define a block driver in qemu.
+
+<pre>
+% qemu-system-x86_64 -S -nographic -monitor stdio
+QEMU 1.5.0 monitor - type 'help' for more information
+(qemu) help drive_add
+drive_add [[<domain>:]<bus>:]<slot>
+[file=file][,if=type][,bus=n]
+[,unit=m][,media=d][,index=i]
+[,cyls=c,heads=h,secs=s[,trans=t]]
+[,snapshot=on|off][,cache=on|off]
+[,readonly=on|off][,copy-on-read=on|off] -- add drive to PCI storage controller
+</pre>
+
+=== 'drive_add' example ===
+Here's a specific example, adding a raw disk, /tmp/test.img.  Note we must specify if=none which allows
+qemu to use this drive with any guest visible device.  This drive may be associated with a virtio-blk-pci or a scsi-disk, or even a usb-disk device.
+
+<pre>
+(qemu) drive_add 0 if=none,file=/tmp/test.img,format=raw,id=disk1
+OK
+</pre>
+
+You can confirm your new device by querying the block subsystem.
+<pre>
+(qemu) info block
+ide1-cd0: removable=1 locked=0 tray-open=0 io-status=ok [not inserted]
+floppy0: removable=1 locked=0 tray-open=0 [not inserted]
+sd0: removable=1 locked=0 tray-open=0 [not inserted]
+pflash0: removable=0 file=/usr/share/qemu/bios.bin ro=1 drv=raw encrypted=0 bps=0 bps_rd=0 bps_wr=0 iops=0 iops_rd=0 iops_wr=0
+disk1: removable=1 locked=0 tray-open=0 file=/tmp/test.img ro=0 drv=raw encrypted=0 bps=0 bps_rd=0 bps_wr=0 iops=0 iops_rd=0 iops_wr=0
+</pre>
+
+== Exporting an existing drive into the guest as a device ==
+Once you've defined an a new 'drive' object, to make it visible to the guest it needs to be connected to a device.  The typical device would be a virtio-blk-pci, or possibly a scsi-disk.  Certain devices may require additional PCI devices.  For example, the scsi-disk device does require that a PCI SCSI controller be present in the system.  Virtio devices only require a PCI device, which is already present by default in QEMU.
+
+Adding a new device is done via the '''device_add''' HMP command.
+
+<pre>
+(qemu) help device_add
+device_add driver[,prop=value][,...] -- add device, like -device on the command line
+</pre>
+
+To enumerate all of the supported driver values, you can query the list in the monitor with:
+<pre>
+(qemu) device_add ?
+name "VGA", bus PCI
+name "gus", bus ISA, desc "Gravis Ultrasound GF1"
+name "tpci200", bus PCI, desc "TEWS TPCI200 IndustryPack carrier"
+name "usb-storage", bus usb-bus
+[...snip...]
+name "virtio-blk-pci", bus virtio-bus
+</pre>
+
+or via the command line:
+<code> qemu-system-x86_64 -device help </code>
+
+=== 'device_add' example ===
+Here's a specific example.  Let's add the drive from above (disk1) as a virtio-blk device, and let's track our new virtio-blk-pci device with a separate id, myvirtio1.
+
+<pre>
+(qemu) device_add virtio-blk-pci,drive=disk1,id=myvirtio1
+</pre>
+
+Confirm the device has been created by querying the pci bus.
+
+<pre>
+(qemu) info pci
+  Bus  0, device   0, function 0:
+    Host bridge: PCI device 8086:1237
+      id ""
+  Bus  0, device   1, function 0:
+    ISA bridge: PCI device 8086:7000
+      id ""
+  Bus  0, device   1, function 1:
+    IDE controller: PCI device 8086:7010
+      BAR4: I/O at 0xffffffffffffffff [0x000e].
+      id ""
+  Bus  0, device   1, function 3:
+    Bridge: PCI device 8086:7113
+      IRQ 0.
+      id ""
+  Bus  0, device   2, function 0:
+    VGA controller: PCI device 1013:00b8
+      BAR0: 32 bit prefetchable memory at 0xffffffffffffffff [0x01fffffe].
+      BAR1: 32 bit memory at 0xffffffffffffffff [0x00000ffe].
+      BAR6: 32 bit memory at 0xffffffffffffffff [0x0000fffe].
+      id ""
+  Bus  0, device   3, function 0:
+    Ethernet controller: PCI device 8086:100e
+      IRQ 0.
+      BAR0: 32 bit memory at 0xffffffffffffffff [0x0001fffe].
+      BAR1: I/O at 0xffffffffffffffff [0x003e].
+      BAR6: 32 bit memory at 0xffffffffffffffff [0x0001fffe].
+      id ""
+  Bus  0, device   4, function 0:
+    SCSI controller: PCI device 1af4:1001
+      IRQ 0.
+      BAR0: I/O at 0xffffffffffffffff [0x003e].
+      BAR1: 32 bit memory at 0xffffffffffffffff [0x00000ffe].
+      id "myvirtio1"
+</pre>
+
+At this point, the device should show up in the guest as well.
+
+== Removing disks from Guests ==
+When removing a disk (hotplugged or otherwise) the order of operations matters.  In particular, since ACPI hotplug requires guest cooperation, hotplug and hotunplug operations may not complete in the guest.  To ensure that the hypervisor retains control of host resources, it is possible to break the relation between a host block device (QEMU's drive object) and the guest visible device (the 'device').  
+
+'''drive_del''' is responsible for removing the association between the guest and host device.  Running this HMP command will close out the host-side resource and prevent any further IO to the device.  '''drive_del''' should be used in the case that a '''device_del''' doesn't complete successfully.
+
+=== Example of 'device_del' ===
+The use of 'id' parameters is required when adding devices and drive objects so that they can be referenced when deleting them.  Here is a list of block devices in the machine:
+
+<pre>
+(qemu) info block
+ide1-cd0: removable=1 locked=0 tray-open=0 io-status=ok [not inserted]
+floppy0: removable=1 locked=0 tray-open=0 [not inserted]
+sd0: removable=1 locked=0 tray-open=0 [not inserted]
+pflash0: removable=0 file=/usr/share/qemu/bios.bin ro=1 drv=raw encrypted=0 bps=0 bps_rd=0 bps_wr=0 iops=0 iops_rd=0 iops_wr=0
+usbdisk1: removable=1 locked=0 tray-open=0 file=/tmp/test.img ro=0 drv=raw encrypted=0 bps=0 bps_rd=0 bps_wr=0 iops=0 iops_rd=0 iops_wr=0
+</pre>
+
+Let's remove '''usbdisk1''' from the system by removing the device.
+
+<pre>
+(qemu) info usb
+  Device 0.0, Port 5, Speed 480 Mb/s, Product QEMU USB MSD
+(qemu) device_del usbdisk1
+(qemu) info usb
+(qemu) info block
+ide1-cd0: removable=1 locked=0 tray-open=0 io-status=ok [not inserted]
+floppy0: removable=1 locked=0 tray-open=0 [not inserted]
+sd0: removable=1 locked=0 tray-open=0 [not inserted]
+pflash0: removable=0 file=/usr/share/qemu/bios.bin ro=1 drv=raw encrypted=0 bps=0 bps_rd=0 bps_wr=0 iops=0 iops_rd=0 iops_wr=0
+</pre>
+
+== Additional Examples ==
+=== Hotplug USB Disk ===
+Ensure you start QEMU with a usb controller, for example, the usb-ehci controller.
+<pre>
+% qemu-system-x86_64 -S -nographic -monitor stdio -device usb-ehci 
+QEMU 1.5.0 monitor - type 'help' for more information
+(qemu) info pci
+  Bus  0, device   0, function 0:
+    Host bridge: PCI device 8086:1237
+      id ""
+  Bus  0, device   1, function 0:
+    ISA bridge: PCI device 8086:7000
+      id ""
+  Bus  0, device   1, function 1:
+    IDE controller: PCI device 8086:7010
+      BAR4: I/O at 0xffffffffffffffff [0x000e].
+      id ""
+  Bus  0, device   1, function 3:
+    Bridge: PCI device 8086:7113
+      IRQ 0.
+      id ""
+  Bus  0, device   2, function 0:
+    VGA controller: PCI device 1013:00b8
+      BAR0: 32 bit prefetchable memory at 0xffffffffffffffff [0x01fffffe].
+      BAR1: 32 bit memory at 0xffffffffffffffff [0x00000ffe].
+      BAR6: 32 bit memory at 0xffffffffffffffff [0x0000fffe].
+      id ""
+  Bus  0, device   3, function 0:
+    Ethernet controller: PCI device 8086:100e
+      IRQ 0.
+      BAR0: 32 bit memory at 0xffffffffffffffff [0x0001fffe].
+      BAR1: I/O at 0xffffffffffffffff [0x003e].
+      BAR6: 32 bit memory at 0xffffffffffffffff [0x0001fffe].
+      id ""
+  Bus  0, device   4, function 0:
+    USB controller: PCI device 8086:24cd
+      IRQ 0.
+      BAR0: 32 bit memory at 0xffffffffffffffff [0x00000ffe].
+      id ""
+</pre>
+
+Now, add the drive and device.
+
+<pre>
+(qemu) drive_add 0 if=none,id=usbdisk1,file=/tmp/test.img 
+OK
+(qemu) device_add usb-storage,id=usbdisk1,drive=usbdisk1 
+(qemu) info usb
+  Device 0.0, Port 1, Speed 480 Mb/s, Product QEMU USB MSD
+</pre>

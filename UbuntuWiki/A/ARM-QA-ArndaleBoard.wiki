@@ -1,0 +1,91 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+The <nowiki>[[http://arndaleboard.org|Arndale]]</nowiki> board uses the SAMSUNG Exynos 5 Dual Cortex A15 SOC. It is currently not supported by Ubuntu, but there is a <nowiki>[[https://launchpad.net/~arndale-team/+archive/ppa|PPA]]</nowiki> that includes the necessary hardware enablement bits to get a board installed. This page is intended to serve as a HOWTO for installing a board using this PPA.
+
+== Preparing a Board for Install ==
+Before installing a board, you must do some configuration of the system. There are two parts to this configuration, setting up the memory card for storing the boot files and configuring the u-boot environment. Note: this assumes you will be installing to an external SATA or USB disk.
+
+=== Setting up the memory card ===
+The memory card will need to be laid out like so:
+{| class="wikitable"
+|-
+| Sectors
+| Contents
+|-
+| 0
+| Master Boot Record
+|-
+| 1-16
+| Fuse bl1 binary
+|-
+| 17-48
+| SPL binary
+|-
+| 49-1104
+| u-boot
+|-
+| 1105-
+| msdos partitions; partition #2 used for boot files
+|}
+
+Information on obtaining the Fuse bl1 binary, SPL binary and u-boot binaries can be found <nowiki>[[https://wiki.linaro.org/Boards/Arndale/Setup/EnterpriseUbuntuServer|here]]</nowiki>. Partition #2 was selected for the boot files in order to preserve the OS partition that comes in the preinstalled memory cards. This partition is hardcoded in the flash-kernel package, so you need to make sure to create the second partition even if you plan to do away with the preinstalled OS partition. The installer will take care of installing a kernel/ramdisk into partition #2, but the device tree blob must be manually copied there one time.
+
+As a quick start, the following commands can be used to setup your memory card from the pre-installed OS environment. This will preserve the pre-installed OS filesystem, but it will not preserve the preinstalled boot files (kernel/ramdisk/device tree blob), so making a backup of your memory card first is recommended.
+# apt-get install parted
+# parted /dev/mmcblk1 -- mkpart primary ext2 1048576B 991298047B
+# mkfs.ext2 /dev/mmcblk1p2
+# mkdir /tmp/foo
+# mount /dev/mmcblk1p2 /tmp/foo
+# cp /path/to/exynos5250-arndale.dtb /tmp/foo
+# umount /tmp/foo
+
+=== Setting up u-boot ===
+To netboot the installer you will need to make sure to have a recent build of u-boot. Instructions for obtaining/building u-boot for the Arndale board are available <nowiki>[[https://wiki.linaro.org/Boards/Arndale/Setup/EnterpriseUbuntuServer|here]]</nowiki>. 
+
+You will need to set some environment variables in the u-boot environment:
+<pre>
+ setenv kernel_addr_r 0x40007000
+ setenv ramdisk_addr_r 0x41000000
+ setenv fdt_addr_r 0x40002000
+ setenv pxefile_addr_r 0x50000000
+ setenv netboot "usb start; dhcp; pxe get; pxe boot"
+ setenv bootcmd 'ext2load mmc 0:2 $kernel_addr_r uImage; ext2load mmc 0:2 $ramdisk_addr_r uInitrd; ext2load mmc 0:2 $fdt_addr_r exynos5250-arndale.dtb; bootm $kernel_addr_r $ramdisk_addr_r $fdt_addr_r' 
+</pre>
+
+The onboard NIC ships with a NULL MAC address. You can set a MAC address to be used by u-boot to network boot by setting an environment variable:
+<pre>
+ setenv usbethaddr aa:bb:cc:dd:ee:ff
+</pre>
+You can generate a random mac address by running the following commands on a Debian/Ubuntu system:
+<pre>
+ apt-get install virtinst
+ python -c 'import virtinst.util ; print virtinst.util.randomMAC()'
+</pre>
+Save these settings so they persist for the next boot:
+<pre>
+ saveenv
+</pre>
+See <nowiki>[[#patchinguboot|below]]</nowiki> about patching u-boot to passthrough the MAC address to the installer.
+
+==== Adding MAC passthrough support to u-boot ====
+The mac address set in the u-boot environment is not retained once you boot into the installer. You can set this manually by dropping to a shell and running:
+<pre>
+ ip link set dev eth0 address aa:bb:cc:dd:ee:ff
+</pre>
+Alternatively, you can patch u-boot to pass the u-boot defined MAC address to the installer, and the installer will automatically detect and use this MAC address. A patch that adds this feature is available <nowiki>[[http://people.canonical.com/~dannf/arndale/u-boot/u-boot-ipappend.patch|here]]</nowiki>. This patch emulates pxelinux's 'IPAPPEND' feature, so you will need to set the IPAPPEND setting in your pxelinux configuration file. Whether or not you choose to manually set the MAC address or to patch u-boot to pass it for you, the installer will create a udev rule that restores the MAC address used during install for future boots.
+
+== Installing ==
+Install bits are available <nowiki>[[http://people.canonical.com/~dannf/arndale/installer/|here]]</nowiki>. You will need to pass a preseed file in to workaround some issues with having a separate PPA archive. A file with the minimum preseed settings is included in the preseed.cfg file there.
+
+You will need to setup DHCP for your system and place the installer files on a tftp server. DHCP/tftp instructions are not included in this document. To initiate network boot of the installer, run the following at the u-boot prompt:
+<pre>
+ run netboot
+</pre>

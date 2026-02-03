@@ -1,0 +1,245 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+----
+== Branch automerging and testing ==
+----
+
+== Introduction ==
+The tool/infrasctructure described in this document is part of the deliverables of UDS-P blueprint: https://blueprints.launchpad.net/ubuntu/+spec/desktop-p-unity-quality
+
+The purpose of this document is to describe the setup of the infrastructure for automated merging and testing of LP branches using tarmac and jenkins. We will start with Unity and related components but this can be expanded to any project hosted on Launchpad.
+
+This enables us doing extra checking, running autotests before the branch is landed, and pushing every commits to a ppa for users to get latest crack before it lands  into the development release. This short cycle of feedback will enable everyone to spot  regressions way easier and create some rapid error/fix loop compared  than what we had in the past.
+
+Announcement: https://lists.ubuntu.com/archives/ubuntu-desktop/2011-November/003492.html
+== Workflow ==
+# The developers should not, at any mean, be merging himself a branch to  trunk. Ideally, commit access is removed.
+# For every merge request, once someone is happy with the branch and is  sure it can be safely merged to trunk, he can change the *global* status  of the merge request from "Needs Review" to "Approve".
+# A cron job is run every 15 minutes, scans a project directory and runs a special tarmac branch. Only one project can be build at once to avoid conflicts between projects.
+# Tarmac will basically ensure that the branch is mergeable, try to merge  it, check some criterias which will be extended in the future, and then  runs a jenkins job
+# Tarmac will then monitor the generic jenkins job (this one doesn't depend on the project which will be run), and from it:
+## copy all the branches to other dirs and handling the fact that jenkins  is runned by another user without spoiling the upstream tree.
+## take the proposed branch, apply the packaging, figuring a correct  versionning for the ppa, run autoreconf/libtoolize to take the latest  dependencies (if you are using autotools, cmake project and projects  without any separate packaging branches are also supported). 
+## Then,  it will spawn a pbuilder chroot, take all needed dependencies as well as  a local repository with latest nux, dee, bamf… from previous builds,  adds some specific test dependencies like google-tests and build from  it.
+## Finally, it runs a make check on the project to ensure tests are passing. ''Note  that the packaging rules are a little bit relaxed in the pbuilder: no  need for exact symbol checking and such. However, it needs the packaging  to be in synced with the upstream branch, but packaging heavy changes  like soname bumps should only happen once a cycle (and that was what  happened on the past), there will be no automatically ABI checks though.''
+# If all of this is successfull, it will then take a commit message from  the merge description, adds a "By <author>, reviewed by  <reviewer>. Fixes: <bugs_fixed>.", commit and push to trunk.  If a bug is attached to the branch, this one is automatically set to  "Fix committed"
+# It dput a packaged version in the unity-team daily ppa: https://launchpad.net/~unity-team/+archive/ppa  for broader audience (which will then build on the three architectures:  i386, amd64 and finally armel). It won't wait on the end of it building  though are we are already ensured it builds on amd64 through steps 5.
+Then… it will go to the next branch of the same project
+
+== Infrastructure Setup ==
+
+For this setup, we will be installing the system in a VM but it could as well be installed on bare-metal or and LXC container.
+
+=== Initial Setup ===
+* Setup a VM. If you use vm-tools from lp:ubuntu-qa-tools, run the following command:
+<pre>
+$ vm-new-vmbuilder oneiric amd64 unity
+</pre>
+Wait till the end of the installation then connect to the VM
+<pre>
+$ vm-view unity-oneiric-amd64
+</pre>
+* Login as your user and sudo as root, optionally configure a proxy and update system
+<pre>
+$ sudo -i
+$ echo 'Acquire::http::proxy "http://xx.xx.xx.xx:3128/";' >>  /etc/apt/apt.conf
+$ apt-get update && apt-get -yq dist-upgrade
+</pre>
+* Set a static network interface to /etc/network/interfaces
+<pre>
+auto eth0
+iface eth0 inet static
+    address 192.168.122.10
+    netmask 255.255.255.0
+    gateway 192.168.122.1
+</pre>
+* Reboot
+
+=== User Setup ===
+On the host generate a new key.
+<pre>
+$ ssh-keygen -N '' -f unity-key
+</pre>
+
+On the guest, add the following entry to /etc/sudoers
+<pre>
+%sudo    ALL=NOPASSWD: ALL
+</pre>
+Create the user 'unity-merger' and add it to privileged groups
+<pre>
+$ adduser unity-merger
+$ adduser unity-merger adm
+$ adduser unity-merger admin
+$ adduser unity-merger sudo
+</pre>
+Add the public key just generated to the list of authorized keys in /home/unity-merger/.ssh
+Try logout and login again
+<pre>
+$ ssh -f unity-key unity-merger@192.168.122.10
+</pre>
+* Additional requirements for the 'unity-merger' user:
+** Create a mail account 
+** Create a Launchpad account
+** Create a GPG key
+** Create a SSH key
+* Run the following command for the first authentication
+<pre>
+ bzr launchpad-login 
+</pre>
+
+=== Env Setup ===
+* Install the following package
+<pre>
+    bzr
+    ubuntu-dev-tools
+    jenkins-slave
+    pbuilder
+    intltool
+    packaging-dev
+    dh-autoreconf
+    + any additional packages required by the projects you want to build
+</pre>
+* Install Tarmac
+<pre>
+bzr branch lp:~didrocks/tarmac/tarmac-jenkins
+</pre>
+
+Create a directory '''$HOME/tarmac-projects'''
+
+This directory contains all the projects that you'll want to merge with tarmac. A job will search for subdirectories containing a tarmac.conf and will execute the associated job.
+
+Create a directory '''$HOME/tarmac-projects/<PROJECT NAME>'''
+
+In this directory create the tarmac configuration file '''tarmac.conf'''
+<pre>
+[Tarmac]
+use_pid = True
+[lp:unity-merger-test]
+commit_message_template = <commit_message>. By <author>, reviewed by <reviewer>. Fixes: <bugs_fixed>.
+jenkins_job_url = http://xx.xx.xx.xx:8080/job/unity-merger
+packaging_branch = lp:~ubuntu-desktop/unity-lens-applications/ubuntu
+jenkins_public_url = https://jenkins.qa.ubuntu.com/job/unity-merger
+jenkins_token = thisisaverystrongauthenticationtoken
+</pre>
+
+Change the settings to suite your project and jobs. jenkins_token is the token used to trigger a job remotely
+<pre>
+export TARMAC_CONFIG_HOME=$HOME/tarmac-projects/<PROJECT>/tarmac.conf
+export TARMAC_PID_FILE=$TARMAC_CONFIG_HOME/tarmac.pid
+-> TODO: tarmac.conf and TARMAC_CONFIG_HOME by user
+(write a jenkins job for it)
+</pre>
+
+* Configure jenkins' slave
+This is configured in '''/etc/init/jenkins-slave.overrride''':
+<pre>
+env USER="unity-merger"
+env GROUP="unity-merger"
+env JENKINS_URL="http://xx.xx.xx.xx:8080"
+</pre>
+
+Create a pbuilder configuration file 
+<pre>
+$HOME/.pbuilderrc 
+</pre>
+
+And update the variable HOOKDIR to match your environment.
+
+Create pbuilder hook directory 
+<pre>
+$HOME/.pbuilder-hooks
+</pre>
+
+Copy the files '''D09custompool''', '''D10specifictests''', '''B10runmakecheck'''  to '''.pbuilder-hooks''' and update the variable BINDMOUNTS to match your environment.
+
+Create the pbuilder
+<pre>
+sudo pbuilder create  --debootstrapopts --variant=buildd 
+</pre>
+
+Copy the scripts '''fire-tarmac''' and '''jenkins_script.sh''' to '''$HOME/bin'''
+
+Set them executable and add fire-tarmac to the user crontab.
+
+=== Jenkins Setup ===
+On jenkins create a freestyle job with 3 string parameters - dir, trunkrev and branch - this job will be duplicated and renamed for all the projects.
+
+Set it to be triggered remotely and add a token.
+
+Give it the same name and token than defined in tarmac.conf on the guest.
+
+The full job definition is:
+<pre>
+<?xml version='1.0' encoding='UTF-8'?>
+<project>
+  <actions/>
+  <description>Automated merge and build of unity</description>
+  <keepDependencies>false</keepDependencies>
+  <properties>
+    <hudson.model.ParametersDefinitionProperty>
+      <parameterDefinitions>
+        <hudson.model.StringParameterDefinition>
+          <name>dir</name>
+          <description>Tarmac working directory</description>
+          <defaultValue></defaultValue>
+        </hudson.model.StringParameterDefinition>
+        <hudson.model.StringParameterDefinition>
+          <name>trunkrev</name>
+          <description></description>
+          <defaultValue></defaultValue>
+        </hudson.model.StringParameterDefinition>
+        <hudson.model.StringParameterDefinition>
+          <name>branch</name>
+          <description>Branch to execute</description>
+          <defaultValue></defaultValue>
+        </hudson.model.StringParameterDefinition>
+      </parameterDefinitions>
+    </hudson.model.ParametersDefinitionProperty>
+    <hudson.plugins.build__publisher.ExternalProjectProperty/>
+  </properties>
+  <scm class="hudson.scm.NullSCM"/>
+  <assignedNode>unity-merger</assignedNode>
+  <canRoam>false</canRoam>
+  <disabled>false</disabled>
+  <blockBuildWhenDownstreamBuilding>false</blockBuildWhenDownstreamBuilding>
+  <blockBuildWhenUpstreamBuilding>false</blockBuildWhenUpstreamBuilding>
+  <authToken>thisisaverystrongauthenticationtoken</authToken>
+  <triggers class="vector"/>
+  <concurrentBuild>false</concurrentBuild>
+  <builders>
+    <hudson.tasks.Shell>
+      <command>#!/bin/bash
+export HOME=/home/unity-merger
+/home/unity-merger/bin/jenkins_script.sh
+</command>
+    </hudson.tasks.Shell>
+  </builders>
+  <publishers>
+    <hudson.plugins.build__publisher.BuildPublisher>
+      <publishUnstableBuilds>true</publishUnstableBuilds>
+      <publishFailedBuilds>true</publishFailedBuilds>
+      <postActions class="vector"/>
+    </hudson.plugins.build__publisher.BuildPublisher>
+  </publishers>
+  <buildWrappers/>
+
+</pre>
+
+=== Additional Notes ===
+To execute a job manually run the following command:
+<pre>
+wget 'http://xx.xx.xx.xx:8080/job/unity-merger/buildWithParameters?token=yoursupertoken&dir=/tmp/tmprpWPDv&trunkrev=10' -o /dev/null
+</pre>
+
+To execute tarmac manually run the following command
+<pre>
+PYTHONPATH=. bin/tarmac merge --debug --imply-commit
+</pre>

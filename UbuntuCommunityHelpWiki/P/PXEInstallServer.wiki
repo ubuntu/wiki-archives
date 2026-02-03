@@ -1,0 +1,138 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+=== Introduction ===
+This will guide you through running an Ubuntu server as PXE install server.
+You'll need to run a DHCP server on your network, not necessarily this server but you do need one.
+
+=== Installing needed packages ===
+You'll need to install the following packages <code>inetutils-inetd (previously netkit-inetd), tftpd-hpa</code> (see InstallingSoftware).
+
+* For Ubuntu 10.04, there is a bug with inetutils-inetd.  It only listens on IPv6, and not on IPv4.  As a quick workaround, you can use openbsd-inetd instead.
+
+If this is also going to be your DHCP server, install dhcp server contained in the follwing package: <code>dhcp3-server</code> (see InstallingSoftware)
+
+=== Configure tftpd-hpa ===
+You'll need to tell tftpd-hpa to start its daemon (which it doesn't by default).  To do this, edit the /etc/default/tftpd-hpa file, and make sure that it looks something like this:
+<pre>
+RUN_DAEMON="yes"
+OPTIONS="-l -s /var/lib/tftpboot"
+</pre>
+Then, run the startup script to actually start the daemon
+<pre>
+/etc/init.d/tftpd-hpa restart
+</pre>
+
+=== Configure dhcpd ===
+If your pxe server is also your dhcp server, you'll need something like this in /etc/dhcp3/dhcpd.conf
+<pre>
+subnet 192.168.0.0 netmask 255.255.255.0 {
+        range 192.168.0.100 192.168.0.200;
+        filename "pxelinux.0";
+}
+</pre>
+
+If you have an existing dhcp server, you should point it to your pxe server by doing something like the following
+<pre>
+subnet 192.168.0.0 netmask 255.255.255.0 {
+    <other config here>
+    filename "pxelinux.0";
+    next-server <pxe host>;
+}
+</pre>
+
+Be sure to restart your dhcp server so that the changes take effect
+<pre>
+sudo /etc/init.d/dhcp3-server restart
+</pre>
+
+=== Configure tftpd-hpa ===
+tftpd-hpa is called from inetd. The options passed to tftpd-hpa when it starts are thus found in /etc/inetd.conf
+
+The defaults are fine for us, your /etc/inetd.conf should have an entry like this
+<pre>
+tftp    dgram   udp    wait    root    /usr/sbin/in.tftpd /usr/sbin/in.tftpd -s /var/lib/tftpboot
+</pre>
+
+(although you may need to edit this file and replace udp with 'udp4', as tftpd-hpa seems to expect an IPv6 address now)
+
+Now we'll copy the needed files from the Ubuntu CD
+<pre>
+sudo cp -r /media/cdrom/install/netboot/* /var/lib/tftpboot/
+</pre>
+
+If your dhcp server issues correct network info and your pxe clients will have network access, then at this point you will be able to do an Ubuntu install using internet repositories.
+
+I want to go a little further however and install everything from the install server as well as customise some of the packages to install.
+
+=== Install apache ===
+Currently nfs installs aren't well supported (Please correct me if I'm wrong) so we'll install over http. For that we need a webserver on our install server too: install the following package <code>apache</code> (see InstallingSoftware).
+
+=== Copying Ubuntu files ===
+Create an ubuntu directory under your freshly installed apache's document root and copy all of the contents of the Ubuntu Alternate CD to that directory
+<pre>
+mkdir /var/www/ubuntu
+cp -r /media/cdrom/* /var/www/ubuntu/
+</pre>
+
+=== Customising the install ===
+There is a package called system-config-kickstart which is a GUI frontend to creating kickstart files. The kickstart file tells the installer where to get its packages from, what to install and a number of other useful settings.
+See KickstartCompatibility for more info.
+
+This package does not have to be installed on your install server, it can be on a convenient Ubuntu desktop somewhere.
+
+Create a custom ks.cfg with system-config-kickstart, be sure to specify HTTP under "Installation Method". Provide the IP of you install server and make the HTTP Directory /ubuntu/
+Save the file and copy it to your install server under /var/www/html/
+
+A very minimalist ks.cfg file which only uses the installation files on the install server and asks for all other questions might look like this
+<pre>
+install
+url --url http://192.168.0.1/ubuntu/
+</pre>
+=== Use your ks.cfg ===
+In order for your network Ubuntu install to use your kickstart file, you have to tell it where to find it. Edit /var/lib/tftpboot/pxelinux.cfg/default and add <code>ks=http://<installserver>/ks.cfg</code> to the append line. 
+It should then look something like this (note that the append line is one line)
+<pre>
+label linux
+        kernel ubuntu-installer/i386/linux
+        append ks=http://192.168.0.1/ks.cfg vga=normal initrd=ubuntu-installer/i386/initrd.gz ramdisk_size=16432 root=/dev/rd/0 rw  --
+</pre>
+
+In Jaunty the default file has been broken up into includes. The append line can be found in /ubuntu-installer/i386/boot-screens/text.cfg
+<pre>
+label install
+        menu label ^Install (from my http server)
+        menu default
+        kernel ubuntu-installer/i386/linux
+        append ks=http://192.168.0.1/ks.cfg vga=normal initrd=ubuntu-installer/i386/initrd.gz -- quiet
+</pre>
+
+=== Boot and install ===
+You should now be able to boot another pc on the lan over the network and have it install Ubuntu automagically :)  You can vary the tftp and http install points to have multiple versions of Ubuntu available to install on your network.
+
+=== Using the CD (or .iso) directly ===
+You can also achieve the above without actually copying any files anywhere. You can mount the CD (or the .iso) and then do additional mounts with the --bind option. The advantage is that you can upgrade the CD (or the .iso) without needing to update the install server files.
+
+For example, after mounting the CD (or the .iso) to /media/cdrom/, you can mount the ubuntu files to the web directory
+<pre>
+mount --bind /media/cdrom/ /var/www/ubuntu/
+</pre>
+
+Similarly, you can do the same with the tftproot:
+<pre>
+mount --bind /media/cdrom/install/netboot/ /var/lib/tftpboot/
+</pre>
+
+If you were to create a pxelinux.cfg directory with an appropriate default file, you can mount that over the top of the mounted CD, so that the tftp server gives out your pxelinux.cfg/default file. For example, a pxelinux.cfg directory in ~/pxelinux.cfg could be mounted like this
+<pre>
+mount --bind ~/pxelinux.cfg /var/lib/tftpboot/pxelinux.cfg
+</pre>
+(Note that in the above example, the actual mount point of the directory would end up as /var/lib/tftpboot/ubuntu-installer/i386/pxelinux.cfg because the pxelinux.cfg is a symlink on the CD (or .iso))
+----

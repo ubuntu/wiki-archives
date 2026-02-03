@@ -1,0 +1,280 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+
+=== Overview ===
+Systemtap allows you harness both static and dynamic
+instrumentation without recompiling your code. It can perform simple things like dynamically
+inserting a printk anywhere, or changing a critical data structure of the kernel (guru mode).
+All operations are performed as root (shell prompt of #). While Systemtap has many safeguards
+in place to sandbox dangerous, system crashing actions, it's not infallible. Proceed at your
+own risk.
+
+* http://sourceware.org/systemtap/
+* http://sourceware.org/systemtap/wiki/SystemtapOnUbuntu
+* http://sourceware.org/systemtap/wiki
+* http://sourceware.org/systemtap/wiki/WarStories
+* git clone git://kernel.ubuntu.com/cking/systemtap-scripts.git
+* git clone git://kernel.ubuntu.com/ppetraki/manza-tapset.git
+* bzr branch lp:~peter-petrakis/+junk/systemtap-infosession
+* <nowiki>[[http://smackerelofopinion.blogspot.com/search/label/systemtap| Colin King's Systemtap musings]]</nowiki>
+
+=== Basics ===
+* Awk/C like language, gets the job done
+* Embedded C mode aka "guru mode"
+* Reference http://sourceware.org/systemtap/langref/
+
+=== Systemtap Installation ===
+<pre>
+$ sudo apt-get install -y systemtap gcc
+</pre>
+
+=== Where to get debug symbols for kernel X? ===
+
+* http://ddebs.ubuntu.com/pool/main/l/linux/
+==== GPG key import ====
+* 16.04 and higher
+
+<code> sudo apt-key adv --keyserver keyserver.ubuntu.com --recv-keys C8CAB6595FDFF622 </code>
+
+* older distributions
+
+<code> sudo apt-key adv --keyserver keyserver.ubuntu.com --recv-keys ECDCAD72428D7C01 </code>
+
+==== Add repository config ====
+<pre>
+codename=$(lsb_release -c | awk  '{print $2}')
+sudo tee /etc/apt/sources.list.d/ddebs.list << EOF
+deb http://ddebs.ubuntu.com/ ${codename}      main restricted universe multiverse
+deb http://ddebs.ubuntu.com/ ${codename}-security main restricted universe multiverse
+deb http://ddebs.ubuntu.com/ ${codename}-updates  main restricted universe multiverse
+deb http://ddebs.ubuntu.com/ ${codename}-proposed main restricted universe multiverse
+EOF
+
+sudo apt-get update
+sudo apt-get install linux-image-$(uname -r)-dbgsym
+</pre>
+
+=== How do I build a debuginfo kernel if one isn't available? ===
+* Getting the <nowiki>[[https://wiki.ubuntu.com/KernelTeam/KernelGitGuide|sources]]</nowiki> and compiling the <nowiki>[[https://help.ubuntu.com/community/Kernel/Compile | kernel]]</nowiki> on Ubuntu.
+<pre>
+
+$ cd $HOME
+$ sudo apt-get install dpkg-dev debhelper gawk
+$ mkdir tmp
+$ cd tmp
+$ sudo apt-get build-dep --no-install-recommends linux-image-$(uname -r)
+$ apt-get source linux-image-$(uname -r)
+$ cd linux-2.6.31 (this is currently the kernel version of 9.10)
+$ fakeroot debian/rules clean
+$ AUTOBUILD=1 fakeroot debian/rules binary-generic skipdbg=false
+$ sudo dpkg -i ../linux-image-debug-2.6.31-19-generic_2.6.31-19.56_amd64.ddeb
+</pre>
+
+=== Work around broken dbgsym file layout so kernel and module probe points work ===
+Systemtap having been developed at RH is predisposed to their layout for kernel
+debug symbols. Typically, everything is installed under /usr/lib/debug/<kernel ver>, what
+debian/ubuntu does is split the kernel proper and the modules into two separate directories.
+Not only that, elfutils actually looks for modules with a .debug extension e.g. psmouse.ko.debug,
+as a result, even though it's searching in the right place, the expected file name is wrong,
+causing stap to fail when probing modules.
+
+Run the following script '''as root''' to setup your debug symbols each time you install a
+kernel ddeb. Eventually this will integrated into the main package. '''Note''' unlike
+previous workarounds, this doesn't touch your real modules /lib/modules.
+
+This issue is tracked '''[fix released: quantal, precise]''' by: https://bugs.launchpad.net/ubuntu/+source/systemtap/+bug/669641
+
+<pre>
+}}}
+{{{
+
+for file in `find /usr/lib/debug -name '*.ko' -print`
+do
+        buildid=`eu-readelf -n $file| grep Build.ID: | awk '{print $3}'`
+        dir=`echo $buildid | cut -c1-2`
+        fn=`echo $buildid | cut -c3-`
+        mkdir -p /usr/lib/debug/.build-id/$dir
+        ln -s $file /usr/lib/debug/.build-id/$dir/$fn
+        ln -s $file /usr/lib/debug/.build-id/$dir/${fn}.debug
+done
+</pre>
+
+This will also make our debug symbols more friendly to gdb and company.
+
+=== List all functions that are accessible by systemtap ===
+<pre>
+
+</pre>
+
+and if that wasn't cool enough, using the '''-L''' switch instead
+will show a list of probe points and the local variables accessible at
+that point
+
+<pre>
+module("thinkpad_acpi").function("brightness_exit@/build/buildd/linux-2.6.32/drivers/platform/x86/thinkpad_acpi.c:6308")
+module("thinkpad_acpi").function("brightness_get@/build/buildd/linux-2.6.32/drivers/platform/x86/thinkpad_acpi.c:6113") $bd:struct backlight_device* $status:int $res:int
+module("thinkpad_acpi").function("brightness_read@/build/buildd/linux-2.6.32/drivers/platform/x86/thinkpad_acpi.c:6319") $m:struct seq_file* $level:int
+module("thinkpad_acpi").function("brightness_set@/build/buildd/linux-2.6.32/drivers/platform/x86/thinkpad_acpi.c:6064") $value:unsigned int $res:int
+module("thinkpad_acpi").function("brightness_shutdown@/build/buildd/linux-2.6.32/drivers/platform/x86/thinkpad_acpi.c:6303")
+module("thinkpad_acpi").function("brightness_suspend@/build/buildd/linux-2.6.32/drivers/platform/x86/thinkpad_acpi.c:6298") $state:pm_message_t
+module("thinkpad_acpi").function("brightness_update_status@/build/buildd/linux-2.6.32/drivers/platform/x86/thinkpad_acpi.c:6097") $bd:struct backlight_device* $level:unsigned int $__func__:char[] const
+module("thinkpad_acpi").function("brightness_write@/build/buildd/linux-2.6.32/drivers/platform/x86/thinkpad_acpi.c:6337") $buf:char* $level:int $rc:int $cmd:char* $max_level:int
+</pre>
+
+=== Determine local variables available at probe point ===
+By dumping the 'locals' var using '$$' which displays it as
+an associative array flattened to a string, easy to print.
+<pre>
+  i8042_controller_selftest locals [param=0xc0 i=?]
+</pre>
+
+and the stap code to generate this:
+<pre>
+  printf (%s locals [%s]\n", probefunc(), $$locals)
+</pre>
+
+=== Easily grab a functions argument list and return value ===
+<pre>
+probe kernel.function("ps2_*").call {
+       printf ("%s -> %s\n", thread_indent(1), probefunc())
+       printf ("%s args [%s]\n", probefunc(), $$parms)
+}
+
+probe kernel.function("ps2_*").return {
+       printf ("exit %s <- %s\n", thread_indent(-1), probefunc())
+       printf ("%s args [%s]\n", probefunc(), $$return)
+}
+
+and this is what it looks like.
+
+    0 kseriod(41): -> ps2_init
+ps2_init args [ps2dev=0xf006de08 serio=0xf6d36200 ]
+exit 17 kseriod(41): -> ps2_init
+ps2_init args []
+    0 kseriod(41): -> ps2_command
+ps2_command args [ps2dev=0xf006de08 param=0xf75bbeaa command=0x2f2 ]
+   42 kseriod(41): -> ps2_sendbyte
+ps2_sendbyte args [ps2dev=0xf006de08 byte=0xf2 timeout=0xc8 ]
+exit 200048 kseriod(41): -> ps2_sendbyte
+ps2_sendbyte args [return=0xffffffffffffffff ]
+exit 200070 kseriod(41): -> ps2_command
+ps2_command args [return=0xffffffffffffffff ]
+</pre>
+
+=== Basic syslog integration ===
+Making use of the system() function. Having it print to syslog and stdout simultaneously
+is an exercise left to the reader.
+
+{{{#!c
+function syslog(msg:string)
+{
+    sendit = "/usr/bin/logger -t stap ".msg
+    system(sendit)
+}
+
+probe scsi.iodispatching
+{
+    if ($cmd->cmnd[0] == 0x12) {
+        syslog(sprintf("%d %s: INQUIRY submitted to h:%d c:%d d:%d l:%d\n", gettimeofday_s(),
+                execname(), host_no, channel, dev_id, lun))
+    }
+}
+
+}}}
+
+=== Aggregate probe points for easier book keeping ===
+Instead of creating a new body for '''call''' and '''return''' for
+yet another trace function, you can create probe chains by making use
+of the comma operator.
+<pre>
+
+probe kernel.function("i8042_controller_reset").call,
+  kernel.function("i8042_controller_selftest").call,
+  kernel.function("i8042_command").call
+{
+  printf ("%s -> %s\n", thread_indent(1), probefunc())
+  printf ("\t %s args [%s]\n", probefunc(), $$parms)
+  printf ("\t %s locals [%s]\n", probefunc(), $$locals)
+}
+
+probe kernel.function("i8042_controller_reset").return,
+  kernel.function("i8042_controller_selftest").return,
+  kernel.function("i8042_command").return
+{
+  printf ("exit %s -> %s\n", thread_indent(-1), probefunc())
+  printf ("%s args [%s]\n", probefunc(), $$return)
+}
+
+</pre>
+
+=== Get the absolute address of a kernel routine ===
+'''NOTE: statement/absolute addressing requires GURU mode (-g) to operate'''
+
+Just grep /proc/kallsyms and then use the address like so
+<pre>
+c0489820 T ps2_sendbyte
+
+</pre>
+
+Alternatively, you can disassemble the module/kernel, calculate the
+offset like so.
+
+<pre>
+probe kernel.statement(0xc0439c86).absolute {
+/*
+/build/buildd/linux-2.6.31/drivers/input/serio/libps2.c:224
+c0439c86:       bb ff ff ff ff          mov    $0xffffffff,%ebx
+serio_pause_rx():
+
+224         if (ps2dev->cmdcnt && (command != PS2_CMD_RESET_BAT || ps2dev->cmdc    nt != 1))
+225                 goto out;
+226 
+* /
+
+	printf("(%s) libps2.c:224  \n", probefunc() )
+}
+</pre>
+
+I like to intersperse the related code so I can remember what I was working on.
+
+Systemtap actually makes this easier by allowing you to cite the sourcecode file
+and the line number and will take care of the translation for you.
+
+=== Disassembling the kernel and related modules correctly ===
+If you need absolute addressing or are going through a dump then
+you need to look at the ASM. Assuming you have the debug symbols installed
+
+<pre>
+}}}
+
+The same is done for any non-stripped KO object. The capital S tells
+your editor that you're dealing with ASM + C preprocessor statements
+so it will highlight the code correctly, especially if you intersperse
+the source code.
+
+Now if you want the source code injected with the relevant ASM you can
+add the '''-S''' option to the above invocation but you need the actual
+source code in place for this to work and it expects this code to be
+in the same location it was built from originally on the build server.
+
+To determine this location:
+{{{
+/build/buildd/linux-2.6.32
+</pre>
+
+Therefore:
+<pre>
+}}}
+
+Then disassemble the kernel again with the additional statement
+{{{
+</pre>

@@ -1,0 +1,168 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+=== Introduction ===
+An intrusion detection system (IDS) inspects all inbound and outbound network activity and identifies suspicious patterns that may indicate a network or system attack from someone attempting to break into or compromise a system.
+
+An IDS differs from a firewall in that a firewall inspects the traffic and stops it based upon user specified rules.  An IDS on the other hand, inspects and evaluates the traffic to determine if it is suspicious.  The IDS may raise alerts based upon the analysis.
+
+There are multiple locations an IDS should be located.  The following are two example placement locations.
+
+Our first example, shows the IDS behind our firewall.  Data coming into the Local Area Network (LAN) is mirrored to the port the IDS is connected to.  The interface on the IDS is in promiscuous mode allowing it to inspect all traffic.
+
+<nowiki>[[File:ids_mirror_firewall.png]]</nowiki>
+
+Our second example is our workstation acting as an IDS.
+
+<nowiki>[[File:ids_workstation.png]]</nowiki>
+
+Both of the above examples are monitoring our firewall to ensure no suspicious traffic is on the LAN.  As previously stated, there are multiple locations an IDS can be deployed.  An additional scenario would be an IDS in front of the firewall, and an IDS behind the firewall.  This will allow you to know what suspicious traffic is coming in on the Wide Area Network (WAN) and what suspicious traffic made it through the firewall.
+
+In this tutorial we will install and configure an IDS.
+=== Prerequisites ===
+==== System Setup ====
+To begin, set up an Ubuntu 9.04 (Jaunty Jackalope) system.  In this guide, Ubuntu will be set up in a virtual environment using KVM-84.
+
+To ease the visualization of Snort related data, we will install a web-based front end.  The Analysis Console for Intrusion Detection (ACID) will serve this purpose.
+
+==== LAMP Server ====
+Once your operating system is installed, install the <nowiki>[[ApacheMySQLPHP|LAMP suite]]</nowiki>:
+
+<pre>
+sudo tasksel install lamp-server
+</pre>
+
+Please note: You will be prompted to create a MySQL root password during the installation process.
+
+<nowiki>[[File:lamp_install.png]]</nowiki>
+
+The LAMP suite not only serves as a HTTP server for ACID, but will also serve as a MySQL backend for Snort.
+
+=== SNORT ===
+==== SNORT Database ====
+Create the database to be used by Snort.
+
+<pre>
+mysql -u root -p
+create database snort;
+GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, INDEX, ALTER, CREATE TEMPORARY TABLES, LOCK TABLES ON snort.* TO 'snort'@'localhost' IDENTIFIED BY 'password';
+FLUSH PRIVILEGES;
+quit
+</pre>
+
+==== SNORT Install ====
+Install Snort:
+<pre>
+sudo apt-get -y install snort-mysql
+</pre>
+
+Please note: you will be prompted to enter the IP address for the local network in Classless Inter-Domain Routing (CIDR) format.
+
+<nowiki>[[File:local_net_address_range.png]]</nowiki>
+
+At the end of Snort's installation routine, you will be prompted if you wish to set up a database for use with Snort.  Choose no.  We will manually configure Snort to connect to our previously created database.
+
+You will receive a warning similar to the following:
+Snort will not start as its database is not yet configured.
+
+==== SNORT Configuration ====
+Update our database with the Snort table structure.
+
+<pre>
+pushd /usr/share/doc/snort-mysql
+sudo zcat create_mysql.gz | mysql -u snort -p snort
+popd
+</pre>
+
+Modify the Snort configuration file to include our MySQL specific information.
+
+<pre>
+sudo sed -i "s/output\ log_tcpdump:\ tcpdump.log/#output\ log_tcpdump:\ tcpdump.log\noutput\ database:\ log,\ mysql, user=snort password=password dbname=snort host=localhost/" /etc/snort/snort.conf
+</pre>
+
+The above line was located at line number 786 /etc/snort/snort.conf.  The snippet simply places a comment in front of the output for the log, and appends the output line for our database.
+
+Remove the pending Snort database configuration file.
+
+<pre>
+sudo rm -rf /etc/snort/db-pending-config
+</pre>
+
+Start the Snort service.
+
+<pre>
+sudo /etc/init.d/snort start
+</pre>
+
+Verify the Snort daemon successfull started.
+
+<pre>
+sudo /etc/init.d/snort status
+tail /var/log/daemon.log
+</pre>
+
+=== ACID ===
+==== ACID Installation ====
+Next we will install a web front-end (ACID) to monitor Snort's output.
+
+<pre>
+sudo apt-get -y install acidbase
+</pre>
+
+During the installation process for acidbase, you will be prompted to configure a database for acidbase.  Choose yes and use MySQL for the database type.
+
+You will be prompted for the password of the database administrator.  This is the same password we used when MySQL was initially installed with the LAMP stack.
+
+<nowiki>[[File:acidbase_install.png]]</nowiki>
+
+Upon entering the database administrator password, you will be prompted to create a MySQL password for acidbase to connect to the database.  In this tutorial I will use the same password as the snort user.
+
+==== ACID Configuration ====
+When installed, the acidbase web front-end is configured to only allow access from the localhost.  Modify acidbase's HTTP configuration to allow other workstations to connect.
+
+<pre>
+sudo sed -i "s#allow\ from\ 127.0.0.0/255.0.0.0#allow\ from\ 127.0.0.0/255.0.0.0\ 10.10.1.10/255.255.255.0#" /etc/acidbase/apache.conf
+</pre>
+
+In the above snippet, I am allowing access to acidbase from my desktop which has IP address 10.10.1.10/24.
+
+Restart apache for the acidbase configuration change to take affect.
+
+<pre>
+sudo /etc/init.d/apache2 restart
+</pre>
+
+==== For Earlier Ubuntu Releases ====
+The final configuration step is to access the acidbase web front-end's configuration at http://snort.home.local/acidbase/base_db_setup.php
+Choose the button labelled "Create BASE AG" and new tables to support acidbase will be added to our Snort database.
+
+You can then return to the main page http://snort.home.local/acidbase/base_main.php
+
+==== From Maverick 10.10 or newer ====
+the acidbase package does most of the work for you already you just need to choose the same password for acidbase as for snort in the above steps.
+
+then browse to:
+
+[http://localhost/acidbase]
+
+* you can of course replace localhost with whatever address you had set in the /etc/acidbase/apache.conf as above.
+
+=== Test IDS ===
+To test Snort and acidbase, perform a portscan of the Snort host.
+
+<pre>
+sudo nmap -p1-65535 -sV -sS -O snort.home.local
+</pre>
+
+Refresh the acidbase web interface and you should see the results of your port scan.
+
+=== Further ===
+==== Oinkmaster ====
+The installation of Snort comes with the analysis rules available in the repository.  I suggest you sign up to receive updated rules at the <nowiki>[[http://www.snort.org|Snort web site]]</nowiki>.  You can then configure oinkmaster (a script that will help you update and manage your Snort rules) to automate the rule update process.

@@ -1,0 +1,701 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+{| class="wikitable"
+|-
+| <tablestyle="float:right; font-size: 0.9em; width:40%; background:#F1F1ED; margin: 0 0 1em 1em;" style="padding:1em;"><<BR>>
+|}
+
+''Note: these notes apply to C++ only, not C''
+
+This page contains coding guidelines for the Mir and Unity teams that go beyond mere style. The intent is to
+
+* have a common set of classes, idioms, and coding conventions that are re-used throughout our code
+* write C++ that is idiomatic and recognized throughout Canonical
+* establish safe coding practice
+* make it difficult or impossible to produce certain kinds of errors
+
+This page will necessarily be forever incomplete. As we come up with new ideas, idioms, and re-usable code, we can add it to the collection.
+
+== Coding style ==
+The <nowiki>[[https://launchpad.net/canonical-client-development-guidelines|C++ style guide]]</nowiki> details a bunch of rules about layout, naming conventions, tools, and the like. Please read it and stick to it.
+
+While there is no point in becoming too obsessed about style (particularly layout and spacing), there is huge value in adhering to a common set of conventions because they make it easier for everyone to read, understand, and modify code written by another developer. The contents of the style guide are not completely cast in concrete; if you find something that seems contentious, please speak up!
+
+== Namespaces ==
+We will use namespaces extensively to group related code.
+
+All of Unity's code will live inside a `unity` namespace. No exceptions to this! By doing this, we place exactly one symbol into the global namespace (instead of hundreds) and avoid accidental clashes with other libraries.
+
+Nested namespaces within `unity` further sub-divide the various bits of functionality. For example, everything that is part of the public Unity API goes into a `unity::api` namespace. (Namespace names are lower case. If you must have a separator for long namespace names, use an underscore.)
+
+For the Unity API, we'll have a namespace structure like this:
+
+* `unity`
+** `util`
+** `api`
+** `scopes`
+** `notifications`
+** `greeter`
+** ...
+** `shell`
+** ...
+
+We can add to this structure as we need to.
+
+Each namespace typically will contain things that are for consumption by the public, and things that are internal to the implementation. Code that is public (that is, defines public types or APIs) lives directly in the corresponding namespace. Code that is part of the implementation lives in an `internal` sub-namespace. For example, `unity::InvalidArgumentException` is an exception that is thrown across the API boundary, so it belongs in the `unity` namespace. Internally, the exception is implemented by an `InvalidArgumentExceptionImpl` class. That class lives in `unity::internal`.
+
+In other words, anything in an `internal` namespace is implementation concern and not for public use. Given this, the above namespace hierarchy looks something like this:
+
+* `unity`
+** `internal`
+** `util`
+** `internal`
+** `api`
+** `internal`
+** `scopes`
+*** `internal`
+** `notifications`
+*** `internal`
+** `greeter`
+*** `internal`
+** ...
+** `shell`
+** `internal`
+** ...
+
+There are several advantages to this naming scheme. The main one is that it makes it much easier to ensure that we do not accidentally break the ABI. By definition, if something is in an `internal` namespace, you can hack away to your heart's content without having to worry about the ABI. Conversely, if something is not in an `internal` namespace, by definition, it is part of the public API and changes may break the ABI.
+
+Another advantage is that simply by looking at the namespace, I know immediately whether something is for public consumption or internal implementation, and I don't have to play guessing games along the lines of "who is meant to call this, anyone, or just our code, or both?"
+
+Don't pollute our own namespaces! If you need a helper function in some source file, and that helper function doesn't make sense outside the current source file, put that function into an anonymous namespace:
+
+<pre>
+namespace unity
+{
+
+namespace
+{
+
+void
+fancy_helper(/* params */)
+{
+    // ...
+}
+
+} // namespace
+
+// Use fancy_helper() here...
+
+} // namespace unity
+</pre>
+
+Anonymous namespaces are preferable to file static definitions. (File static definitions are sooo retro...)
+
+Use a nested class instead of a class in an anonymous namespace only if the class requires access to its enclosing class's private members. Nested classes make a class definition harder to read. If a nested class is complex, add a `nested_` or `friend_of_other_class` namespace, put the class into that namespace, and make it a friend of the class you need access to. That way, the code is easier to read.
+
+== Header files ==
+
+=== One class per header ===
+In general, header files should define one class per file. The name of the header is the same as the class. For example, a class named `ResourcePtr` has a header file called `ResourcePtr.h` (surprise, surprise).
+
+Sometimes, it doesn't make sense to have only one class per header. For example, a collection class and its corresponding iterator class are usually designed together and know about each other's implementation, and it makes little sense to split them into separate header files. Similarly, we have a bunch of exceptions in the `unity` namespace that all derive from a common base class, such as `InvalidArgumentException`, `LogicException`, `FileException`, and so on. These are defined in a single header file `UnityExceptions.h`. These exceptions derive from a common `Exception` base class (which has its own header `Exception.h`).
+
+However, try to stick to the one-class-per-header rule as much as possible. It makes the code easier to understand, reduces inter-dependencies and the associated cost of recompiling after a change, and it makes it much easier to navigate the code base. (I don't have to use `find` and `grep` to figure out in which header file a particular class is defined.) Multiple classes per header is OK for groups of closely related and/or trivial utility classes; otherwise, give each class its own header.
+
+=== #include directives ===
+Always use angle brackets for `#include`, with the full pathname of the header:
+<pre>
+}}}
+This style means that, when compiling, a single `-I` command-line option is sufficient to get access to all the headers. Moreover, when someone reads the code, they can immediately see ''where'' to find the header file.
+
+Do not use quotes for `#include` directives:
+
+{{{
+</pre>
+The lookup semantics for this are poorly defined and not all compilers do the same thing when searching for headers with this syntax. (This can be an issue if a local header has the same name as a header in a library we are using.) For the same reason, always use the full pathname for the header, starting with `unity`.
+
+=== Header file location ===
+All headers live underneath an `include/unity` directory. (Correspondingly, source code lives underneath a `src/unity` directory.) The motivation is to reduce clutter. Especially with code that consists of many source files, having header and source files in the same directory quickly becomes unwieldy.
+
+Only headers that are part of the API proper (including its implementation) are underneath `include/unity`. Other headers, such as headers created for tests or examples, live in the corresponding test or example directory.
+
+We use the `something` and `something::internal` namespace convention, and headers follow that convention. Every public header directory, such as `include/unity` has an internal subdirectory (`include/unity/internal`, in this case). In other words, the directory structure for headers follows the namespace structure. This makes the code base easier to navigate. In addition, it also makes it very easy to see what headers are part of the public API: if you "pick up" the header tree by its `include` root and delete all directories named `internal`, you are looking at all the headers that, eventually, will be installed in `/usr/include`.
+
+=== Public versus internal headers ===
+Public headers are not allowed to include internal headers, but internal headers can include public ones. The test suite enforces this restriction. The idea is to make sure that we don't accidentally leak an internal header into a public header, thereby potentially exposing internals of the implementation or, worse, break the ABI.
+
+=== Stand-alone headers ===
+All headers, whether public or internal, must include their own dependencies. This means that, if I write a source file that contains only a single `#include` of an arbitrary header, that file must compile without error. The test suite enforces this restriction.
+
+Note that, if a header uses, say, `std::string` and includes another header that already (directly or indirectly) includes `<string>`, there is no need to include `<string>` explicitly. For example, the header for `MyClass` might look like this:
+<pre>
+
+// No need to #include <string> here. It's OK to rely on the include caused by SomeClass.h.
+
+class MyClass
+{
+public:
+    // ...
+
+private:
+    std::string msg_;
+    MyClass::SPtr p_;
+};
+</pre>
+    
+It's better to rely on the include of `<string>` that is done by `SomeClass.h` than to include `<string>` explicitly: compilation will be faster without the redundant `#include`.
+
+Prefer forward declarations to including a header file where possible: compilation will be faster this way, and fewer source files are re-compiled if a change is made to a forward-declared class. However, don't go overboard with this; unless the project gets very large indeed, time lost in header file processing is rarely a problem. In particular, do not forward-declare things that are none of your business. For example, it is impossible to portably forward-declare `std::string`. (All attempts to do so result in ill-formed programs.)
+
+To forward-declare stream classes, include `<iosfwd>`. (Unfortunately, there is no corresponding `<stringfwd>`.)
+
+== Source files ==
+All source files that are part of the API live under `src/unity`, following the same namespace-related directory structure as header files.
+
+== Project directory structure ==
+At the top level, we have at least the following directories:
+* `cmake`
+* `doc`
+* `examples`
+* `include`
+* `src`
+* `test`
+
+As you would guess, source files live under `src`, header files under `include`, etc. Other files that are appropriate at this level are things like `CMakeLists.txt`, `INSTALL`, `README`, `valgrind-suppress`, and similar.
+When creating files, think about where they should go and, if appropriate, create an appropriate directory for them, either at the top level or the appropriate sub-level. Do not clutter this directory with other things, such as source files, header files, scripts, or similar. If this code base is to last over time, we need to have a clean structure with logical ordering. (Remember, this thing is called a "file system"—it's not called an "in-tray"!)
+
+Underneath `src` and `include`, we have directories that follow the namespace hierarchy (each with its `internal` subdirectory). Underneath `test`, we have at least:
+
+* `gtest`      Contains unit tests
+* `copyright`  Contains tests to check that all source files have a copyright header
+* `headers`    Contains tests relevant to header conventions
+* `whitespace` Checks for trailing whitespace in source files
+* ...
+
+Underneath `gtest`, we again have the same namespace-related directory structure as for source and header files, and tests go into the corresponding directory. For example, the unit test for `ResourcePtr` is in `test/gtest/unity/util/internal/ResourcePtr/ResourcePtr_test.cpp` (together with its `CMakeLists.txt` file).
+
+For unit tests, put each test into a separate directory. That is, we have `util/internal/ResourcePtr/ResourcePtr_test.cpp` and `util/FileIO/FileIO_test.cpp` instead of just `util/ResourcePtr_test.cpp` and `util/FileIO_test.cpp`. Again, this reduces clutter, makes it easier to move tests around in the hierarchy (together with their `CMakeLists.txt` file) if we change namespaces, and it keeps complex tests that require multiple source files and/or header files separate from other tests.
+
+== Compiler warnings ==
+The code is built with `-Wall -Wextra`. Code must compile without warnings, no exceptions. If code routinely builds with warnings, very quickly, developers get used to the noise from the warnings. When the one warning that is truly serious suddenly pops up, chances are that it will be overlooked, and we end up chasing down a seg fault when, with a clean build, the warning would have told us straight away what is wrong.
+
+The effort required to get rid of a warning is almost always minor, and worth making.
+
+One common warning is caused by unused parameters. The best way to disable the warning is to comment out the parameter name, for example:
+
+<pre>
+void
+foo(int size, string const& /* name */)
+{
+    // ...
+}
+</pre>
+
+This eliminates the warning about the unused parameter `name`, and it clearly documents that the parameter is ignored ''intentionally''.
+
+Do not check in code that compiles with warnings. For release builds, we add `-Werror`, so the build fails if it produces warnings.
+
+== Error handling ==
+We do error handling with C++ exceptions, period. I'm well aware of the discussions around exceptions versus error codes. The short of it is that this is 2013, that modern C++ uses exceptions, and that projects using other languages, such as Java and Python, have not ended in catastrophic failure because they use exceptions.
+
+Unity defines a number of exception types, in `unity/UnityExceptions.h`. These come in broad categories, such as `InvalidArgumentException`, `SyscallException`, `ResourceException`, and so on. We can add to these categories as the need arises.
+
+If you define a new exception, ask yourself whether the caller may have a need to programmatically handle the exception. For example, if we were to add a `SocketException` and throw that for all network-related errors, this probably wouldn't make the grade. It usually is important for the caller to know whether something didn't work because there was no-one listening at the other end, a call timed out, or a connection was lost.
+
+The easiest way for the caller to react differently to different error conditions is to have a different exception type for each error condition. So, make a base exception for the generic case, and derived exceptions for the specific case. For example, we could have a `SocketException` that is a base for both `DNSException` and `TimeoutException`. With that, the caller can write:
+
+<pre>
+try
+{
+    some_network_operation();
+}
+catch (DNSException const& e)
+{
+    // React to error
+}
+catch (TimeoutException const& e)
+{
+    // Deal with that
+}
+catch (SocketException const& e)
+{
+    // Something else unspecified went wrong
+    cerr << "Sick network: " << e.error_number() << endl;
+}
+</pre>
+
+Note that doing this is preferable to having just a single `SocketException` with an `error_number()` member that that returns `errno`.
+
+Alternatively, for the above code, the caller can decide to let `SocketException` propagate up the call stack and only deal with DNS and timeout errors on the spot, to handle the generic error higher up. By creating exception hierarchies that capture common specific cases with a generic fallback, we allow the caller to structure his/her code they way the caller wants, not the way we dictate.
+
+Think about what details an exception should carry that should be accessible ''programmatically'', such as `errno`. It's nice to have human-readable and comprehensible error messages. (The `unity::Exception` base class makes it really easy to get nice error messages.) But details that are accessible ''programmatically'' are important for good error handling: without that, the caller has to write a parser for the error message to figure out what's gone wrong. So, equip your exceptions with whatever detail is available at the point the exception is thrown, even if there isn't a specific sub-exception type for a particular error condition. This allows the caller to still make sense of the specifics. (The golden rule is: never throw away information that is available at the throw site. Whatever error information is available at that point should go into the exception.) 
+
+`unity::Exception` has a feature that automatically preserves any exception that is caught "from below" and re-thrown as a different exception. At the point where the exception is handled or logged, the entire exception history as it bubbled up the call stack is still available.
+
+=== Exception safety ===
+Ideally, methods should provide the no-throw guarantee. If they do, mark them as such with a `noexcept` on their signature.
+
+Wherever possible, provide the strong exception guarantee in your code. This means that, if a method throws an exception, there should be no lingering side-effects from the failed call: things should behave as if the failed call had never happened. Doing this is often impossible, particularly when the failure involves an external resource (such as failed system call or library call). However, for code that we fully control ourselves, it is usually possible.
+
+When you write a method, ask yourself at each point you throw an exception whether doing that will leave the system in the same state it was in before the failed call. If not, try to improve the code to not leave any side-effects behind. If doing this turns out to be impossible, the documentation must state what the state after an exception will be. (For example, "If this method throws, the `xyz` in-out parameter may not have its original value.")
+
+In all cases, throwing an exception must not cause a resource leak and it must preserve all data type invariants. Any values that were changed before the exception was thrown must still be valid, in the sense that use of those values later will not cause a crash. (That's called the basic exception guarantee.)
+
+If it is not possible to preserve invariants in the face of an error condition, don't throw an exception; call `abort()` instead.
+
+=== Catch errors early ===
+Whenever we accept information across the API from the "outside world" (e.g., the shell or a third-party developer), we must sanitize any values that are passed into our code. For example, if we have a method that accepts an icon image and an icon display string, it almost certainly makes no sense for the display string to be empty. So, the first step must be to check that string and, if it is empty, throw an `InvalidArgumentException`.
+
+If we don't do this, the empty string will most likely be passed around in our code and, eventually, be given to the shell (which most likely will display the icon without a label). By the time the problem is seen, the string has been passed from the third-party code into the API, and from there to the shell (crossing at least one address space boundary). Because the source of the string can be any one of a number of scopes, tracking down the problem is a lot of work, and it may not even be possible to easily reproduce it.
+
+So, for every parameter that enters the API, think about what semantic constraints apply to the parameter (and possibly to its combination with other parameters). If the values don't make sense, throw an exception there and then. Doing this makes the API better (because it alerts the source of the bad parameter that something isn't right), and it prevents meaningless data from propagating through the system and doing collateral damage in code that is far away from the source of the problem.
+
+=== Use asserts ===
+
+We are not perfect, and there will be bugs in our code. Just as we sanitize what we receive from the outside world, we need to sanitize what we pass to each other. If a method expects a particular data type invariant to hold, put assertions in the code to make sure the invariant does indeed hold. This is not to say that every method has to have a string of assertions at the beginning. Where an assertion makes sense depends on how the code is structured and who calls whom. If function `a` calls function `b`, and `a` has just asserted the correctness of the parameters, there is no point asserting again in `b`, if `b` is only called from `a`. Conversely, if `b` is also called from `c`, it's usually better to assert only in `b`, instead of both `a` and `c`.
+
+You understand your code and you know how it is structured and what assumptions it relies on. Verify those assumptions at key points with assertions, so we catch errors early. This makes debugging a lot easier and less time-consuming.
+
+== Resource management ==
+All C++ code should take care of resource management (not leaking things) as a matter of course. This is doubly true for code that uses exceptions because exceptions can change the flow of control in unexpected ways, and sometimes years after the code was written (because, for example, a function in a third-party library that didn't use to throw was changed to throw).
+
+The golden rule for our code is: ''always'' use RAII (Resource Acquisition Is Initialization). When I say ''always'', I really mean ''always'', no exceptions (pun intended).
+
+The classical way to leak something is the following:
+
+<pre>
+class MyClass
+{
+public:
+    MyClass()
+    {
+        p_ = new[99];
+        // Some more code here...
+    }
+    ~MyClass()
+    {
+        delete[] p_;
+    }
+
+private:
+    char* p_;
+};
+</pre>
+This code is wrong. (If it is not wrong today, it may start being wrong without warning in two years' time.)
+
+The problem is that, if, in the constructor, the code following the allocation throws an exception, the allocated memory is leaked. (The same thing can happen with any pair of create/destroy or allocate/deallocate functions.) If a constructor throws, member variables that were initialized up to the point where the exception is encountered are destroyed in the reverse order they were initialized in. However, something like `char*` does not have a destructor, meaning that the `delete[]` call never happens.
+
+This problem can arise in many disguises, such as an early return out of a block of code where the allocation is near the beginning and the deallocation at the end.
+
+Generally, any code that explicitly allocates something and then later explicitly deallocates it (whether in a destructor or elsewhere) is wrong. Don't ever, ''ever'' do this! It's a recipe for leaking resources, typically in hard-to-reproduce circumstances.
+
+For memory, use `unity::util::DefinesPtrs`. That's a template that injects four type definitions into a class. This not only saves typing, but also creates a common naming convention that everyone can recognize. The typedefs are for `unique_ptr` and `shared_ptr` (to const and non-const instances).
+
+For locks, use `lock_guard` and `unique_lock` as appropriate. To lock several mutexes such that no deadlock can occur, use the `std::lock` template.
+
+For other resources, use `unity::util::internal::ResourcePtr`. That's essentially the same thing as a `unique_ptr`, but it works for arbitrary non-memory resources, such as file descriptors, X displays, EGL contexts, and whatever else you can think of. `ResourcePtr` also works for types for which you can't use `unique_ptr`, such as opaque or incomplete types. Basically, whenever you need to call into a C API, `ResourcePtr` is your friend. (`ResourcePtr` shouldn't be necessary for C++ APIs because any self-respecting C++ API makes it impossible to leak resources, right?)
+
+=== Memory management ===
+
+Using `DefinesPtrs` and `ResourcePtr` consistently will do a lot to prevent memory management errors.
+
+The test suite has a `valgrind` target, so you can run all the tests with `make valgrind`. Use it regularly!
+
+The `valgrind-suppress` file contains suppressions for false positives. Please be careful when adding new supressions and make sure that the problem really is harmless and not caused by our own code!
+
+Please try to keep intentionally leaked memory (such as for static buffers) to a minimum. Every time we do this, we make life harder for the users of our library because they will need to add a suppression directive for the intentionally leaked memory.
+
+=== Using smart pointers correctly ===
+I often see code where people use smart pointers, but in ways that are inefficient or not idiomatic. Here are a few rules for how to do it right.
+
+==== Naming and initialization ====
+
+Suppose we have:
+<pre>
+MyClass::SPtr p = make_shared<MyClass>(); // MyClass::SPtr is a synonym for shared_ptr<MyClass>
+</pre>
+First up, use the `DefinesPtrs` template to enforce a uniform naming convention for your smart pointers. (It defines `SPtr`, `SCPtr`, `UPtr`, and `UCPtr`, which are `shared_ptr<T>`, `shared_ptr<T const>`, `unique_ptr<T>`, and `unique_ptr<T const>`, respectively.
+
+Second, use `make_shared` instead of `new`. `make_shared` gets the job done with a single memory allocation, whereas, if you use `new`, you first allocate the instance, and then the `shared_ptr` constructor hits the heap a second time to allocate space for the reference counts.
+
+==== Passing a smart pointer as an in-parameter ====
+
+If you want to pass a smart pointer (either `shared_ptr` or `unique_ptr`) as an in-param, ''do not'' pass it by value:
+<pre>
+void foo(MyClass::SPtr p); // WRONG!
+</pre>
+This works, but is rather inefficient because the pointer will be copied. In turn, this means that the copy constructor locks the pointer, increments the reference count, and unlocks the pointer again before the function is called. When the function completes, the destructor of the temporary locks, decrements the reference count, and unlocks. All of this is a waste of time, so pass the pointer by const reference instead:
+<pre>
+void foo(MyClass::SPtr const& p); // Right, avoids the needless copy
+</pre>
+
+==== Passing a smart pointer as an inout- or out-parameter ====
+No deep mysteries here. Just pass the smart pointer by non-const reference:
+<pre>
+void foo(MyClass& p); // p may or may not have a different value when the call returns
+if (p.get() == nullptr)
+{
+    // foo() has taken ownership
+}
+else
+{
+    // foo() may or may not have changed the instance owned by p
+}
+</pre>
+
+==== Transferring ownership of a `unique_ptr` into a function ====
+There are two options here:
+* Pass by non-const reference. When the call completes, the called function may have taken ownership, in which case `p.get()` will return `nullptr`.
+* Pass the `unique_ptr` by value.
+The second option seems to have become idiomatic for ownership transfer. Note that you will have to write the signature as follows:
+<pre>
+void foo(MyClass::UPtr p); // Same as unique_ptr<MyClass>
+
+// ...
+
+MyClass::UPtr p = new MyClass();
+foo(std::move(p));
+</pre>
+Note that you have to use `std::move` for things to compile because `unique_ptr` is non-copyable.
+
+This idiom is appropriate if the called function ''always'' takes ownership. If it may or may not take ownership, you'll have to use pass by reference instead. (But it's questionable whether a function with such semantics should ever exist; decisions about ownership should not be made at run time.)
+
+=== Fixed-size buffers ===
+
+The first person to allocate a fixed-size buffer and write to it with the mindset of "1024 bytes will surely be big enough" will be shot!
+
+The most common case where people are tempted to use a fixed-size buffer is when cobbling formatted strings together and using `sprintf()` or the like to fill the buffer. Don't do that! Instead, use an `ostringstream`:
+<pre>
+ostringstream hue_msg;
+if (!degrees_in_range(h))
+{
+    hue_msg << "Invalid hue outside [" << degree_range << "] range: " << h;
+}
+throw_bad_HSV(hue_msg.str());
+</pre>
+This is easy, safe, there is no upper limit on the buffer size, and things just work. Note that `str()` returns a C++ `string`; if you need a `const char*` instead to pass to a C API, you can use `str().c_str()` to get at the C-string in constant time.
+
+== Pass complex types by const reference ==
+This is a common mistake:
+<pre>
+void foo(std::string s);
+</pre>
+Nothing wrong with that, it works just fine, right? It indeed works, but very inefficiently: the string is copied, which almost guarantees that the copy constructor will make a heap allocation, which is ''very'' expensive.
+
+Instead, pass the string by const reference:
+<pre>
+void foo(std::string const& s);
+</pre>
+That doesn't make a copy and is loads faster.
+
+The same is true for exceptions, which you should catch by const reference instead of by value:
+<pre>
+try
+{
+    // ...
+}
+catch (SomeException e) // inefficient and may cause slicing
+{
+    // ...
+}
+catch (SomeOtherException const& e) // much faster and doesn't throw information away
+{
+    // ...
+}
+</pre>
+Exceptions are, by definition, exceptional (or so one would hope), so efficiency is not a concern. Still, the cost of doing it right is so small that we might as well do it right always. In addition, with pass-by-value, if a derived exception is thrown, it is sliced to its static type, and re-throwing the exception will throw the sliced exception, not the original one, which is bad.
+
+In general, keep an eye out for anything that's a class and passed by value. Unless the class is tiny and trivially copyable, passing by const reference instead will be massively faster. (Anything that's larger than 8 bytes should be passed by const reference.)
+
+=== Passing by value if the callee wants to modify a copy ===
+This point is a little arcane, but worth knowing. Suppose we pass a class to function, and the called function want's to make a copy that it can modify:
+<pre>
+void
+foo(MyClass const& c)   // Should we write it like this?
+{
+    MyClass copy = c;
+    copy.modify_something();
+    // ...
+}
+
+void
+foo(MyClass c)    // Or should we write it like this?
+{
+    c.modify_something();
+    // ...
+}
+</pre>
+Semantically, the two implementations are the same: either way, what is modified is a copy of what's passed in. It turns out that the second option can be more efficient in some cases, specifically, if the caller passes a temporary:
+<pre>
+extern MyClass make_an_instance();
+
+foo(make_an_instance()); // Faster if passed by value instead of const reference
+</pre>
+If the instance is passed by value, the compiler can avoid making an internal copy of the instance whereas, if passed by const reference, the compiler is forced to make a copy to bind the reference to.
+
+Worrying about this difference is generally not worth it, unless `MyClass` is expensive to copy.
+
+== Inheritance ==
+Inheritance is the most widely abused feature of C++. The golden rule is: "don't, unless you really have to." Many classes that use inheritance really mean a ''has-a'' relationship rather than an ''is-a'' relationship. A ''has-a'' relationship is preferable because it can be kept private whereas, with (public and protected) inheritance, the base type(s) become part of the type of the derived class, and so create much tighter coupling.
+
+Avoid APIs that force the caller to derive from something, if at all possible. (Often, a functor can be used instead of derivation from a base with pure virtual functions.)
+
+If you derive from a class that is non-final, and override any of the base's virtual methods, explicitly mark each method as such:
+<pre>
+class MyClass : public MyBaseClass
+{
+public:
+    // ...
+    virtual void some_method(/* params */) override;
+    // ...
+};
+</pre>
+Doing this adds an extra layer of safety because it causes a compile-time error if you accidentally change the parameter signature and end up overloading instead of overriding.
+
+If a class clearly is not meant to be derived from, consider marking it `final`, at least for the public part of the API.
+
+gcc 4.7.2 supports delegating constructors. Use them where appropriate; it saves you having to write a separate helper function if there are several constructors that perform similar initialization.
+
+== Think about the big five ==
+We used to have "the big three": copy constructor, assignment operator, and destructor. C++ 11 has made that "the big five" by adding the move constructor and move assignment operator.
+
+=== Copy semantics ===
+Pretty much the first question you should ask yourself when you write a class is "does it make sense to copy or assign instances of this class?"
+
+Whether to allow or disallow copy and assignment is a fundamental decision. If you don't know the answer for your class, chances are that you don't understand what you are trying to write!
+
+Generally, value types (such as strings, numbers, etc.) have copy semantics whereas control and facade objects (such as a `Mouse` class or `Display` class) do not.
+
+==== Disabling copy semantics ====
+
+If you decide that your class should not be copied, write it like this:
+
+<pre>
+class MyClass : private unity::util::NonCopyable
+{
+    // ...
+};
+</pre>
+`NonCopyable` disables the copy constructor and the assignment operator. (It's the same thing as `boost::noncopyable`, but doesn't require including a boost header.)
+
+Use private inheritance to avoid creating accidental polymorphism. (If you use public inheritance, you could treat all classes that can't be copied polymorphically, which is not what you want!)
+
+Note that you can achieve the same effect like this:
+<pre>
+class MyClass
+{
+public:
+    // Lots of stuff here...
+
+    MyClass(MyClass const&) = delete;
+    MyClass& operator=(MyClass const&) = delete;
+
+    // Lots more stuff here...
+};
+</pre>
+This also disables copy and assignment. The down-side is that, depending on what else is in the class, that may be hard to find. For example, for an abstract base class that can't be copied, you should disable these two methods in the protected section, where you'll put the constructor(s). The style guide requires the public section to appear before the protected section so, to find out whether the class can be copied or not, I have to read through potentially a hundred lines or more.
+
+Whether or not a class can be copied is one of its most fundamental properties, so it makes sense to have that visible immediately, by deriving from `NonCopyable`. That's easier to type too, so everybody wins.
+
+==== Enabling copy semantics ====
+If you decide that your class implements a value type that can be copied and assigned, consider whether you can use the compiler-generated defaults. If so, you ''must'' make this explicit:
+<pre>
+class MyClass
+{
+public:
+    // ...
+    MyClass(MyClass const&) = default;            // Mandatory for default copy constructor
+    MyClass& operator=(MyClass const&) = default; // Mandatory for default assignment operator
+    // ...
+};
+</pre>
+Note that you can achieve the same thing by not mentioning anything at all, and the compiler will generate these two methods anyway. The reason for requiring these two methods to be spelled out explicitly is that ''it shows that you have thought about them''. It confirms that "yes, I know what my class is doing and I've verified that the defaults do the right thing". If you say nothing, the reader is left wondering whether you perhaps left out these two methods by accident.
+
+Note that, for properly-written C++ classes (unless you are creating resource management classes), the defaults will ''always'' be a appropriate. That is because any self-respecting class does not have unmanaged data members, but uses managed data members (such as smart pointers) instead. And, for those, the defaults ''always'' do the right thing. (See how RAII makes life easier? By using RAII consistently, we not only can be sure that we won't leak anything, we also no longer have to worry about copy and assignment.)
+
+Note that, as a side effect of defaulting the copy constructor and assignment operator as above, the compiler will no longer generate the default move copy constructor and move assignment operator. (Declaring a destructor disables that too.) But that's not a big deal. If we really are implementing a value type that needs them, it's easy enough to define them explicitly. (And most of our classes won't be value types.)
+
+==== Enabling move semantics ====
+
+A move constructor and move assignment operator usually make sense only for value types (or fassade types, such as `unique_ptr` and similar). If you have a value type that can benefit from a move constructor (meaning that it's contents are large and, typically, require dynamic memory), chances are that you will have to implement the big five.
+
+Note that the move assignment operator must leave the moved-from object in a state that is safe to destruct.
+
+Almost always, it is sufficient to use the compiler-generated methods:
+<pre>
+class MyClass
+{
+public:
+    // ...
+    MyClass(MyClass&&) = default;
+    MyClass& operator=(MyClass&&) = default;
+    // ...
+};
+</pre>
+
+One case where you need to write your own move methods is if you need acquire locks for the duration. Otherwise, if your class only has managed data members, the default versions will do the right thing.
+
+==== Writing the destructor ====
+With modern C++, most classes don't need a destructor. Yes, really.
+
+If your class doesn't have data members that hold raw (unmanaged) resources, there is nothing to clean up because the destructors of these data members do the right thing for you. Consequently, you don't need to do anything in the destructor of your class. (RAII keeps looking better and better...)
+
+So, when do we need a destructor? The typical case is that the destructor must call something that causes a side-effect, such as flushing a buffer, closing a file, turning off a physical device, etc. Again, if your data members are properly managed types, you still need not do anything because they will clean up after themselves. (If we have a file class instance as a data member, I would expect the destructor of the class to close the file, for example.)
+
+There is one glitch with this: destructors can't throw exceptions. If they do, it's likely that, sooner or later, the program will dump core (namely, if the stack is unwound after an exception is thrown from somewhere and, during the unwinding, the destructor of an unwound variable throws as well).
+
+In turn this means that, if some of the clean-up actions performed by a destructor may throw an exception, we can't let the exception escape from the destructor and, therefore, the calling code will not find out that something went wrong during finalization. That gives us rule number one for destructors:
+
+If a class does require a user-defined destructor, you must declare that destructor as `noexcept`:
+<pre>
+class MyClass
+{
+public:
+    // ...
+    ~MyClass() noexcept; // noexcept is mandatory
+};
+</pre>
+Doing this ensures that, if the destructor does indeed throw an exception, we get a core dump straight away. Conversely, if we don't have the `noexcept` and the destructor throws, the stack will start to unwind normally and, if the exception is caught at a higher level (for example, ignored by some generic catch handler), no-one will ever notice that something horrible has just happened.
+
+In general, it's a bad idea to just silently swallow errors (especially if we can't recover from them). Consider to at least log such errors.
+<pre>
+Myclass::
+~MyClass() noexcept
+{
+    try
+    {
+        cleanup(); // might throw
+    }
+    catch (CleanupException const& e)
+    {
+        log(e);
+    }
+}
+</pre>
+No exception can get out of this destructor, which is good. (If `cleanup()` throws something other than `CleanupException`, we get a core dump because of the `noexcept`.)
+
+What we have above is fine as it goes, but still not that great. The problem is that the caller never finds out that something bad happened (unless he/she looks in the log; how bloody likely is that?) Also, logging from APIs may not be desirable because, often, applications have their own logging mechanism, and having the library send messages to, for example, `syslog` may be the wrong thing.
+
+The problems is that the above gives the caller no option to find out ''programatically'' when things go wrong.
+
+Now, usually, if clean-up actions such as closing files, flushing buffers, or terminating an EGL graphics session fail, something is seriously wrong, and there is essentially nothing we can do to recover. But, for a generic API, it's nice to give the caller at least the option of finding out, so the caller can do whatever is most appropriate, such as logging the problem, calling `abort()`, or even ignoring the problem. (It's about choice for the caller.)
+
+Here is how we can do that:
+
+<pre>
+class MyClass
+{
+public:
+    // ...
+    ~MyClass() noexcept; // noexcept is mandatory
+    void finalize();     // explicit clean-up method
+};
+
+void
+MyClass::
+finalize()
+{
+    if (!finalized_)
+    {
+        finalized_ = true;
+        cleanup(); // might throw
+    }
+}
+
+Myclass::
+~MyClass() noexcept
+{
+    try
+    {
+        finalize();
+    }
+    catch (...)
+    {
+    }
+}
+</pre>
+Now we have an API that doesn't needlessly set policy. If the caller cares about problems during shutdown, he/she can call `finalize()`, which reports any problems. If the caller doesn't care about those problems, he/she can just let the instance go out of scope and `cleanup()` will do its thing as best as it can.
+
+==== Destructors and inheritance ====
+
+If a class is designed to be derived from, it ''must'' have a virtual destructor:
+<pre>
+class DeriveFromMe
+{
+public:
+    // ...
+    virtual some_method();
+    // ...
+    virtual ~DeriveFromMe() noexcept; // virtual and noexcept are mandatory
+};
+</pre>
+
+Forgetting to make the destructor of a base class virtual is one of the most common mistakes and also one of the most insidious to find, so don't do it!
+
+If the virtual destructor doesn't need any code (generally, it shouldn't), make it explicit that the default is right:
+<pre>
+class DeriveFromMe
+{
+public:
+    // ...
+    virtual ~DerivedFromMe() = default; // noexcept is implied by = default
+};
+</pre>
+
+Note that, for pimpl classes, the destructor must be defined out of line. In that case, just declare the (possibly virtual) destructor and put the defaulted implementation into the `.cpp` file:
+<pre>
+// DeriveFromMe.h
+
+class DeriveFromMe
+{
+public
+    // ...
+    virtual ~DeriveFromMe() noexcept;
+};
+
+// DeriveFromMe.cpp
+
+DeriveFromMe::
+~DeriveFromMe() noexcept = default;
+</pre>
+
+== Comments ==
+It shouldn't be necessary to say anything here, seeing that good code has good comments as a matter of course, right? Sadly, the reality is different.
+
+As a minimum, each class should be preceded by a comment that explains in high-level terms what the class does. Depending on its relationship with other classes, it may also be necessary to explain why the class is needed. Unless the usage of the class is trivially obvious, add a salient code example or two to the class to show how it is meant to be used.
+
+If a method has more than five lines of code, chances are that it needs a comment. Often, a single sentence is enough: "This function fiddles the widget blurble to gargle in the nimbles."
+
+This one sentence is a ''lot'' quicker for me to read and understand than me having to carefully trace through five or more lines of code to figure out that the method indeed fiddles the widget blurble correctly. (And, yes, reading and understanding five lines of code can sometimes take well more than a minute before someone is sure of what these five lines really do and why.)
+
+If you have a method that does a number of things in sequence, each of which takes several lines, insert comments into the code for each section that state what the next few lines do. In essence, I should be able to only read the comments to understand in broad terms how the implementation works. Such comments make a ''huge'' difference when someone who is not familiar with the code has to work on it.
+
+== Documentation ==
+For the API reference documentation, we'll be using Doxygen.
+
+As much as possible, put the Doxygen comments into the `.cpp` file rather than the header. If the comments are in the header, it can become very difficult to read the header to get an overview of a class, because the documentation comments create a lot of clutter.
+
+For some documentation comments, the comment must go into the header file (such as for a typedef inside a class definition). In that case, put the comment into the class header, rather than creating a documentation comment in the implementation header that needs to restate the typedef and, hence, can go out of sync with reality.
+
+Pay particular attention to boundary cases when documenting methods. If a method is well-named and has sensible parameter names, it's usually obvious what it does just from that. However, it is often less obvious what it does for boundary conditions, such as when a particular parameter is zero or `nullptr`.
+
+Most importantly, you must state how a method behaves if it has error conditions. What happens when something goes wrong is as much part of the public API as what happens when things go right. So, state what exceptions may be thrown by a method under what circumstances, and be clear about side-effects of errors. If there aren't any, say so!
+
+We do not consider code complete unless it has documentation. Adding documentation later is not an option!
+
+Documenting an API requires explaining what the API does, and doing that often exposes problems with the API. In other words, writing the documentation helps to create code that is more likely to be correct. If you write documentation while you are writing the code, you are doing yourself (and everyone who has to use your code) a favor!
+
+== Testing ==
+We use gtest/gmock as our test suite. Code is not considered complete until it is accompanied by tests.
+
+Our baseline is that code should have 100% test coverage. Use `make coverage-html` to generate coverage output (after building with `cmake -DCMAKE_BUILD_TYPE=coverage` and running the tests.
+
+100% percent coverage is often unachievable, usually due to the difficulty of reaching "impossible" error conditions, such as failed system calls. There is a point where the effort required to reach 100% coverage exceeds the benefit. Use judgement in such cases. If code cannot be reached, mark the relevant sections with ``LCOV_EXCL_LINE`` (for single lines) and `LCOV_EXCL_START` and `LCOV_EXCL_STOP` (for groups of lines). Please be judicious about using these directives. If there is a reasonble way to test a piece of code, test it rather than excluding it!

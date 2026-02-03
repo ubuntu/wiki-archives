@@ -1,0 +1,112 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+{| class="wikitable"
+|-
+| <tablestyle="float:right; font-size: 0.9em; width:30%; background:#F1F1ED; background-repeat: no-repeat; background-position:  98% 0.5ex; margin: 0 01em 1em; padding: 0.5em;">'''Contents'''<<BR>>
+|}
+
+== What is an MMIO Trace ==
+MMIO (Memory Mapped I/O) tracing is a technique that can be used to reverse-engineer hardware drivers.  It works by intercepting all the reads and writes by a driver to memory, recording how the driver is poking the hardware and what hardware state it reads.  This tool was partially written, has been extensively used, by the <nowiki>[[http://nouveau.freedesktop.org|Nouveau]]</nowiki> project to reverse-engineer the nVidia binary drivers.
+
+== Tracing the binary nVidia drivers ==
+
+Some bugs in the Nouveau drivers can best be solved by working out what the binary nVidia drivers do and adapting that.  This is particularly true for new hardware support and where the nouveau drivers fail to activate a monitor correctly.
+
+=== Prerequisites ===
+
+* Kernel 2.6.32-17 or newer.  The mmiotrace kernel framework was enabled in the 2.6.32-17-generic kernel in the Lucid development cycle.  You'll need to be running a kernel at least as new as this.  An appropriate kernel is included in Lucid Beta 1 and later.
+* Working nVidia restricted drivers.  We'll be tracing how the binary drivers interact with the graphics card, so we need the nVidia drivers to be working.  You can enable the nVidia drivers through the Hardware Drivers configuration applet in System→Administration→Hardware Drivers.  Boot at least once normally to check that the nVidia drivers are working correctly.
+
+=== Setup ===
+
+The initial set up for an MMIO trace needs to be done '''before''' the driver is loaded.  This means that we need to do it outside of X.
+
+Boot your system in “recovery mode”.  You can select this from the GRUB boot menu.  If the GRUB menu is not shown by default you can bring it up early in your boot process by pressing the “shift” key.  Select “Drop to a root shell prompt” from the recovery menu to bring up a terminal.
+
+From here we will ensure that the <code>nvidia</code> driver is not loaded, enable the mmio tracer, load the nvidia driver, perform the action we want to trace, then collect the log.
+
+==== Ensure the nvidia driver is not loaded ====
+
+Run <code>lsmod | grep nvidia</code>.  This should not produce any output.  If it returns some output like
+<pre>
+nvidia               9932176  5 
+agpgart                31724  2 nvidia,intel_agp
+</pre>
+then you need to remove the nvidia module by running <code>rmmod nvidia</code>.  Run <code>lsmod | grep nvidia</code> again to check.
+
+==== Enable the mmio tracer ====
+
+First set the buffer size to a reasonable value.  If this is too small some data will be lost and you will need to re-run the trace with a larger buffer.
+
+This sets a reasonable default size of 64MiB:
+<pre>
+root@Ein:~# echo 64000 > /sys/kernel/debug/tracing/buffer_size_kb
+</pre>
+
+Enable the mmio tracer, and start recording the log:
+<pre>
+root@Ein:~# echo mmiotrace > /sys/kernel/debug/tracing/current_tracer
+root@Ein:~# cat /sys/kernel/debug/tracing/trace_pipe > mmiotrace.log &
+</pre>
+
+Now load the nvidia driver.  If you're using the nvidia-current package you can do that with
+<pre>
+root@Ein:~# modprobe nvidia-current
+</pre>
+
+If you are using nvidia-173 or nvidia-96 you can replace “nvidia-current” with the package name.
+
+==== Run the trace ====
+
+Now we start X and run a command to exercise the functionality of the nvidia drivers that we need to check.  Because the mmio tracer intercepts all access to the graphics card, this makes X much slower - it is not unusual for X to take a couple of minutes to start up while the trace is in progress.
+
+===== For resolution / display bugs =====
+For bugs where the nouveau drivers aren't able to display anything correctly, we just need the logs of the nvidia drivers bringing up the display.  For this, we just need to start X.  Running
+<pre>
+root@Ein:~# xinit "sleep 10"
+</pre>
+will start X, wait for 10 seconds, and then quit X.
+
+===== For acceleration bugs =====
+For bugs and missing features in nouveau's acceleration code we need to exercise the nvidia driver's 3D engine.  To do this, we start X and run a simple OpenGL program, glxgears.
+
+Running
+<pre>
+root@Ein:~# xinit -e sh -c "glxgears & sleep 10"
+</pre>
+will start X, run glxgears for 10 seconds, then quit X.
+
+===== For dual-head bugs =====
+For bugs and missing features in nouveau's handling of secondary monitors we want to trace how the nvidia driver sets up the second monitor.  For this, we want to run nvidia-settings and enable the secondary monitor.  Running
+<pre>
+root@Ein:~# xinit nvidia-settings
+</pre>
+will start X and nvidia-settings.  Quitting nvidia-settings will quit X.
+
+==== Check the trace ====
+
+Now we stop tracing and check that the trace is good.
+
+<pre>
+root@Ein:~# echo nop > /sys/kernel/debug/tracing/current_tracer
+root@Ein:~# fg
+[1]   + running   cat /sys/kernel/debug/tracing/trace_pipe > mmiotrace.log
+(Press <Ctrl>+C to finish the log)
+root@Ein:~#
+</pre>
+
+Check that there were no lost events.  Running <code>grep -i lost mmiotrace.log</code> should return no output, like this:
+<pre>
+root@Ein:~# grep -i lost mmiotrace.log
+root@Ein:~# 
+</pre>
+
+If this returns some output then your trace has lost some events and is incomplete.  You need to re-run the trace from <nowiki>[[https://wiki.ubuntu.com/X/MMIOTracing#Ensure the nvidia driver is not loaded|step 1]]</nowiki> but with a larger buffer size.  Generally

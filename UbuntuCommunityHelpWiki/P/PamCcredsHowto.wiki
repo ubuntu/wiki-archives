@@ -1,0 +1,158 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+
+Install & configure libpam-ccreds on Ubuntu 5.10, 7.04, 7.10, 8.04.
+
+=== Introduction ===
+Your username and password are your credentials.  Cached credentials are very useful for laptops on which user authentication is done via LDAP server. You are still able to authenticate with the accustomed login credentials when the LDAP server is not reachable.
+
+I will give a brief explanation on PAM. Linux-PAM is a system of libraries that handles all authentication in Ubuntu by default.  A PAM is a ''Pluggable Authentication Module'' that is handled by Linux-PAM.  Each module represents a particular authentication mechanism, and is named pam_xxxxx.so.  pam_unix.so handles basic linux authentication using the /etc/passwd, /etc/group and /etc/shadow files.  pam_ldap handles authentication using an LDAP database. And so on.
+
+=== Installation ===
+Install the necessary packages.
+<pre>
+sudo apt-get install nss-updatedb libnss-db libpam-ccreds
+</pre>
+
+=== nss-updatedb ===
+Caches name service directories (passwd and group) locally.  When a connection to the ldap server is available, create passwd.db and group.db.
+<pre>
+sudo nss_updatedb ldap
+  passwd... done.
+  group... done.
+ls -l /var/lib/misc/*.db
+  -rw-r--r-- 1 root root 8192 2008-08-26 18:20 /var/lib/misc/group.db
+  -rw-r--r-- 1 root root 8192 2008-08-26 18:20 /var/lib/misc/passwd.db
+</pre>
+Use anacron to run this no earlier than 5 minutes after boot-up, once a day only. 
+<pre>
+echo '#!/bin/sh'               | sudo tee    /etc/cron.daily/upd-local-nss-db
+echo `which nss_updatedb` ldap | sudo tee -a /etc/cron.daily/upd-local-nss-db
+sudo chmod +x /etc/cron.daily/upd-local-nss-db
+</pre>
+
+=== libnss-db ===
+
+NSS module for using Berkeley Databases as a naming service.  This is needed to enable NSS to read the cached name service directories (passwd and group).
+
+Edit /etc/nsswitch.conf:
+<pre>
+passwd:		files ldap [NOTFOUND=return] db
+group:		files ldap [NOTFOUND=return] db
+</pre>
+This means:
+* look first in the local files (/etc/passwd and /etc/group)
+* if not found, use LDAP
+* when LDAP does not have user information, exit and return nothing (this is the [NOTFOUND=return] directive)
+* if the LDAP server was not reachable, proceed with using the cached data
+
+You can test if passwd and group are cached properly by disconnecting the network connection and listing the users:
+<pre>
+ifdown eth0
+sudo getent passwd
+</pre>
+This should return the local user plus the users from the ldap server cache in the passwd.db.
+
+=== libpam-ccreds ===
+
+Pam module to cache authentication credentials (i.e. passwords) locally in /var/cache/.security.db.
+
+If you are using recent versions of ubuntu (10.10, 11.04, 11.10, 12.04); you would need to rung pam-auth-update and make sure you enable the ldap module and the ccreds modules (in addition to other desired ones)
+
+then you will need t edit etc/pam.d/'''common-auth''' and change the line :
+<pre>
+auth	[success=1 default=ignore]	pam_ldap.so use_first_pass
+</pre>
+with the line :
+<pre>
+auth [authinfo_unavail=ignore success=1 default=2] pam_ldap.so use_first_pass
+</pre>
+
+This will allow pam to try next auth (which would be ccreds) if authinfo is not available, and jump 2 steps ahead (to deny rule) if it is not success and not authinfo_unavailable. (see <nowiki>[[https://bugs.launchpad.net/ubuntu/+source/libpam-ccreds/+bug/799605|launchpad bug 799605]]</nowiki>)
+
+For older versions you need to edit /etc/pam.d/'''common-auth''' as follows:
+<pre>
+auth	[success=done default=ignore]	pam_unix.so nullok_secure try_first_pass
+auth	[authinfo_unavail=ignore success=1 default=2] pam_ldap.so use_first_pass
+auth	[default=done]	pam_ccreds.so action=validate use_first_pass
+auth	[default=done]	pam_ccreds.so action=store
+auth	[default=bad]	pam_ccreds.so action=update
+</pre>
+
+If you are using Gutsy or Hardy you should have these lines in /etc/pam.d/'''common-account'''.
+<pre>
+account     [user_unknown=ignore authinfo_unavail=ignore default=done] pam_unix.so
+account     [user_unknown=ignore authinfo_unavail=ignore default=done] pam_ldap.so
+account     required       pam_permit.so
+</pre>
+
+After the file is adjusted properly you must login while connected to the LDAP server once to make libpam-ccreds store your password. After that you will be able to login while not connected to the ldap server as usual.
+
+In a fresh install of Hardy, pam_foreground.so does not exist.  Comment out the pam_foreground line in /etc/pam.d/'''common-session'''. This removes this error from /var/log/auth.log - 'PAM [error: /lib/security/pam_foreground.so: cannot open shared object file: No such file or directory]'.  Until you fix this, you may not be able to use GUI programs that are used to change system settings - eg. the network manager.
+<pre>
+session    required     pam_unix.so
+session    required     pam_mkhomedir.so skel=/etc/skel/ umask=0077
+session    optional     pam_ldap.so
+</pre>
+
+<nowiki>[[File:IconsPage/important.png]]</nowiki>There is a problem with libnss-ldap where, even for system users listed in ''/etc/passwd'', LDAP is contacted to find out if the user is in any LDAP groups.  This can cause the system to come to a virtual stand-still if the LDAP server is unavailable.  To get around this problem, there is a directive called nss_initgroups_ignoreusers.  List all your local system accounts after this directive.  The article <nowiki>[[http://www.nabble.com/nsswitch.conf-issues-with-LDAP-Auth--td6259466.html]]</nowiki> suggests the following options in '''/etc/ldap.conf'''.
+<pre>
+  timelimit 15
+  bind_timelimit 15
+  bind_policy soft
+  nss_initgroups_ignoreusers root,sys,... and all your other local system accounts in /etc/passwd ...
+</pre>
+
+<nowiki>[[File:IconsPage/important.png]]</nowiki>If you have chosen to list all users in the initial logon dialog, this might crash when the LDAP server is unavailable.  If so, disable this by setting the following line in '''/etc/gdm/gdm.conf-custom''' in the '''[greeter]''' section.
+<pre>
+[greeter]
+  :  :
+IncludeAll=false
+  :  :
+</pre>
+
+=== Testing ===
+The easiest way to test is by using ''su''.  While the LDAP server is available do something like this and check that .security.db has been updated.
+<pre>
+ls -l /var/cache/.security.db 
+  -rw------- 1 root root 8192 2008-08-28 08:31 /var/cache/.security.db
+date
+  Thu Aug 28 10:09:03 EST 2008
+su fred
+  Password: 
+  exit
+ls -l /var/cache/.security.db 
+  -rw------- 1 root root 8192 2008-08-28 10:09 /var/cache/.security.db
+</pre>
+You can run ''cc_dump''.  This is part of the libpam-ccreds package, and shows what passwords are stored in .security.db.
+<pre>
+sudo cc_dump 
+  Credential Type  User             Service  Cached Credentials  
+  ----------------------------------------------------------------------------------
+  Salted SHA1      fred             any     4a985b233701cf106ed450a0168fa8e0aa86ef5d
+</pre>
+<nowiki>[[File:IconsPage/important.png]]</nowiki>This failed for me when the user account's password was not encrypted as {SSHA} in the LDAP database. Using smbldap-passwd to change the password fixed this problem.  
+
+Now disconnect the PC from the network (or shutdown the LDAP service) and do similar to this.
+<pre>
+su fred
+  Password: 
+  You have been logged on using cached credentials.
+  exit
+</pre>
+
+=== Further Information ===
+/usr/share/doc/nss-updatedb/*<<BR>>
+/usr/share/doc/libpam-ccreds/*<<BR>>
+<nowiki>[[http://www.padl.com/OSS/nss_updatedb.html]]</nowiki><<BR>>
+<nowiki>[[http://www.padl.com/OSS/pam_ccreds.html]]</nowiki><<BR>>
+<nowiki>[[http://www.kernel.org/pub/linux/libs/pam/Linux-PAM-html/pam.html]]</nowiki><<BR>>

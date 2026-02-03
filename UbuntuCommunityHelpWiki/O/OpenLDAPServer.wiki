@@ -1,0 +1,560 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== Introduction ==
+
+Lightweight Directory Access Protocol (LDAP) is a network protocol for accessing and manipulating information stored in a <nowiki>[[http://en.wikipedia.org/wiki/Directory_%28databases%29|directory]]</nowiki>.
+
+Services built on the LDAP protocol are used to serve a wide range of information. The protocol is well-suited to serving information that must be highly available and accessible, but does not change frequently. Common applications include:
+
+* Centralization of user and group information as part of <nowiki>[[SingleSignOn|Single Sign On (SSO)]]</nowiki>.
+* Authenticate users in a web application.
+* Create a shared address directory for mail agents.
+* Authenticate users locally (see <nowiki>[[LDAPClientAuthentication]]</nowiki> for details).
+
+== Audience ==
+
+This page describes the installation, configuration and administration of OpenLDAP. It  supplements the Server Guide that is available as part of the <nowiki>[[https://help.ubuntu.com/|the official Ubuntu documentation]]</nowiki>. This page targets system administrators in need of a more thorough understanding of OpenLDAP and its advanced configuration. This page also contains information on deploying OpenLDAP on Ubuntu versions older than 8.04 (Hardy Heron).
+
+'''Warning:''' Errors have been reported in the <nowiki>[[https://help.ubuntu.com/9.10/serverguide/C/openldap-server.html|Ubuntu 9.10 OpenLDAP Server Guide]]</nowiki>. See <nowiki>[[https://bugs.launchpad.net/ubuntu/+source/openldap/+bug/463684| bug 463684]]</nowiki> for details. The documentation issues have been resolved in <nowiki>[[http://doc.ubuntu.com/ubuntu/serverguide/C/openldap-server.html|a more recent Server Guide]]</nowiki>. Information on configuring OpenLDAP in Ubuntu 9.10 is also available in <nowiki>[[http://ubuntuforums.org/showthread.php?t=1313472|a forum thread]]</nowiki>.
+
+To configure OpenLDAP in Ubuntu 8.04, follow the instructions on this page, convert the directory to the dynamic `cn=config` configuration scheme described in <nowiki>[[http://www.zytrax.com/books/ldap/ch6/slapd-config.html]]</nowiki>, then follow the <nowiki>[[https://help.ubuntu.com/8.04/serverguide/C/index.html|Ubuntu 8.10 OpenLDAP Server Guide]]</nowiki>. '''Note:''' The replication setup described on this page is not applicable.
+
+== Installation ==
+
+Refer to the Ubuntu Server Guide and the <nowiki>[[http://manpages.ubuntu.com/manpages/precise/en/man5/slapd-config.5.html|slapd-config manpage]]</nowiki> for basic installation and configuration instructions.
+
+'''Note:''' The default installation of OpenLDAP in recent versions of Ubuntu (from at least 10.04, Lucid Lynx) use the new runtime configuration (RTC) system. Much of the information on the Internet about configuring OpenLDAP refers to modifying `/etc/ldap/slapd.conf`; this information does not apply directly to the RTC. See the following section for notes on key differences.
+
+The RTC configuration is stored in the `/etc/ldap/slapd.d/` directory. The directory server's configuration can be modified by editing the files in this directory and restarting `slapd`, but it is also possible to modify the server configuration in real-time by changing the configuration entries in the special RTC DIT `cn=config` with the tools in the `ldap-utils package` (`ldapadd`, `ldapmodify`, et cetera), just as if you were dealing with a regular DIT.
+
+=== RTC Configuration Notes ===
+
+* Many configuration options in the RTC system have the same name as the configuration option in `slapd.conf`, with an `olc` prefix. For example, the `loglevel` directive becomes `olcLogLevel` in the RTC system. 
+* The default RTC installation will create two DITs: the RTC DIT (`cn=config`) and a starter DIT (default: `dc=nodomain`).
+* As of Ubuntu Natty (and possibly prior to it), the 3 basic schemas, (`inetorgperson`, `cosine`, and `nis`) do not have to be loaded manually, contrary to the Ubuntu Server Guide's instructions. These schemas are loaded as part of the installation process.
+* Some documentation and examples in the wild assume the existence of the entry `cn=admin,cn=config` in the RTC DIT and use this as the root Distinguished Name (DN). However, the default installation does not create any RootDN/RootPW  entries in the RTC DIT. You must use the EXTERNAL mechanism to bind and manage the RTC DIT in the default installation. To manage the RTC DIT with tools such as `slapadd` or `ldapmodify`, bind with `-Y EXTERNAL -H ldapi:///`: 
+ <pre>
+sudo ldapsearch -Y EXTERNAL -H ldapi:/// -b cn=config
+ }}}
+ Initially, this command should return 10-15 entries and is a good check to make sure the installation is basically functional.
+
+=== Dapper and Below ===
+
+'''Note: These instructions are superseded by the instructions in the Ubuntu Server Guide for versions of Ubuntu newer than 8.04 (Dapper Drake).'''
+
+ 1. Install the OpenLDAP server daemon (slapd):
+ 
+ {{{
+$ sudo apt-get install slapd ldap-utils db4.2-util
+ }}}
+ 
+ 2. Enter your domain and the directory administrator's password. '''Do not''' use root password here.
+
+ 3. Generate an encrypted password with `slappasswd`:
+ 
+ {{{
+$ slappasswd
+New password:
+Re-enter password:
+{SSHA}d2BamRTgBuhC6SxC0vFGWol31ki8iq5m
+</pre>
+ ''This example shows the output of encrypting the password "secret"--result will vary.''
+ 4. Set directory's root password in the configuration file (instead of in the directory) by pasting the encrypted password into `/etc/ldap/slapd.conf`:
+ <pre>
+ 
+suffix          "dc=example,dc=com"
+directory       "/var/lib/ldap"
+rootdn          "cn=admin,dc=example,dc=com"
+rootpw          {SSHA}d2BamRTgBuhC6SxC0vFGWol31ki8iq5m
+ }}}
+
+ 6. Apply the changes by restarting `slapd`:
+ {{{
+/etc/init.d/slapd restart
+ }}}
+
+== Populating the Directory ==
+
+Once OpenLDAP is installed and function, it's time to begin populating it with information.
+
+'''Note:''' If a UID is defined in the LDAP directory and also on the local system, unexpected behaviors can result. To avoid collisions between local UIDs and the UIDs of users defined in the LDAP directory, it is generally advisable to assign UIDs to LDAP users in a non-standard range such as 5000-8000 (local UIDs start at 1000 by default).
+
+=== Creating a DIT with the RTC System ===
+
+To create a new DIT "from scratch", a database entry must be made in the RTC DIT. This is equivalent to adding a new database section in `slapd.conf` in the old configuration system. Once the database entry is made, the DIT can be populated in the usual way, with `slapadd` and such.
+
+==== Prerequisites ====
+
+* The database directory (e.g. `/srv/ldap/example`) must exist and be writable by slapd user (`openldap` in the default installation).
+* AppArmor must allow `/usr/sbin/slapd` access to this directory; by default slapd only as access to `/var/lib/ldap`.
+* The RootPW string must be created with `slappasswd`.
+
+==== Procedure ====
+
+ 1. Create an LDIF file containing the new database entry and access controls. Below is a simple example--the Ubuntu Server Guide contains more elaborate examples.
+ '''Note:''' the long `olcAccess` lines must not be broken by a newline. Take care your text editor does not automatically insert them.
+ 
+ {{{
+dn: olcDatabase=hdb,cn=config
+objectClass: olcDatabaseConfig
+objectClass: olcHdbConfig
+olcDatabase: hdb
+olcDbDirectory: /srv/ldap/example
+olcSuffix: dc=example,dc=com
+olcAccess: {0}to attrs=userPassword,shadowLastChange by self write by anonymous auth by  dn="cn=admin,dc=example,dc=com" write by * none
+olcAccess: {1}to dn.base="" by * read
+olcAccess: {2}to * by self write by dn="cn=admin,dc=example,dc=com" write by * read
+olcLastMod: TRUE
+olcRootDN: cn=admin,dc=example,dc=com
+olcRootPW: {SSHA}tXptpxDkVTlwYHJcas70oR/5XmTJ1+Yj
+olcDbCheckpoint: 512 30
+olcDbConfig: {0}set_cachesize 0 2097152 0
+olcDbConfig: {1}set_lk_max_objects 1500
+olcDbConfig: {2}set_lk_max_locks 1500
+olcDbConfig: {3}set_lk_max_lockers 1500
+olcDbIndex: objectClass eq
+ }}}
+
+ The new database will be numbered automatically by OpenLDAP.
+
+ 2. Update the RTC system using `ldapadd`:
+ {{{
+sudo ldapadd -Y EXTERNAL -H ldapi:/// -f example.ldif
+ }}}
+ 
+ If everything is in order, `ldapadd` will print the following:
+ {{{
+SASL/EXTERNAL authentication started
+SASL username: gidNumber=0+uidNumber=0,cn=peercred,cn=external,cn=auth
+SASL SSF: 0
+adding new entry "olcDatabase=hdb,cn=config"
+ }}}
+
+ If the database creation is successful, a new file will appear in the `/etc/ldap/slapd.d/cn=config/olcDatabase{N}hdb.ldif`, representing the new database. The integer `N` is incremented by 1 each time a new database is added.
+
+ 3. Populate the new database as desired. Refer to the Ubuntu Server Guide for details.
+
+=== Dapper and Below ===
+
+'''Note: These instructions are superseded by the instructions in the Ubuntu Server Guide for versions of Ubuntu newer than 8.04 (Dapper Drake).'''
+
+The following section outlines a basic directory tree that is intended to be very compatible with POSIX accounts (for use on *nix systems), address books, and classic accounts (for web applications). This configuration is a starting point; the applications of LDAP are virtually limitless.
+
+The LDAP directory manipulation tools support a standard file format know as LDAP Directory Interchange Format (LDIF). We will use this format to create the initial directory structure.
+
+Start by creating a file `init.ldif`:
+{{{
+dn: dc=example,dc=com
+objectClass: dcObject
+objectClass: organizationalUnit
+dc: example
+ou: Example Dot Com
+
+dn: cn=admin,dc=example,dc=com
+objectClass: simpleSecurityObject
+objectClass: organizationalRole
+cn: admin
+description: LDAP administrator
+userPassword: <password>
+
+dn: ou=people,dc=example,dc=com
+objectClass: organizationalUnit
+ou: people
+
+dn: ou=groups,dc=example,dc=com
+objectClass: organizationalUnit
+ou: groups
+
+dn: uid=lionel,ou=people,dc=example,dc=com
+objectClass: inetOrgPerson
+objectClass: posixAccount
+objectClass: shadowAccount
+uid: lionel
+sn: Porcheron
+givenName: Lionel
+cn: Lionel Porcheron
+displayName: Lionel Porcheron
+uidNumber: 1000
+gidNumber: 10000
+userPassword: <password>
+gecos: Lionel Porcheron
+loginShell: /bin/bash
+homeDirectory: /home/lionel
+shadowExpire: -1
+shadowFlag: 0
+shadowWarning: 7
+shadowMin: 8
+shadowMax: 999999
+shadowLastChange: 10877
+mail: lionel.porcheron@example.com
+postalCode: 31000
+l: Toulouse
+o: Example
+mobile: +33 (0)6 xx xx xx xx
+homePhone: +33 (0)5 xx xx xx xx
+title: System Administrator
+postalAddress:
+initials: LP
+
+dn: cn=example,ou=groups,dc=example,dc=com
+objectClass: posixGroup
+cn: example
+gidNumber: 10000
+
+dn: cn=example2,ou=groups,dc=example,dc=com
+objectClass: posixGroup
+cn: example2
+memberUid: lionel
+gidNumber: 10001
+</pre>
+
+Here the directory structure, a user, and group have been defined. Examples elsewhere on the Internet may include `objectClass: top` in every entry; this is not necessary because every object is automatically inherits from this abstract object class.
+
+As with the LDAP root password, passwords can be generated with `slappasswd` using the MD5 or CRYPT hashing scheme. See the <nowiki>[[http://manpages.ubuntu.com/manpages/man8/slappasswd.8.html|slappasswd manpage]]</nowiki> for details.
+
+For fresh installations of OpenLDAP, load the LDIF file into the directory as follows.
+
+ 1. Make sure the `slapd` daemon is running:
+ <pre>
+sudo /etc/init.d/slapd start
+ }}}
+ 2. Load the initial data:
+ {{{
+sudo ldapadd -x -W -c -D "cn=admin,dc=example,dc=com" -f init.ldif
+ }}}
+
+If the LDAP directory already contains data that can safely be removed, follow this procedure instead.
+ 1. Stop the LDAP daemon:
+ {{{
+sudo /etc/init.d/slapd stop
+ }}}
+ 2. Delete the existing content:
+ {{{
+sudo rm -rf /var/lib/ldap/*
+ }}}
+ 3. Add the new content:
+ {{{
+sudo slapadd -l init.ldif
+ }}}
+ 4. Correct permissions on the database files:
+ {{{
+sudo chown -R openldap:openldap /var/lib/ldap
+ }}}
+ 5. Restart `slapd`:
+ {{{
+sudo /etc/init.d/slapd start
+ }}}
+
+The `ldap-utils` package contains useful tools for querying and manipulating LDAP directories. Here we search for the user we created with `ldapsearch`:
+
+{{{
+$ ldapsearch -xLLL -b "dc=example,dc=com" uid=lionel sn givenName cn
+dn: uid=lionel,ou=people,dc=example,dc=com
+cn: Lionel Porcheron
+sn: Porcheron
+givenName: Lionel
+</pre>
+
+** <code>-x</code> disables SASL authentication, which is enabled by default.
+** <code>-LLL</code> disables printing of LDIF information.
+
+== Logging ==
+
+OpenLDAP supports very detailed and configurable logging with its `loglevel` directive (`olcLogLevel` for the `cn=config` configuration method). See http://www.zytrax.com/books/ldap/ch6/#logfile for a detailed explanation of this directive.
+
+It can be difficult to strike a good balance between verbosity and readability. Loglevel `424` can be useful for debugging, but may not be the best setting for a production environment as it may cause `sysklogd` to "lock up" the system on boot.
+
+== Security ==
+
+=== Access Control ===
+
+It is generally necessary to restrict access to sensitive data in the directory (such as user passwords). The default configuration is usually sufficient, restricting access to the userPassword and shadowLastChange attributes. More sophisticated ACLs are possible, see <nowiki>[[http://www.zytrax.com/books/ldap/ch5/step2.html#step2]]</nowiki> for a thorough treatment.
+
+'''Note:''' The Zytrax book provides instructions for static slapd.conf configuration method instead of the RTC configuration method. To modify the ACLs of a dynamically configured LDAP directory, use `ldapmodify` and add/modify/remove `olcAccess` entries.
+
+=== Encryption ===
+In many configurations, OpenLDAP transmits sensitive user information (usually passwords) over the network. This transmission should be encrypted to prevent unauthorized access. The simplest method is SSL/TLS encryption.
+
+To implement SSL/TLS encryption, you will need a certification authority to sign your certificates. You can use one of the public Certificate Authorities, or create your own.
+Recent Ubuntu releases ship with a version of OpenLDAP that is compiled with support for <nowiki>[[GnuTLS]]</nowiki>, instead of the more common <nowiki>[[OpenSSL]]</nowiki>, due to <nowiki>[[http://en.wikipedia.org/wiki/OpenSSL#Licensing|concerns about the freedom of the OpenSSL license]]</nowiki>. Both toolkits provide the same basic functionality, but GnuTLS is easiest to use on recent Ubuntu releases.
+
+You will need:
+ 
+* The Certificate Authority's public certificate. If you are using a third-party certification service, the public certificate is probably stored in the computer's certificate cache already. If you chose to create your own Certificate Authority with OpenSSL, import your new CA's certificate into /usr/share/ca-certificates, as described on the <nowiki>[[OpenSSL]]</nowiki> page, so that other software on your system will recognize your CA as trusted.
+* A private key for the LDAP service.
+* A public certificate for the LDAP service. If you are using OpenSSL, make sure the Common Name (CN) matches the hostname of the server where you are running slapd.
+
+Copy the public certificate and the private key to a file directory such as `/etc/ldap/ssl` (the exact directory is largely a matter of preference, as long as it is in the /etc/ directory, and accessible by the OpenLDAP service).
+
+Tighten the file access permissions on the key and certificate as follows:
+
+<pre>
+sudo chown root:ldap <certname>
+sudo chown root:ldap <keyname>
+sudo chmod 640 <keyname>
+</pre>
+
+==== Configuring TLS in OpenLDAP ====
+
+ 1. Edit the `slapd.conf` file and include the following lines in the global configuration section (replacing the bracketed placeholder names with the path to the appropriate file):
+ <pre>
+TLSCACertificateFile </etc/ldap/ssl/ca_certname>
+TLSCertificateFile </etc/ldap/ssl/certname>
+TLSCertificateKeyFile </etc/ldap/ssl/keyname>
+ }}}
+ 2. Restart `slapd`
+ 3. If you are using OpenSSL, test the SSL response:
+ {{{
+openssl s_client -connect SERVER-NAME:389 -showcerts
+ }}}
+ 4. Test TLS connections on a client (see next section).
+ 5. Once TLS connections are functional and tested, modify the access control lists and security policies to require it. To require an encrypted connection to bind, add an `olcSecurity: tls=128` attribute to the database or DIT branch that requires encryption.
+ 
+To require encryption in statically configured installations, use the following directive in slapd.conf:
+ {{{
+security tls=128
+ }}}
+The 'security' directive can be applied globally, or in the scope of a DIT. See <nowiki>[[http://www.zytrax.com/books/ldap/ch6/#security]]</nowiki>
+
+OpenLDAP supports fine-grained control over the encryption requirements for various operations. See the sections on olcSecurity attributes in the <nowiki>[[http://linux.die.net/man/5/slapd-config|slapd-config manpage]]</nowiki> for details.
+
+==== Client Configuration ====
+ 1. If you maintain your own Certificate Authority, deploy the Certificate Authority's certificate in `/etc/ssl/certs`
+ 2. Edit `/etc/ldap/ldap.conf` and include the following lines (replacing "SERVER-NAME" & "YOUR-BASE" with the correct values):
+ {{{
+BASE    YOUR-BASE
+URI     ldap://SERVER-NAME
+TLS_REQCERT allow
+ }}}
+ 3. Test the encrypted connection using `ldapsearch -ZZ` (add the `-x` switch if SASL is not in use).
+ 
+==== Verification ====
+It is never wise to trust unverified encryption, so be sure to verify the encryption once it is deployed using a packet analyzer such as Wireshark. 
+
+ 1. Run `ldapsearch` with the `-ZZ` switch. This forces ldapsearch to utilize transport-layer encryption.
+ 2. Disable all encryption.
+ 3. Use a packet analyzer to verify the packets in the un-encrypted connection is readable. This will provide a baseline that the encrypted traffic can be compared against.
+ 4. Enable encryption.
+ 5. Verify the same traffic is now unreadable using a packet analyzer.
+
+=== Kerberos Authentication ===
+
+<nowiki>[[Kerberos]]</nowiki> is a trusted third-party authentication solution. It provides many of the key benefits of TLS, with more manageable authenticity guarantees and password hygiene. Like TLS, Kerberos provides service authentication, but does not require transport layer encryption since it obviates the need to store user passwords in the LDAP directory.  For a more thorough discussion of Kerberos vs. TLS/SSL, see <nowiki>[[http://www.faqs.org/faqs/kerberos-faq/general/section-31.html]]</nowiki>
+
+OpenLDAP uses the Cyrus SASL pluggable authentication framework to interface with Kerberos. A minimal description of this configuration is available at <nowiki>[[http://www.bind9.net/manual/openldap/2.3/sasl.html]]</nowiki>. The following section provides a more complete description of this configuration.
+
+'''Note:''' if you deploy OpenLDAP with Kerberized authentication in a <nowiki>[[SingleSignOn]]</nowiki> environment and restrict LDAP access to authorized users, each SSO-enabled host must be able to authenticate to the LDAP directory without user intervention. <nowiki>[[http://arthurdejong.org/nss-pam-ldapd/|nss-pam-ldapd]]</nowiki> provides this service. See <nowiki>[[SingleSignOn]]</nowiki> for details.
+
+==== Setup ====
+
+Install and configure Kerberos integration with SASL as described on the <nowiki>[[Kerberos|Kerberos wiki page]]</nowiki>. Be sure to run the sample client and server tests before proceeding.
+
+==== Configuration ====
+
+To utilize Kerberos, OpenLDAP must know some general details about the Kerberos realm and KDC. Also, it is frequently necessary to map the Distinguished Name (DN) of an authorized Kerberos client to an existing entry in the DIT. 
+
+The '''olcSaslRegexp''' attribute (or the '''saslRegexp''' directive in `slapd.conf`) establishes maps between SASL DNs and DIT entries. As an example, in the configurations below, the Kerberos user `bob` (with DN `uid=bob,cn=<Kerberos Realm>,cn=GSSAPI,cn=auth`) would be mapped to the DN `uid=bob,ou=people,dc=example,dc=com`.
+
+It may be necessary to modify the directory's Access Control Lists if the `saslRegexp` mappings are modified.
+
+===== RTC =====
+For OpenLDAP instances configurable by RTC, add the following attributes to the `cn=config` DIT:
+{{{
+olcSaslHost: kerberos.example.com
+
+olcSaslRealm: EXAMPLE.COM
+
+olcSaslSecProps: noplain,noactive,noanonymous,minssf=56
+
+olcAuthzRegexp: {0}"uid=([^/]*),cn=example.com,cn=GSSAPI,cn=auth" "uid=$1,ou=people,dc=example,dc=com"
+olcAuthzRegexp: {1}"uid=host/([^/]*).example.com,cn=example.com,cn=gssapi,cn=auth" "cn=$1,ou=hosts,dc=example,dc=com"
+
+olcAuthzRegexp: {2}"uid=ldap/admin,cn=example.com,cn=gssapi,cn=auth" "cn=admin,cn=config"
+</pre>
+
+===== slapd.conf =====
+For statically configured instances, add the following to `slapd.conf` and restart `slapd`.
+
+<pre>
+sasl-host kerberos.example.com
+sasl-realm EXAMPLE.COM
+
+sasl-secprops noanonymous,noactive,noplain,minssf=56
+
+saslRegexp uid=([^/]*),cn=example.com,cn=GSSAPI,cn=auth uid=$1,ou=people,dc=example,dc=com
+saslRegexp uid=host/([^/]*).example.com,cn=example.com,cn=gssapi,cn=auth cn=$1,ou=hosts,dc=example,dc=com
+
+saslRegexp uid=ldap/admin,cn=example.com,cn=gssapi,cn=auth cn=admin,cn=config
+</pre>
+
+===== Keytab Location =====
+
+If the keytab for the LDAP service is stored in a keytab other than the default system keytab, add or modify the following line in `/etc/default/slapd`:
+
+<pre>
+export KRB5_KTNAME=/path/to/keytab
+</pre>
+
+Restart `slapd` to apply the new configuration, even if the dynamic `cn=config` configuration method is in use; the environment variable exported in `/etc/default/slapd` will not take effect until the service is restarted.
+
+===== Client Configuration =====
+
+Add the following lines to `/etc/ldap/ldap.conf` to use Kerberos authentication as the default authentication mechanism for `ldap-utils` (e.g. `ldapsearch`). Replace "EXAMPLE.COM" with the name of your Kerberos realm.
+
+<pre>
+SASL_MECH GSSAPI
+SASL_REALM EXAMPLE.COM
+</pre>
+
+==== Testing ====
+
+To test Kerberos authentication, obtain a Kerberos TGT with kinit, then use the `ldapsearch` tool with the `-Y GSSAPI` option to force the use of the GSSAPI authentication mechanism:
+
+<pre>
+$ ldapsearch -Y GSSAPI
+</pre>
+
+== LDAP replication ==
+
+LDAP services can quickly become a critical dependency of core services such as authentication, authorization, and mail. High availability is important in such scenarios. The availability of LDAP services can be greatly improved with redundant LDAP servers.
+
+Redundancy in OpenLDAP is effected with a master-slave replication scheme. The master is the authoritative source of information about the LDAP directory. Each slave replicates the information in the master and serves it to clients on request.
+
+Fortunately, replication is simple to setup. The following section describes the process. The Ubuntu Server Guide for recent version of Ubuntu contains useful information on this subject as well.
+
+=== Overview ===
+
+ 1. Configure the master server to enable replication to the new slave server.
+ 2. Restart the replica server's slapd process.
+ 3. Export the database of the master server.
+ 4. Configure the slave server.
+ 5. Import the database of the master server on the slave server.
+ 6. Restart the master server's slapd process.
+
+<!> ''' Modifications to the LDAP directory MUST be made on the master server. Modifications made on the slave will be lost.'''
+
+=== Master ===
+
+ 1. Modify the database section of the `/etc/ldap/slapd.conf` or `cn=config` to add a `replica` directive. The following example shows a replica on `ldap-2.example.com`, accessible by user `Manager` with `secret` as password. The replication logfile stores modifications before they are send to the LDAP slave.
+ {{{
+replica uri=ldap://ldap-2.example.com:389 binddn="cn=Manager,dc=example,dc=com" bindmethod=simple credentials=secret
+
+replogfile      /var/lib/ldap/replog
+ }}}
+ 2. If a static `slapd.conf` configuration is used, restart the master server to update the server configuration:
+ {{{
+user@master:~$ sudo /etc/init.d/slapd start
+ }}}
+ 3. Export the database of the master using `slapcat`. 
+ {{{
+user@master:~$ sudo slapcat -l master.ldif
+ }}}
+ 4. Copy the LDIF file generated in the previous step to the slave using `scp` or suchlike.
+
+=== Slave ===
+
+ 1. Configure the slave to authenticate to the master by adding the following lines to `/etc/ldap/slapd.conf` file (or `cn=config`) in the database section:
+ {{{
+updatedn        cn=Manager,dc=example,dc=com
+updateref       ldap://ldap-1.example.com
+ }}}
+ 2. Import `master.ldif` using `slapadd`:
+ {{{
+user@slave:~$ sudo slapadd -c -l master.ldif
+ }}}
+ 3. Restart the server:
+ {{{
+user@slave:~$ sudo /etc/init.d/slapd start
+ }}}
+
+== Samba Integration ==
+
+The definitive guide to using LDAP with Samba, <nowiki>[[http://samba.org/samba/docs/man/Samba-Guide/2000users.html|"Chapter 6 of the Samba-3 Guide"]]</nowiki>, is a bit long and not for the faint of heart. Luckily, Matt Oquist created the <nowiki>[[http://majen.net/smbldap/|smbldap installer]]</nowiki> that works well with Ubuntu (tested by MarkChang on Dapper). Following the instructions on the smbldap homepage should give you a working server and client.
+
+=== Related links ===
+* <nowiki>[[OpenLDAP-SambaPDC-OrgInfo-Posix]]</nowiki>
+* <nowiki>[[http://times.usefulinc.com/2005/09/25-ldap|Turn your world LDAP-tastic]]</nowiki>
+* <nowiki>[[http://linsec.ca/bin/view/Main/OpenLDAPAuth#Host-based_Authentication|Host-based authentication]]</nowiki>
+
+== LDAP Authentication in Apache ==
+
+'''Note:''' this Section is tested on 7.10 (Gutsy)
+
+ 1. Enable the Apache LDAP Module
+ {{{
+ user@server:~$ sudo a2enmod authnz_ldap
+ }}}
+ 2. Edit the Apache site for which LDAP authentication is needed. Here the default site is used:
+ 
+ {{{
+ user@server:~$ vim /etc/apache2/sites-enabled/000-default
+ }}}
+
+ Add the following lines:
+ {{{
+ <Location /secret>
+  AuthBasicProvider ldap
+  AuthLDAPBindDN "cn=admin,dc=example,dc=com"
+  AuthLDAPBindPassword "test"
+  AuthLDAPURL  "ldap://127.0.0.1:389/ou=people,dc=example,dc=com?uid"
+  AuthLDAPGroupAttributeIsDN on
+  Require ldap-group cn=vips,ou=groups ,dc=example,dc=com
+  AuthType basic
+  AuthName "secret"
+ </Location>
+ }}}
+ '''AuthLDAPBindDN''': This line is very important because the password must not be visible for anonymous connections to the ldap server.
+ 
+ '''AuthLDAPURL''': This is the main LDAP search string.
+ 
+ '''Require ldap-group cn=vips,ou=groups,dc=example,dc=com''': This line restricts access to users from the group `vips`. Use '''Require valid-user''' to allow access to all users that can successfully authenticate to LDAP.
+ 
+ 3. Create the LDAP groups referenced in the configuration file if necessary. You can create such a group easily with phpldapadmin:
+   1. Simple Login. 
+   2. Expand the Root and the Group field. 
+   3. Click on the star beneath the Last Existing Group (labeled "Create new entry here").
+   4. Select Default and click Next.
+   5. Select groupOfUniqueNames in the objectClass List (Container auto-fill with `ou=groups,dc=example,dc=com`).
+   6. in the field RDN add for example cn=vip to name your group "vip".
+   7. Proceed.
+   8. Add the first Member in the uniqueMember field. The member must be in dn syntax (for example uid=lionel,ou=people,dc=example,dc=com).
+   9. Click Create.
+   10. Now you can add further People to this group by pressing the "(add value)" Link beneath the uniqueMember.
+   ''' If there is no green arrow left in front of the username, you entered an incorrect DN and it will not work. '''
+
+   '''Tip: ''' Use the magnifier icon next to the username to open an LDAP navigator.
+
+More information is available in the `mod_authnz_ldap` documentation: <nowiki>[[http://httpd.apache.org/docs/current/mod/mod_authnz_ldap.html]]</nowiki>
+
+== Host-based Authentication ==
+
+See <nowiki>[[LDAPClientAuthentication]]</nowiki>.
+
+== Administration Tools ==
+
+=== Web-based ===
+* <nowiki>[[InstallingphpLDAPadmin|phpLDAPadmin]]</nowiki>
+* <nowiki>[[eBox]]</nowiki> - web-based GUI for many services, which manages users via LDAP; eBox was renamed to Zentyal in August 2010
+* <nowiki>[[Webmin]]</nowiki> - Webmin is '''unsupported in Ubuntu''' but has a decent component to help administer an LDAP directory; you can get it from <nowiki>[[http://www.webmin.com/]]</nowiki>
+
+=== GUI Administration Tools ===
+* <nowiki>[[http://directory.apache.org/studio/|Apache Directory Studio]]</nowiki> Eclipse-based LDAP tools
+* Directory Administrator (only available in Ubuntu Dapper and Hardy)
+* LDAP Administration Tool (install package name 'lat' from the repositories)
+* <nowiki>[[http://luma.sourceforge.net/|LUMA]]</nowiki> Simple GUI for LDAP administration, available in Ubuntu repositories.
+* <nowiki>[[http://www.ldapsoft.com/ldapadmintool.html|LDAP Admin Tool]]</nowiki> (commercial)
+
+== Resources ==
+
+* <nowiki>[[http://www.zytrax.com/books/ldap/|Zytrax' LDAP for Rocket Scientists]]</nowiki>
+* <nowiki>[[http://www.openldap.org|OpenLDAP project website]]</nowiki>
+* <nowiki>[[http://www.tldp.org/HOWTO/html_single/LDAP-HOWTO/|LDAP HOWTO]]</nowiki>
+----

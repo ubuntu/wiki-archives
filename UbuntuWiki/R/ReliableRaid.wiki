@@ -1,0 +1,221 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+* '''Launchpad Entry''': 
+* '''Created''': 2009-12-15
+* '''Contributors''': 
+* '''Packages affected''': 
+* '''See also''': BootDegradedRaid, HotplugRaid
+** Fedora's solution:
+** http://www.mail-archive.com/initramfs@vger.kernel.org/msg00978.html
+** http://osdir.com/ml/linux-raid/2009-04/msg00090.html
+
+=== Summary ===
+
+RAIDs (Redundant arrays of independent disks) allow systems to keep functioning even if some parts fail. You just plug more then one disk side by side. If a disk fails the mdadm monitor will trigger a buzzer, notify-send or send email to notify that a (new spare) disk has to be added to up the redundancy again. All the while the system keeps working unaffectedly.
+
+=== Release Note ===
+
+Event driven pure and secure UUID based raid/crypt assembly. (Hotplugging that supports booting more than only the simple "root filesystem directly on md device" case, if arrays are degraded.)
+
+=== Rationale ===
+
+Unfortunately Ubuntu's md (software) raid configuration seems to suffer from a little incompleteness.
+
+The assembling of arrays with "mdadm" has been transitioned from the Debian startup scripts to the hotplug system (udev rules), however some bugs defy the hotplug mechanism and other things that are generally expected (as in just works in other distros) are missing functionality in Ubuntu:
+
+ 1. No handling of raid degradation during boot for non-root filesystems (i.e. /home) at all. (Boot simply stops at a recovery console.)
+
+** The Debian init script has been removed but no upstart job has been created to start/run necessary regular (non-rootfs) arrays degraded.  Bug:259145 non-root raids fail to run degraded on boot
+
+ 1. Only limited and buggy handling of raid degradation for the rootfs.(Working only for plain no lvm/crypt md's (and with 9.10 only after applying a fix from the release notes).
+
+** Bug:539597 bogus debconf question "mdadm/boot_degraded"
+
+** The initramfs boot process is not (a state machine) capable of assembling the base system from devices appearing in any order and starting necessary raids degraded if they are not complete after some time.
+
+** Bug:491463 upstart init within initramfs (Could handle most of the following nicely by now.)
+** Bug:251164 boot impossible due to missing initramfs failure hook integration
+** Bug:247153 encrypted root initialisation races/fails on hotplug devices (does not wait)
+** Bug:488317 installed system fails to boot with degraded raid holding cryptdisk
+
+ 1. No notification of users/admins about raid events, i.e. disk failures (email question suppressed during install without any buzzer/notify-send replacement.)
+** Bug:535417 mdadm monitor feature broken, not depending on local MTA/MDA or using wall/notify-send
+
+ 1. Blocked and flawed hotplugging mechanisims.
+
+   Mdadm is setting up arrays according to unreliable superblock information. (Device "minor" numbers, labels and hostnames in superblocks are not sure to be unique and can be outdated.) This is combined with the idea of fixing the unreliability by limiting array assembly with information from mdadm.conf. (Defining PARTITIONS, ARRAY, HOMEHOST lines.) Consequently this forces setup tools, admins and installers to create mdadm.conf files and subjects them to the exact same reliability problems.
+
+   The only thing mdadm can (and should) rely on when assembling is the high probability of uniqueness of UUIDs. (i.e. don't rely on admins, tools or install scripts to set up a mdadm.conf, use only UUIDs as references for device nodes/userspace.)
+
+   Mdadm reads/depends on a /etc/mdadm/mdadm.conf file (also in the initramfs !!!). It refuses to assemble any  array not mentioned there and tagged with the own hostname in the superblocks. This behaviour actually breaks the autodetection even of arrays newly created on a system, as well as connecting a (complete) md array from another system. (mdadm does not default to just go assembling matching superblocks and run arrays (only) if they are complete.) For instructions on updating the initramfs manualy refer to: http://ubuntuforums.org/showthread.php?p=8407182
+** This cause a large amount of filed bugreports (taged [->UUIDudev] ), plus:
+** Bug:252345 raid setups fail due to mdadm.conf with explicit ARRAY statements and HOMEHOST !=any  
+** Bug:136252 mdadm.conf w/o ARRAY lines but udev/mdadm not assembling arrays
+** Bug:550131 initramfs missing /var/run/mdadm dir (loosing state)
+** Bug:576147 if array is given a name, a strange inactive md device appears instead of the one created upon reboot
+
+ 1. mdadm not included on live CD 
+** Bug:44609 RAID not implemented in ubiquity (use alternate CD instead)
+
+Regarding booting with degraded raids: Note that no problem really arises in a hotpluggable system if an array required to boot is run degraded after a reasonable timeout and a missing drive comes
+up later. It can simply be (re-)added to the array (and will be synced in the background if any writes have occurred yet). The admin however should
+get a notification not only if a drive did not come up timely but in any case of drive failure.
+
+There really isn't any problem that would require BOOT_DEGRADED=NO or a rescue console/repair prior to boot only in case a disk fails *while the system is powered down*. There is however a problem of not notifying anybody in all other cases of disk failures. (The system stays running without any notification about lost redundancy and will happily reboot straight up in those cases, regardless of BOOT_DEGRADED.)
+
+There are tasks that do require an admin action *after* the raid has done what it is designed to (keep the system working unaffectedly, preventing data loss in case of failure):
+
+* Forcibly re-adding a drive marked faulty to the array (occasional bad block error that modern hard drives will remap automatically). In a hotplug environment this can simply translate to detach an re-attach a device.
+
+* Replacing a faulty drive with an spare one, partitioning it if necessary, and adding it/them to the degraded array(s).
+
+Those tasks are generally best done with the system either fully up and running, or powered down completely. The boot process should never need to be stopped (and should not) for something (like adding and syncing a spare drive to the raid) that is especially designed to be done on live systems. Besides it breaks the automatic activation of spare disks supported by mdadm.
+
+=== Use Cases ===
+
+** Angie installs Ubuntu on two raid arrays one raid0 containing a lvm VG for the root filesystem (/) and swap, and one raid1 (mirror) containing a lvm VG for /home. When one of the raid mirror members fails/is detached while the system is powered down: The system waits 20 seconds (default) for the missing member then resumes booting with a degraded raid emits the notifications by means of beeping, notify-send, and email (configurable). When the raid mirror member is re-attached later on (hotpluggable interface) it gets automatically synced in the background.
+
+** Bono does the same with his laptop and one external drive, but uses lvm on top of cryptsetup on the raids. After being on the road using the laptop he reconnects his laptop to his external peripherals on his desk (including the disk drive) *prior to powering it up*.
+
+** HotplugRaid
+
+=== Design ===
+
+Event driven degradation for non-root filesystems should be possible with a configuration change to the mdadm package to hook it into upstart, so a raid is started degraded if it hasn't fully come up after a timeout. (This should appropriately replace the second mdadm init.d script present in the Debian package, instead of just dropping it.)
+** As long as upstart does not support timer based events, running degraded raids can be integrated into "mountall".
+
+Cryptsetup is already set up event driven with upstart during boot. (And triggered upon udev events on the desktop level, but not yet on system level.)
+
+Initramfs:
+
+We need an event driven boot also in the initramfs. Current initramfs scripts and their failure hooks are very limited and too complicated to handle the general case. Reimplementing an event based boot with the initramfs scripts can be avoided using upstart also in the initramfs (to set up crypt and auth devices, raid, lvm, ... and mount the rootfs).
+
+* Incremental mdadm assembly is already completely done by udev rules also in initramfs.
+
+* Upstart timer events or mountall needs to run required raids if they are degraded.
+
+* cryptsetup in initramfs needs to be switched to be started by upstart when required crypt devices appear, and to stop the rootwait-timeout during its passphrase prompt.
+
+=== Implementation ===
+
+* Package mdadm needs to supply the initramfs with a MD_COMPLETION_WAIT value and a watchlist containing the arrays required to mount the rootfs. -> In order for the boot scripts to watch out for them and run them degraded, if they did not come up after MD_COMPLETION_WAIT seconds.) 
+* During rootwait when time_elapsed == MD_COMPLETION_WAIT (starting a raid degrated event) do:
+** If a next level in the dependency tree exists and the remaining root delay timer is lower then MD_COMPLETION_WAIT the rootdelay_timer is increased by MD_COMPLETION_WAIT.
+** The degraded arrays of the current dependency level are started degraded. (About event driven initramfs see https://bugs.launchpad.net/ubuntu/+source/cryptsetup/+bug/251164/comments/15 ...)
+
+* How would you decide what devices are needed?  
+** Auto-running *only selected* arrays if they are found degraded on boot probably requires a watchlist:
+*** For each filesystem mentioned in fstab that depends on a an array, the watchlist file needs to describe its dependency tree of raid devices. The file needs to be (auto)recreated during update-initramfs.
+*** initramfs only watches out for and runs rootfs dependencies if necessary.
+*** mountall watches for and runs other (bootwait) filesystems mentioned in the watchlist.
+**** Is there a way to nicely auto-update the raid dependency trees of non-rootfs in the watch list upon changes?
+**** The file could be updated/validated on every shutdown.
+
+** The raid dependencies of a device holding a filesystem in question can be determined like this (pseudo code):
+
+*** For lvm and crypt devices "dmsetup deps" returns the current major/minor of the parent device and "mdadm --query /dev/block/x:y" can tell what kind of md device it is. (get_lvm_deps() from /usr/share/initramfs-tools/hooks/cryptroot uses this to find crypt devices.) The major/minor can be used in tracking down the dependencies (set up/installed) in the running system  but only UUIDs of required arrays must be saved to initramfs.
+
+*** Since md devices do not use the device mapper, but can depend on other md devices themselves (e.g. if separate bitmaps are desired), those dependencies need to be looked up in /proc/mdadm or with "mdadm --detail" separately.
+
+    
+    <pre>
+get_raid_deps(child_dev) -> list-of-raid-deps {
+  if ['mdadm --query child_dev' == IsRaid]
+     push child_dev to list-of-raid-deps
+     for all member-devices gotten from 'mdadm --detail child_dev'
+         push get_raid_deps(member-device) to list-of-raid-deps
+     done
+  done
+  if ['dmsetup deps child_dev' returns something]
+     push get_raid_deps('dmsetup deps child_dev') to list-of-raid-deps
+  done
+}
+
+        
+get_list-of-raids-to-run-if-degraded() -> raid-watchlist {
+  blkid -g 
+  for all bootwait filesystems
+    if deviceID contains "="
+      dev_name = blkid -l -o device -t deviceID
+    else dev_name = deviceID
+
+    push get_raid_deps(dev_name) to raid-watchlist
+  done
+}
+
+</pre>
+
+* Using the legacy method to start degraded raids selectively (mdadm --assemble --run -uuid) will break later --incremental (re)additions by udev/hotplugging. (The initramfs currently uses "mdadm --assemble --scan --run" and starts *all* arrays available degraded! Bug:497186. The corresponding command "mdadm --incremental --scan --run" to start *all remaining* hotplugable raids degraded (something still to execute only manually if at all!) does not start anything. Bug:244808)
+
+** The proper command (i.e. for boot scripts) "mdadm --incremental --run --uuid" to start *only specific* raids degraded in a hotpluggable manner may not be available yet. (i.e. to start only the rootfs degraded after a timeout from initramfs) Bug:251646 (Workaround maybe: to remove a member from the incomplete array and re-adding it with --incremental --run)
+
+* For hotpluggable systems, it is a reasonable default to automatically re-add members when they are re-attached (udev event) after getting out of sync. If a drive gets marked faulty even due to block errors repeatedly it is of course time to add a new/other drive to that array (manually if you have not prepared a spare disk already).
+** If the mdadm udev rule that fires "mdadm --incremental $device_name" returns "mdadm: failed to open $raid_device: Device or resource busy" ($raid_device is already running degraded), it might have to issue "mdadm --add $raid_device $device_name" to re-add the re-attached member.
+** Check if more recent mdadm versions support this better.
+
+* mdadm needs to supply proper udev rules to clean up member devices of raids when they are detached.
+
+* We should create partitionable arrays by default.
+
+"mountall" functionality related:
+
+* Large server RAIDs may take minutes until they come up, but regular disks are quick, this should be handled nicely:
+   <pre>
+"NOTICE: /dev/mdX didn't get up within the first 10 seconds.
+
+We continue to wait up to a total of xxx seconds complying to the ATA
+spec before attempting to start the array degraded.
+(You can lower this timeout by setting the rootdelay= parameter.)
+
+<counter> seconds to go.
+
+Press <Escape> to stop waiting and start the array degraded now.
+Press <Return> to enter a rescue shell, to start the array manually.
+</pre>
+** This functionality is similar to and could most easily be added in (the temporary tool) mountall.
+
+* We've tried to avoid "fallback after a timeout" kind of behaviours in the past.  
+** However crypsetup currently needs to and is timing out in initramfs (since it's not event driven). And the raid setup needs to timeout waiting for full raid dicovery, for deciding about degrading. The classic implementation uses a second startup script later in the boot up process. (But it has been silently dropped in Ubuntu without a proper replacement.)
+
+==== UI Changes ====
+
+None necessary.
+
+==== Code Changes ====
+
+Code changes should include an overview of what needs to change, and in some cases even the specific details.
+
+==== Migration ====
+
+Include:
+* data migration, if any
+* redirects from old URLs to new ones, if any
+* how users will be pointed to the new way of doing things, if necessary.
+
+=== Test/Demo Plan ===
+
+* http://testcases.qa.ubuntu.com/Install/AlternateRaidMirror
+* http://testcases.qa.ubuntu.com/Install/ServerRAID1
+
+It's important that we are able to test new features, and demonstrate them to users.  Use this section to describe a short plan that anybody can follow that demonstrates the feature is working.  This can then be used during testing, and to show off after release. Please add an entry to http://testcases.qa.ubuntu.com/Coverage/NewFeatures for tracking test coverage.
+
+This need not be added or completed until the specification is nearing beta.
+
+=== Unresolved issues ===
+
+This should highlight any issues that should be addressed in further specifications, and not problems with the specification itself; since any specification with problems cannot be approved.
+
+=== BoF agenda and discussion ===
+
+Use this section to take notes during the BoF; if you keep it in the approved spec, use it for summarising what was discussed and note any options that were rejected.
+
+----
+CategorySpec

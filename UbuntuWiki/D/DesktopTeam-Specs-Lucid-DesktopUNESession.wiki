@@ -1,0 +1,160 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+* '''Launchpad Entry''': UbuntuSpec:desktop-lucid-unr-session
+* '''Created''': 2009-11-25
+* '''Contributors''': Rick Spencer, Martin Pitt, Sebastien Bacher, Didier Roche
+* '''Packages affected''': 
+
+=== Summary ===
+
+Create an alternative desktop session for Ubuntu Desktop Edition 10.04, so users can engage with the Ubuntu Netbook Edition experience.
+
+=== Release Note ===
+
+Ubuntu 10.04 provides an Ubuntu Netbook Edition session for
+traditional desktop users. On a classical Ubuntu installation, 
+users can now install the `ubuntu-netbook-{remix;edition}` package,
+which adds a new session type "Ubuntu Netbook Remix"
+in the GDM login manager.
+
+=== Rationale ===
+
+Ubuntu Desktop Edition 10.04 is an LTS release, so few to no disruptive changes will land this cycle. The Alternative Desktop Session will allow Ubuntu Desktop users to experience the new and interesting work going into Ubuntu Netbook Edition without get constraint to stick with it.
+
+The objectives are:
+# Increase exposure to the Ubuntu Netbook Edition interface.
+# Allow Ubuntu Desktop users, who may not use or own a netbook, to easily install the Ubuntu Netbook Edition interface and enable it as their default session.
+# Allow Ubuntu Desktop users who have installed and enabled the Alternative Desktop Session to easily revert to using the normal Ubuntu Desktop.
+
+=== Use Cases ===
+
+* Fred heard about UNE and wants to give it a try. Nevertheless, he doesn't want to install UNE from scratch without being able to revert to his vanilla desktop session.
+* Robert has UNE installed and want (for development, for instance), run the usual and well-known ubuntu-desktop without having two different ubuntu installation on his netbook (less upgrade/install to do, less space used...).
+
+=== Scope ===
+
+* packages currently heavily depending on ubuntu-netbook-remix and not in ubuntu-desktop:
+** cheese
+** go-home-applet
+** netbook-launcher
+** maximus
+** ubuntu-netbook-remix-default-settings
+** webfav
+** window-picker-applet
+
+=== Design ===
+
+# User should only have to select his session.
+# As UNE has a lot of particular gconf keys changing the defaults or users option, we have to provide an additional path to gconfd to overlay them. Further investigation showed that gconfd (launched as a dbus service) can't access to session wrapper export variables. The GDMSESSION variable is available in /etc/X11/Xsession.d/* and so, we can export there the right $ENV_DEFAULTS_PATH value used in /etc/gconf/2/path (regarding $GDMSESSION).
+# Similar work has to be done for applications autostart. Instead of patching application (which makes launching application available in only some cases), we can change XDG_CONFIG_DIRS to add a new path depending on session in /etc/X11/Xsession.d/*
+# Only having one ubuntu-netbook-{remix;edition} package is the main goal. We have to fix bug #403291 about default gdm session first.(needed also when installing xubuntu and mythbuntu, for instance).
+# This will also making the opposite available: installing first UNE and then ubuntu-dekstop.
+
+=== Implementation ===
+
+==== Addition to ubuntu-netbook-remix-default-settings ====
+
+* provides a new session type `/usr/share/xsessions/une.desktop`, running `/usr/bin/gnome-session`
+* add an additionnal gconf path (only taken in une session, see below): /usr/share/gconf/une.mandatory.path pointing to /var/lib/gconf/une.mandatory
+* mv debian/gconf-defaults
+
+Changelog is:
+<pre>
+** move debian/gconf.default to 20_une-mandatory to avoid dh_gconf
+    taking it into account
+** add une.mandatory.path to include the new mandatory path in gconf
+** add those two previous files to debian/install
+** remove dh_gconf specific call in debian/rules
+** debian/{postinst;postrm}: add them manually for registering/removing
+    une mandatory value in non standard path
+</pre>
+
+==== Addition to gconf2 package ====
+
+* add new gconfd path in /etc/X11/Xsession.d/70gconfd_path-on-session which set proper MANDATORY_PATH and DEFAULT_PATH depending on $GDMSESSION (gconf automatically adds ENV_ when reading /etc/gconf/2/path configuration file)
+
+-> With that trick, we can generically address all sessions (not just une)
+
+==== Starting application depending on selected session ====
+
+* add to GDM package /etc/X11/Xsession.d/60xdg_path-on-session to keep compatibility with other session manager which add ${DEFAULT_XDG_CONFIG_DIRS}/xdg-${GDMSESSION} to XDG_CONFIG_DIRS. So, we are able to point to any additional autostart directory.
+
+-> With that trick, we can generically address all sessions too
+
+==== Move une specific application .desktop to /etc/xdg/xdg-une/autostart ====
+
+-> Application (not applets/FF extension) needed to be started on UNE session only are:
+
+* maximus
+* netbook-launcher
+
+.desktop autostart files have been moved in /etc/xdg/xdg-une/autostart
+
+==== Choosing right default session in GDM ====
+
+* /usr/lib/gdm/gdm-set-default-session is a new component enabling that from the GDM package.
+
+==== Remaining investigation needed ====
+
+* Do we need to disable x-screensavergl if running unr
+* See imcompatibility with UNE experience:
+** plugins that if installed would add non-UNE compatible UI elements
+** GL screensavers that may clash with the launcher
+** gnome-panel applets that may have bad interactions with the launcher(?) (the target is to only show needed applet as gconf mandatory key)
+* What to do if GL is not supported?
+** There is currently no 2D fallback (the ARM alternative planned for Lucid is quite different and would not convey the "UNE" experience)
+** It needs to run enough for the user to determine that it's too slow and log out again
+** Option: detect that and just end with a dialog telling you so
+
+  [ to be completed once fully implemented ]
+
+==== gnome-panel ====
+
+* putting some keys as mandatory gconf keys had already bad feedbacks from community (on IRC, discussing with LaserJock for instance and some bug reports). I didn't expect that as the old panel was already quite difficult to edit already (even if all keys were default, they were only a little space between window-picker-applet and indicators)
+
+Why do we have to put those keys as mandatory in the current configuration?
+* we have both GNOME and UNE using the panel, with different value
+** the fundamental change in the keys are toplevel_id_list and applet_id_list, which choose the right panel/applets to show.
+** my first guess was to just set them as mandatory. But then, this lock all the applets in it.
+* the first time a panel is loading, a bunch of copy is done in the user gconf home (~/.gconf) copying those panels value. Consequently, this override the default we could have set.
+
+So, here are the alternatives, after thinking a bit about the issue and what can be done:
+* Stay like this, calling it the "UNE experience" where you can't change any applets. This is what I first chose, (as mostly gnome shell take that path too). But we need then to take some shields against community feedbacks (no casual user where we don't expect to change this) :)
+* add -{session} values to some keys, and patch gnome-panel to try to get them at first. If they don't exist, then fallback to defaults keyname (solution detailed below).
+* add an option to gnome-panel to launch with --user-gconf-dir, which will depend on session. No idea of how bad this can interact with some values and no possibility for applet config share between sessions (like date and time).
+* last solution is to rewrite gconf/gnome-panel interaction so that if you put one value as mandatory in gnome-panel, you can still edit the dependant values (intrusive, can crash a lot of things)
+
+About solution 2:
+** impacted keys will be:
+*** for panels and what it contains: /apps/panel/general/{applet_id_list,object_id_list,toplevel_id_list}
+*** for sharing some applets which adds new keys (like date and time), we need to keep the same applet name. The only "session dependant" values are the panel where it's attached and the position, so adding a new -{session} suffix detection on: /apps/panel/applets/*/toplevel_id and /apps/panel/applets/*/position
+
+So, basically, in UNE, we will ask first:
+/apps/panel/general/toplevel_id_list/toplevel_id-une.
+If found (will be the case in une), take that value. If not, use:
+/apps/panel/general/toplevel_id_list/toplevel_id
+
+That's not too intrusive and can be quickly implemented.
+
+==== Migration ====
+
+No migration is involved, this should not ever become the default session. But user can change it afteward thanks to the work on gdmsetup.
+
+=== Test/Demo Plan ===
+
+* Session independance
+# log into a desktop session, add a funky applet on the panel
+# log into the UNE session, check that 'Applications, Places, etc.' are *not* displayed, the proper applets and applications are loaded, and funky applet is not
+# log back into the desktop session and check that 'Applications, Places, etc.' *are* correctly displayed, and funky applet *is* too. check that une applications (maximus, netbook-launcher) aren't loaded by default.
+
+----
+CategorySpec

@@ -1,0 +1,174 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+This document tries to outline steps that need to be performed whenever a certain LandingTeam infrastructure action needs to be performed.
+
+== Standard Procedures ==
+
+=== Investigating failed system-image imports ===
+
+Sometimes images fail to get published (on system-image) and one of the reasons for this can be that the rootfs built fine but system-image failed on importing the image. The following is a list of steps that can be performed to try and figure out what the cause of the failure was.
+
+==== Procedure ====
+
+* Log into nusakan, switch to a separate screen instance and log in as cdimage.
+* Type `crontab -l` and check if importer is enabled.
+* Check if the channel you expected to import the image is enabled in the system-image config.
+** Go to `/srv/system-image.ubuntu.com/etc/config`, find the channel config and check if it's set as `type = auto`.
+* Try running the importer verbose: `TMPDIR=/srv/system-image.ubuntu.com/tmp /srv/system-image.ubuntu.com/bin/import-images -vvv`
+** Investigate the scrollback from the importer output when looking for the channel that you wanted the image to be imported to.
+* Common reasons for an image to fail during import-images:
+** The device or custom tarball URLs are no longer valid.
+** There is some typo in the config file causing importer to fail.
+
+=== Investigating failed cdimage builds ===
+
+Sometimes images fail to get published (on system-image) and one of the reasons for this can be that the rootfs build on cdimage has failed. The following is a list of steps that can be performed to try and figure out what the cause of the failure was.
+
+==== Procedure ====
+
+* Go to http://people.canonical.com/~ubuntu-archive/cd-build-logs/ubuntu-touch/ (or ubuntu-touch-custom for re-spins) and select the series the image was being build for.
+* Find the rootfs ID that was expected to build (the IDs are date-based) and download its build log.
+* Analyzing the first part of the log file, check if all architectures built fine.
+** If some (or all) are 'Failed to build', go to their livefs links and check the build log for failures.
+** Failure on one arch doesn't break the import others, e.g. if an i386 build failed but armhf succeeded, system-image will still be able to import just the armhf one.
+** Typically problems in livefs builds are fixable in either livecd-rootfs, fixing package dependencies or updating the seeds (ubuntu-touch-meta).
+* Check the rest of the file for any network errors while importing the livefs builds to cdimage.
+** If you see some, you might still be able to get the rootfs imported by following the Re-run a recent failed cdimage rootfs publish procedure below.
+
+=== Copy rc-proposed images to the rc channel ===
+
+When the Final Freeze for an ubuntu-touch OTA is put in effect, the latest rc-proposed image is being copied to the rc channel for candidate QA testing. This is a very simple procedure involving only the copy-image system-image command.
+
+==== Procedure ====
+
+* Get the latest image number for the given channel and device
+** This can be done by browsing to https://system-image.ubuntu.com/ubuntu-touch/rc-proposed/, finding the channel and device name and checking the latest image number
+** For convenience the image-info command from lp:landing-team-tools can be used: `image-info ubuntu-touch/rc-proposed/ubuntu krillin`
+* Log into nusakan, switch to a separate screen instance and log in as cdimage
+* Temporarily disable the importer (otherwise it might get in the way)
+** To do this type crontab -e and comment-out the last line with import-images
+* Change the directory to /srv/system-image.ubuntu.com
+* Copy the latest image from the rc-proposed channel to the rc channel
+** Execute `bin/copy-image <source channel> <destination channel> <device> <number> -vvv -t "<OTA name>-rc"`
+** e.g.: `bin/copy-image ubuntu-touch/rc-proposed/bq-aquaris.en ubuntu-touch/rc/bq-aquaris.en krillin 41 -vvv -t "OTA-xx-rc"`
+* Re-enable the importer
+* Repeat from first step until all channels and devices are copied
+
+=== Prepare image snapshot ===
+
+Sometimes we need to prepare snapshots of overlay package states for certain releases, either to perform hotfixes or whenever we already moved forward with the development of the next release. The following procedures show how to perform the snapshotting.
+
+==== Procedure ====
+
+* ...
+
+==== Notes ====
+
+This process is a bit awkward right now, needs to get tweaked up a bit.
+
+=== Image re-spin from snapshot ===
+
+When final freeze for an OTA is in effect, we snapshot the state of the overlay and proceed with the development of the next update. Sometimes a re-spin is required with new fixes and the current rc-proposed images no longer can be used (as they might be tainted with new changes already). When that happens, a manual image re-spin from the snapshot is required.
+
+==== Procedure ====
+
+* Prepare the snapshot
+* Copy over any required additional packages to the snapshot PPA (e.g. ci-train-ppa-service/stable-snapshot).
+* Make sure all source packages and binaries are fully published (the Published state on Launchpad).
+* Log into nusakan, switch to a separate screen instance and log in as cdimage
+* Execute the following command: `DIST=vivid EXTRA_PPAS=<SNAPSHOT_PPA>:1001 for-project ubuntu-touch-custom cron.daily-preinstalled --live`
+** Where <SNAPSHOT_PPA> is the PPA containing the requested snapshot, e.g. ci-train-ppa-service/stable-snapshot
+** This command will only finish once the build is finished.
+* Once the build is done, change the channel config to import the new image.
+** In the channel configuration, use the following line as the ubuntu tarball: `file_ubuntu = cdimage-ubuntu;/srv/cdimage.ubuntu.com/www/full/ubuntu-touch-custom/vivid/daily-preinstalled;vivid;import=any`
+* Run the system image importer.
+
+=== Re-run a recent failed cdimage rootfs publish ===
+
+Every ubuntu-touch image rootfs is first built in launchpad livefs by the cdimage infrastructure. Sometimes it happens that even though the rootfs builds themselves succeed, cdimage fails to publish them due to internal network errors. Sadly in such a case a manual intervention is needed.
+
+==== Procedure ====
+
+* Check when the rootfs built was attempted as we can only re-try the publishing step for builds on the same day (UTC)
+** If the build was longer ago a full cdimage rebuild is needed
+* Log into nusakan, switch to a separate screen instance and log in as cdimage
+* Execute the following command: `DIST=<DIST> EXTRA_PPAS=<PPA>:1001 for-project ubuntu-touch-custom cron.daily-preinstalled`
+** Where <DIST> is the series the build was performed for and <PPA> is the PPA used during the original build, e.g. ci-train-ppa-service/stable-phone-overlay
+** This command will only finish once the publish job is finished
+
+== Emergency Procedures ==
+
+=== Security Vulnerability ===
+
+In case of security vulnerabilities, first thing that needs to happen is the assessment of severity. Some questions need to be answered: how serious the issue is? How easy is it to exploit it? What are the chances of someone knowing about the vulnerability? Once answers to those are known, a decision needs to be made if an emergency procedure is required. It doesn't make sense to release a security hotfix for an issue that is not a direct threat to our users or is hard to exploit.
+
+That being said, any security vulnerability should be treated with highest priority.
+
+==== Procedure ====
+
+===== Fix preparation =====
+
+* Security vulnerability gets detected and components affected identified and LandingTeam notified.
+* The issue is assessed as a potential threat to our users and a decision is made to engage emergency procedures.
+* The SecurityTeam gets informed and asked for help and guidance.
+* Engineers of the affected components and the SecurityTeam work on the fix.
+** At the same time an intermediate countermeasure needs to be considered - some workaround to make sure that during the time until the fix is ready and deployed as little users will be affected by the bug.
+** The countermeasure if announced on the mailing-list.
+* The fix is prepared.
+** In case a countermeasure is live and the affected component is managed through the CI Train, a priority silo is created. All fix branches need to be public in this case.
+** In other cases, the fix is prepared in a private branch and the fixed packages built in the security PPA. Please note that the package should only be published to the public archives when everything is ready for quickly releasing the update (TODO: see <nowiki>[[#ideas|Future ideas]]</nowiki> section).
+
+===== Emergency update preparation =====
+
+* The LandingTeam is informed about the fix preparation.
+* An emergency snapshot PPA is prepared (or re-used) of the last stable image.
+* The fixed package is binary-copied to the snapshot PPA.
+* The system-image importer is disabled and new rootfs builds for ubuntu and ubuntu-pd based on the snapshot are performed.
+* Rootfs builds are finished, the LandingTeam modifies the system-image config to import the new images to the rc channels.
+** Afterwards, a new rootfs build needs to be performed so that the rc-proposed channel gets the fix as well and does not go 'back in time' because of importing the snapshotted rootfs.
+* Newly imported rc images are passed to the QA Team for testing.
+* The importer is re-enabled after the rc-proposed rootfs is finished.
+
+===== Emergency update release =====
+
+* An emergency support team is selected to be made available in case of sudden issues with the hotfix update.
+** This team should, at best, consist of at least: an engineering manager, a developer and a LandingTeam member.
+** This team needs to be available 24h a day (on standby) in case of emergencies.
+* The images pass QA testing and get copied to the stable channels with phased percentage set to 0%.
+* Phased upgrades are started over a much shorter period (approx. 5h).
+** During that time the emergency support team monitors for any issues with the upgrade and reacts if needed.
+* Announcement about the security update is sent requesting users to upgrade as soon as possible.
+* After a grace period after phased upgrades finishing, the eventual countermeasures are removed.
+* The emergency support team gets disbanded on the next work-day.
+
+ 
+==== Future ideas ====
+
+Vulnerabilities that get detected internally and for which a quick countermeasure cannot be deployed should probably be prepared, built and published privately. Right now we can create private bugs, private branches and build the package in a private security PPA - the only thing is that we cannot build new images (rootfs) from private PPAs. This means that there still is that one moment where we need to binary-copy the private package to a public PPA for image build time. That's, of course, only a short period of time, but still allows someone to inspect the source package contents to figure out the vulnerability and exploit it before the fix is made available to all users.
+
+An action item for the future would be enabling cdimage to build a rootfs out of a private snapshot PPA in cases of emergencies like these.
+
+=== Faulty Image Update ===
+
+In very rare cases, even if an update gets tested by QA, a stable OTA can include unnoticed critical issues that require us to back-out an update. This will usually happen during the phased upgrade stage, where only a small percentage of users should be affected. It is required to react swiftly and stop phasing making sure no more users will get the faulty update and then, if possible, back out the update.
+
+==== Procedures ====
+
+* The automated phased upgrade procedure is stopped.
+** On nusakan: <code>touch /home/lzemczak/phased-state/done</code>
+* The LandingTeam along with the ProductTeam and QA assess the state of how broken the image is.
+* QA checks if OTA upgrades are still possible in the current image.
+* In case OTA updates still work: the LandingTeam prepares an image revert - publishes a new stable image to each channel containing the last working stable image.
+* Factory images with the reverted image are prepared.
+* An announcement is sent out with the steps on how to recover devices that have been bricked or broken by the latest update.
+* The image fix is prepared, new images are prepared on the rc channel and handed over to QA.
+* New image is published to the stable channel with the usual phasing.

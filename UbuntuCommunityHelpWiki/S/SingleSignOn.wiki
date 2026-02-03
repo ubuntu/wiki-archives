@@ -1,0 +1,474 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+== Introduction ==
+This page describes how to set up network-connected Ubuntu machines to support '''Single Sign-On''' (SSO). SSO is a name for a collection of technologies that allows network users to provide a single set of credentials for all network services. In a properly configured SSO environment, a user's desktop environment can migrate seamlessly between computers, and access to shared resources such as file systems and printers can be managed with ease.
+
+This SSO solution centralizes the following services:
+* Authentication: Verification that a user or server is who they claim to be and providing a mechanism for passing this information to hosts on the network. Kerberos is used for this purpose.
+* Account Management: Information about the user such as username and group membership. OpenLDAP is used.
+* Shared File Systems: several options are available. Auto-mounting is effected by `pam_mount`.
+* (Limited) Authorization: authorization information is a combination of group membership information held in the LDAP directory and local file system permissions.
+
+This guide is divided into several sections that describe installation of required server software, testing, and installation of software on the client.
+
+== Audience ==
+This guide is written for system administrators looking for a Single Sign-On solution. To properly implement the practical steps found in this guide, the reader should be comfortable with the use command-line applications, using the Bourne Again SHell (bash) environment, and editing system configuration files with their preferred text editor application. While previous familiarity with OpenLDAP or Kerberos is not required for this guide, the reader is advised to pursue further learning from the resources listed in the Resources section to broaden their understanding of the technologies involved in SSO.
+
+== Authentication ==
+
+Kerberos is an authentication protocol using a combination of secret-key cryptography and trusted third parties to allow secure authentication to network services over untrusted networks. This guide uses the MIT implementation of Kerberos as the '''authentication''' function of SSO.
+
+See the <nowiki>[[Kerberos]]</nowiki> wiki page for instructions on deploying MIT Kerberos.
+
+== Account Management ==
+
+'''LDAP''' is the '''L'''ightweight '''D'''irectory '''A'''ccess '''P'''rotocol.  It is designed to store data records and allow for easy access to the records via a simple network interface. LDAP can provide access to directory type information such as an address book for your email client, or a list of users and groups that have access to services on your network. This guide uses the OpenLDAP package for the '''account management''' function of SSO.
+
+Detailed instructions on installing and populating an LDAP directory are available on the <nowiki>[[OpenLDAPServer]]</nowiki> page and in the Ubuntu Server Guide. Pay special attention to the section on encrypting LDAP traffic if user passwords are stored in the LDAP directory (this is not recommended).
+
+=== Securing Access ===
+
+The Security section of the <nowiki>[[OpenLDAPServer]]</nowiki> describes how to configure authentication to OpenLDAP via Kerberos in detail. The <nowiki>[[Kerberos|Kerberos wiki page]]</nowiki> also contains information on installing and troubleshooting Kerberos/SASL integration. The following is a brief summary.
+
+ 1. Generate an LDAP keytab using `kadmin`:
+ <pre>
+kadmin: addprinc -randkey ldap/lab.example.com@EXAMPLE.COM
+kadmin: ktadd -k ~/ldap.keytab ldap/lab.example.com@EXAMPLE.COM
+ }}}
+ 2. Securely transfer the keytab to the OpenLDAP server (`scp` is used here):
+ {{{
+$ scp user@kdc:/home/user/ldap.keytab ~/
+ }}}
+ 3. Fix permissions and move the keytab to the correct directory:
+ {{{
+$ chmod 640 ~/ldap.keytab
+$ sudo chown openldap:openldap ~/ldap.keytab
+$ mv ~/ldap.keytab /etc/ldap
+ }}}
+ 4. Configure OpenLDAP to reference the new keytab by adding the following line to `/etc/default/slapd`:
+ {{{
+export KRB5_KTNAME=/etc/ldap/ldap.keytab
+ }}}
+ 5. Install SASL packages:
+ {{{
+$ sudo apt-get install sasl2-bin libsasl2-2 libsasl2-modules libsasl2-modules-gssapi-mit
+ }}}
+ 6. Configure SASL by adding the following attributes to the `cn=config` DIT. For statically configured instances, add the appropriate directives to `slapd.conf` and restart.
+ {{{
+olcSaslHost: kerberos.example.com
+
+olcSaslRealm: EXAMPLE.COM
+
+olcSaslSecProps: noplain,noactive,noanonymous,minssf=56
+
+olcAuthzRegexp: {0}"uid=([^/]*),cn=example.com,cn=GSSAPI,cn=auth" "uid=$1,ou=people,dc=example,dc=com"
+
+olcAuthzRegexp: {1}"uid=host/([^/]*).example.com,cn=example.com,cn=gssapi,cn=auth" "cn=$1,ou=hosts,dc=example,dc=com"
+
+olcAuthzRegexp: {2}"uid=ldap/admin,cn=example.com,cn=gssapi,cn=auth" "cn=admin,cn=config"
+ }}}
+
+==== Anonymous Access ====
+
+In small environments with minimal security requirements, it may be convenient to allow any user on the network to obtain account information anonymously. This is a more NIS-like approach, without some of NIS's more serious security concerns. See section 10.3 of OpenLDAP's <nowiki>[[http://www.openldap.org/doc/admin24/security.html| security documentation]]</nowiki> for details.
+
+If anonymous access is used, the directory's Access Control List must be configured carefully. The default OpenLDAP configuration restricts access to sensitive fields such as `userPassword` and `shadowLastChange` only.
+
+== Shared File Systems ==
+
+'''Note:''' The file server '''must''' have access to the account information in the LDAP directory. Configure the file server using the process described the Authentication and Accounts sections of the Client Configuration section. Test with `getent passwd`.
+
+=== NFS ===
+NFS works well for network environments comprised primarily of *nix systems, but security can be a concern. See <nowiki>[[http://nfs.sourceforge.net/nfs-howto/ar01s06.html]]</nowiki>. One solution is <nowiki>[[IPSecHowto|IPSec]]</nowiki>, see <nowiki>[[SettingUpNFSHowTo]]</nowiki> for details.
+
+=== Samba ===
+
+Samba can be configured to use Kerberos as an authentication source; see the <nowiki>[[Samba-Kerberos| Samba-Kerberos wiki page]]</nowiki> for details. This can be an attractive option for network environments where hosts must interoperate with Windows. Some of the security concerns related to NFS are also present here, although Samba provides an extension to the CIFS/SMB protocol that is designed to provide transport encryption. IPSec can be useful here as well.
+
+=== SSHFS ===
+
+The use of Kerberized user logins allows `pam_mount` to auto-mount <nowiki>[[SSHFS]]</nowiki> file systems if the file server's SSH access has been Kerberized (see <nowiki>[[http://www.visolve.com/security/ssh_kerberos.php]]</nowiki> for details on configuring Kerberos authentication in SSH). Transport encryption is automatic. It may be necessary to restrict remote access to portions of the server's file system with tools such as <nowiki>[[http://www.pizzashack.org/rssh/|rssh]]</nowiki>, <nowiki>[[http://sublimation.org/scponly/wiki/index.php/Main_Page|scponly]]</nowiki>, or chrooted SSH. 
+== Client Configuration ==
+
+=== Authentication ===
+
+The following instructions briefly demonstrate the process for configuring a host to participate in a Kerberos realm. Each step of the process is described more thoroughly in the Client Configuration section of the <nowiki>[[Kerberos|Kerberos wiki page]]</nowiki>.
+
+ 1. Install the packages necessary for Kerberized local authentication:
+ 
+ {{{
+$ sudo apt-get install krb5-user krb5-config
+ }}}
+
+ The `krb5-user` package is very useful for diagnostics and troubleshooting, but not strictly necessary.
+
+ Supply a default realm name, and the FQDNs of the KDC and administrative servers if this information is not available via DNS.
+ 
+ 2. Generate a keytab for the host using `kadmin`:
+
+ {{{
+kadmin: addprinc -randkey host/client.example.com@EXAMPLE.COM
+kadmin: ktadd -k ~/client.keytab host/client.example.com@EXAMPLE.COM
+ }}}
+ 
+ 3. Securely transfer the keytab to the host. `scp` is used here.
+ 
+ {{{
+$ scp user@host:/home/user/client.keytab .
+ }}}
+
+ 4. Correct permissions:
+ {{{
+$ chmod 600 ~/client.keytab
+$ sudo chown root:root ~/client.keytab
+ }}}
+  
+ 5. Deploy the keytab:
+ {{{
+$ sudo mv ~/client.keytab /etc/krb5.keytab
+ }}}
+
+=== Accounts ===
+
+ 1. Install the packages necessary for NSS to obtain user and group information from LDAP with Kerberos authentication:
+ {{{
+$ sudo apt-get install sssd
+ }}}
+
+ 2. Create `/etc/sssd/sssd.conf` with the appropriate settings. The following is a minimal configuration suitable for an environment utilizing MIT Kerberos for authentication and an OpenLDAP with TLS enabled.
+
+ {{{
+[sssd]
+config_file_version = 2
+services = nss,pam
+domains = EXAMPLE
+
+[nss]
+filter_users = root
+filter_groups = root
+
+[pam]
+
+[domain/EXAMPLE]
+auth_provider = krb5
+krb5_server = kdc.example.com
+krb5_realm = EXAMPLE.COM
+cache_credentials = true 
+
+access_provider = simple
+chpass_provider = krb5
+
+id_provider = ldap
+ldap_uri = ldap://ldap.example.com
+ldap_search_base = dc=example,dc=com
+ldap_id_use_start_tls = true
+ldap_sasl_mech = GSSAPI
+
+sudo_provider = none
+ }}}
+ 
+ 3. Set file permissions for the SSSD config file
+ {{{
+$ sudo chmod 600 /etc/sssd/sssd/conf
+ }}}
+
+ 4. If TLS encryption is enabled on the LDAP server, it may be necessary to provide a path to the Certificated Authority certificate that establishes the authenticity of the LDAP server's certificate. This can be done by adding the following line to `/etc/ldap/ldap.conf`:
+ {{{
+TLS_CACERT	/path/to/certificate
+ }}}
+ 5. Start the `sssd` if it isn't already running:
+ {{{
+$ sudo service sssd restart
+ }}}
+
+==== Login Manager Configuration ====
+
+LDAP users may not be displayed in the login manager configuration until they have successfully logged in, so the first login attempt must be made manually. To enable manual logins in LightDM, add the following line to `/etc/lightdm/lightdm.conf` in the `[SeatDefaults]` configuration section:
+
+{{{
+greeter-show-manual-login=true
+</pre>
+
+Create `lightdm.conf` if it does not exist.
+
+More information about configuring LightDM can be found on the <nowiki>[[https://wiki.ubuntu.com/LightDM|LightDM page]]</nowiki> of the Ubuntu Wiki or the freedesktop.org <nowiki>[[https://wiki.freedesktop.org/www/Software/LightDM/|LightDM page]]</nowiki>.
+=== Shared Files ===
+
+<nowiki>[[http://pam-mount.sourceforge.net/|pam_mount]]</nowiki> is a PAM module that provides a flexible mechanism for mounting file systems as part of the login process. Install as follows:
+
+<pre>
+$ sudo apt-get install libpam-mount
+</pre>
+
+Configure `pam_mount` to mount directories by editing `/etc/security/pam_mount.xml` and adding `<volume>` definitions. Here is a sample SSHFS volume:
+
+<pre>
+<volume fstype="fuse" path="sshfs#%(USER)@host.example.com:/home/%(USER)/shared" mountpoint="~/Shared/" options="workaround=rename" />
+</pre>
+
+See the <nowiki>[[http://pam-mount.sourceforge.net/doc.php|pam_mount documentation]]</nowiki> for details on configuring pam_mount.
+
+=== Testing and Validation ===
+
+Users and groups defined in the LDAP directory should now be present in the output of `getent passwd` and `getent group`. Shared folders should be available after login. If logins are available on the command line but not through LightDM, restart the lightdm service as follows:
+<pre>
+sudo service lightdm restart
+</pre>
+
+== LDAP Authentication ==
+
+It is possible to configure clients to authenticate using credentials stored in the LDAP directory instead of Kerberos authentication. The following section describes this method. See also <nowiki>[[LDAPClientAuthentication]]</nowiki>, particularly for caching.
+
+=== Installing required packages ===
+You need to install these packages on all machines on your network where you want to be able to use SSO.  At the command line, type the following:
+
+<pre>
+sudo apt-get install ldap-auth-client libpam-krb5 krb5-user libpam-foreground libsasl2-modules-gssapi-mit
+</pre>
+
+==== Configuring LDAP ====
+The ldap-auth-config package (depended upon by ldap-auth-client) has a debconf script to help you create the LDAP configuration file.  This script will be run automatically when you install the package.
+
+* The first step is to enter the URI for your LDAP server.  If you followed this howto's instructions on installing your server, this URI will be '''ldaps://<your server IP>/'''.
+<nowiki>[[File:ldap-1-uri.png]]</nowiki>
+
+* Next, you need to enter the DN of your search base.  Use the same DN that you used as the base for your user database.
+<nowiki>[[File:ldap-2-base-dn.png]]</nowiki>
+
+* You will only be using LDAPv3, so choose the default on this screen.
+<nowiki>[[File:ldap-3-version.png]]</nowiki>
+
+* There's no need for local root to have full privileges over your LDAP server, so answer no here.
+<nowiki>[[File:ldap-4-local-root.png]]</nowiki>
+
+* If your LDAP server allows anonymous binds, you can answer 'no' here too. If you're ok with the script dropping a plaintext password in `/etc/ldap.secret`, then you can enter the password here. Otherwise, you answer 'no', but you have some work to do [XXX which is not documented here yet].
+<nowiki>[[File:ldap-5-require-login.png]]</nowiki>
+
+==== Configuring Kerberos ====
+
+krb5-config has a debconf script to set up client-side Kerberos properly.
+
+<pre>
+sudo dpkg-reconfigure -plow krb5-config
+</pre>
+
+Enter your realm (EXAMPLE.COM, for example) when prompted. If you have set up DNS records to point to your KDC, answer yes to the relevant question. If not, you will be asked to specify the hostname of your KDC and admin server.
+
+edit `/etc/ldap/ldap.conf` and include the following lines:
+<pre>
+BASE    YOUR-BASE
+URI     ldaps://SERVER-NAME
+TLS_REQCERT allow
+</pre>
+Replace the SERVER-NAME & YOUR-BASE with the correct values.
+
+edit `/etc/ldap.conf` and include the following lines:
+<pre>
+bind_policy soft
+</pre>
+
+==== Configuring PAM and NSS ====
+auth-client-config gives us an easy way to configure NSS and PAM. It doesn't come with a configuration for LDAP and Kerberos.
+
+edit `/etc/auth-client-config/profile.d/krb-auth-config` and include the following lines:
+<pre>
+[krb5ldap]
+nss_passwd=passwd: files ldap
+nss_group=group: files ldap
+nss_shadow=shadow: files ldap
+nss_netgroup=netgroup: files ldap
+pam_auth=auth       sufficient   pam_krb5.so
+         auth       required     pam_unix.so nullok_secure use_first_pass
+pam_account=account    sufficient   pam_krb5.so
+            account    required     pam_unix.so
+pam_password=password   sufficient   pam_krb5.so
+             password   required     pam_unix.so nullok obscure min=4 max=8 md5
+pam_session=session    required     pam_unix.so
+            session    required     pam_mkhomedir.so skel=/etc/skel/
+            session    optional     pam_krb5.so
+            session    optional     pam_foreground.so
+
+[krb5ldap.cached]
+nss_passwd=passwd: files ldap [NOTFOUND=return] db
+nss_group=group: files ldap [NOTFOUND=return] db
+nss_shadow=shadow: files ldap
+nss_netgroup=netgroup: files ldap
+pam_auth=auth   required       pam_env.so
+         auth   sufficient     pam_unix.so likeauth nullok
+         auth   [default=ignore success=1 service_err=reset] pam_krb5.so use_first_pass
+         auth   [default=die success=done] pam_ccreds.so action=validate use_first_pass
+         auth   sufficient pam_ccreds.so action=store use_first_pass
+         auth   required        pam_deny.so
+pam_account=account    sufficient   pam_krb5.so
+            account    required     pam_unix.so
+pam_password=password   sufficient   pam_krb5.so
+             password   required     pam_unix.so nullok obscure min=4 max=8 md5
+pam_session=session    required     pam_unix.so
+            session    required     pam_mkhomedir.so skel=/etc/skel/
+            session    optional     pam_krb5.so
+            session    optional     pam_foreground.so
+</pre>
+
+Now we can do the actual configuration. It's probably a good idea to have a root shell open while doing this, just in case something breaks.
+
+<pre>
+sudo auth-client-config -a -p krb5ldap
+</pre>
+
+At this stage, everything should work! Try `getent passwd` and `getent group` to check that users and groups from LDAP are appearing properly. Log in as one of the LDAP users, and use `klist` to confirm that you were automatically granted a TGT. Running `passwd` should change your Kerberos password.
+
+===== Cached Credentials =====
+<pre>
+sudo apt-get install nss-updatedb libnss-db libpam-cracklib libpam-ccreds
+</pre>
+
+<pre>
+sudo nss_updatedb ldap
+</pre>
+
+<pre>
+sudo auth-client-config -a -p krb5ldap.cached
+</pre>
+
+=== Reverting ===
+
+If your login fails and the troubleshooting procedures don't help, head over to your lifesaving root shell, and use auth-client-config to revert the settings.
+
+<pre>
+auth-client-config -a -p krb5ldap -r
+</pre>
+
+You may then debug at a later date without the risk of not being able to log into your system.
+
+== Troubleshooting ==
+
+=== Common Error Messages ===
+
+<pre>
+ldap_start_tls_s() failed: Connect error
+</pre>
+
+TLS connection failed. Often indicates the connection URI doesn't match the server name in the TLS certificate. Troubleshoot with `ldapsearch -ZZ`
+
+<pre>
+k5start: error getting credentials: Client not found in Kerberos database
+</pre>
+
+Usually means the client's FQDN doesn't match what's in the Kerberos database. The output of `hostname -f` must match the hostname in the Kerberos database exactly. If a DNS server is the authoritative source for FDQNs, put "dns" first on the "hosts" line in `/etc/nsswitch.conf`
+
+<pre>
+SASL authentication failure: No worthy mechs found 
+</pre>
+
+Usually indicates SASL is not installed or configured correctly. Verify `libsasl2-modules-gssapi-mit` is installed.
+
+=== sssd ===
+1. See https://docs.pagure.org/SSSD.sssd/users/troubleshooting.html for detailed troubleshooting steps
+
+=== Kerberos ===
+ 1. Check for connectivity with `ping`.
+ 2. Verify users can obtain TGTs with `kinit`:
+ {{{
+ $ kinit
+ }}}
+ Type the user's password when prompted.  If authentication succeeds, the command will return silently and no error messages will be displayed.
+ 3. Verify `kinit` acquired a '''T'''icket '''G'''ranting '''T'''icket ('''TGT''') from the KDC:
+ {{{
+ $ klist
+ }}}
+ The response should look something like this:
+ {{{
+ Ticket cache: FILE:/tmp/krb5cc_5001_PpRNvF
+ Default principal: user@SOMEREALM.COM
+
+ Valid starting     Expires            Service principal
+ 05/28/06 08:18:09  05/28/06 18:18:09  krbtgt/SOMEREALM.COM@SOMEREALM.COM
+        renew until 05/29/06 08:18:06
+ 
+ 
+ Kerberos 4 ticket cache: /tmp/tkt5001
+ klist: You have no tickets cached
+ }}}
+
+ 4. Repeat the last two steps on another computer on the network.
+
+ 5. Verify `hostname -f` returns the host's FQDN. It may be necessary to adjust the hostname lookup procedure in `/etc/nsswitch.conf`. `/etc/hosts` and /etc/resolv.conf` are also relevant configuration files.
+
+See the <nowiki>[[Kerberos]]</nowiki> wiki page for further information on troubleshooting Kerberos.
+
+=== OpenLDAP ===
+ 1. Verify connectivity with `ping`.
+ 2. Verify the host can obtain Kerberos tickets:
+ {{{
+ $ sudo kinit -k -t /etc/krb5.keytab -p host/host.example.com@EXAMPLE.COM
+ $ sudo klist
+ }}}
+ 
+ The output should indicate a credentials cache has been successfully established.
+ 3. Use `getent` to verify the local system is pulling user and group information from the LDAP directory:
+ 
+ {{{
+ $ getent passwd
+ }}}
+ 
+ The output should include all users and groups that are accessible in LDAP. If not, the host is either unable to connect, or lacks access to the appropriate locations in the LDAP directory. Verify access by reconstructing the host's query string with the `ldapsearch` tool (part of the `ldap-utils` package). Use the option `-Y GSSAPI` to authenticate via Kerberos and `-b <basedn>` to specify the base DN to search. `-Z` will enable TLS. The basedn used by the account infrastructure is specified in `/etc/ldap.conf`. For example:
+ 
+ {{{
+ $ ldapsearch -Z Y GSSAPI -b dc=example,dc=com
+ }}}
+
+ 4. Verify the settings in `/etc/ldap.conf` and `/etc/sssd/sssd.conf`.
+ 5. Review `/var/log/auth.log`, `/var/log/daemon.log` and `/var/log/syslog` for error messages.
+ 
+ The error "no worthy mechs found" indicates SASL is not installed or configured correctly.
+ 6. Enable bootlogging and check the bootlogs for errors related to sssd and k5start. If k5start fails to load due to connectivity or DNS name resolution issues, see http://ubuntuforums.org/showthread.php?p=8370410 for details on starting nslcd using Upstart.
+ 7. Log OpenLDAP stats (`loglevel stats` in `slapd.conf` or `olcLogLevel stats` in `cn=config`), then follow the OpenLDAP log output while running `getent`.
+
+== Service Configuration ==
+
+=== SSH ===
+ 1. Verify `/etc/krb5.conf` exists; sshd requires this file even if sssd is installed. A minimal krb5.conf example:
+ {{{
+ [libdefaults]
+	default_realm = EXAMPLE.COM
+
+ [realms]
+	EXAMPLE.COM = {
+		kdc = kerberos.example.com
+	}
+
+ [domain_realm]
+	.example.com = EXAMPLE.COM
+	example.com = EXAMPLE.COM
+  }}}
+ 2. Enable GSSAPI auth in `/etc/ssh/sshd_config`:
+ {{{
+ GSSAPIAuthentication yes
+ GSSAPICleanupCredentials yes
+ }}}
+ 3. Restart sshd for the settings to take effect:
+ {{{
+ $ sudo service sshd restart
+ }}}
+
+=== Apache ===
+
+Apache can be configured to authenticate users via Kerberos. See the <nowiki>[[Kerberos|Kerberos wiki page]]</nowiki> for details.
+
+=== NFS ===
+<nowiki>[[NFSv4Howto]]</nowiki> contains information for Kerberized NFS access.
+
+TODO:
+* information on configuring nss-updatedb and nscd to cache LDAP information
+
+----
+CategorySecurity

@@ -1,0 +1,268 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+'''NOTE''': This page is part of the Ubuntu Specification process.  Please check the status and details in Launchpad before editing.  If the spec is Approved then you should contact the Assignee, or another knowledgeable person, before making changes.
+
+* '''Launchpad entry''': UbuntuSpec:ltsp-persistent-home
+* '''Packages affected''': 
+
+=== Summary ===
+
+Rather than store their home directories up on a server, some users would like to plug in flash media, and run off their memory stick. This currently works on the live CD. We should look at getting this to work for LTSP thin clients as well.
+
+=== Rationale ===
+
+Maintaining permanent home directories on an LTSP server may not be a desirable option for some administrators.  For instance, in a public walk-up library terminal, where userids could be based off your library patron number, keeping the home directory around after the user logs out will be a management problem that the administrator won't want.
+
+=== Use cases ===
+
+* Joseph is studying journalism at a college.  He gets an assignment to study and report on the employment opportunities that the growth of biofuel feedstock crops may offer to subsistence farmers.  He starts developing his report on a memory stick inserted into a lab computer at college, then goes to the town library to access more information resources.  He wants to further edit his report using a computer available within the library.
+
+=== Scope ===
+
+Affects:
+* libpam-modules
+
+=== Design ===
+
+Currently, the persistent home system on the live cd requires the user to reformat/repartition their usb stick with an EXT3 filesystem.  We'd like to avoid this, for support reasons.  This requires us to create another layer of filesystem.
+
+We'll need a filesystem shim that will provide standard unix filesystem semantics on top of a vfat filesystem.  Things we'll need to handle that a fat formatted memory stick don't have are:
+
+* proper times (utime, mtime, ctime) witout constant updates to the memory stick (so as not to wear out the flash)
+* long filenames/directories simulation with 8.3 real names.
+* permissions, user, and group auth.
+* symlink and hardlink emulation.
+
+Overall process will look something like the following:
+
+* The user will have to pre-prepare the stick for use.
+** This will be simple.  No reformatting will be required, the user just has to create the /pershome directory.
+** Perhaps a simple shell script using zenity can be created to facilitate this.
+* User plugs in media into the workstation before login.
+* User logs in.
+* the pam module pam_script will run, and determine from either /etc/ltsp/persistent_homes, or $HOME/.persistent_home, that the user wishes to have a USB persistent home dir.
+* pam_mount executes a ltspfs mount to /media/username, which mounts the vfat formatted media.
+* pam_mount then executes a layered mount of a fuse based filesystem that behaves much like the rockridge extentions for CD's, in that it maps long filenames and permissions (but not userid or groupids) into the corresponding files in a /pershome directory on the vfat media.  This directory then is mounted onto $HOME for the user.
+** If there is no /pershome directory, then we pop up a dialogue box indicating that the /pershome directory hasn't been created, possibly with instructions on how to do it.
+* On logout, reverse unmounting is done.  The libpam-mount module does this. '''NOT VERIFIED'''
+
+However, while "complete", in the sense that it will provide a persistent home directory, it relies on a fuse filesystem that doesn't exist as of yet, as well as some fairly intrusive changes to the LTSP management process.  So, a nice intermediate step would be to have proper temporary home directories.
+
+* The user's home directory is set to a special home root, i.e. /tmphome
+* When the user logs in, his or her home directory is automatically created.
+* The user then uses the computer as normal, including standard LTSP local device access to store their documents on their USB stick.
+* When the user logs out, their home directory is automatically removed.
+
+The pam module pam_mkhomedir will MAKE the homedirectory, however, the pam_sm_close_session function in the module currently simply returns PAM_SUCCESS.  What we'd like to do is modify pam_mkhomedir in the following way:
+
+* have a way on the pam module's command line to specify a tmphome parameter.
+** Without this parameter, pam_mkhomedir will behave as normal.
+** This parameter must be supplied either a group with contains users who have temporary homes, or a directory name under which temporary home directories will be created.  '''THIS MUST BE A DIFFERENT HIERARCHY FROM /home'''
+** modify pam_sm_close_session to remove the home directory iff:
+*** The home the tmphome value length is > 0
+*** The home directory of the user starts with the tmphome hierarchy OR
+*** The user belongs to the specified group
+*** The users home directory exists.
+
+=== Implementation ===
+
+* Modify pam_mkhomedir.c with the additional functionality.
+* It will be up to local administrators who need this functionality to modify their own /etc/pam.d/common-session file.
+* Document the additional functionality in the packages documentation, and in the Edubuntu handbook, for LTSP administrators to set up as needed.
+** Make documentation changes to pam-0.79/Linux-PAM/modules/pam_mkhomedir/README.
+** Add information to the Edubuntu handbook, in the "management chapter"
+* Send modifications upstream, with the intent of getting them included in pam.
+
+==== Code ====
+
+<pre>
+--- pam-0.79/Linux-PAM/modules/pam_mkhomedir/pam_mkhomedir.c	2006-11-07 19:25:50.000000000 -0600
++++ pam-0.79-sbalneav/Linux-PAM/modules/pam_mkhomedir/pam_mkhomedir.c	2006-11-08 02:14:29.000000000 -0600
+@@ -31,10 +31,12 @@
+# define _GNU_SOURCE 1
+# include <stdarg.h>
+# include <sys/types.h>
++#include <sys/wait.h>
+# include <sys/stat.h>
+# include <fcntl.h>
+# include <unistd.h>
+# include <pwd.h>
++#include <grp.h>
+# include <stdlib.h>
+# include <stdio.h>
+# include <string.h>
+@@ -57,9 +59,12 @@
+ /* argument parsing */
+# define MKHOMEDIR_DEBUG      020	/* keep quiet about things */
+# define MKHOMEDIR_QUIET      040	/* keep quiet about things */
++#define MKHOMEDIR_REMOVE    0200	/* Remove home dir on exit */
+ 
+ static unsigned int UMask = 0022;
+ static char SkelDir[BUFSIZ] = "/etc/skel"; /* THIS MODULE IS NOT THREAD SAFE */
++static char TmpHome[BUFSIZ] = "\0";
++static char TmpGrp[BUFSIZ] = "\0";
+ 
+ /* some syslogging */
+ static void _log_err(int err, const char *format, ...)
+@@ -91,6 +96,14 @@
+       } else if (!strncmp(*argv,"skel=",5)) {
+ 	 strncpy(SkelDir,*argv+5,sizeof(SkelDir));
+ 	 SkelDir[sizeof(SkelDir)-1] = '\0';
++      } else if (!strncmp(*argv,"tmphome",7)) {
++	 ctrl |= MKHOMEDIR_REMOVE;
++      } else if (!strncmp(*argv,"dir=",4)) {
++	 strncpy(TmpHome,*argv+4,sizeof(TmpHome));
++	 TmpHome[sizeof(TmpHome)-1] = '\0';
++      } else if (!strncmp(*argv,"group=",6)) {
++	 strncpy(TmpGrp,*argv+6,sizeof(TmpGrp));
++	 TmpGrp[sizeof(TmpGrp)-1] = '\0';
+       } else {
+ 	 _log_err(LOG_ERR, "unknown option; %s", *argv);
+       }
+@@ -458,6 +471,41 @@
+    return PAM_SUCCESS;
+ }
+ 
++static int remove_homedir(pam_handle_t * pamh, int ctrl,
++                          const struct passwd *pwd)
++{
++   int status;
++   pid_t child;
++   char *null_env[] = { NULL };
++   char *remove_cmd[] = { "/bin/rm", "-r", "-f",  pwd->pw_dir, NULL };
++
++   child = fork();
++
++   if (child == 0) {
++      execve(remove_cmd[0], remove_cmd, null_env);
++      _log_err(LOG_DEBUG, "execl() returned");
++      exit (1);                 /* exec should never return */
++   } else if (child > 0) {
++      if (waitpid(child, &status, 0) < 0) {
++         _log_err(LOG_DEBUG, "wait() failed");
++         exit(1);
++      }
++   } else if (child < 0) {
++      _log_err(LOG_DEBUG, "fork() failed");
++      exit(1);
++   }
++
++   if (!WIFEXITED(status)) {
++      _log_err(LOG_DEBUG, "execve() returned no status");
++      return PAM_SYSTEM_ERR;
++   }
++
++   if (WEXITSTATUS(status) != 0)
++      return PAM_SYSTEM_ERR;
++
++   return PAM_SUCCESS;
++}
++
+ /* --- authentication management functions (only) --- */
+ 
+ PAM_EXTERN
+@@ -501,7 +549,71 @@
+ int pam_sm_close_session(pam_handle_t * pamh, int flags, int argc
+ 			 ,const char **argv)
+ {
+-   return PAM_SUCCESS;
++   int retval, ctrl;
++   const char *user;
++   const struct passwd *pwd;
++   const struct group *grp = NULL;
++   int got_home = 0, got_group = 0;
++   struct stat St;
++
++   /* Parse the flag values */
++   ctrl = _pam_parse(flags, argc, argv);
++
++   /* Check and see if tmphome= has been specified. */
++   if ((ctrl & MKHOMEDIR_REMOVE) != MKHOMEDIR_REMOVE)
++      return PAM_SUCCESS;
++
++   /* Determine the user name so we can get the home directory */
++   retval = pam_get_item(pamh, PAM_USER, (const void **) &user);
++   if (retval != PAM_SUCCESS || user == NULL || *user == '\0')
++   {
++      _log_err(LOG_NOTICE, "user unknown");
++      return PAM_USER_UNKNOWN;
++   }
++
++   /* Get the password entry */
++   pwd = _pammodutil_getpwnam (pamh, user);
++   if (pwd == NULL)
++   {
++      D(("couldn't identify user %s", user));
++      return PAM_CRED_INSUFFICIENT;
++   }
++
++   if (stat(pwd->pw_dir,&St) != 0)	/* Home directory has already gone? */
++      return PAM_SUCCESS;
++
++   if (strlen(TmpGrp) > 0)		/* group= filled out */
++   {
++      grp = _pammodutil_getgrnam (pamh, TmpGrp);
++      if (grp == NULL)
++         grp = _pammodutil_getgrgid(pamh, atoi(TmpGrp));
++      if (grp && (grp->gr_gid == 0)) 		/* atoi failed, groupid = 0 */
++         grp = NULL;
++   }
++ 
++   if (grp) {
++      char **members = grp->gr_mem;
++
++      while (*members)
++      {
++         if (!strcmp(user, *(members)))
++         {
++            got_group = 1;
++            break;
++         }
++      }
++   }
++      
++   if (strlen(TmpHome) > 0)
++   {
++      if (strncmp(pwd->pw_dir, TmpHome, strlen(TmpHome)) == 0)
++         got_home = 1;
++   }
++
++   if (got_home || got_group)
++      return remove_homedir(pamh,ctrl,pwd);
++   else
++      return PAM_SUCCESS;
+ }
+ 
+# ifdef PAM_STATIC
+</pre>
+
+==== Data preservation and migration ====
+
+None.
+
+Administrator can add:
+
+<code>session required pam_mkhomedir.so tmphome dir=/tmphome/ skel=/etc/skel/ umask=0077</code>
+ 
+or
+
+<code>session required pam_mkhomedir.so tmphome group=tmphome skel=/etc/skel/ umask=0077</code>
+
+To their <code>/etc/pam.d/common-session</code> to use. 
+
+=== Unresolved issues ===
+
+* To implement the original spec, we'd need the fuse filesystem that maps Unix filesystem semantics on top of a vfat filesystem.  We'll defer this to feisty + 1
+
+----
+CategorySpec
+CategoryEdubuntuSpec

@@ -1,0 +1,143 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+== Stack publication ==
+
+This page is part of the <nowiki>[[DailyRelease|daily release process documentation]]</nowiki>
+
+Now that we know how branches are flying to trunk and how we ensure that the packaging metadata are in sync with our delivery, let's swing to the heart of the daily release process!
+
+=== Preliminary notes on daily release ===
+This workflow is heavily using other components that we rely on. In addition to our own tool for daily release, which is <nowiki>[[https://launchpad.net/cupstream2distro|available here]]</nowiki>, we needed to use jenkins for scheduling, controlling and monitoring the different parts of the process. Not forgetting pbuilder-classic and other uses that we needed to benchmark and ensure we are doing the right thing for creating the source packages. Finally, we needed to fix (and automate the fix) of a lot of configuration on the launchpad side itself for our projects. Now it's clean and we have tools to automatically keeps that this way.
+
+=== General flow of daily release ===
+
+<nowiki>[[File:daily-release-summary.png]]</nowiki>
+
+The global idea of the different phases for achieving a stack delivery is the following:
+* For every component of the stack (new word spotted, will be definied in the next paragraph), prepare a source package
+* Upload them to ppa and build the packages
+* Once built, run the integration tests associated to the stack
+* If everything is ok, publish those to Ubuntu
+
+Of course, this is the big picture, let's enter into more details now. :)
+
+=== What is a stack? ===
+Daily release is working per stack. Jenkins is showing <nowiki>[[https://jenkins.qa.ubuntu.com/view/cu2d/|all of them here]]</nowiki>. We validate a stack all together or reject all components that are part of it. A stack are various components having close interactions and relationships between themselves. They are generally worked on by the same team. For instance, those are the different stacks we have in ubuntu 13.04:
+* the <nowiki>[[https://jenkins.qa.ubuntu.com/view/cu2d/view/Head/view/Indicators/|indicator stack]]</nowiki> for indicators :)
+* the <nowiki>[[https://jenkins.qa.ubuntu.com/view/cu2d/view/Head/view/OIF/|open input framework stack]]</nowiki>
+* the <nowiki>[[https://jenkins.qa.ubuntu.com/view/cu2d/view/Head/view/QA/|QA stack]]</nowiki>
+* the <nowiki>[[https://jenkins.qa.ubuntu.com/view/cu2d/view/Head/view/Misc./|misc stack]]</nowiki> contains all misc components like theming,  wallpapers, design assets. This is generally all components that don't have integration tests (and so we don't run any integration tests step)
+* the <nowiki>[[https://jenkins.qa.ubuntu.com/view/cu2d/view/Head/view/WebApps/|web application stack]]</nowiki> (in progress to have integration tests so that we can add  more components)
+* the <nowiki>[[https://jenkins.qa.ubuntu.com/view/cu2d/view/Head/view/WebCreds/|web credentials stack]]</nowiki> (in progress to have integration tests so that we can add more components)
+* the <nowiki>[[https://jenkins.qa.ubuntu.com/view/cu2d/view/Head/view/Unity/|Unity stack]]</nowiki>, containing the core components of what defines the Unity experience.
+
+The "cu2d" group that you can see in the above links is everything that is related to the daily release.
+
+As we are working per stack, let's focus here on one particular stack and seeing the life of its components.
+
+=== Different phases of one stack ===
+==== General diagram ====
+
+Let's have a look at the general diagram in a different way to see what is running concurrently:
+
+<nowiki>[[File:daily-release-jenkins-jobs.png]]</nowiki>
+
+You should recognize here the different jenkins jobs that we can list per stack, like <nowiki>[[https://jenkins.qa.ubuntu.com/view/cu2d/view/Head/view/Unity/|this one]]</nowiki> for instance.
+
+==== The prepare phase ====
+The prepare phase is running one sub-prepare job per components. This is all control by the <nowiki>[[http://bazaar.launchpad.net/~cupstream2distro-maintainers/cupstream2distro/trunk/view/head:/prepare-package|prepare-package script]]</nowiki>. Each projects:
+* Branch latest trunk for the component
+* Collect latest package version that were available to this branch and compare to distro ones, we can get multiple case here:
+** the version in the distro is the same than the one we have in the branch, we are then downloading the source code from Ubuntu of the latest available package to check its content against the content of the branch (this is a double security check).
+** If everything matches, we are confident that we won't overwrite anything in the distribution (by a past direct upload) that is not in the upstream trunk and can go on.
+** However, maybe a previous release was tempted as part of the daily release, so we need to take into account the version in the ppa we are using for daily release to eventually bump the versioning (it would be like the previous version in the ppa never existed)
+** if the version is less than the one in the distro, it means that there has been a direct upload to the distro not backported to the upstream trunk. The prepare job for this component is exiting as unstable, but we don't block the rest of the process. We'll simply ignore that component and try to validate all the other changes on the other projects without anything new from that one (if this component was really needed, the integration tests will fail later on). The <nowiki>[[https://launchpad.net/~ubuntu-unity|integration team]]</nowiki> will then work to get those additional changes in the distro merged back into trunk for the next daily release.
+* We then check that we have new useful commits to publish. It means that a change which isn't restricted to debian/changelog or po files update has been made. If no useful revision is detected, we won't release that component today, but still go on with the other projects.
+* We then create the new package versionning. See the paragraph about versionning below.
+* We then update the symbols file. Indeed, the symbols file needs to know in which exact version a new symbol was introduced. This can't be done as part of the merge process as we can't be sure that next day, the release will be successful. So upstream is using the magic string "0replaceme" instead of providing a version as part the merge adding a symbol to a library. As part of making that package a candidate for daily release, we then replace automatically all the occurences of "0replaceme" by the exact versionning we computed just before. We add an entry to the changelog if we had to do that to document.
+* Then, we prepare the changelog content.
+** We first scan the changelog itself to grab all bugs that were manually provided as part of upstream merges by the developers since that last package upload.
+** Then, we scan the whole bzr history until latest daily release (we know the revision of the previous daily release where the snapshot has been taken by extracting the string "Automatic snapshot from revision <revision>". Fetching in detail this history (included merged branch content), we are looking for any trace of bugs attached or commit message talking about "bug #…" (there is a quite flexible regexp for extracting that).
+** We then look at the committer for each commit message (after cleaning up) into the mainline and grab eventually linked bug number to it. There are special rules to ignore commit message or when something in debian/changelog was already provided. We finally populate debian/changelog (if it wasn't already previously mentionned in our initial parsing of debian/changelog to avoid duplication). This mean that it's directly the person fixing the issue who gets the praise (and blames ;)) for this fix. You can then see <nowiki>[[https://lists.ubuntu.com/archives/raring-changes/2013-January/004507.html|a result like that]]</nowiki>. As we only deduplicate since the last package upload, it means that we can mention again the same bug number if the previous fix in last upload wasn't enough. Also all the fixes are grouped and ordered by names, making the changelog quite clear (<nowiki>[[https://lists.ubuntu.com/archives/raring-changes/2013-January/004090.html|see here]]</nowiki>).
+** We finally append the revision from where the snapshot was taken to the changelog to make clear what's in this upload and what's not.
+* Then, we generate a diff if we have any meaningful packaging changes since last upload to Ubuntu (so ignoring changelog and symbols automatically replaced). In case we detect some, we include all meta-build information (like configure.ac, cmake files, automake files) that changed as well since last release to be able to have a quick look at why something changed. This information will be used during the publisher step.
+* We then sync all bugs that were previously detected, opening downstream bugs in launchpad so that they are getting closed by the package upload.
+* We then commit the branch and keep it there for now.
+* Building the source package, inside a chroot to try to get all build-dependencies resolved is then the next step. This is using pbuilder-classic and a <nowiki>[[http://bazaar.launchpad.net/~cupstream2distro-maintainers/cupstream2distro/trunk/files/head:/chroot-tools/|custom setup]]</nowiki> to do exactly the job we want to do (we have our own .pbuilderrc and triggering tool, using cowbuilder to avoid having to extract a chroot). This step is creating as well the upstream tarball that we are going to use.
+* Finally, we upload that source package that we just got to the <nowiki>[[https://launchpad.net/~ubuntu-unity/+archive/daily-build|ubuntu-unity ppa]]</nowiki>, and save various configuration parts.
+
+All those steps are happening in parallel for any component of the stack.
+
+For those interested, here are <nowiki>[[https://jenkins.qa.ubuntu.com/view/cu2d/view/Head/view/Unity/job/cu2d-unity-head-1.1prepare-unity/35/console|the logs]]</nowiki> when there is some new commits to publish for that component. Here is <nowiki>[[https://jenkins.qa.ubuntu.com/view/cu2d/view/Head/view/Unity/job/cu2d-unity-head-1.1prepare-dee/38/console|another example]]</nowiki>, when there is nothing relevant. Finally, an upload not being on trunk is signaled <nowiki>[[https://jenkins.qa.ubuntu.com/view/cu2d/view/Head/view/Indicators/job/cu2d-indicators-head-1.1prepare-appmenu-gtk/10/console|like that]]</nowiki> (and the component is ignored, but other goes on).
+
+==== Monitoring the ppa build ====
+This is mostly the job of this <nowiki>[[http://bazaar.launchpad.net/~cupstream2distro-maintainers/cupstream2distro/trunk/view/head:/watch-ppa|watch-ppa script]]</nowiki>. It monitors the <nowiki>[[https://launchpad.net/~ubuntu-unity/+archive/daily-build|ubuntu-unity daily-ppa]]</nowiki> build status for the components we just uploaded  and ensure that they are published and built successfully on all architectures. As we are running unit tests as part of the packaging build, we already have unit tests passing with latest Ubuntu ensured that way. In addition, the script generates some meta-information when packages are published. It will make the jenkins job failing if any architecture failed to build, or if a package that was supposed to start building had never its source published (after a timeout) in the ppa.
+
+* Logs of a <nowiki>[[https://jenkins.qa.ubuntu.com/view/cu2d/view/Head/view/Unity/job/cu2d-unity-head-2.1build/34/console|successful build]]</nowiki>
+* Logs of a <nowiki>[[https://jenkins.qa.ubuntu.com/view/cu2d/view/Head/view/Indicators/job/cu2d-indicators-head-2.1build/45/console|failed build]]</nowiki>
+
+==== Running the integration tests ====
+In parallel to monitoring the build, we are running the integration tests (if any). For that, we start monitoring using the previous script, but only on i386. Once all new components for this arch are built and published, we start a slave jenkins jobs running the integration tests. Those will, using UTAH, provision a machine, installing latest Ubuntu iso for each configuration (intel, nvidia, ati), then we add the packages we need from this stack using the ppa and run the tests corresponding to the current stack. Getting all Unity autopilot tests stabilized for that, was a huge task and with some help of the upstream Unity team, we finally got the number of autopilot tests failing under control (from 130 to 12/15 over the 450 tests). We are using them to validate Unity nowadays. However, the indicator and oif tasks had no integration tests at all. To not block the process and trying to move on, we then "stole" the relevant (hud + indicators one for indicators) Unity autopilot tests and only run those. As oif has no integration test at all, we just ensure that Unity is still starting and that the ABI is not broken.
+
+We are waiting on web credentials and web apps stack to grow some integration tests (which are coming in the next couple of weeks with our help) to be able to add more components from them and ensuring the quality status we target for.
+
+Then, the check job is getting back the results of those tests and thanks to a configuration per-stack mechanism, we have triggers to decide if the current state is acceptable or not to us. For instance, over the 450 tests running for Unity (x3 as we run on intel, nvidia and ati), we accept for instance 5% of failures. We have different level for regressions and skipped tests as well. If the collected values are below those triggers, we are considering that the tests are passing.
+
+* Logs of <nowiki>[[https://jenkins.qa.ubuntu.com/view/cu2d/view/Head/view/Unity/job/cu2d-unity-head-2.2check/40/console|tests passing]]</nowiki>. You can get a more detailed view on which tests passed and failed looking at the son job, which is the one running really the tests: https://jenkins.qa.ubuntu.com/job/ps-unity-autopilot-release-testing/. (unstable, yellow means that some tests failed). The parent one is only launching it when ready and doing the collect.
+* Logs of <nowiki>[[https://jenkins.qa.ubuntu.com/view/cu2d/view/Head/view/Indicators/job/cu2d-indicators-head-2.2check/33/console|more tests]]</nowiki> than the acceptable threshold failing.
+* Logs of tests failing because <nowiki>[[https://jenkins.qa.ubuntu.com/view/cu2d/view/Head/view/Unity/job/cu2d-unity-head-2.2check/34/console|UTAH failed to provision the machine or the daily build iso wasn't installable]]</nowiki>.
+
+Note that if we are getting X crashes and other vital components crashes, we fail the tests as well.
+
+==== And finally, publishing ====
+If we reach this step, it means that:
+* we have at least one component with something meaningful to publish
+* the build was successful on all architectures.
+* the tests are in the acceptable tests passing rate
+
+So, let's go on and publish! The <nowiki>[[http://bazaar.launchpad.net/~cupstream2distro-maintainers/cupstream2distro/trunk/view/head:/publisher|script]]</nowiki> has still some steps to proceed. In addition to have a "to other ppa" or "to distro" mode as a publishing destination, it:
+* will check if we have manual packaging changes (remember this diff we did for each component in the prepare stage?). If we actually do have some, we put the publishing in a manual mode. This means that we won't publish this stack automatically and only people with upload rights have special credentials to force the publish.
+* it will then propose and autoapprove upstream for each components the changes that we made to the package (edition of debian/changelog, symbols files…). Then, the upstream merger will grab those branches and merge that upstream. We are only pushing those changes back upstream now (and not during the prepare steps) as we are only finally sure we are releasing them.
+
+Most of the time, we don't have packaging changes, so the story is <nowiki>[[https://jenkins.qa.ubuntu.com/view/cu2d/view/Head/view/Unity/job/cu2d-unity-head-3.0publish/29/console|quite easy]]</nowiki>.
+When we do, the job is <nowiki>[[https://jenkins.qa.ubuntu.com/view/cu2d/view/Head/view/OIF/job/cu2d-oif-head-3.0publish/9/console|showing it in the log]]</nowiki> and is marked as unstabled. The packaging diff, plus the additional build system contexts are <nowiki>[[https://jenkins.qa.ubuntu.com/view/cu2d/view/Head/view/OIF/job/cu2d-oif-head-3.0publish/9/|attached as artefacts]]</nowiki> for an easy review. If the integration team agreed with those changes, they have special credentials to run <nowiki>[[http://bazaar.launchpad.net/~cupstream2distro-maintainers/cupstream2distro/trunk/view/head:/manual/cu2d-run|cu2d-run]]</nowiki> in a special "manual" mode, ignoring the packaging changes and doing the publish if nothing else is blocking. This way, we address the concerns of "only people with upload right can ack/review packaging changes". This is our secondary safety net (the first one being the integration team looking at upstream merges).
+
+The reality is not that easy and that's not the only case when the publish can be set as manual, but I'll discuss that later on.
+
+Small note on the publisher, you see that we are merging back our changes to upstream, but upstream didn't sleep while we take our snapshot, build everything and have those integration tests running, so we usually end up where some commits were done in trunk in between the latest snapshot and the time we push back that branch. That's the reason why we have this "Automatic snapshot from revision <revision>" in the changelog to clearly state where we did the cut and don't rely on the commit of this changelog modification to be merged back.
+
+==== Copy to distro ====
+In fact, publishing is not the end of the story. Some concern arised that we need to separate the power and not having too many launchpad bots having upload rights to Ubuntu. That's true that all previous operations are using a bot for committing, pushing to the ppa, with its own gpg and ssh key. Having those credentials widespread on multiple jenkins machine can be scary if they give upload privileges to Ubuntu. So instead of the previous step directly being piloted by a bot having upload rights to the distro, we only generated a sync file with various infos, <nowiki>[[https://jenkins.qa.ubuntu.com/view/cu2d/view/Head/view/Unity/job/cu2d-unity-head-3.0publish/26/artifact/packagelist_rsync_cu2d-unity-head|like this one]]</nowiki>.
+
+Then, on the archive admin machines, we have a cron using this <nowiki>[[http://bazaar.launchpad.net/~cupstream2distro-maintainers/cupstream2distro/trunk/view/head:/copy2distro|copy script]]</nowiki> which:
+* collects all available rsync files over the wire
+* then, check that the info in this file are valid, like ensuring that components to be published are part of this whitelist of projects that can be synced (which is the same list and metainfo used to generate the jenkins jobs and lives <nowiki>[[http://bazaar.launchpad.net/~cupstream2distro-maintainers/cupstream2distro-config/trunk/files/head:/stacks/|there]]</nowiki>).
+* do a last final check from version compared to the distro if new version were uploaded since the prepare phase (indeed, maybe an upload happened on one of those components while we were busy building/testing/publishing).
+* if everything is fine, the sources and binaries are copied from the ppa to the proposed repository.
+
+<nowiki>[[File:rsync-to-distro.jpg]]</nowiki>
+
+The fact to execute binary copies from the ppa (meaning that the .debs in the ppa are exactly the one that are copied to Ubuntu) gives us the confidence that what we tested is exactly what is delivered, built in the same order, to our users. The second obvious advantage as well is that we don't rebuild what's already ready.
+
+=== Rebuild only one or some components ===
+We have an additional facility. Let's say that test integration failed because of one component (like one build dependency not being bumped), we have the possibility to only rerun (still using the same <nowiki>[[http://bazaar.launchpad.net/~cupstream2distro-maintainers/cupstream2distro/trunk/view/head:/manual/cu2d-run|cu2d-run]]</nowiki> script by people having the credentials) the whole workflow for this or those defined on the command line components. We keep for the others components exactly the same state, meaning, not rebuilding them, but they would still be part of what we tests as part of the integration suite and as part of what we are going to publish. Some resources are spared this way and we can get faster to our result.
+
+However, for the build results, it will still take all the components (even those we don't rebuild) into account. We won't let a FTBFS slipping by that easily! :)
+
+=== Configuring all those jobs ===
+As we have one job per project per series + some metajob per stack, we are about having 80 jobs right now per supported version. This is a lot, the only way to not have bazillions of people just to maintain those jenkins jobs is to automate, automate, automate.
+
+So every stack <nowiki>[[http://bazaar.launchpad.net/~cupstream2distro-maintainers/cupstream2distro-config/trunk/view/head:/stacks/head/unity.cfg|defines some metadata]]</nowiki> like a serie, projects that they cover, when they need to run, eventual extracheck step, ppa used as source and destination, optional branches involved… Then, using <nowiki>[[http://bazaar.launchpad.net/~cupstream2distro-maintainers/cupstream2distro-config/trunk/view/head:/daily-release/cu2d-update-stack|cu2d-update-stack -U]]</nowiki>, this will update all the jenkins jobs to latest configuration using <nowiki>[[http://bazaar.launchpad.net/~cupstream2distro-maintainers/cupstream2distro-config/trunk/files/head:/daily-release/jenkins-templates/|the templates we defined to standardize those jobs]]</nowiki>. In addition, that will reset as well some bzr configuration in launchpad for those branches to ensure that various components like lp-propose or branching the desired target will indeed do the right thing. As told previously, as this list is as well used for filtering when copying to distro, we have very few chances to get out of sync by automating everything!
+
+So, just adding a component to a stack is basically a one line change + the script to run! Hard to do something easier. :)
+
+And btw, if you were quite sharp on the last set of links, you have seen a "dependencies" stanza in the stack definition. Indeed, we described here the simple case and eluded completely the fact that stacks are depending on each other. How do we resolve that? How do we avoid publishing an inconsistent state is covered in a <nowiki>[[DailyRelease-StackDependencies|dedicated section]]</nowiki>.

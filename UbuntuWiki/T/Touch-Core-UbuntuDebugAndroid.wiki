@@ -1,0 +1,122 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+== Ubuntu Debug of Android userspace via Hybris ==
+
+One of the main problems with the current Hybris based architecture, is the lack of symbols resolution and mapping once a crash happens at the Android layer. For all Ubuntu-only applications, it's just a plain Ubuntu, and the usual debugging tools apply just fine.
+
+=== Quick intro about Hybris ===
+
+As described at https://plus.google.com/113386402913695079840/posts/9LF6atjc455, Hybris is a solution to allow us to use bionic-based HW adaptations in glibc systems (specifically at Ubuntu).
+
+Simple example of a OpenGL ES based application that wants to use the hardware acceleration from Android:
+<pre>
+Application <-> Glibc <-> Hybris <-> OpenGL ES (libEGL, libGLESv2) <-> Bionic
+</pre>
+
+As a result of this architecture, we end up having our own custom Android-based linker together with Hybris, which is responsible for loading the Android specific libraries and mapping up the symbols with the Glibc calls.
+
+=== Debugging a crash at Hybris/Android ===
+
+Until our custom linker is fixed to automatically map and load the symbols from the Android userspace, the best and easier approach is to manually load them inside GDB.
+
+==== Identifying possible crash at Hybris/Android ====
+
+Usually when there's no useful information at the GDB stack trace, or with the core dump file (specially after installing libc6/glib debug packages), there's a high change the crash is indeed happening due the Hybris bridge.
+
+Example when trying to run the Nux '''kinetic_scroll_view''' example:
+<pre>
+(gdb) r
+Starting program: /tmp/kinetic_scroll_view 
+Program received signal SIGSEGV, Segmentation fault.
+0x40aa87e4 in ?? ()
+(gdb) bt full
+No symbol table info available.
+No symbol table info available.
+No symbol table info available.
+Backtrace stopped: previous frame identical to this frame (corrupt stack?)
+</pre>
+
+Now check the pid maps file to see if the crash is near an Android specific library (here 4222 is the '''kinetic_scroll_view''' pid):
+<pre>
+cat /proc/4222/maps | grep system\/lib
+...
+40a8e000-40ad0000 r-xp 00000000 103:02 231       /data/ubuntu/system/lib/libc.so
+40ad0000-40ad3000 rw-p 00042000 103:02 231       /data/ubuntu/system/lib/libc.so
+...
+</pre>
+
+There's a high change that just adding the symbols for libc.so might be enough for a way better debugging session :-)
+
+==== Grabbing not-stripped Android libraries for GDB ====
+
+Just asking GDB to load the symbols from the /system partition is not enough as all binaries are stripped by default.
+
+For a more useful debugging trace, we do want to make sure we're copying and using the libraries that are not yet stripped from the Android build system.
+
+If you have a local setup of our CyanogenMod based phablet builds, copy the useful not-stripped libraries to your Ubuntu partition (using just libc and libutils as example):
+<pre>
+$ adb push out/target/product/maguro/obj/SHARED_LIBRARIES/libutils_intermediates/LINKED/libutils.so /data/ubuntu/tmp/
+3431 KB/s (1264104 bytes in 0.359s)
+$ adb push out/target/product/maguro/obj/SHARED_LIBRARIES/libc_intermediates/LINKED/libc.so /data/ubuntu/tmp/
+4691 KB/s (1422512 bytes in 0.296s)
+</pre>
+
+==== Adding the Android specific symbols at your GDB session ====
+
+Now that you have everything in place, all you need to do is to find is the loaded address and offset, so we can get the real address to load the symbols.
+
+Finding the load address of a library:
+<pre>
+cat /proc/4222/maps | grep system\/lib
+...
+40a8e000-40ad0000 r-xp 00000000 103:02 231       /data/ubuntu/system/lib/libc.so
+40ad0000-40ad3000 rw-p 00042000 103:02 231       /data/ubuntu/system/lib/libc.so
+...
+40b66000-40b97000 r-xp 00000000 103:02 313       /data/ubuntu/system/lib/libutils.so
+40b97000-40b99000 rw-p 00031000 103:02 313       /data/ubuntu/system/lib/libutils.so
+...
+</pre>
+
+Here the load address for ''libc.so'' is '''0x40a8e000''' and for ''libutils.so'', '''0x40b66000'''.
+
+Identifying the offset:
+<pre>
+root@localhost:/# objdump -x /system/lib/libc.so | grep .text
+  6 .text         0002dfe0  0000c140  0000c140  0000c140  2**4
+root@localhost:/# objdump -x /system/lib/libutils.so | grep .text
+  6 .text         00015d94  000150c8  000150c8  000150c8  2**3
+</pre>
+
+Here the offset for ''libc.so'' is '''0x0000c140''' and for ''libutils.so'', '''0x000150c8'''.
+Please note the offset is the sixth column, even though it's same from fourth to sixth in above case.
+
+Now that you know how to do it manually, here is a script for getting android library address (summed) <nowiki>[[attachment:symbolsfor.sh]]</nowiki>
+
+example: ./symbolsfor.sh kinetic_scroll_view libc.so
+
+0x40A9A140
+
+Now all you need to do is tell GDB to load the symbols map at the real address, which is the sum of the load address and the offset:
+<pre>
+(gdb) add-symbol-file /tmp/libc.so 0x40a9a140
+add symbol table from file "/tmp/libc.so" at
+	.text_addr = 0x40a9a140
+(y or n) y
+Reading symbols from /tmp/libc.so...done.
+(gdb) add-symbol-file /tmp/libutils.so 0x40b7b0c8
+add symbol table from file "/tmp/libutils.so" at
+	.text_addr = 0x40b7b0c8
+(y or n) y
+Reading symbols from /tmp/libutils.so...done.
+</pre>
+
+Now by either checking the trace, or by restarting your application inside GDB, you're able to access all the Android specific symbols, and understand better where the crash is :-)

@@ -1,0 +1,164 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== Storing GPG Keys on an Encrypted USB Flash Drive ==
+
+It is often desirable to be able to use a GPG key on more than one computer, for instance at home and at work, or on a desktop and a laptop.  Unfortunately, storing encryption keys where you don't have physical control is generally a bad idea.  Even storing keys on a laptop can be troublesome--if the laptop gets stolen, so does your GPG key.  Luckily, you can probably revoke the key before anybody is able to decrypt it because GPG keys are stored encrypted at all times by default, but that's a hassle.  What if you could securely store the key on a device that you always have on your person?
+
+(Note from another reader:Although using your key on a computer that you don't have physical control of is still dangerous, and although your key is already encrypted with a well respected and highly secure encryption algorithm, you may prefer the extreme security of double encryption. There may be a huge number of other things to spend your time on that would increase your security more, but here's how you can encrypt your already encrypted key again, if you so desire. This Howto is very useful just for learning how to set up an encrypted storage area on a USB drive for general usage though.)
+
+<nowiki>[[File:IconsPage/warning.png]]</nowiki> '''IMPORTANT:''' Make sure you make a backup copy of your ~/.gnupg directory '''before''' you do this. The last thing you want to happen is to lose your keyring because something went wrong.
+
+=== dm-crypt ===
+
+From the dm-crypt website: " Device-mapper is a new infrastructure in the Linux 2.6 kernel that provides a generic way to create virtual layers of block devices that can do different things on top of real block devices like striping, concatenation, mirroring, snapshotting, etc... The device-mapper is used by the LVM2 and EVMS 2.x tools. dm-crypt is such a device-mapper target that provides transparent encryption of block devices using the new Linux 2.6 cryptoapi. The user can basically specify one of the symmetric ciphers, a key (of any allowed size), an iv generation mode and then he can create a new block device in /dev. Writes to this device will be encrypted and reads decrypted. You can mount your filesystem on it as usual. But without the key you can't access your data."
+
+This is perfect for our needs.  We will create an encrypted filesystem inside of a regular file on the USB flash drive, where we will store sensitive data like GnuPG keys.
+
+==== Installing the Software ====
+
+First, you will need to install <code>cryptsetup</code>:
+
+<pre>
+sudo apt-get install cryptsetup
+</pre>
+
+This will also pull in some other necessary dependencies.
+
+=== Setting Up the Encrypted Filesystem ===
+
+I store my GPG keys on a cheap, tiny USB flash drive that fits comfortably on my keyring.  When I plug it in, it is automatically mounted as <code>/media/usbdisk</code>.  The following sections will assume a similar setup.
+
+I decided to make my encrypted filesystem live in a regular file rather than its own partition.  This requires less tweaking of the disk, and makes mounting and unmounting the encrypted filesystem easier, as you will see later.  However, many of the steps in this tutorial can be adapted to use a real partition instead of a regular file.
+
+==== Creating the File ====
+
+Before we can make a filesystem, we need a file that is large enough to hold it.  This can be accomplished with <code>dd</code>:
+
+<pre>
+dd if=/dev/zero of=/media/usbdisk/disk.img bs=1M count=16
+</pre>
+
+The above command will make a 16 MB file containing only zeros.  Modify the <code>count</code> option to get your desired encrypted filesystem size.
+
+==== Setting up the Encrypted Loop Device ====
+
+Before we can actually create the filesystem on our new file, we need to attach it to a loop device and set up a device-mapper target with encryption.  <code>losetup -f</code> will find the first free loop device, so we will set its output to a variable called <code>loopdev</code> and use it for several commands:
+
+<pre>
+sudo modprobe cryptoloop
+sudo modprobe dm-crypt
+sudo modprobe aes_generic
+export loopdev=$(sudo losetup -f)
+sudo losetup $loopdev /media/usbdisk/disk.img
+sudo cryptsetup -c aes -s 256 -h sha256 -y create usbkey $loopdev
+</pre>
+
+This will set up the file with 256-bit AES encryption, hashing the passphrase you issue through SHA-256.
+
+After it's set up, it's a good idea to remove the usbkey device-mapper device and re-run cryptsetup to make sure that you didn't mistype the initial password (I say this from experience...):
+
+<pre>
+sudo cryptsetup remove usbkey
+sudo cryptsetup -c aes -s 256 -h sha256 create usbkey $loopdev
+</pre>
+
+If all goes well, we're ready for the next step!
+
+==== Creating the Actual Filesystem ====
+
+This is the easiest step of all.  I chose the <code>ext3</code> filesystem for its journaling capability, just in case the USB drive gets removed before the filesystem is unmounted.  The <code>cryptsetup</code> command above created the device <code>/dev/mapper/usbkey</code>, which is a map through dm-crypt to the encrypted filesystem.  So, this device appears to the system as a regular old block device, like a hard disk or partition.  The following command will create an <code>ext3</code> filesystem on the encrypted file:
+
+<pre>
+sudo mkfs.ext3 /dev/mapper/usbkey
+</pre>
+
+Now, try mounting the filesystem:
+
+<pre>
+sudo mkdir -p /media/encrypted
+sudo mount -t ext3 /dev/mapper/usbkey /media/encrypted
+</pre>
+
+=== Setting up GnuPG on the Encrypted Filesystem ===
+
+Now, make a <code>.gnupg</code> directory in <code>/media/encrypted</code>, make it owned by your user, and link it to your own <code>~/.gnupg</code> (if you already have a <code>.gnupg</code> directory, move it out of the way first):
+
+<pre>
+sudo mkdir /media/encrypted/.gnupg
+sudo chown $UID.$UID /media/encrypted/.gnupg
+chmod 0700 /media/encrypted/.gnupg
+ln -s /media/encrypted/.gnupg ~/.gnupg
+</pre>
+
+Now, create a GnuPG key as described in <nowiki>[[GPGKey]]</nowiki> or, if you already have a key, move the files in your old <code>.gnupg</code> directory into the new one, possibly using <code>shred</code> or <code>wipe</code> to securely remove the old files.
+
+=== Making Things Easier ===
+
+==== Simplifying the Mount Process ====
+
+It's not really fun to type three or four commands each time you want to mount your encrypted filesystem.  So, I wrote two really simple scripts for mounting and unmounting.  Before using these, you should unmount your filesystem and detach the loop device:
+
+<pre>
+sudo umount /media/encrypted
+sudo cryptsetup remove usbkey
+sudo losetup -d $loopdev
+</pre>
+
+Now, save the following as <code>mount.sh</code> in the root of your USB drive (not in the encrypted filesystem!):
+
+<pre>
+
+dir=`dirname $0`
+loopdev=$(sudo losetup -f)
+
+sudo -p "Password (sudo): " modprobe cryptoloop && \
+sudo modprobe dm-crypt && \
+sudo modprobe aes_generic && \
+sudo mkdir -p /media/encrypted && \
+sudo losetup $loopdev $dir/disk.img && \
+sudo cryptsetup -c aes -s 256 -h sha256 create usbkey $loopdev && \
+sudo mount -t ext3 /dev/mapper/usbkey /media/encrypted && \
+sudo chown -R $UID.$UID /media/encrypted/
+</pre>
+
+Then, save the following as <code>umount.sh</code> in the same place:
+
+<pre>
+
+loopdev=$(sudo cryptsetup status usbkey | grep device | sed -e "s/ *device:[ \t]*//")
+
+sync
+sudo umount /media/encrypted
+sudo cryptsetup remove usbkey
+sudo losetup -d $loopdev
+</pre>
+
+You may not be able to execute these scripts directly, since the default auto-mounting options prohibit running executables.  But, since they are shell scripts, you can simply pass them on to <code>sh</code>.  So, once the USB drive has been mounted, you can simply type:
+
+<pre>
+sh /media/usbdisk/mount.sh
+</pre>
+
+and all the work will be done for you!  (Of course, you will need the encryption password, and you may be asked for a password for <code>sudo</code>.)
+
+==== Verifying PGP Signatures Without the Encrypted Filesystem ====
+
+You might want to be able to verify a signed message without needing to mount the encrypted filesystem.  To facilitate this, simply copy the public keyring and the trust database file to the "real" <code>.gnupg</code> directory:
+
+<pre>
+cp /media/encrypted/.gnupg/{pubring,trustdb}.gpg /tmp
+sh /media/usbdisk/umount.sh
+sudo mv /tmp/{pubring,trustdb}.gpg ~/.gnupg
+</pre>
+
+Now, when the encrypted filesystem is not mounted, you will see those files in your <code>.gnupg</code> directory, so that <code>gpg --verify</code> will work.  But when it is mounted, you will see the files that are actually in the encrypted filesystem.
+----
+CategorySecurity

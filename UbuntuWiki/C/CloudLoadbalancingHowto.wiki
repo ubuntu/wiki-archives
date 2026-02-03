@@ -1,0 +1,99 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+=== Introduction ===
+See <nowiki>[[CloudLoadbalancingSpec]]</nowiki> for more information on the motivations behind this Howto.
+
+In this HOWTO, we'll show how to use the proof of concept project 'clb' to build a rudimentary, haproxy based "load balancer in the cloud."
+
+==== Caveats ====
+
+* clb is a proof of concept as of the time of this writing, and so, may have bugs that will eat your data, redirect your traffic to hamsterdance.com, or any number of other terrible things.
+* There is no real security built into clb yet. HTTPS would be the simplest way, but even then, without a CA signed cert, its not that useful. You can build a VPN tunnel if you decide the danger is too high.
+* The auth method that clb uses is VERY prone to compromise, being a shared password that is difficult to change.
+
+=== clb ===
+
+<nowiki>[[https://launchpad.net/clb|CLB]]</nowiki> is just a python daemon that was created as a proof of concept to provide a simple backend for running a load balancer in the cloud. It was never intended for production use.
+
+=== Configure haproxy template ===
+
+By default, the templates dir is '/var/lib/clb-server/templates'. Inside, it will look for haproxy.tmpl.
+
+The default haproxy.tmpl file in the 'templates' directory is fairly rudimentary and probably won't work in most instances. It uses the Cheetah templating system, so you can look at http://www.cheetahtemplate.org for documentation on the syntax.
+
+The default output file is /etc/haproxy/haproxy.cfg, you can change this by passing -o path/to/your/desired/file to clbd. You'll need to make sure that a) haproxy is installed, and b) that the 'clb-server' user can edit /etc/haproxy/haproxy.cfg.
+
+=== cloud-init for backend servers ===
+
+==== Create a cloud-config file that you can feed in via user-data ====
+
+Using the <nowiki>[[https://help.ubuntu.com/community/CloudInit|cloud-init]]</nowiki> package, have your system install the clb-server package:
+
+<pre>
+apt_sources:
+ - source: "ppa:clint-fewbar/clb"
+
+packages:
+ - clb-server
+
+</pre>
+
+This should produce a working backend server that can have its haproxy.cfg updated on port 8090
+
+You'll still need to either give the clb-server user sudo access to restart haproxy, and pass --reload-cmd in the upstart job, or cron reloading it occasionally.
+
+=== cloud-init for member servers ===
+
+You'll need to feed in an upstart job that registers/unregisters this node.
+
+<pre>
+start on started rc
+stop on stopping rc
+
+pre-start script
+  /usr/bin/clb_register my-clb-password my.clb.node http
+end script
+
+pre-stop script
+  /usr/bin/clb_unregister my-clb-password my.clb.node http
+end script
+
+exec /bin/cat
+</pre>
+
+You'll also need to make sure you install clb-client so you have clb_register and clb_unregister:
+
+<pre>
+apt_sources:
+ - source: "ppa:clint-fewbar/clb"
+
+packages:
+ - clb-client
+
+</pre>
+
+In order to do these both at the same time, you can install cloud-init on your machine, and use it to create a multi-part mime user data:
+
+<pre>
+$ write-mime-multipart --output=combined-userdata.txt \
+   apt-install-clb-client.txt:text/cloud-config \
+   my-upstart-job.txt:text/upstart-job
+</pre>
+
+One thing, make sure if you install cloud-init on a non-ec2/euca node that you edit /etc/cloud/cloud.cfg and set 'cloud_type: nocloud'. Otherwise you may have to wait 20+ minutes to boot your system.
+
+==== Wrapping Up ====
+
+If you apply the above cloud-config templates you should be able to build an haproxy based "load balancer in the cloud". Other things you might need:
+
+* An elastic IP for the load balancer
+* Another node with clb-server for redundancy.
+** A way to fail over to said node

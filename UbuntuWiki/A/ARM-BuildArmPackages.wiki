@@ -1,0 +1,178 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== Building ARM Packages with QEMU ==
+(Original version from these instructions was from Debbie F at Canonical -- Thanks Debbie! -- and was moved here by Cesar U at Canonical and subsequently updated by Loïc Minier at Canonical.)
+
+When working on an ARM project, it can be tricky to build and test a package before pushing it because:
+* Since hardware can be quite limited (especially at the beginning of a project), not all developers will have target hardware to work with
+* Even developers that do receive target hardware early, the hardware is often in such early stages that it is difficult to use, unstable, and possibly unable to connect to the network
+* Developing on the target hardware can be inconvenient if the device's image constantly needs to be re-flashed
+* Building on the target hardware can be very slow (though QEMU may not be faster...) and ties up CPU usage so other work on the device is difficult to do
+
+Goals:
+* Easily build packages for armel from your Ubuntu environment
+* Easily run armel images from your Ubuntu environment
+* Works on Ubuntu 10.04 and later, on i386 and amd64
+
+Running a QEMU ARM image on your development machine may make your life easier.  This page discusses how to setup a QEMU ARM image and to build ARM packages with it.
+
+Anyone should feel free to update/correct the information in this Wiki page!  This page was started simply as one person's experience building ARM packages with QEMU for an OEM project.
+
+=== Links ===
+
+The following links are useful when setting-up/using a QEMU arm image:
+* https://wiki.ubuntu.com/ARM/RootfsFromScratch
+* https://code.launchpad.net/project-rootstock
+* https://help.ubuntu.com/community/Installation/QemuEmulator
+
+=== Step By Step ===
+
+The <nowiki>[[https://wiki.ubuntu.com/ARM/RootfsFromScratch|RootfsFromScratch]]</nowiki> page should serve as your main source of information for creating an ARM rootfs or image for use with QEMU. However, the following may be useful if you are specifically interested in specific steps used to build ARM packages for OEM projects.
+
+==== Creating and Running ARM Image ====
+==== If development machine is running Lucid or later ====
+
+Note: You may be able to just use the qemu-user-static (on 10.04 and 10.10, it's called qemu-arm-static) package to cross-compile an arm package on your i386 machine rather than running a full QEMU ARM VM.
+
+# Create a directory for storing the QEMU files.  In the steps, we will assume `~/qemuArm` has been created for this purpose.
+# Install qemu packages
+ <pre>
+$ sudo apt-get install qemu qemu-kvm-extras
+ }}}
+ 1. Install debootstrap (version 1.0.10ubuntu3 or newer) if it is not already installed
+ {{{
+$ sudo apt-get install debootstrap
+ }}}
+ 1. Install fakeroot if it is not already installed
+ {{{
+$ sudo apt-get install fakeroot
+</pre>
+# Change into `~/qemuArm`
+# Download the contents of the rootstock bzr branch
+ {{{
+$ bzr branch lp:project-rootstock
+ }}}
+# Download the <nowiki>[[http://ports.ubuntu.com/ubuntu-ports/dists/lucid/main/installer-armel/current/images/versatile/netboot/vmlinuz|qemu versatile cortex a8 kernel]]</nowiki> to `~/qemuArm`
+# Execute the following:
+ {{{
+$ sudo project-rootstock/rootstock --fqdn ubuntu --login ubuntu --password ubuntu --notarball --imagesize 3G
+ }}}
+# Wait until `rootstock` completes.  The script will take some time.
+# The script should produce an image file named something like `qemu-armel-<datetime stamp>.img`
+# Make a copy of the resulting image file.  This will allow you to have a pristine image file around as well as a descriptive name for an image file you will be modifying.  For example:
+ {{{
+$ cp qemu-armel-201001131621.img qemu-foo-arm.img
+ }}}
+ 1. Run QEMU with the image file that should be modified.  Be sure to use the cortex a8 kernel and to set the proper CPU (see <nowiki>[[https://bugs.launchpad.net/project-rootstock/+bug/437629|bug 437629]]</nowiki>) for more details.
+ {{{
+$ sudo qemu-system-arm -M versatilepb -cpu cortex-a8 -kernel vmlinuz -hda qemu-foo-arm.img -m 256 -append "root=/dev/sda rootwait"
+ }}}
+ 1. QEMU should launch and boot a black screen with terminal output.
+
+Click on the virtual terminal window in order to get the focus and press Alt+F1, you should have the logging prompt appearing. Note, Alt+F2, F3, ... give more terminals.
+
+==== Configuring ARM Image for Project Builds ====
+# Now that you have booted-up the ARM image you created, login with user `ubuntu` and password `ubuntu` (the username and password were set to `ubuntu` when calling `build-arm-rootfs`/`rootstock` to create the image).
+# After logging in, you should have a terminal prompt to perform your builds.  There is no GUI.  Note that we intentionally created a bare minimum image (no GUI) so QEMU would not run prohibitively slow as you try and build ARM packages.
+# The first time you login, you will need to setup the network.  In the QEMU terminal, add the following to the bottom of `/etc/network/interfaces`:
+ {{{
+auto eth0
+iface eth0 inet dhcp
+ }}}
+ 1. Now bring-up the `eth0` interface:
+ {{{
+$ sudo ifconfig eth0 up
+$ sudo dhclient eth0
+ }}}
+ 1. You should add to `/etc/apt/sources.list` additional repositories you will need, if any, and then update the package lists:
+ {{{
+$ sudo apt-get update
+ }}}
+ 1. You should now download any tools packages that you will use to build your packages (devscripts, pbuilder, quilt, etc.).
+
+NOTE: You only need to configure the network and install a package once.  These changes will be permanently stored in the qemu-foo-arm.img file so they will have already been made when you run QEMU with qemu-foo-arm.img in the future.
+
+==== Configuring ARM Image for Sharing Files Between Host ====
+
+For more background on these steps, see the "Connect your emulated machine to a real network" section of <nowiki>[[https://wiki.ubuntu.com/ARM/RootfsFromScratch|RootfsFromScratch]]</nowiki>.
+
+On your host system:
+# Make sure QEMU is not running
+# Install bridge-utils package:
+ {{{
+$ sudo apt-get install bridge-utils
+ }}}
+# Determine what interface your connected network is on (i.e. by using `ifconfig`).  We will assume in the remaining steps that it is on `eth0`.  If your interface is different, replace all instances of `eth0` with your interface.
+# Open `/etc/network/interfaces` for editing (as root)
+# Add the following section to `/etc/network/interfaces`:
+ {{{
+auto br0
+iface br0 inet dhcp
+  bridge_ports eth0
+  bridge_maxwait 0
+ }}}
+# Save and close `/etc/network/interfaces`
+# Bring-down the eth0 interface
+ {{{
+$ sudo ifconfig eth0 0.0.0.0
+ }}}
+ 1. Bring-up the br0 interface
+ {{{
+$ sudo ifup br0
+ }}}
+ 1. Load the tun module (you can add `tun` to `/etc/modules` if you want it loaded automatically on boot)
+ {{{
+$ sudo modprobe tun
+ }}}
+# Make sure `/dev/net/tun` exists and has 0666 permission
+# Create a file `/etc/qemu-ifup` (as root) with the following contents (this script will be executed when QEMU starts)
+ {{{
+echo "Executing /etc/qemu-ifup"
+echo "Bringing up $1 for bridged mode..."
+sudo /sbin/ifconfig $1 0.0.0.0 promisc up
+echo "Adding $1 to br0..."
+sudo /usr/sbin/brctl addif br0 $1
+sleep 2
+ }}}
+ 1. Make the `/etc/qemu-ifup` script executable to all
+ {{{
+$ sudo chmod +x /etc/qemu-ifup
+ }}}
+ 1. When executing `qemu-system-arm` to launch QEMU with your ARM image, include `-net nic,macaddr=00:16:3e:00:00:01 -net tap`.  For example, you would execute the following:
+ {{{
+$ sudo qemu-system-arm -M versatilepb -kernel vmlinuz -hda qemu-foo-arm.img -m 256 -append "root=/dev/sda rootwait" -net nic,macaddr=00:16:3e:00:00:01 -net tap
+ }}}
+ 1. Once the QEMU ARM image has loaded, install the openssh-server package in the ARM terminal
+ {{{
+$ sudo apt-get install openssh-server
+ }}}
+ 1. You should now be able to `ssh` into or `scp` to your ARM VM from the host.  You can determine the ip address to `ssh` into or `scp` to by simply running `ifconfig` in the ARM terminal.
+
+Note: I have found that the network modfications can cause my network connections to misbehave so have resorted to reverting the changes as soon as I am done using QEMU.  I presume there is a better way...
+
+If you are experiencing problems when logging via ssh, authentication succeed but no prompt appears (not found yet why), a workaround is to install the xterm package
+  {{{
+$ sudo apt-get install xterm
+  }}}
+
+and connect with X11 forwarding set
+
+  {{{
+$ ssh -X user@qemu xterm
+  }}}
+
+or if you are able to log by <nowiki>[[ http:--www.debian-administration.org-article-SSH_with_authentication_key_instead_of_password | using the keys instead of the password ]]</nowiki>
+
+  {{{
+$ ssh -f -X user@qemu xterm
+  }}}
+
+That will show up an xterm in your host with your qemu shell.

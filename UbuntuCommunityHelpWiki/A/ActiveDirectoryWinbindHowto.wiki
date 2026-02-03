@@ -1,0 +1,359 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+== Introduction ==
+
+This Howto describes how to add an Ubuntu box in an Active Directory domain and to authenticate the users with AD.
+
+'''Note:''' <nowiki>[[http://www.centrify.com/express|Centrify Express]]</nowiki> and <nowiki>[[http://www.likewise.com/products/likewise_open/|Likewise Open]]</nowiki> are alternative solutions for Linux systems to authenticate to an Active Directory domain. For Centrify Express see DirectControl. For Likewise Open see <nowiki>[[LikewiseOpen]]</nowiki>.
+
+=== Used terms ===
+
+{| class="wikitable"
+|-
+| <rowbgcolor="#E5E5E5">'''term'''
+| '''definition'''
+|-
+| AD
+| <nowiki>[[https://technet.microsoft.com/en-us/library/cc977985.aspx|Active Directory]]</nowiki>
+|-
+| DC
+| <nowiki>[[https://technet.microsoft.com/en-us/library/cc786438%28v=ws.10%29.aspx|Domain Controller]]</nowiki>
+|-
+| lab.example.com
+| AD domain
+|-
+| win2k3.lab.example.com
+| DC <nowiki>[[http://en.wikipedia.org/wiki/FQDN|FQDN]]</nowiki>
+|-
+| 10.0.0.1
+| DC IP
+|-
+| LAB.EXAMPLE.COM
+| Kerberos Realm
+|-
+| linuxwork
+| computername of the Ubuntu workstation
+|-
+| linuxwork.lab.example.com
+| FQDN of the Ubuntu workstation
+|-
+| ntp.example.com
+| timeserver (NTP)
+|}
+
+== Kerberos ==
+
+The first step in joining an Active Directory domain is to install and configure Kerberos.  See <nowiki>[[Samba-Kerberos]]</nowiki> for details.
+
+== Join AD domain ==
+
+=== Required software ===
+You need to install the '''winbind''' and  '''samba''' packages.  The packages '''smbfs''' and '''smbclient''' are useful for mounting network shares and copying files.
+
+Ubuntu 10.04 and later should also install the '''libnss-winbind''' and '''libpam-winbind''' packages.
+
+<nowiki>[[File:IconsPage/note.png]]</nowiki> The package ''smbfs'' is optional, but includes useful client utilities, including the '''smbmount''' command. Also useful is the ''smbclient'' package, which includes an FTP-like client for SMB shares.
+
+=== Join ===
+
+The first step in joining the Active Directory domain is to edit <code>/etc/samba/smb.conf</code>:
+
+file: <code> /etc/samba/smb.conf </code>
+<pre>
+[global]
+        security = ads
+        realm = LAB.EXAMPLE.COM
+        workgroup = LAB
+        idmap uid = 10000-20000
+        idmap gid = 10000-20000
+        winbind enum users = yes
+        winbind enum groups = yes
+        template homedir = /home/%D/%U
+        template shell = /bin/bash
+        client use spnego = yes
+        client ntlmv2 auth = yes
+        encrypt passwords = yes
+        winbind use default domain = yes
+        restrict anonymous = 2
+</pre>
+
+<nowiki>[[File:IconsPage/note.png]]</nowiki> Adding valid users = @"Domain Users" to the [global] section will allow all Domain Users to see all of the shares avaliable without a password. This is the equivlient to allowing "Everyone" to read all shares. If you want to restrict reading a share then you will have to specify valid users for that share.  
+
+<nowiki>[[File:IconsPage/note.png]]</nowiki> The "winbind use default domain" parameter is useful in single-domain enterprises and causes winbind to treat any username that isn't qualified with a domain name as a username in the domain to which winbind is joined. Omit this parameter if you are concerned about confusion between local accounts on your systems and accounts in the default domain. The "winbind separator" directive is optional, and the default value is the usual backslash "\" Domain and User separator. You can use "+" if you know of a specific reason "\" will not work in your environment.
+
+Be sure to restart the Samba and Winbind services after changing the <code>/etc/samba/smb.conf</code> file:
+
+<pre>
+sudo /etc/init.d/winbind stop
+sudo /etc/init.d/samba restart
+sudo /etc/init.d/winbind start
+</pre>
+
+Request a valid Kerberos TGT for an account using '''kinit''', which is allowed to join a workstation into the AD domain.
+Now join to the domain, if the ticket was valid you should not need to supply a password - even if prompted you should be able to leave it blank.
+
+<nowiki>[[File:IconsPage/note.png]]</nowiki> This next step gave me the error: <code> kinit(v5): Cannot resolve network address for KDC in realm LAB.EXAMPLE.COM while getting initial credentials</code> even though <code>nslookup win2k3</code> and <code>host 10.0.0.1</code> would both return the correct entries. To correct this problem, I had to edit my <code>/etc/hosts</code> file and add the following to it: <code>10.0.0.1   win2k3.lab.example.com</code>
+
+<pre>
+sudo kinit Administrator@EXAMPLE.COM
+sudo net ads join
+Using short domain name – LAB
+Joined 'linuxwork' to realm 'LAB.EXAMPLE.COM'
+</pre>
+
+<nowiki>[[File:IconsPage/note.png]]</nowiki> If the Kerberos auth was valid, you should not get asked for a password. However, if you are not working as root and are instead using sudo to perform the necessary tasks, use the command <code>sudo net ads join -U username</code> and supply your password when prompted. Otherwise, you will be asked to authenticate as root@LAB.EXAMPLE.COM instead of a valid account name.
+You can also supply a password if you don't want to get prompted. Just use <code>net ads join -U <username>%<password></code> for this. Maybe it's useful for unattended installations where you want to add machines to an AD automatically.
+
+<nowiki>[[File:IconsPage/note.png]]</nowiki> If your Active Directory server is not running DDNS as well (eg. if you're running a separate DNS server) you may get the error:
+
+<pre>
+sudo net ads join
+Failed to join domain: failed to find DC for domain LAB.EXAMPLE.COM
+</pre>
+
+To fix this, specify the AD server to the "net join" command:
+
+<pre>
+sudo net ads join -S WIN2K3 -U <username>%<password>
+</pre>
+
+You'll get a warning about not being able to update DNS, but you will successfully join the AD!
+
+=== Testing ===
+
+<nowiki>[[File:IconsPage/note.png]]</nowiki> Using a clean install of 10.04, I did not have to modify any PAM files to get authentication working. I had to edit common-session to get the home directories created, but that is it.
+
+== Setup Authentication ==
+=== nsswitch ===
+
+file: <code>/etc/nsswitch.conf</code>
+<pre>
+passwd:         compat winbind
+group:          compat winbind
+shadow:         compat
+</pre>
+
+<nowiki>[[File:IconsPage/note.png]]</nowiki> I needed to add <code>hosts:  files dns</code> to <code>/etc/nsswitch.conf</code> to avoid the settings in <code>/etc/hosts</code> to be ignored.
+
+<nowiki>[[File:IconsPage/note.png]]</nowiki> Don´t forget to restart winbind again after editing /etc/nsswitch.conf!!!
+
+=== Testing ===
+
+You can check that the Domain has successfully been joined by:
+<pre>
+wbinfo -u
+</pre>
+
+You should get a list of the users of the domain.
+
+<nowiki>[[File:IconsPage/note.png]]</nowiki> I needed to make '''<code>shadow:  compat winbind</code>''' in <code>/etc/nsswitch.conf</code> to make wbinfo -u work.
+
+And a list of the groups. Be patient these queries can take time.
+
+<pre>
+wbinfo -g
+</pre>
+
+Check Winbind nsswitch module with '''getent'''.
+
+<nowiki>[[File:IconsPage/note.png]]</nowiki> This step may or may not work. If you only see local users, try connecting with a Windows machine anyways. (Tested under Ubuntu 9.10 x64)
+
+<pre>
+sudo getent passwd
+
+root:x:0:0:root:/root:/bin/bash
+...
+LAB+administrator:x:10000:10000:Administrator:/home/LAB/administrator:/bin/bash
+LAB+gast:x:10001:10001:Gast:/home/LAB/gast:/bin/bash
+...
+</pre>
+Note that the domain name (here, "LAB+") is displayed by getent '''only''' if you have '''not''' set
+''winbind use default domain = yes'' in smb.conf.
+<pre>
+sudo getent group
+
+root:x:0:
+daemon:x:1:
+bin:x:2:
+...
+LAB+organisations-admins:x:10005:administrator
+LAB+domänen-admins:x:10006:manuel,administrator
+LAB+domänen-benutzer:x:10000:
+LAB+domänen-gäste:x:10001:
+LAB+linux-admins:x:10004:manuel
+...
+</pre>
+
+=== PAM ===
+
+With this configuration you can access the workstation with local accounts or with domain accounts. On the first login of a domain user a home directory will be created. This PAM configuration assumes that the system will be used primarily with domain accounts. If the opposite is true (i.e., the system will be used primarily with local accounts), the order of ''pam_winbind.so'' and ''pam_unix.so'' should be reversed. When used with local accounts, the configuration shown here will result in a failed authentication to the Windows/Samba DC for each login and sudo use. This can litter the DC's event log. Likewise, if local accounts are checked first, the /var/log/auth.log will be littered with failed logon attempts each time a domain account is accessed.
+
+'''Note:''' You can use pam-auth-update to add the necessary entries for winbind authentication. If you installed '''libpam-winbind''' above, this step is all you need to do to configure pam. You may want to add the line to automatically create the home directory.
+<pre>
+sudo pam-auth-update
+</pre>
+
+This PAM configuration does not acquire a Kerberos TGT at login. To acquire a ticket, use ''kinit'' after logging in, and consider using ''kdestroy'' in a logout script.
+
+file: <code>/etc/pam.d/common-account</code>
+<pre>
+account sufficient       pam_winbind.so
+account required         pam_unix.so
+</pre>
+
+file: <code>/etc/pam.d/common-auth</code>
+<pre>
+auth sufficient pam_winbind.so
+auth sufficient pam_unix.so nullok_secure use_first_pass
+auth required   pam_deny.so
+</pre>
+
+<nowiki>[[File:IconsPage/note.png]]</nowiki> On a Ubuntu 7.10 (Gutsy Gibbon) and 9.04 (Jaunty Jackalope) systems, these changes to pam.d/common-auth result in not being able to log in as a local user, for example by ssh. Your luck may be better, but test immediately just in case.
+
+This one allows login for AD users '''and''' local users (tested with Ubuntu 9.10)
+
+file: <code>/etc/pam.d/common-auth</code>
+<pre>
+auth sufficient	pam_unix.so nullok_secure
+auth sufficient pam_winbind.so require_membership_of=domänen-admins use_first_pass
+auth requisite  pam_deny.so
+auth required   pam_permit.so
+auth optional   pam_ecryptfs.so unwrap
+</pre>
+<nowiki>[[File:IconsPage/note.png]]</nowiki> ecryptfs does not work with AD users. Login is successful with local users and AD users which are members of AD group ''domänen-admins''
+
+file: <code>/etc/pam.d/common-session</code>
+<pre>
+session required pam_unix.so
+session required pam_mkhomedir.so umask=0022 skel=/etc/skel
+</pre>
+
+file: <code>/etc/pam.d/sudo</code>
+<pre>
+auth sufficient pam_winbind.so
+auth sufficient pam_unix.so use_first_pass
+auth required   pam_deny.so
+
+@include common-account
+</pre>
+
+== Final configuration ==
+Each domain needs a directory in /home/.
+
+<pre>
+sudo mkdir /home/LAB
+</pre>
+
+=== One last thing ===
+
+If you want to be able to use an active directory account to manage your Ubuntu box, you need to add it to the sudoers file. For that, you will need to edit the file /etc/group an add your username to the admin group and whatever other group you need(plugdev,audio,cdrom just to mention a few). it will be like:
+<pre>
+.......
+admin:x:117:olduser,ActiveDirectoryUser
+.......
+</pre>
+Where, olduser, is your current linux user and, ActiveDirectoryUser, is the new administrator.
+Another way to make a Domain Group a sudoer in your ubuntu is to edit the file /etc/sudoers (using the command 'visudo') and add the following line
+<pre>
+%adgroup	ALL=(ALL) ALL
+</pre>
+Where, adgroup, is a group from your active directory.  Keep in mind that spaces in the group name are not allowed.  You can use '%domain\ admins', without quotes.
+
+=== Usage ===
+
+Logon with DOMAIN+USERNAME, unless you included "winbind use default domain" in your ''smb.conf'', in which case you may log in using only USERNAME.
+
+<pre>
+login: LAB+manuel
+Password: *****
+...
+LAB+manuel@linuxwork:~$
+</pre>
+
+=== Automatic Kerberos Ticket Refresh ===
+
+To have pam_winbind automatically refresh the kerberos ticket
+
+Add the <code> winbind refresh tickets </code> line to <code> smb.conf </code>:
+
+file: <code> /etc/samba/smb.conf </code>
+<pre>
+        winbind refresh tickets = yes
+        idmap uid = 10000-20000
+</pre>
+
+And modify <code>/etc/pam.d/common-auth</code>:
+
+file: <code>/etc/pam.d/common-auth</code>
+<pre>
+auth sufficient pam_winbind.so krb5_auth krb5_ccache_type=FILE
+auth sufficient pam_unix.so nullok_secure use_first_pass
+auth required   pam_deny.so
+</pre>
+
+== Troubleshooting ==
+
+If the Winbind PAM module in <code>/var/log/auth.log</code> says that the AD-user is not existing restart winbind. It might be best to restart the whole workstation.
+<pre>
+sudo /etc/init.d/winbind restart
+</pre>
+
+If when logging into the machine one gets a "no logon servers" error winbind\samba may not be starting properly.  Try restarting them manually, and then logging in.
+
+-If a manual restart works, then to fix this issue one needs to change scripts S20samba and S20winbind to S25samba and S25winbind in the /etc/rc2.d, rc3.d, rc4.d, rc5.d folders.  The understanding is that this causes samba and winbind to startup later in the boot order for each runlevel.  So that they start after S24avahi-daemon. If you then find that you must wait a bit before you can log in, you need to set "winbind enum users" and "winbind enum groups" in /etc/samba/smb.conf to 'no'.
+
+'''name service cache daemon'''
+
+The name service cache daemon (nscd) can interfere with winbind, as winbind maintains its own cache. Remove it.
+<pre>
+sudo apt-get remove nscd
+</pre>
+
+'''Some names or groups are resolved with getent, but others are not'''
+
+The range of your idmap parameter is not wide enough to encompass all the users or groups
+<pre>
+idmap uid = 16777216-33554431
+idmap gid = 16777216-33554431
+</pre>
+
+'''Adding more than one Linux machine to a Windows network'''
+
+The above procedure allows you to add as many Linux machines as you like. However, the UID assigned to a given user may not be the same across all the machines. It created file ownership & rights issues when files/folders are shared between these machines. See <nowiki>[[https://answers.launchpad.net/ubuntu/+question/21806|Question #21806]]</nowiki> on https://answers.launchpad.net/ubuntu/ for details. Therefore it is advisable to specify the UID mapping method
+<pre>
+idmap backend = rid:YOURDOMAIN=70000-1000000
+idmap uid = 70000-1000000
+idmap gid = 70000-1000000
+winbind use default domain = yes
+security = ADS
+</pre>
+
+The newer syntax is (with old style you can get NT_STATUS_OBJECT_NAME_COLLISION in /var/log/samba/log.winbindd)
+<pre>
+idmap domains = YOURDOMAIN
+idmap config YOURDOMAIN:backend = rid
+idmap config YOURDOMAIN:range = 70000-1000000
+winbind use default domain = yes
+security = ADS
+</pre>
+
+== Resources ==
+
+* The <nowiki>[[http://wiki.samba.org/index.php/Samba_&_Active_Directory|Samba and Active Directory Wiki]]</nowiki> contains very detailed instructions.
+
+=== Automated Methods ===
+
+The <nowiki>[[https://help.ubuntu.com/community/ActiveDirectoryWinbind-SADMS|SADMS]]</nowiki> package allows for automated joining to Active Directory through a GUI interface.
+<nowiki>[[http://sadms.sourceforge.net/]]</nowiki>
+
+----
+CategorySecurity

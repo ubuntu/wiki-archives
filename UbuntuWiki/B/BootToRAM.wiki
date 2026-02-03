@@ -1,0 +1,242 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+
+== Booting Ubuntu To RAM ==
+
+=== Version ===
+
+Unnecessary on 11.04 LiveCD. Casper now includes a functioning toram option, which even works with the iso-scan/filename= option.
+
+Last update for 9.10 compability.
+
+Latest update for 2.6.31-16 upgrade
+
+=== Preface ===
+
+This article aims to document the process of creating a customized Ubuntu that loads an image from the hard disk to RAM, then boots an entire Ubuntu session out of RAM. It is intended for intermediate to advanced Ubuntu users who are familiar with the shell, and may have limited experience customizing the livecd (<nowiki>[[https://help.ubuntu.com/community/LiveCDCustomization|LiveCDCustomization]]</nowiki>) and shell scripting. We will customize a LiveCD and copy it to the hard drive, and make a few modifications to bootup scripts so that it copies to RAM via our good friend tmpfs.
+
+'''WARNING''': The author asserts that this procedure works for him, but cannot guarantee that this procedure works for anyone else. Although this procedure is meant to be 100% safe, it is feasible that there may be mistakes, or a chance of misunderstanding the instructions in a manner that causes loss of data. Please make a backup and do not attempt on mission critical systems. Read through this article thoroughly, and do not attempt if you do not comprehend or feel comfortable about any of the instructions!
+
+'''CAUTION''': I hope this is intuitively obvious, but I'll humor you and state it bluntly: '''Changes you make under the live session are NOT saved and WILL BE LOST when you reboot or shut down'''. Don't save anything important to the "home directory" and expect it to still be around! If you want to save data permanently, mount a permanent medium (such as your hard drive), plug in a thumbdrive, or use some network functionality built into Ubuntu to save your data to a non-volatile destination.
+
+=== Use Cases ===
+
+There are many cases where one would like to boot Ubuntu to RAM:
+* Performance: The desktop performance is dramatically improved. A 400MB squashed filesystem in RAM, that holds 1200MB of data, is read back on a 1.6GHz Core Duo in about 3 seconds, including decompression time.
+* Power, Noise, Durability: Although modern hard disks don't use much power compared to other system components, this may still be important for some. In laptops, hard disks are often the noisiest components, so this setup can reduce system noise. With the hard disk spun down, a laptop can potentially withstand greater shocks without damage.
+* Abrupt poweroff: Since the hard disk is only momentarily used in read-only mode during boot, then never touched again, there are few or no negative consequences of an abrupt poweroff. If a system is used where power is inconsistent, or the system is regularly used in a context where fast shutoffs are required, this is very handy.
+* Privacy: Anything you do in this session are lost when you reboot or power off. This is great for kiosks or other systems where permanent modification are not desired. (Note that by default the livecd user has full sudo access, so potentially a malicious user can still make permanent changes by mounting the hard drive and following this HOWTO)
+
+=== Requirements ===
+
+The most obvious increased requirement is RAM. For best performance, I recommend having 256MB RAM + enough RAM to hold a customized image. Stripping Openoffice and some fonts and documentation from a stock Ubuntu LiveCD results in a 400MB compressed image, which fits in RAM comfortably on a system with 1GB RAM.
+
+Tmpfs can fall back on swap (Ubuntu LiveCD scripts will mount any swap it finds), which is excellent for a bit of overflow, but if you regularly need to fall back on swap, performance will naturally suffer.
+
+I have not investigated CPU requirements, but squashfs is compressed and decompressing takes some CPU power, so this is probably not a great idea on systems older than the Pentium III era.
+
+As far as setting this system up, the requirements would be:
+# Having an Ubuntu LiveCD ISO or CD handy. I used a Ubuntu LiveCD, but I see no reason why Xubuntu, Kubuntu, etc wouldn't work (they don't have differing casper boot scripts, as far as I know). This procedure should work on all LiveCD's Dapper and later, with appropriate minor adaptations.
+# About 2-4GB of free space
+# A combined 1GB or so of RAM and swap available.
+
+=== The Process ===
+
+==== Unpack LiveCD ====
+First, we need to unpack the LiveCD for customization. For this article, I am going to make the following assumptions about paths. You can of course reject my choices and substitute your own.
+* The compressed root image is at /casper/filesystem.squashfs
+* The kernel is at /casper/vmlinuz 
+* The initramfs is at /casper/initrd.gz
+* We will make a temporary directory /casper/chroot where we edit this root filesystem.
+
+For the first 3 files are located in /casper on the LiveCD. Please copy these files from the LiveCD to /casper on your hard disk. You may use the GNOME archive manager (file-roller) as root, bind-mounting, or a physical CD. I will assume you know how to do this.
+
+==== Customize Live Environment ====
+
+This procedure is almost identical to customizing a LiveCD (up to the generation of the .squashfs image). Please see <nowiki>[[https://help.ubuntu.com/community/LiveCDCustomization|LiveCDCustomization]]</nowiki> for detailed instructions on customizing the LiveCD. I will only be providing a basic rundown on the process.
+
+===== Extract /casper/filesystem.squashfs to /casper/chroot/ =====
+
+<pre>
+sudo mount -o loop -t squashfs /casper/filesystem.squashfs /mnt
+sudo mkdir /casper/chroot
+sudo rsync -ax /mnt/. /casper/chroot/.
+sudo umount /mnt
+</pre>
+
+===== Patch boot scripts =====
+
+The stock casper "toram" functionality is broken in Feisty. In addition, even when it worked, it would completely decompress the filesystem into RAM, which requires 3-4x more RAM, and is hence undesired. As a result, we will be providing some nasty hacks on casper to make it copy to RAM the way we want it to. Casper developers, please look away.
+
+<pre>
+gksu gedit /casper/chroot/usr/share/initramfs-tools/scripts/casper
+</pre>
+Around line 35, find:
+
+<pre>
+                export SHOWMOUNTS='Yes' ;;
+            persistent)
+</pre>
+
+Between them add extra two lines, so it looks like:
+<pre>
+                export SHOWMOUNTS='Yes' ;;
+            toram)
+                export TORAM='Yes' ;;
+            persistent)
+</pre>
+
+Around line 573, find:
+<pre>
+    if [ "${TORAM}" ]; then
+        live_dest="ram"
+    elif [ "${TODISK}" ]; then
+</pre>
+
+Between them add some extra lines, like this:
+
+<pre>
+    if [ "${TORAM}" ]; then
+##### live_dest="ram"
+        echo "Copying CD contents to ram"
+        mkdir /store
+##### TODO: add a test for amount of ram here
+        mount -t tmpfs -o size=1G none /store
+        mkdir /store/casper
+        cp /cdrom/casper/*.squashfs /store/casper/
+        echo "CD-Rom has been unmounted, it's safe to eject!"
+        umount /cdrom
+        mount -o bind /store /cdrom
+
+    elif [ "${TODISK}" ]; then
+</pre>
+
+You need to comment or delete live_dest="ram".
+Replace "-o size=1G" with a larger (or smaller) size if your customized image is not 1GB (for example, 2G, 1500M, or 350M). Look at the size of your squashfs image to determine the required size.
+
+Save this file, and quit the editor.
+
+===== Regenerate initrd.gz =====
+
+Since we edited bootup scripts, we need to regenerate the file we know as /casper/initrd.gz to incorporate these changes:
+
+<pre>
+sudo cp -L /etc/resolv.conf /casper/chroot/etc/
+sudo mount -t proc none /casper/chroot/proc
+sudo mount -o bind /dev /casper/chroot/dev
+sudo chroot /casper/chroot /bin/bash
+</pre>
+
+At this point, you are "in" the live environment's filesystem. We will be doing this a few more times before the day is over.
+Remember that our Live environment is at /casper/chroot, not at edit/ (adjust customization commands accordingly).
+
+====== Optional: Customize Live Environment Further ======
+
+It would be a great idea to add or remove some packages, or add some default user settings, etc, to make the live environment friendlier. The previously linked LiveCD customization article provides full details on how to do a wide variety of customizations. Follow those instructions, up to: "Putting the CD together" (don't do that step). Instead, replace it with
+
+Ideas for customizations specific to this howto include:
+
+* Removing behemoth packages like OpenOffice.
+* Adding proprietary 3D video drivers by default (TODO: expand on this idea)
+* Removing shutdown scripts (TODO: expand)
+* Customizing user default settings in /etc/skel, including importing a firefox profile, etc. The LiveCD howto roughly states how to do this. (TODO: expand)
+* Suppress the eject notice at shutdown. 
+<pre>
+rm /etc/rc?.d/*casper*
+</pre>
+* Install something like sshfs so you can easily use SSH-able systems as permanent storage (TODO: Expand)
+
+====== Upgrade the whole system and regenerate initrd.gz ======
+<pre>
+apt-get update
+apt-get dist-upgrade
+apt-get autoclean
+apt-get autoremove
+apt-get clean
+mkinitramfs -o /new-initrd.gz 2.6.31-16-generic
+exit
+umount -l /casper/chroot/dev
+umount -l /casper/chroot/proc
+</pre>
+
+The mkinitramfs command may take 30 seconds to a few minutes, depending on your CPU speed. The exit command will take you back to your original shell, that's not within with live environment. Now we will move this initrd to the right spot:
+
+<pre>
+sudo mv /casper/chroot/new-initrd.gz /casper/initrd.gz
+sudo mksquashfs /casper/chroot /casper/filesystem.squashfs -noappend -always-use-fragments
+</pre>
+
+The always-use-fragments argument allows space to be used more efficiently, at the cost of more seeking. Since our image is to be loaded into RAM, seeking is costless and not a concern as opposed to on a mechanical medium.
+
+==== Make a GRUB Entry ====
+
+Ok, the last thing we need to do is tell GRUB how to boot this system. 
+Read <nowiki>[[http://www.gnu.org/software/grub/manual/html_node/Making-a-GRUB-bootable-CD_002dROM.html|Making a GRUB bootable CD-ROM]]</nowiki> first.
+
+Edit /boot/grub/menu.lst to include an entry like this at the bottom:
+
+<pre>
+title Jaunty RAM Session
+kernel /casper/vmlinuz boot=casper toram splash
+initrd /casper/initrd.gz
+</pre>
+
+==== Reboot and Enjoy ====
+
+Now, it's time to reboot and select Jaunty RAM Session, and see if it works out. If the system does not boot, then double-check you followed all the instructions properly. It took me about 10 or 11 customization cycles to get my live system JUST the way I like it, so be patient!
+
+Remember, the possibilities are endless! Enjoy, and share any cool things you do with this HOWTO!
+
+== Comments ==
+Why don't you work on bug #25496: toRam or copy2Ram (run ubuntu live from ram), to make this feature in the default Ubuntu livecd?
+https://bugs.edge.launchpad.net/ubuntu/+source/casper/+bug/25496
+
+Any idea on how to get this to work with "iso-scan/filename=" option? It loads everything to RAM fine, but won't let me unmount /isodevice (probably because a loopback device needs to be killed). I can't seem to find which script creates the loopback nor where to destroy it and unmount the /isodevice folder.
+
+=== Lucid Updates ===
+
+For trying this out in Lucid, it's easier to just go into edit mode in grub2 having booted the live cd/usb and change the options to 
+<pre>
+kernel /casper/vmlinuz boot=casper toram splash
+initrd /casper/initrd.gz
+</pre>
+
+Else you'll need to get grub legacy packages and use that to create the grub install cd stage2_eltorito can be extracted from http://packages.ubuntu.com/lucid/i386/grub/download
+
+When making the iso use -J option to Generate Joliet directory information so that you can use usb-creator-gtk (Startup disk creator) and not waste CDs!
+<pre>
+mkisofs -R -J -b boot/grub/stage2_eltorito -no-emul-boot \
+         -boot-load-size 4 -boot-info-table -o grub.iso iso
+</pre>
+
+Pitfalls: 
+* remember to set permissions on all the files before you create the iso as these will be honored when imaged 
+* Make sure your chroot doesn't end up on the iso
+
+Variations:
+* loading the squashfs from a cheap usb stick or cd can be slow, so if you do have a hard drive use that instead e.g.
+<pre>
+if [ "${TORAM}" ]; then
+      echo "Copying contents to ram.."
+      mkdir /store
+      mount -t tmpfs -o size=2G none /store 
+      mkdir /store/casper
+      mkdir /mnt
+      mount /dev/sda3 /mnt/
+      cp /mnt/casper/*.squashfs /store/casper/
+      echo "Copy done.. safe to eject boot medium"
+      umount /cdrom
+      umount /mnt
+      mount -o bin /store /cdrom
+
+    elif [ "${TODISK}" ]; then
+</pre> 

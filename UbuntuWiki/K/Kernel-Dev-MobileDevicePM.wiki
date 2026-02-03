@@ -1,0 +1,178 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+This page details power management interfaces for devices typically found in a mobile platform such as a phone or a tablet. The analysis is focused primarily on Android kernels, specifically those for the Nexus 4 and Nexus 10 devices, as Android is running on the majority of Linux-based devices currently on the market.
+
+=== Background Information ===
+
+A feature of some Android kernels is a partially suspended state which will be referred to as ''partial suspend'' in this document. The system is in this state whenever ''mem'' has been written to `/sys/power/state` but wake locks are preventing the kernel from fully suspending. Drivers can register early suspend and late resume handlers which are called when entering and leaving the partial suspend state.
+
+A feature called ''autosleep'' was introduced into mainline Linux in version 3.5. This feature is largely similar to the mechanism found in Android except that it lacks support for early suspend and late resume handlers. Some recent Android kernels have started using this feature instead of the Android-specific implementation.
+
+=== CPU ===
+
+CPU power consumption is controlled by scaling CPU frequency and voltage (DVFS) and by placing processor cores into idle states (also known as C-states) when there is no work to do.
+
+==== Dynamic Frequency and Voltage Scaling (DVFS) ====
+
+Linux supports DVFS through a framework called ''CPUFreq''. CPUFreq operates on frequency; voltage is typically scaled automatically based on the operating frequency.
+
+CPU frequency selection is driven by CPUFreq governors. Several governors are available, such as ''performance'' (which always selects the highest frequency), ''ondemand'' (which varies the frequency based on load), and ''userspace'' (which allows userspace to select the frequency). The governor in use can be changed at run-time.
+
+==== Idle ====
+
+Many CPUs support multiple idle levels with varying power consumption and exit latencies. The kernel has an infrastructure named ''cpuidle'' to manage these states via various governors. The kernel selects the most optimal governor based on the kernel configuration and platform, but this selection can be overridden via sysfs.
+
+Userspace may also take one or more CPU cores offline to force those cores to remain in an idle state.
+
+=== Clocks and Voltage Regulators ===
+
+Recent Linux versions contain frameworks for expressing relationships between various clocks and voltage regulators found in mobile platforms and SoCs. These frameworks can dynamically disable any unused clocks and regulators.
+
+For this to work, the CPU architecture, board support, and device drivers must be properly written to express these relationships and disable clocks used by devices when not needed.
+
+=== Input Devices ===
+
+This class primarily covers devices such as touchscreens and buttons, though some other functionality such as headphone jack detection may also be implemented as input devices.
+
+The Linux input subsystem is well established, and Android makes use of it for reporting input events to userspace. PM of input devices is typically based on usage; i.e. the input device remains powered on while userspace has open file descriptors to the device and powered off when all descriptors are closed. Drivers may also implement runtime PM support. However, some drivers utilize early suspend for powering down hardware. In particular the driver for the Nexus 4 touchscreen uses early suspend exclusively for powering down the hardware.
+
+For most input devices it will be sufficient for userspace to close open file descriptors whenever a given device is not being used. An example would be closing the descriptor for the touchscreen device whenever the screen is turned off. However, when running on some Android kernels it may also be necessary to set the kernel into partial suspend.
+
+=== Backlight ===
+
+Interfacing with backlights is typically done via established sysfs interfaces located under `/sys/class/backlight`. Both the Nexus 4 and the Nexus 10 backlight devices conform to this interface. Userspace can thus manage backlight power by utilizing the standard kernel interfaces.
+
+=== Displays and Video ===
+
+'''Note''': This area may require more investigation.
+
+==== Internal Panels ====
+
+Userspace powers off a display using the FBIOBLANK ioctl for framebuffer devices. This interface appears to be supported in the kernel for both the Nexus 4 and Nexus 10, though in the case of the Nexus 4 the early suspend hanlder in the fb driver does some extra work (which mostly seems to affect video outputs rather than built-in panels).
+
+Runtime suspend may also be supported.
+
+==== Video Outputs ====
+
+TODO: Investigate further
+
+The picture here is somewhat muddled. While it appears that FBIOBLANK is also used for video outputs, it doesn't appear that this will always cause all hardware to be powered down.
+
+==== GPU ====
+
+TODO
+
+=== Networking ===
+
+==== Wi-Fi ====
+
+Power control of wi-fi devices is managed in a few different ways. The first of these is via access to the network devices associated with the wireless device. The second controls allows enabling of IEEE 802.11 power save functionality via the nl80211 interface. Both of these interfaces are well established and should be utilized by userspace.
+
+The third interface, rfkill, is a big hammer which forces a wireless device to be completely disabled. This should be used whenever wireless is disabled, including in airplane mode.
+
+Another power consideration for wi-fi is wake on WLAN (WoWLAN). This causes the system to be woken from suspend in response to triggers such as reception of user-specified data patterns or disconnection from the AP. WoWLAN requires that the connection remain active during suspend and may be used for functionality like push notifications.
+
+http://wireless.kernel.org/en/users/Documentation/WoWLAN
+
+==== Bluetooth ====
+
+'''Note''': More investigation required.
+
+Normally under Linux bluetooth power can be controlled via rfkill as with wifi. When available this mechanism should be used to turn off bluetooth whenever it is to be disabled.
+
+Android uses an alternate bluetooth stack named ''bluedroid''. More research is needed to understand how integration with bluedroid works, but it does appear that the bluetooth device drivers do not integrate with the kernel bluetooth subsystem in the usual fashion.
+
+==== NFC ====
+
+Linux has a standard kernel infrastructure for NFC, but this is not used in the Nexus 4 or 10.
+
+A variant of the same NFC part, BCM2079x, is used in both devices, with an I2C interface in the Nexus 4 and a SPI interface in the Nexus 10. The drivers are very similar. Both provide a character device node to access the NFC hardware, and both control power via a custom ioctl.
+
+=== Cellular Modem ===
+
+Power management of the modem is very platform specific and largely under the control of a separate operating environment. Integration with Ubuntu PM is required in some areas, including airplane mode and wakeup events.
+
+=== Sensors ===
+
+Most of the sensors for the Nexus 4 are hidden behind a Qualcomm proprietary library. Therefore the following analysis primarily considers devices found on the Nexus 10.
+
+On the Nexus 10 the majority of the sensors are exposed to userspace via the Industrial I/O (IIO) framework. IIO has no explicit PM support, so power control is rather ad hoc. Some devices control power based on whether or not any events are being requested, others provide sysfs knobs for controlling power, etc.
+
+==== Motion and Orientation (Gyroscope / Accelerometer) ====
+
+The Nexus 10 motion and orientation sensors uses IIO. Power control is done via a sysfs node in addition to powering off the device while suspended.
+
+==== Proximity Sensor ====
+
+The Nexus 10 likely does not have a proximity sensor. In the Nexus 4 the sensor is supported in the proprietary sensors library.
+
+==== Pressure Sensor (Barometer) ====
+
+The pressure sensor on the Nexus 10 uses IIO. It is powered off whenever no events are requested and during suspend.
+
+==== Ambient Light Sensor ====
+
+The Nexus 10 ambient light sensor uses IIO. It is powered off when no events are requested and during suspend.
+
+=== GPS ===
+
+Control of GPS varies from device to device. The Nexus 4 kernel seems to have no hooks for controlling GPS, so it is presumably done by userspace. The Nexus 10 also has a userspace driver, but the kernel does export gpios for power control to userspace via the standard sysfs interface for gpios.
+
+=== Audio ===
+
+==== PCM Playback / Record ====
+
+Embedded audio is done by the ASoC (ALSA System on Chip) driver subsystem. If the driver fully supports <nowiki>[[http://www.alsa-project.org/main/index.php/DAPM|DAPM]]</nowiki>, different parts of the Audio chip (headphone amplifiers etc) should power up and down as needed. You can see what parts of the audio chip is currently powered up by browsing through /sys/kernel/debug/ASoC.
+
+==== Hardware Acceleration ====
+
+Some hardware may support acceleration for decoding compressed audio fromats via a DSP or similar at lower power than using the main CPU. Support for exploiting this functionality is incomplete at this time.
+
+==== SIMD ====
+
+TODO: Find out about NEON-optimized decode libraries.
+
+PulseAudio has optimized routines utilizing NEON for functions like mixing audio.
+
+=== Camera ===
+
+In general both the Nexus 4 and Nexus 10 export the camera using the kernel's V4L2 subsystem. However various aspects of the functionality for each are enabled using vendor-specific controls in the driver, so in general userspace interaction with the camera hardware will need to utilize per-vendor libraries.
+
+==== Camera Sensor ====
+
+V4L2 drivers can power on the hardware whenever the device is opened by userspace and power it off when the device is closed. The Nexus 4 driver uses this technique. The Nexus 10 driver uses runtime PM to manage the power state of the device.
+
+==== Camera Flash ====
+
+Both devices export flash control via ioctls on the v4l2 device node. The Nexus 10 uses a standard V4L2_CID_CAMERA_FLASH_MODE, however the Nexus 4 seems to use a custom ioctl. In both cases the states of the flash are defined using vendor-specific enumerations.
+
+=== USB ===
+
+USB power management is handled completely within the kernel with no direct management by userspace. This includes charging the battery from USB power and enabling VBUS when acting as an OTG host.
+
+=== Vibrator ===
+
+There does not appear to be a standard kernel interface for vibrators. A couple of mainline drivers support them as force-feedback input devices.
+
+The Nexus 4 kernel contains a vibrator class named `android_vibrator` (which despite the name does not appear to be a standard Android kernel feature). All control happens through a couple of sysfs interfaces.
+
+=== Real Time Clock ===
+
+RTC devices are continuously enabled by the nature of their use. Generally they are capable of waking the CPU from sleep and are used to support timed wakeup events. Interfacing with the RTC has traditionally done via ioctls on `/dev/rtc<n>` device nodes, however a sysfs interface is also available. These interfaces are described in the `Documentation/rtc.txt` file in the kernel source tree.
+
+=== Power Sources (Battery and External Sources) ===
+
+Management of power sources is generally taken care of by the kernel. Information about power supplies is generally exported at /sys/class/power_supply.
+
+=== LEDs ===
+
+LEDs are controlled via sysfs interfaces under `/sys/class/leds`. LEDs are disabled by setting the brightness to 0.

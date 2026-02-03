@@ -1,0 +1,146 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+{| class="wikitable"
+|-
+| <tablebgcolor="#f1f1ed" tablewidth="35%" tablestyle="margin:0pt 0pt 1em 1em;float:right;font-size:0.9em; "style="padding:0.5em;">
+|}
+<nowiki>[[https://blueprints.launchpad.net/ubuntu/+spec/ubuntu-touch-flight-mode|blueprint]]</nowiki>
+
+=== Basic Description ===
+Flight Mode ( aka "Airplane Mode" ) is a global control that can be used to turn all transmitting-capable radios on the system off at one time.  In the case of a phone, this can include:
+
+* Wi-Fi
+* Bluetooth
+* Cellular
+* NFC
+* GPS ( on some devices GPS is blocked, but as it's a non-transmitting device, this doesn't make much sense )
+
+Once airplane mode is enabled, certain radios are allowed to be re-enabled (Wi-Fi, Bluetooth), however the re-enabling the cellular radio is not possible while airplane mode is active.  When airplane mode is disabled, any radios that were disabled when airplane mode was activated, will be re-enabled.
+
+The state of Airplane mode and of radios is persistent across reboots.
+
+While in airplane mode, it is possible to make emergency calls.  It appears that Android disables airplane mode when an emergency call is made.
+
+Airplane mode and radios are also influenced by hardware keys / shortcuts and physical radio killswitches / buttons.
+Touch Design
+https://wiki.ubuntu.com/Networking#Flight_mode
+
+One mis-statement:
+
+"However, if you turn on any transmitting connection type while Flight Mode is on,
+Flight mode should be turned off automatically, but this should not turn on any
+of the other connection types..."
+
+This is wrong, flight mode stays active, as otherwise there is no separate toggle
+to turn on the cellular radio.  Also, what would happen if the phone was power cycled?
+
+One other point...
+
+"Whenever you toggle Flight Mode in either direction, the icon should become a spinner until all connections have stopped or resumed as appropriate."
+
+I can see this be a ripe situation for a race if the user toggles Flight Mode, and then immediately re-enabled Wi-Fi, but this would be a bug.  Android prevents toggling state of Wifi or Bluetooth while it’s going through activation/deactivation (IOW there are activation and deactivation states).
+
+=== Current Touch Power Controls ===
+==== Issues w/Current Power Controls ====
+
+1. On maguro, toggling Wi-Fi off disconnects any active connections, and also
+prevents scanning, however the interfaces (both p2p & wlan0) are both
+visible via 'iwconfig'.  Probably OK for Flight Mode, but it's unclear if
+the devices are still consuming power.
+
+2. The "Mobile Data" toggle in indicator-network operates NM's WwanEnabled
+toggle switch.  This controls the 'Power' of the modem's ConnectionManager
+interface, *not* the radio power.
+
+https://bugs.launchpad.net/touch-preview-images/+bug/1204678
+
+Flight Mode will need to control the radio power.
+
+3. Need to investigate NM's errors when trying to toggle the modem 'Power'. Is
+this caused by trying to enable the ConnectionManager's 'Powered' or the Modem's
+'Powered' property?
+
+=== Possible Implementations ===
+
+urfkill has been mentioned as a potential candidate for managing "Flight Mode".  urfkill is currently packaged in universe; it’s curent version is 0.4.  The current implementation offers a very basic DBus API:
+
+http://lcp.github.io/urfkill-doc/URfkill.html
+ 
+A few issues:
+
+1. As currently implemented, urfkilld is essentially a wrapper around devices which
+implement rfkill devices in the kernel.  It’s API allows rfkill devices to be enumerated and controlled. It is not compatible with drivers which use properietary mechanisms, nor is it currently compatible with ofono.
+
+Possible solution - create a plugin API to allow different implementations to be used?
+
+''The bigger issue is that the DBus API exposed by urfkill exposes constants from the system rfkill API.  It's essentially a direct 1-to-1 mapping.  This makes it difficult to add new "non-rfkill" type device to the API.  We could invent a new non-rfkill type, but we'd have to be careful to not allow constant/enum collisions.  Perhaps any non-rfkill types added could use a higher base enum with a set of reserved values protecting against further expansion of the base rfkill types?''
+
+''Note, if the voice modem is the only non-rfkill device, we could just not expose it as a possible type to block ( ie. cellular modem is only disabled/enabled via FlightMode method ).''
+
+''Finally, we could re-factor the API to make it more generic and introduce a killswitch_type ( eg. "rfkill", "ofono", "some-other-custom-mechanism" ), although this would require much more work.  Perhaps this is something we defer to post-13.10? -awe''
+
+Note, we should review the current DBus API as it’s not a property-based API.  If a kill switch changes state, a Changed signal is fired, which then requires the caller to invoke a method to determine the state of the device.
+
+''I don't think this is something we need to worry about too much.  It's probably best to continue to follow the current API. - awe''
+
+2. urfkill currently has no concept of state.  If the system is re-booted, the soft
+state of the kill switches is not preserved.
+
+This will require extending urfkilld to persist the soft power switch states, and the
+global Flight Mode state.
+
+3. urfkill currently has no concept of "Flight Mode".
+
+This would an extension of the DBus API to handle Flight Mode.
+
+''This could be handled by the addition of Flight``Mode and Is``Flight``Mode methods.  For a rough prototype implementation of this please refer to: <nowiki>[[https://code.launchpad.net/~awe/ubuntu/saucy/urfkill/flight_mode|lp:~awe/ubuntu/saucy/urfkill/flight_mode]]</nowiki>. -awe''
+
+4. urfkill stability
+
+urfkill currently lives in universe, and has not had a lot of testing cyles.  A number of bugs were discovered during some of the initial work on urfkill with touch ( see: <nowiki>[[https://bugs.launchpad.net/ubuntu/+source/urfkill|urfkill(Ubuntu) bugs]]</nowiki>).
+
+5. urfkill configuration
+
+The current urfkill implementation has two mechanisms for configuration.  An automatic configuration mechanism which uses the udev system DMI device to load a pre-configured profile included with the urfkill package, or a configuration file specified on the command line.  Both profiles and configuration files allow control over the following three variables:
+
+* '''user''' - specifies a user account for urfkill to switch to after start-up ( default = root ).
+* '''key_control''' - controls whether urfkill listens for hardware kill switch key events.
+* '''master_key''' - controls whether or not a master hard killswitch exists on the device.
+* '''force_sync''' - used to for guaranteeing that switches ( eg. WLAN ) of the same type are kept in sync.
+
+Making profiles work for Touch, would require some work.  At this point, manual configuration for 13.10 is probably our best bet.  Another option would be adding support for reading an android property ( '''ro.product.device''' ).
+
+The configuration/profile mechanism should probably be used to configure a particular device for non-standard killswitches ( eg. ''ofono=true, voice=ofono, or gps=hybris/hal'' ).
+
+6. Overlap with RFKILL_INPUT module
+
+One of the goals of urfkill is to replace the deprecated RFKILL_INPUT kernel module.  We should consider disabling this module via kernel configuration changes for supported devices.
+
+7. Other non-RFKILL devices
+
+Some devices may include wireless drivers that lack RFKILL support, these devices will need custom device control via Bluez DBus, or worst case, OEM/device specific mechanisms.
+
+8. consolekit dependency
+
+urfkill currently depends on consolekit for input handling.  This code should be re-factored to use logind.
+
+9. No upstart job
+
+=== Summary of plan ===
+
+We want a new (dbus) interface exposing and controlling the status of all radios and of airplane mode.
+Implementation can start from urfkill and expand it to cover the required needs.
+Needs to persist state (e.g. across reboots).
+Backend to turn radio off is to use the rfkill device for bluetooth and wifi, and to talk to the corresponding middleware for nfc (not sure we have middleware there now), location services and cellular.
+Will need to patch oFono/RILd and possibly location services to allow turning radio on/off via DBus and to not turn them on automatically on startup.
+Rfkill should be good enough for nexus devices (might need some kernel fixes though, notably bluetooth on mako).
+In the general case/future, might need to explicitly turn power off on devices after killing their radio as to save power.
+Should all eventually apply to the desktop, albeit not a 13.10 goal.

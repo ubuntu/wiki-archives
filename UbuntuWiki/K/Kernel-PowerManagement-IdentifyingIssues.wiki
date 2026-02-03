@@ -1,0 +1,768 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+=== Preable ===
+
+To minimise power consumpution applications need to be behaving correctly.  Unfortunately some applications are far from perfect and cause unnecessary work for the system by causing frequent CPU wakeups or disk I/O activity.  The following describes how to track down issues using tools available in Ubuntu and also some in <nowiki>[[https://launchpad.net/~colin-king/+archive/white|ppa:colin-king/white]]</nowiki>
+
+=== Wakeups ===
+
+Applications and daemons generally are not running 100% of the time and can be in an idle state waiting for I/O to complete.  Many block (wait) for I/O to complete using poll() or select() and these allow the application to also timeout after a specified amount of time.  The application may use the timeout to update some status or just re-do the poll() or select().  Badly behaving applications may wait for a very short time, causing multiple wakeups a second which impacts on the ability of the CPU to stay in a deep idle state.  Some applications may even have a zero timeout, which causes a busy loop and never lets the CPU enter an idle state.
+
+==== Using PowerTop ====
+
+Identifying rogue processes is a two step process.  Firstly, we need to identify tasks that are frequently waking up the system.   Tools such as powertop help identify rogue tasks, for Ubuntu 12.04 Precise LTS we recommend using the older version of powertop, install it as follows:
+
+<code>sudo apt-get install powertop-1.13</code>
+
+and run for 60 seconds as follows:
+
+<code>sudo powertop-1.13 -d -t 60 > powertop.log</code>
+
+Looking at the powertop.log you will see a section titled "Top causes for wakeups:" and this will list running processes in order of wakeups per second.  An excerpt from this is a follows:
+
+<pre>
+   1.4% ( 10.0)   gwibber-service
+   1.4% (  9.9)   ubuntuone-syncd
+   0.8% (  5.5)   [ata_piix] <interrupt>
+   0.7% (  5.0)   syndaemon
+</pre>
+
+Lets examine ubuntuone-syncd. It appears to be waking up 9.9 times a second, so what is it doing? First we identify its process ID:
+
+<pre>
+ps -e | grep ubuntuone-syncd
+2331 ?        00:01:03 ubuntuone-syncd
+</pre>
+
+..and now we then attach strace to that PID as follows:
+
+<pre>
+sudo strace -p 2331
+Process 2331 attached - interrupt to quit
+restart_syscall(<... resuming interrupted call ...>) = 0
+read(10, 0x7fffe58ab1e0, 16)            = -1 EAGAIN (Resource temporarily unavailable)
+read(22, 0x285a2c4, 4096)               = -1 EAGAIN (Resource temporarily unavailable)
+poll([{fd=10, events=POLLIN}, {fd=11, events=POLLIN}, {fd=22, events=POLLIN}, {fd=64, events=POLLIN}, {fd=16, events=POLLIN}, {fd=3, events=POLLIN}, {fd=62, events=POLLIN}, {fd=63, events=POLLIN}, {fd=71, events=POLLIN}], 9, 101) = 0 (Timeout)
+read(10, 0x7fffe58ab1e0, 16)            = -1 EAGAIN (Resource temporarily unavailable)
+read(22, 0x285a2c4, 4096)               = -1 EAGAIN (Resource temporarily unavailable)
+poll([{fd=10, events=POLLIN}, {fd=11, events=POLLIN}, {fd=22, events=POLLIN}, {fd=64, events=POLLIN}, {fd=16, events=POLLIN}, {fd=3, events=POLLIN}, {fd=62, events=POLLIN}, {fd=63, events=POLLIN}, {fd=71, events=POLLIN}], 9, 101) = 0 (Timeout)
+</pre>
+
+..hit control-C to stop strace.
+
+The final argument to poll() [see man 2 poll] is the timeout (in milliseconds, and a negative value is in infinite timeout). In this case poll waits for 101 milliseconds and then returns 0, which indicates a timeout occurred and none of the file descriptors were ready for I/O. If one observes this process with strace for a while one notices that the poll is frequently timingout on the 101 millisecond wait, so this is effectively a 9.9Hz polling loop which needs fixing (see bug LP#906924).
+
+Applications may also using select() in the same way, with the final argument being being the address of a struct timeval and a return of zero from select() indicating a timeout.  See man 2 select for more details.
+
+==== Using eventstat ====
+
+Eventstat is specifically designed to find system wakeup events, and by default will dump out all the causes of wakeups every second.  It is a lightweight tool and runs well on low-power platforms. One can also specify the period between each measurement and number of measurments to take, for example:
+
+<pre>
+sudo apt-get install eventstat
+sudo eventstat 10 6 -r results.csv
+</pre>
+..this will dump out event causes every 10 seconds 6 times in total and write a report into a comma separated file results.csv
+
+The CSV data can be then parsed or imported into tools such as LibreOffice and graphs or reports generated from the captured data.
+
+For more information, refer to <nowiki>[[http://kernel.ubuntu.com/~cking/eventstat/|Eventstat]]</nowiki> and the eventstat man page.
+
+==== Using pidstat ====
+
+pidstat can be used to find out which processes are context switching the most. Voluntary context switches should be minimised where possible (since the program relinquishes control by itself); involuntary context switches are generally unavoidable if a process is being interrupted. pidstat -w will show the contex switching stats, for example, install and run using:
+
+<pre>
+sudo apt-get install sysstat
+pidstat -w
+</pre>
+
+The cswch/s column reports the number of voluntary context switches and the nvcswch/s column reports the involuntary context switches.
+
+=== Process Activity ===
+
+There are many useful tools to monitor process activity and allow one to find heavy CPU utilization, such as top, htop, ps and vmstat.  Sometimes a seemingly idle system is busy running lots of very short lived processes that are sometimes hard to spot with these tools.  Ubuntu 14.04 LTS introduces the forkstat tool to find and log process activity allowing one to identify these short lived processes.  Most are legitimate, however, sometimes a rogue cron job or daemon may be creating many short lived power consuming redundant processes. 
+
+forkstat example - run fortstat for 40 seconds and show fork/exec/exit stats at end of run:
+
+<pre>
+sudo apt-get install forkstat
+forkstat -D 40 -S
+</pre>
+
+find just coredumps and processes that exit:
+<pre>
+forkstat -e core,exit
+</pre>
+
+Refer to <nowiki>[[http://kernel.ubuntu.com/~cking/forkstat|forkstat]]</nowiki> or the forkstat man page for more details.
+
+=== Memory Activity ===
+
+It is also useful to see if any processes are actively leaking or consuming more memory than expected.  Memory can be shared amongst processes, so it makes sense to monitor the shared memory to get a clearer view of fair memory utilisation. For example, consider 128K shared between 2 processes, this is fairly reported by the shared memory allocations as 64K per process.
+
+Introduced into Ubuntu 14.10 will be the smemstat tool that can view either the current memory allocations or the change in memory over time. 
+
+To view the current memory allocations of all the user space processes, use:
+<pre>
+sudo apt-get install smemstat
+sudo smemstat
+</pre>
+
+and to view the memory change over time, for example, every 10 seconds, 60 times:
+<pre>
+sudo smemstat 10 60
+</pre>
+
+One can even specify which processes to monitor, for example, monitor every 5 seconds firefox and thunderbird:
+<pre>
+sudo smemstat -p thunderbird,firefox 5
+</pre>
+
+Refer to <nowiki>[[http://kernel.ubuntu.com/~cking/smemstat/|smemstat]]</nowiki> or the smemstat man page for more details.
+
+=== Disk Wakeups ===
+
+Badly behaving applications may also be frequently waking up the disk drive and forcing data to be sync'd to disk using fsync() or sync().  For example, debug logging may be still turned on and frequently writing debug messages.  Applications may have unnecessarily opened files with O_SYNC which depedening on the filesystem causes file data and metadata to be written to disk before returning from a writes, this causes disk wakeups and writes where instead data could be held in the buffer cache.
+
+The easiest problem to identify is frequent disk I/O from seemingly idle applications. Simply run powertop-1.13 for 60 seconds as follows:
+
+<code>sudo powertop-1.13 -d -t 60 > powertop.log</code>
+
+Looking at the powertop.log you will see a section titled "Disc accesses:" and this will list processes that were writing to disk and the name of the file and device it was writing to.  An excerpt from this is a follows:
+
+<pre>
+Disk accesses:
+The application 'thunderbird-bin' is writing to file 'global-messages-db.sqlite-journ' on /dev/ecryptfs
+The application 'thunderbird-bin' is writing to file 'global-messages-db.sqlite' on /dev/ecryptfs
+The application 'thunderbird-bin' is writing to file 'INBOX.msf' on /dev/ecryptfs
+The application 'thunderbird-bin' is writing to file 'ECRYPTFS_FNEK_ENCRYPTED.FWb7w4.' on /dev/sda5
+The application 'thunderbird-bin' is writing to file 'ECRYPTFS_FNEK_ENCRYPTED.FWb7w4.' on /dev/sda5
+The application 'thunderbird-bin' is writing to file 'panacea.dat' on /dev/ecryptfs
+The application 'indicator-weath' is writing to file 'indicator-weather.log' on /dev/sda5
+The application 'indicator-weath' is writing to file 'indicator-weather.log' on /dev/sda5
+The application 'indicator-weath' is writing to file 'indicator-weather.log' on /dev/sda5
+The application 'thunderbird-bin' is writing to file 'panacea.dat' on /dev/ecryptfs
+The application 'dconf-service' is writing to file 'user.L2II8V' on /dev/sda5
+The application 'dconf-service' is writing to file 'user.L2II8V' on /dev/sda5
+The application 'dconf-service' is writing to file 'user.L2II8V' on /dev/sda5
+</pre>
+
+Let us explore the 'indicator-weath' writes. The name is truncated because powertop fetches the name from the /proc/$pid/comm field.  We need to identify the process ID and the full pathname to the file as follows:
+
+<pre>
+ps -e | grep indicator-weath
+ 2024 ?        00:00:04 indicator-weath
+</pre>
+
+<pre>
+lsof -p 2024 | grep indicator-weather.log
+indicator 2024 ubuntu    3u   REG                8,5   154647 11796492 /home/ubuntu/.cache/indicator-weather.log
+</pre>
+
+And since it is a log, we can see any recent activity:
+<pre>
+tail -10 /home/king/.cache/indicator-weather.log
+[Fetcher] 2012-01-16 16:57:52,805 - DEBUG - Weather: night, show 'weather-clear-night' icon
+[Fetcher] 2012-01-16 16:57:52,808 - DEBUG - Indicator: fill in menu with params: city='Gatwick', temp='Temperature: 3 ˚C', humid='Humidity: 65%', wind='Wind: E at 8 mph', sunrise='Sunrise: 07:59:41', sunset='Sunset: 16:22:13', puretemp=3 ˚C
+[Fetcher] 2012-01-16 16:57:52,808 - DEBUG - Indicator: menu_normal: filling in a menu for found places
+[Fetcher] 2012-01-16 16:57:52,816 - DEBUG - Indicator: update_label: setting label to ' '
+[Fetcher] 2012-01-16 16:57:52,821 - DEBUG - Indicator: setting refresh label to 'Refresh (just now)'
+[Fetcher] 2012-01-16 16:57:52,823 - DEBUG - Indicator: scheduling refresh label update in 1 min
+[Fetcher] 2012-01-16 16:57:52,833 - DEBUG - Weather: night, show 'weather-clear-night' icon
+[Fetcher] 2012-01-16 16:57:52,835 - DEBUG - Settings: setting '23387567'='{'humidity': u'Humidity: 65%', 'sunrise': 'Sunrise: 07:59:41', 'sunset': 'Sunset: 16:22:13', 'wind': u'Wind: E at 8 mph', 'humidex': None, 'icon': 'weather-clear-night', 'temper': u'Temperature: 3 \u02daC', 'condition': u'Clear', 'label': '3 \xcb\x9aC'}'
+[Fetcher] 2012-01-16 16:57:52,836 - DEBUG - Indicator: update_label: setting label to '3 ˚C'
+[Fetcher] 2012-01-16 16:57:52,837 - DEBUG - Indicator: scheduling update in 15 mins
+</pre>
+
+Looking at the log more deeply we can see that the applet is writing DEBUG messages to the log every minute which is keeping the disk drive from being in an idle state, so this needs fixing (e.g. LP#917253).
+
+==== iotop ====
+
+iotop is a useful tool for showing I/O activity across the system and helps to identify the top I/O producing processes.  To install and run, use:
+
+<pre>
+sudo apt-get install iotop
+sudo iotop
+</pre>
+
+=== power-usage-report ===
+
+<nowiki>[[http://bazaar.launchpad.net/~pitti/fatrace/trunk/view/head:/power-usage-report|power-usage-report]]</nowiki> is a script which calls fatrace for measuring file access activity from programs and powertop-1.13 to measure process and device wakeups.  The script generates a report which is appropriate to attach to bug reports.  It is now part of fatrace version 0.4 and is availble in Ubuntu 12.04 LTS Precise Pangolin.
+
+To install:
+
+<code>sudo apt-get install fatrace powertop-1.13</code>
+
+and run:
+
+<code>sudo power-usage-report</code>
+
+The output includes several sections covering disk access statistics (which prevent the disk from spinning down), wakeups (causing CPU power usage) and device activity.  The Disk/wakeups are sorted in descending order, ranked by process.
+
+<pre>
+$ sudo power-usage-report
+Measurement will begin in 5 seconds. Please make sure that the
+computer is idle, i. e. do not press keys, start or operate programs, and that
+programs are not busy with active tasks other than the one you want to examine.
+Starting measurement for 60 seconds...
+Measurement complete. Generating report...
+======== unity-panel-ser: 4 file access events =======
+/usr/share/zoneinfo/UTC: 1 reads
+/etc/timezone:
+/etc/localtime: 2 reads
+/usr/share/zoneinfo/GB-Eire: 1 reads
+
+======== deja-dup-monito: 2 file access events =======
+/etc/localtime: 2 reads
+
+======== gnome-settings-: 1 file access events =======
+/etc/fstab: 1 reads
+
+======= Wakeups =======
+  36.2% ( 61.8)   [i915] <interrupt>
+  32.8% ( 55.9)   compiz
+  13.1% ( 22.3)   java
+   3.2% (  5.5)   [ahci] <interrupt>
+   2.1% (  3.6)   swapper/2
+   1.1% (  2.0)   [iwlwifi] <interrupt>
+[...]
+
+======= Devices =======
+An audio device is active 100.0% of the time:
+hwC0D2 Realtek ALC889 
+
+A USB device is active 100.0% of the time:
+/sys/bus/usb/devices/1-1
+
+Recent USB suspend statistics
+Active  Device name
+100.0%	USB device 1-1.6 : USB Multimedia Keyboard (LITEON Technology)
+  0.0%	/sys/bus/usb/devices/2-1
+100.0%	/sys/bus/usb/devices/1-1
+  0.0%	USB device usb4 : xHCI Host Controller (Linux 3.3.0-1-generic xhci_hcd)
+  0.0%	USB device usb3 : xHCI Host Controller (Linux 3.3.0-1-generic xhci_hcd)
+  0.0%	USB device usb2 : EHCI Host Controller (Linux 3.3.0-1-generic ehci_hcd)
+100.0%	USB device usb1 : EHCI Host Controller (Linux 3.3.0-1-generic ehci_hcd)
+
+Runtime Device Power Management statistics
+Active  Device name
+  0.0%	04:00.0 FireWire (IEEE 1394): Texas Instruments XIO2200A IEEE-1394a-2000 Controller (PHY/Link) 
+  0.0%	02:00.0 Network controller: Intel Corporation Centrino Advanced-N 6205 
+  0.0%	00:1f.2 SATA controller: Intel Corporation Panther Point 6 port SATA Controller [AHCI mode] 
+  0.0%	00:1d.0 USB controller: Intel Corporation Panther Point USB Enhanced Host Controller #1 
+[...]
+
+Devices without runtime PM
+
+03:00.0 PCI bridge: Texas Instruments XIO2000(A)/XIO2200A PCI Express-to-PCI Bridge 
+00:1f.3 SMBus: Intel Corporation Panther Point SMBus Controller 
+00:1f.0 ISA bridge: Intel Corporation Panther Point LPC Controller 
+00:1e.0 PCI bridge: Intel Corporation 82801 PCI Bridge 
+
+Recent audio activity statistics
+Active  Device name
+100.0%	hwC0D2 Realtek ALC889 
+100.0%	hwC0D3 Intel PantherPoint HDMI 
+
+Recent SATA AHCI link activity statistics
+Active	Partial	Slumber	Device name
+</pre>
+
+=== Deeper Inspection with health-check ===
+
+<nowiki>[[http://kernel.ubuntu.com/~cking/health-check/|health-check]]</nowiki> monitors processes in various ways to help identify areas where it is consuming too many resources. One can trace one or more processes (including all their threads and child processes too) for a full story of system activity.
+
+to install:
+
+<pre>
+sudo apt-get install health-check
+</pre>
+
+One can attach to a running process using the -p option and follow all threads using the -f option, for example to do 120 seconds of tracing on compiz:
+
+<pre>
+sudo health-check -f -p compiz -d 120
+</pre>
+
+One also start a process and trace it too:
+
+<pre>
+sudo health-check -u youruserid -f firefox
+</pre>
+
+Consult <nowiki>[[http://kernel.ubuntu.com/~cking/health-check/|health-check]]</nowiki> or the health-check manual page for more options.
+
+=== Deeper Inspection with Cachegrind ===
+
+Cachegrind simulates the cache interactation with a given program. It simulates a machine with independent first-level instruction (I1) and data caches (D1) and also a unified second-level cache (L2) as found on many modern computers.
+
+Cachegrind is tool inside valgrind, to install use:
+<pre>
+sudo apt-get install valgrind
+</pre>
+
+and to run, use:
+
+<pre>
+valgrind --tool=cachegrind program-name
+
+valgrind --tool=cachegrind ps
+==4338== Cachegrind, a cache and branch-prediction profiler
+==4338== Copyright (C) 2002-2013, and GNU GPL'd, by Nicholas Nethercote et al.
+==4338== Using Valgrind-3.10.0.SVN and LibVEX; rerun with -h for copyright info
+==4338== Command: ps
+=== 4338 ===
+--4338-- warning: L3 cache found, using its data for the LL simulation.
+  PID TTY          TIME CMD
+ 4191 pts/16   00:00:00 bash
+ 4338 pts/16   00:00:01 cachegrind-amd6
+=== 4338 ===
+==4338== I   refs:      7,827,007
+==4338== I1  misses:        8,054
+==4338== LLi misses:        2,280
+==4338== I1  miss rate:      0.10%
+==4338== LLi miss rate:      0.02%
+=== 4338 ===
+==4338== D   refs:      2,318,066  (1,554,969 rd   + 763,097 wr)
+==4338== D1  misses:        5,480  (    4,470 rd   +   1,010 wr)
+==4338== LLd misses:        3,645  (    2,798 rd   +     847 wr)
+==4338== D1  miss rate:       0.2% (      0.2%     +     0.1%  )
+==4338== LLd miss rate:       0.1% (      0.1%     +     0.1%  )
+=== 4338 ===
+==4338== LL refs:          13,534  (   12,524 rd   +   1,010 wr)
+==4338== LL misses:         5,925  (    5,078 rd   +     847 wr)
+==4338== LL miss rate:        0.0% (      0.0%     +     0.1%  )
+</pre>
+
+Note: I = Instruction cache, D = Data cache
+
+Many caches misses may indicate that the code could be optimised to be
+more cache efficient, for example, 2D array re-ordering or try to localise
+memory accesses in critical highly used data structures.
+
+For more in-depth details, refer to the cache-grind <nowiki>[[http://valgrind.org/docs/manual/cg-manual.html|documentation]]</nowiki>
+
+=== Finding Hot-Spots in Programs ===
+
+If one finds that a program needs some optimisation then perf is an excellent
+tool gain some excellent low-level analysis of where all the CPU cycles are
+being consumed.
+
+Install perf from the linux-tools package, one has to select the appropriate
+package since this is tied to the kernel, for example, for a LG Nexus 4
+(mako), use:
+
+<pre>
+sudo apt-get install linux-mako-tools
+</pre>
+
+or more generally use:
+<pre>
+sudo apt-get install linux-tools
+</pre>
+
+Perf is very powerful and can be directed to perform many kinds of deep profiling, so the following section is just a very brief primer to illustrate some of the uses of perf:
+
+==== Example #1, "tree" report ====
+
+Record Perf samples at 1000 samples/sec for 1 minute:
+
+<pre>
+sudo perf record -a -g -F 1000 sleep 60
+</pre>
+
+And report once complete:
+
+<pre>
+perf report > report-tree.log
+</pre>
+
+==== Example #2, No tree recording ====
+
+<pre>
+sudo perf record -a -F 1000 sleep 60
+perf report > report.log
+</pre>
+
+==== Example #3, See snapshot of CPU activity in cycles and cache stalls ====
+
+<pre>
+sudo perf stat -v -d -p PID
+</pre>
+.. and press ^C to stop
+
+==== Example #4, View current activity in real-time ====
+
+<pre>
+sudo perf top
+</pre>
+
+See also the perf <nowiki>[[https://perf.wiki.kernel.org/index.php/Tutorial|Tutorial]]</nowiki>
+
+As said, perf is really useful as spotting where the CPU cycle hot spots
+are occuring in code, and hence where to try and optimise these code paths.
+
+=== System Loading ===
+
+Sometimes it is useful to know how much power a device consumes when fully
+loaded or for how long it can run on battery before it runs out of power.
+
+stress-ng is clean room implementation of the stress utility with plenty
+of more options and better ways to stress out a machine.  Stress-ng is used
+in the QA lab to measure the power consumed of some of the kernel core components (such as the scheduler).
+
+Install stress-ng (currently only in PPA:colin-king/white)
+
+<pre>
+sudo add-apt-repository ppa:colin-king/white
+sudo apt-get update
+sudo apt-get install stress-ng
+</pre>
+
+Stress CPU, IO, context switching and pipe I/O for 60 seconds on 4 CPUs:
+
+<pre>
+stress-ng -c 4 -d 4 -s 4 -p 4 -t 60
+</pre>
+
+See <nowiki>[[http://kernel.ubuntu.com/~cking/stress-ng|stress-ng]]</nowiki> and the stress-ng man page
+for more details of all the stress tests available.
+
+=== Battery Power Monitoring ===
+
+Sometimes it can be instructive to get a rough idea of how much power a
+device is consuming by monitoring the battery discharge rate.  This is
+* NOT* recommended for exact measurements as it is based on the derived from the battery gas gauge 
+which can be subject to internal hardware and firmware smoothing, tweaking and re-calibrations.  For some
+analysis on this, refer to <nowiki>[[http://smackerelofopinion.blogspot.co.uk/2012/11/non-linear-characteristics-in-draining.html|this article]]</nowiki>
+
+Using powerstat, one can gather reasonable battery data and one is forced
+to run the test over a fairly long duration for better results. Powerstat
+is much like vmstat, but shows power consumption stats too. To install and use:
+
+<pre>
+sudo apt-get install powerstat
+</pre>
+
+Then ensure the device is not charging and run:
+
+<pre>
+powerstat
+</pre>
+
+or to see more process activity, use:
+
+<pre>
+sudo powerstat
+</pre>
+
+It is worth saying again that the values are derived from the battery and so
+are subject to the '''''limited accuracy''''' of the gas gauge in the device.
+
+See also <nowiki>[[http://kernel.ubuntu.com/~cking/powerstat/|powerstat]]</nowiki> and the powerstat man page.
+
+=== Estimating CPU power consumption ===
+
+It may be useful to get some idea of how much power is consumed when
+exercising the CPU on some devices.  The power-calibrate tool attempts
+to get an estimate of the power consumed for each 1% of CPU utilisation
+and for 1 wakeup context switch.  power-calibrate exercises the CPU multiple
+times and makes hundreds of battery capacity based power measurements and
+computes a linear best fit on the range of CPU load results to calculate
+the power utilisation. It also calculates the R^2 coefficient of
+determination, values approaching 1.0 indicate a good linear fit and hence
+some trust worthy results.
+
+The output can be dumped into a JSON formatted file that can be combined
+with the JSON output from health-check allowing one to roughly estimate
+the CPU power consumption of an application.
+
+For example:
+
+<pre>
+sudo add-apt-repository ppa:colin-king/white
+sudo apt-get update
+power-calibrate -c -o calibration.json
+
+CPU load  User  Nice   Sys  Idle    IO  Run Ctxt/s  IRQ/s  Watts  Volts   Amps
+ 10% x 1  13.2   0.0   2.2  84.5   0.1  1.2  328.0  200.5  0.609  3.771  0.162
+ 20% x 1  25.6   0.0   2.0  72.4   0.0  1.3  408.8  231.0  0.709  3.761  0.189
+ 30% x 1  25.1   0.0   2.4  72.5   0.1  1.4  476.2  255.0  0.753  3.754  0.201
+ 40% x 1  42.5   0.0   2.9  54.7   0.0  1.4  546.9  280.6  0.864  3.744  0.231
+ 50% x 1  36.1   0.0   2.6  61.3   0.0  1.6  612.3  297.9  0.993  3.734  0.266
+ 60% x 1  37.0   0.0   2.2  60.7   0.1  1.5  590.2  319.1  0.962  3.730  0.258
+ 70% x 1  35.4   0.0   0.7  63.9   0.1  1.8  375.8  334.3  1.090  3.721  0.293
+ 80% x 1  40.9   0.0   0.6  58.3   0.2  1.8  348.4  314.9  1.115  3.714  0.300
+ 90% x 1  45.8   0.0   0.6  53.4   0.2  1.9  347.2  344.2  1.255  3.705  0.339
+100% x 1  51.0   0.0   0.8  48.1   0.1  2.2  342.9  329.4  1.320  3.699  0.357
+
+Power (Watts) = (% CPU load * 0.018912) + 0.267133
+1% CPU load is about 0.018912 Watts (about 5.066016 mA)
+Coefficient of determination R^2 = 0.758722 (fair)
+</pre>
+
+'''NOTE:''' This can take around 1 hour to calibrate. Also, it is worth disabling
+deep sleep on phone devices using powerd-cli and setting the display to always
+on and suspending powerd-cli and then running power-calibrate.
+
+'''NOTE:''' Depending on the battery and device the values may be fair to good. If
+one requires accurate data then one has to resort to using a high precision
+multimeter instead.
+
+Once the device is calibrated, one can combine the data with health-check for a rough estimate of power consumption for a particular program's execution. E.g. gather data with health-check:
+
+<pre>
+sudo health-check -f -c -o unity.json -d 60 -p unity8
+</pre>
+And then combine these JSON files with the <nowiki>[[http://kernel.ubuntu.com/git?p=cking/power-calibrate.git;a=blob;f=scripts/power-calibrate-json-parse.py|script in the power-calibrate git repository]]</nowiki> as follows:
+
+<pre>
+./power-calibrate-json-parse.py calibration.json unity.json
+</pre>
+
+..and this computes an '''''estimated power estimate'''''.
+
+=== Ubuntu Phone Wakelock Detection ===
+
+Wakelocks on phone devices stop the device going into deep suspend. Deep
+suspend is the lowest power state except for turning the device off. The
+suspend-blocker tool can be used to examine wakelock utilisation and can
+also examine the kernel log to detect reasons for suspend failures or early
+suspend aborts. To use suspend-blocker:
+
+<pre>
+sudo add-apt-repository ppa:colin-king/white
+sudo apt-get update
+sudo apt-get install suspend-blocker
+</pre>
+
+==== Active Wakelock Detection ====
+
+suspend-blocker with the -w option is used to see what is keeping device from sleeping. For example, to monitor wakelocks for 120 seconds use:
+
+<pre>
+sudo suspend-blocker -w 120
+
+Wakelock                         Active   Count    Expire   Wakeup   Total    Sleep    Prevent
+Name                             count             count    count    time %   time %   time %
+mmc0_detect                          0.00     0.00     0.00     0.00     0.00     0.00     0.00
+msm_hsic_host                        0.00    23.00     0.00     0.00    29.34    29.34     0.00
+msm_otg                              0.00     0.00     0.00     0.00   100.00   100.00     0.00
+pm8921_eoc                           0.00     0.00     0.00     0.00   100.00   100.00     0.00
+qcom_rx_wakelock                     0.00    13.00    13.00     0.00     0.59     0.57     0.00
+qmuxd_port_wl_9                      0.00    23.00     0.00     0.00     0.00     0.00     0.00
+wlan                                 0.00     4.00     2.00     0.00     2.55     2.54     0.00
+Requested test duration: 120.00 seconds, actual duration: 120.11 seconds
+</pre>
+
+Note that this was run with USB + adb which blocks deep suspend, hence the
+msm_otg wakelock is 100% (totally blocking deep suspend). The larger the
+"Total time%" the greater % time the device has been blocked from deep
+suspend.  We need to aim to reduce these as much as possible.
+
+==== Kernel Log History ====
+
+suspend-blocker can also analyse the output from the kernel log to see the past history of wakeup activity, showing blocking wakelocks names, histogram of times between suspend and resume
+and a list of causes of resume:
+
+<pre>
+sudo add-apt-repository ppa:colin-king/white
+sudo apt-get update
+suspend-blocker -b -r -H /var/log/kern.log
+/var/log/kern.log:
+Suspend blocking wakelocks:
+  wlan                                3  60.00%
+  qcom_rx_wakelock                    2  40.00%
+
+Resume wakeup causes:
+
+Time between successful suspends:
+     0.000 -    0.124 seconds        73  31.06%
+     0.125 -    0.249 seconds         0   0.00%
+     0.250 -    0.499 seconds         3   1.28%
+     0.500 -    0.999 seconds         0   0.00%
+     1.000 -    1.999 seconds       152  64.68%
+     2.000 -    3.999 seconds         2   0.85%
+     4.000 -    7.999 seconds         2   0.85%
+     8.000 -   15.999 seconds         0   0.00%
+    16.000 -   31.999 seconds         1   0.43%
+    32.000 -   63.999 seconds         2   0.85%
+
+Duration of successful suspends:
+     0.250 -    0.499 seconds        17   7.20%
+     0.500 -    0.999 seconds        20   8.47%
+     1.000 -    1.999 seconds        67  28.39%
+     2.000 -    3.999 seconds        36  15.25%
+     4.000 -    7.999 seconds        55  23.31%
+     8.000 -   15.999 seconds        34  14.41%
+    16.000 -   31.999 seconds         7   2.97%
+
+Suspends:
+  270 suspends aborted (53.36%).
+  236 suspends succeeded (46.64%).
+  total time: 1071.260801 seconds (73.41%).
+  minimum: 0.399514 seconds.
+  maximum: 28.996670 seconds.
+  mean: 4.539241 seconds.
+  mode: 1 seconds.
+  median: 2 seconds.
+
+Time between successful suspends:
+  total time: 388.091768 seconds (26.59%).
+  minimum: 0.000793 seconds.
+  maximum: 63.177278 seconds.
+  mean: 1.651454 seconds.
+  mode: 1 seconds.
+  median: 1 seconds.
+</pre>
+
+Refer to <nowiki>[[http://kernel.ubuntu.com/~cking/suspend-blocker/|suspend-blocker]]</nowiki> or the suspend-blocker man page for more details.
+
+=== CPU utilisation ===
+
+There are many tools to look at CPU utilisation, such as top, vmstat, etc.
+cpustat is a very lightweight process monitoring tool that simply reports
+the per process CPU utilisation in terms of user time, system time and
+total time. It is less sophisticated than top, but has a smaller memory
+and CPU footprint, ideal for small devices such as low power phones.
+
+To use, install with:
+
+<pre>
+sudo add-apt-repository ppa:colin-king/white
+sudo apt-get update
+sudo apt-get install cpustat
+</pre>
+
+and run, for example, report CPU utilisation over 60 seconds just once:
+
+<pre>
+sudo cpustat 60 1
+  %CPU   %USR   %SYS   PID   Task
+  0.72   0.02   0.70  1080 /system/bin/mpdecision
+  0.35   0.23   0.12  2280 unity8
+  0.18   0.10   0.08  1450 /usr/lib/upower/upowerd
+  0.13   0.00   0.13  3893 [kworker/0:2]
+  0.13   0.00   0.13  3941 [kworker/0:3]
+  0.13   0.12   0.02  2238 /usr/lib/arm-linux-gnueabihf/indicator-power/indicator-power-service
+  0.12   0.00   0.12  4040 ./cpustat
+  0.12   0.08   0.03   726 dbus-daemon
+  0.10   0.05   0.05  2342 maliit-server
+  0.08   0.08   0.00  4038 [kworker/u:1]
+  0.07   0.05   0.02  1345 NetworkManager
+  0.07   0.03   0.03     1 /sbin/init
+  0.07   0.00   0.07   133 [mmcqd/0]
+  0.07   0.00   0.07   914 /lib/systemd/systemd-udevd
+  0.07   0.00   0.07  1887 init
+  0.05   0.00   0.05  1066 /sbin/healthd
+  0.05   0.00   0.05  3140 [kworker/0:1]
+  0.05   0.00   0.05  2669 [kworker/u:33]
+  0.03   0.00   0.03  1283 [MC_Thread]
+  0.03   0.02   0.02  1968 upstart-event-bridge
+  0.03   0.02   0.02  2016 upstart-dbus-bridge
+  0.03   0.03   0.00   893 /usr/bin/powerd
+  0.03   0.00   0.03  1079 /system/bin/thermald
+  0.03   0.02   0.02   908 upstart-udev-bridge
+  0.02   0.02   0.00  2250 /usr/lib/arm-linux-gnueabihf/indicator-datetime/indicator-datetime-service
+  0.02   0.00   0.02   707 rsyslogd
+  0.02   0.00   0.02  2227 /usr/lib/arm-linux-gnueabihf/indicator-messages/indicator-messages-service
+  0.02   0.02   0.00  2011 upstart-dbus-bridge
+  0.02   0.02   0.00  1071 /system/bin/rild
+  0.02   0.00   0.02  2281 /usr/lib/arm-linux-gnueabihf/indicator-network/indicator-network-service
+  0.02   0.00   0.02   852 [flush-179:0]
+  0.02   0.02   0.00  1984 /usr/lib/telepathy/mission-control-5
+  0.02   0.02   0.00   964 /usr/lib/accountsservice/accounts-daemon
+  0.02   0.02   0.00   699 upstart-file-bridge
+</pre>
+
+Also refer to <nowiki>[[http://kernel.ubuntu.com/~cking/cpustat/|cpustat]]</nowiki> and the cpustat man page.
+
+=== CPU P and C states ===
+
+Studying the time the processors spend at different performance states (P states) and different power states (C states) as well as interrupt activity can also help identify if an "idle" machine is actually busier than it should be.  Tools such as <nowiki>[[https://wiki.linaro.org/WorkingGroups/PowerManagement/Resources/Tools/Idlestat|idlestat]]</nowiki> (Ubuntu 14.10 onwards) can be helpful to identify busy states.
+
+<pre>
+sudo idlestat --trace -f trace.log -t 60 
+Total trace buffer: 1846688 kB
+Log is 60.069154 secs long with 23580 events
+clusterA@state	hits	      total(us)		avg(us)	min(us)	max(us)
+         C7-IVB	6707	    54894275.00	        8184.62	0.00	20103.00
+  core0@state	hits	      total(us)		avg(us)	min(us)	max(us)
+        C1-IVB	1	        1048.00	        1048.00	0.00	1048.00
+        C7-IVB	4764	    57593327.00	       12089.28	0.00	193461.00
+    cpu0@state	hits	      total(us)		avg(us)	min(us)	max(us)
+         C1-IVB	12	       22896.00	        1908.00	8.00	7980.00
+         C1E-IVB	33	       16155.00	         489.55	12.00	11194.00
+         C3-IVB	20	        6007.00	         300.35	69.00	443.00
+         C7-IVB	3239	    58182733.00	       17963.18	1.00	592587.00
+         2501	9	     1256644.00	      139627.11	1.00	1223175.00
+         2200	16	        4789.00	         299.31	1.00	3794.00
+         2100	7	         393.00	          56.14	17.00	93.00
+         2000	7	         190.00	          27.14	2.00	74.00
+         1400	38	        3564.00	          93.79	18.00	585.00
+         1200	3087	      542216.00	         175.64	1.00	12382.00
+    cpu0 wakeups 	name 		count
+         irq043	ahci           	18
+         irq045	i915           	16
+         irq009	acpi           	40
+
+...
+</pre>
+
+=== Filing Bugs ===
+
+If you identify rogue applications or daemons that are frequently looping on poll()/select() or needlessly doing frequent writes to disk then file a bug against the application and also add <nowiki>[[https://bugs.launchpad.net/ubuntu-power-consumption|"The Ubuntu Power Consumption Project"]]</nowiki> using "Also affects project".
+
+=== Analysis Techniques ===
+
+Tracking down issues in entire systems and individual programs may require some
+careful analysis. Below are some recommendations:
+
+==== Correlating measurements ====
+
+One can learn a lot about system activity by gathering data from several
+sources and correlating the data.  For example, gathering system activity
+data using vmstat, iostat as well as measuring power consumption using a
+multimeter.  To easily compare data, a simple trick is to find the min and
+max of each data source and normalise the data to a range of 0..1 and then
+compare data sources by simply plotting the normalised data.  This allows
+one to quickly spot trends, for example the number of interrupts is related
+to I/O activity and peaks in system CPU load and power consumption.
+
+==== Gather data multiple times ====
+
+Gathering data via multimeters or system tools should be run several times
+against known stable repeatable tests.  It is useful to then compare the
+samples and calculate the standard deviation of a set of results to see
+how much variation there is in the sample set.
+
+==== Double check results ====
+
+Simply put, do the results look sane?  Are they repeatable?  Never trust
+a single set of samples.  Is there a trend, for example, plotting CPU
+utilisation against power consumption -  is it linear, polynomial or
+exponential, or do you see lots of variations that mean the data is generally
+not stable?
+
+==== Ensure the test environment is "clean" ====
+
+Sporadic system activity can peturb results, so it is useful to try to
+create an test environment on the target device that is stable and not
+busy from other activity (such as cron jobs running).
+
+==== Assume Nothing ====
+
+Don't bring any pre-conceived ideas into the results. Don't try and
+make the results match your pre-conceived ideas - if there are anomalies
+in the results don't assume they are wrong, they may be hinting at something
+deeper that one has overlooked.

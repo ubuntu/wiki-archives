@@ -1,0 +1,297 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+== Introduction ==
+This page will show how to debug kernel bugs inside a QEMU/KVM instance.
+
+== Kernel debugging using QEMU/KVM instances ==
+
+=== Step #1: create a memory dump of the VM ===
+
+==== libvirt: virsh dump ====
+
+If the VM is running in a libvirt environment we can use "virsh dump" to
+generate a memory dump:
+<pre>
+ $ virsh dump --memory-only bionic_amd64 /tmp/vmcore.img
+
+ Domain bionic_amd64 dumped to /tmp/vmcore.img
+</pre>
+ 
+NOTE: the argument --memory-only is required to dump only the VM's memory, so
+that the resulting vmcore.img can be analized later by any gdb/crash tools.
+<pre>
+ $ crash /tmp/core.img ~/canonical/bcache/bad-kernel/vmlinux 
+ ...
+ cr1ash> 
+</pre>
+
+==== QMP ====
+If the VM is not running in a libvirt environment, it is possible to attach
+directly to the QEMU instance and generate the memory dump (similarly to the
+`virsh dump` method) using the QEMU Machine Protocol (QMP).
+
+QMP is a JSON-based protocol that allows external applications to control
+QEMU/KVM instances.
+
+To generate a memory dump make sure to start the qemu/kvm instance with the
+-qmp option:
+<pre>
+ $ qemu-system-x86_64 -qmp tcp:localhost:4444,server,nowait ...
+</pre>
+
+Now qemu will listen on port 4444 accepting QMP commands. Connect to the QMP
+port and send the following commands to generate a crash dump in
+/tmp/vmcore.img:
+<pre>
+ {"execute": "qmp_capabilities"}
+ {"execute":"dump-guest-memory","arguments":{"paging":false,"protocol":"file:/tmp/vmcore.img"}}
+</pre>
+
+Example:
+<pre>
+ $ telnet localhost 4444
+ Trying 127.0.0.1...
+ Connected to localhost.
+ Escape character is '^]'.
+ {"QMP": {"version": {"qemu": {"micro": 0, "minor": 0, "major": 4}, "package": "Debian 1:4.0+dfsg-0ubuntu5"}, "capabilities": ["oob"]}}
+ { "execute": "qmp_capabilities" }
+ {"return": {}}
+ {"execute":"dump-guest-memory","arguments":{"paging":false,"protocol":"file:/tmp/vmcore.img"}}
+ ...
+ {"return": {}}
+ ^]
+ telnet> quit
+ Connection closed.
+ $ file /tmp/vmcore.img
+ /tmp/vmcore.img: ELF 64-bit LSB core file, x86-64, version 1 (SYSV), SVR4-style
+</pre>
+
+=== Step #2: analize the memory dump using crash ===
+
+Once the memory dump has been generated you need the vmlinux of the running
+kernel and then you can attach to it using `crash`.
+
+Make sure to install `crash`:
+<pre>
+ $ apt install crash
+</pre>
+
+Examine the memory dump reading the symbols from vmlinux:
+<pre>
+ $ crash /tmp/vmcore.img vmlinux
+</pre>
+
+== Example: track down a bcache deadlock using a memory dump ==
+<pre>
+ $ crash /tmp/vmcore.img vmlinux
+
+      KERNEL: vmlinux
+     DUMPFILE: vmcore.img
+         CPUS: 2
+         DATE: Tue Aug  6 12:15:22 2019
+       UPTIME: 00:06:27
+ LOAD AVERAGE: 2.00, 1.81, 1.06
+        TASKS: 152
+     NODENAME: ubuntu
+      RELEASE: 5.3.0-050300rc3-generic
+      VERSION: #201908042232 SMP Tue Aug 6 09:32:11 UTC 2019
+      MACHINE: x86_64  (1992 Mhz)
+       MEMORY: 1 GB
+        PANIC: ""
+          PID: 0
+      COMMAND: "swapper/0"
+         TASK: ffffffffa6413780  (1 of 2)  [THREAD_INFO: ffffffffa6413780]
+          CPU: 0
+        STATE: TASK_RUNNING (ACTIVE)
+      WARNING: panic task not found
+
+ crash> dmesg
+ ...
+ [  133.771761] INFO: task python3:4714 blocked for more than 10 seconds.
+ [  133.773836]       Not tainted 5.3.0-050300rc3-generic #201908042232
+ [  133.776172] "echo 0 > /proc/sys/kernel/hung_task_timeout_secs" disables this message.
+ [  133.780275] python3         D    0  4714   1589 0x00004000
+ [  133.780283] Call Trace:
+ [  133.780361]  __schedule+0x2a8/0x670
+ [  133.780370]  ? __switch_to_asm+0x40/0x70
+ [  133.780375]  schedule+0x2d/0x90
+ [  133.780398]  bch_bucket_alloc+0xe5/0x370 [bcache]
+ [  133.780440]  ? wait_woken+0x80/0x80
+ [  133.780454]  __bch_bucket_alloc_set+0x10d/0x160 [bcache]
+ [  133.780467]  bch_bucket_alloc_set+0x4e/0x70 [bcache]
+ [  133.780486]  __uuid_write+0x61/0x180 [bcache]
+ [  133.780504]  ? __write_super+0x154/0x190 [bcache]
+ [  133.780519]  bch_uuid_write+0x16/0x40 [bcache]
+ [  133.780536]  __cached_dev_store+0x668/0x8c0 [bcache]
+ [  133.780552]  bch_cached_dev_store+0x46/0x110 [bcache]
+ [  133.780590]  sysfs_kf_write+0x3c/0x50
+ [  133.780596]  kernfs_fop_write+0x125/0x1a0
+ [  133.780618]  __vfs_write+0x1b/0x40
+ [  133.780622]  vfs_write+0xb1/0x1a0
+ [  133.780626]  ksys_write+0xa7/0xe0
+ [  133.780630]  __x64_sys_write+0x1a/0x20
+ [  133.780652]  do_syscall_64+0x5a/0x130
+ [  133.780659]  entry_SYSCALL_64_after_hwframe+0x44/0xa9
+ [  133.780715] INFO: task bcache_allocato:7289 blocked for more than 10 seconds.
+ [  133.784130]       Not tainted 5.3.0-050300rc3-generic #201908042232
+ [  133.787863] "echo 0 > /proc/sys/kernel/hung_task_timeout_secs" disables this message.
+ [  133.791743] bcache_allocato D    0  7289      2 0x80004000
+ [  133.791751] Call Trace:
+ [  133.791765]  __schedule+0x2a8/0x670
+ [  133.791792]  ? kvm_sched_clock_read+0x11/0x20
+ [  133.791798]  schedule+0x2d/0x90
+ [  133.791821]  bch_bucket_alloc+0xe5/0x370 [bcache]
+ [  133.791827]  ? wait_woken+0x80/0x80
+ [  133.791848]  bch_prio_write+0x1dc/0x390 [bcache]
+ [  133.791862]  bch_allocator_thread+0x233/0x490 [bcache]
+ [  133.791881]  kthread+0x121/0x140
+ [  133.791894]  ? invalidate_buckets+0x890/0x890 [bcache]
+ [  133.791899]  ? kthread_park+0xb0/0xb0
+ [  133.791906]  ret_from_fork+0x35/0x40
+</pre>
+
+The system doesn't show any panic, but looking at dmesg we can see the usual
+hung task timeout trace. In this particular case a "python3" process and a
+kernel thread "bcache_allocator" are both stuck in D state, potentially waiting
+for an event that never happens.
+
+Let's take a look at the stack trace of those PIDs:
+<pre>
+ crash> bt 4714
+ PID: 4714   TASK: ffff94dafa634140  CPU: 0   COMMAND: "python3"
+## 0 [ffffafd540543b50] __schedule at ffffffffa5886ba8
+## 1 [ffffafd540543be0] schedule at ffffffffa5886f9d
+## 2 [ffffafd540543bf8] bch_bucket_alloc at ffffffffc06e6105 [bcache]
+## 3 [ffffafd540543c60] __bch_bucket_alloc_set at ffffffffc06e657d [bcache]
+## 4 [ffffafd540543cb0] bch_bucket_alloc_set at ffffffffc06e661e [bcache]
+## 5 [ffffafd540543cf0] __uuid_write at ffffffffc06fb241 [bcache]
+## 6 [ffffafd540543d98] bch_uuid_write at ffffffffc06fb646 [bcache]
+## 7 [ffffafd540543db8] __cached_dev_store at ffffffffc0701eb8 [bcache]
+## 8 [ffffafd540543e10] bch_cached_dev_store at ffffffffc0702156 [bcache]
+## 9 [ffffafd540543e40] sysfs_kf_write at ffffffffa516bf3c
+# 10 [ffffafd540543e50] kernfs_fop_write at ffffffffa516b895
+# 11 [ffffafd540543e90] __vfs_write at ffffffffa50c7c1b
+# 12 [ffffafd540543ea0] vfs_write at ffffffffa50caaf1
+# 13 [ffffafd540543ed8] ksys_write at ffffffffa50cadf7
+# 14 [ffffafd540543f20] __x64_sys_write at ffffffffa50cae4a
+# 15 [ffffafd540543f30] do_syscall_64 at ffffffffa4e0430a
+# 16 [ffffafd540543f50] entry_SYSCALL_64_after_hwframe at ffffffffa5a0008c
+ 
+ crash> bt 7289
+ PID: 7289   TASK: ffff94daf8c9ab80  CPU: 0   COMMAND: "bcache_allocato"
+## 0 [ffffafd542fafd10] __schedule at ffffffffa5886ba8
+## 1 [ffffafd542fafda0] schedule at ffffffffa5886f9d
+## 2 [ffffafd542fafdb8] bch_bucket_alloc at ffffffffc06e6105 [bcache]
+## 3 [ffffafd542fafe20] bch_prio_write at ffffffffc06fbd5c [bcache]
+## 4 [ffffafd542fafeb0] bch_allocator_thread at ffffffffc06e5dc3 [bcache]
+## 5 [ffffafd542faff08] kthread at ffffffffa4ec04f1
+## 6 [ffffafd542faff50] ret_from_fork at ffffffffa5a00215
+</pre>
+
+This confirms what we can see from dmesg, both tasks are still stuck in the
+same spot.
+
+If we inspect the source code of bch_bucket_alloc() we can see the following:
+<pre>
+ long bch_bucket_alloc(struct cache *ca, unsigned int reserve, bool wait)
+ {
+         DEFINE_WAIT(w);
+         struct bucket *b;
+         long r;
+ 
+ 
+         /* No allocation if CACHE_SET_IO_DISABLE bit is set */
+         if (unlikely(test_bit(CACHE_SET_IO_DISABLE, &ca->set->flags)))
+                 return -1;
+ 
+         /* fastpath */
+         if (fifo_pop(&ca->free[RESERVE_NONE], r) ||
+             fifo_pop(&ca->free[reserve], r))
+                 goto out;
+ 
+         if (!wait) {
+                 trace_bcache_alloc_fail(ca, reserve);
+                 return -1;
+         }
+ 
+         do {
+                 prepare_to_wait(&ca->set->bucket_wait, &w,
+                                 TASK_UNINTERRUPTIBLE);
+ 
+                 mutex_unlock(&ca->set->bucket_lock);
+                 schedule();
+                 mutex_lock(&ca->set->bucket_lock);
+         } while (!fifo_pop(&ca->free[RESERVE_NONE], r) &&
+                  !fifo_pop(&ca->free[reserve], r));
+ 
+         finish_wait(&ca->set->bucket_wait, &w);
+ ...
+</pre>
+The "wait" path is taken when we can't pop any item from ca->free, and the
+particular wait queue where our tasks are sleeping is called bucket_wait.
+
+Now we can search in the code where the wake_up event for this particular wait
+queue is sent:
+<pre>
+ $ git grep "wake_up.*bucket_wait"
+ drivers/md/bcache/alloc.c:                      wake_up(&ca->set->bucket_wait);
+</pre>
+
+And with a simple search in that file we can easily identify that 
+the wake up can only be sent by bch_allocator_thread:
+<pre>
+ static int bch_allocator_thread(void *arg)
+ {
+         struct cache *ca = arg;
+ 
+         mutex_lock(&ca->set->bucket_lock);
+ 
+         while (1) {
+                 /*
+********** First, we pull buckets off of the unused and free_inc lists,
+********** possibly issue discards to them, then we add the bucket to
+********** the free list:
+********** /
+                 while (1) {
+                         long bucket;
+ 
+                         if (!fifo_pop(&ca->free_inc, bucket))
+                                 break;
+ 
+                         if (ca->discard) {
+                                 mutex_unlock(&ca->set->bucket_lock);
+                                 blkdev_issue_discard(ca->bdev,
+                                         bucket_to_sector(ca->set, bucket),
+                                         ca->sb.bucket_size, GFP_KERNEL, 0);
+                                 mutex_lock(&ca->set->bucket_lock);
+                         }
+ 
+                         allocator_wait(ca, bch_allocator_push(ca, bucket));
+                         wake_up(&ca->set->btree_cache_wait);
+                         wake_up(&ca->set->bucket_wait);
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                 }
+ ...
+</pre>
+
+However, looking back at the stack trace of bcache_allocator we can see that
+bch_bucket_alloc() was called by the bch_allocator_thread() itself, and it's
+waiting on a wake up event that should be sent by itself, but it's not
+possible, because it's sleeping, therefore we have a deadlock.
+
+== Conclusion ==
+In this tutorial we have seen how to generate a memory dump of a running
+QEMU/KVM instance and use the debugging tool "crash" to inspect the system and
+track down a deadlock condition.
+
+== See also ==
+https://wiki.qemu.org/Documentation/QMP

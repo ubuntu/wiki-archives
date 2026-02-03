@@ -1,0 +1,106 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+=== Debugging USB Problems ===
+
+==== Basic Information ====
+
+To get a list of currently attached USB devices (including hubs) use the following command:
+
+<pre>
+sudo lsusb -v
+</pre>
+
+Another variation, which results in a slightly more condensed format but will also show which driver currently is used for the devices can be received by:
+
+<pre>
+cat /proc/bus/usb/devices
+</pre>
+
+If there is no file like that, the usbfs needs to be mounted:
+
+<pre>
+sudo mount -t usbfs none /proc/bus/usb
+</pre>
+
+==== Getting USB Tracedata ====
+
+Recent kernels have a facility called '''usbmon''' which can be used to gather information about traffic on the USB bus(es). To use it, first mount the debug filesystem: <pre>
+sudo mount -t debugfs none /sys/kernel/debug
+</pre>
+
+If there is no '''/sys/kernel/debug/usb/usbmon/''' directory after this, the usbmon module must be loaded. One may do this via a terminal: <pre>
+sudo modprobe usbmon
+</pre> Otherwise there are several file in the usbmon directory. The file names consist of a number and a letter. The number relates to the USB bus (with 0 being sort of the master, which relates to all buses). The letter is either s, u or t. The s file contains a generic event overview. The t and u files will stream trace data. With t being the older format, while u is currently preferred.
+
+Now, in order to gather debug data, one can either use the master file 0u (but that contains data from all devices) or find out the bus on which a device shows up (with one of the basic information sources) and then using the trace file for that bus. If, for example the device is on bus 2, the following command will write trace data into a file:
+
+<pre>
+sudo cat /sys/kernel/debug/usb/usbmon/2u >bus2data.txt
+</pre>
+
+To end tracing, just kill the command (CTRL-C).
+
+==== Looking at USB Storage Traffic ====
+
+Probably most USB storage device will use the bulk transport layer. Below the transport layer there might be different protocols like ATA or SCSI but luckily (for the purpose of debugging) all the commands seen on the trace data are SCSI. As examples on different protocols, here are the relevant parts of lsusb from USB storage I got:
+
+<pre>
+Bus 001 Device 042: ID 067b:2517 Prolific Technology, Inc. Flash Disk Mass Storage Device
+...
+      bInterfaceClass         8 Mass Storage
+      bInterfaceSubClass      5 SFF-8070i
+      bInterfaceProtocol     80
+
+Bus 001 Device 039: ID 04b4:6830 Cypress Semiconductor Corp. CY7C68300A EZ-USB AT2 USB 2.0 to ATA/ATAPI
+...
+      bInterfaceClass         8 Mass Storage
+      bInterfaceSubClass      6 SCSI
+      bInterfaceProtocol     80 Bulk (Zip)
+</pre>
+
+Even as both drives have a different interface subclass, both use bulk transfers as the protocol and the command blocks and their results are using the SCSI commands protocol.
+Looking at some examples, there is a certain pattern in the messages going forth and back. Anything going through the transport layer will trigger two lines in the trace.
+
+<pre>
+dd176480 4157531894 S Bo:1:042:1 -115 31 = 55534243 01000000 24000000 80000c12 00000024 00000000 00000000 000000
+dd176480 4157532036 C Bo:1:042:1 0 31 >
+dd176380 4157532077 S Bi:1:042:2 -115 36 <
+dd176380 4157532790 C Bi:1:042:2 0 36 = 00800001 37000000 436f7273 61697220 466c6173 6820566f 79616765 72202020
+dd176480 4157532830 S Bi:1:042:2 -115 13 <
+dd176480 4157532898 C Bi:1:042:2 0 13 = 55534253 01000000 00000000 00
+</pre>
+
+All lines print a reference (pointer) to the USB Request Block (URB), a timestamp, a submission type (Submission or Callback), the data direction (Bulk in/out), the <bus>:<device>:<endpoint>, a status and the length of the transfer.
+
+The first line starts sending a command block. The first word is just an identifier (which is little endian, so looking for that in the source code it would be 0x43425355 "USBC"). The second word is a tag which will see a matching tag on the ending command status. The next word (little endian again) is the size of the data buffer. This is followed by one byte that contains flags (actually it seems to use only one bit to tell whether the command sends (0) or receives (1)). After the flags, comes the logical unit number to which the command is sent. This is usually 0 but some devices have multiple LUNs. Then the size of the actual command string and the command and finally a variable number of command arguments.
+
+<pre>
++-------------------------------------------------------------------------------+
+|                                 Command Block                                 |
++----------+----------+----------+----+----+----+----+--------------------------+
+| 55534243 | TTTTTTTT | SSSSSSSS | FF | UU | LL | CC | 112233445566778899aabbcc |
++----------+----------+----------+----+----+----+----+--------------------------+
+</pre>
+
+As seen in the example, the length of the command block is always 31 bytes and the return code to the first step is always -115 (command in progress). When the transport layer has processed that sequence it writes out the following line which shows that it has been processed successfully.
+
+The submission of a bulk in transfer starts the response sequence from the device and the callback to that prints out, what the transport layer received. This data directly relates to the command sent before.
+
+Each communication is finished by receiving the command status for it. Again this is started by a magic identification word and followed by a tag (the same as in the command block). Then followed by the number of bytes not transferred (residue which is little endian too) and the overall status.
+
+<pre>
++-------------------------------------+
+|           Command Status            |
++----------+----------+----------+----+
+| 55534253 | TTTTTTTT | RRRRRRRR | SS |
++----------+----------+----------+----+
+</pre>

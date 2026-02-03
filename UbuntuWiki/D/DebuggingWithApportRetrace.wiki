@@ -1,0 +1,121 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+{| class="wikitable"
+|-
+| <tablestyle="float:right; font-size: 0.9em; width:30%; background:#F1F1ED; background-image: url('https://librarian.launchpad.net/1812570/bugsquad.png'); background-repeat: no-repeat; background-position:  98% 0.5ex; margin: 0 0 1em 1em; padding: 0.5em;">'''Contents'''<<BR>>
+|}
+
+== Introduction ==
+
+'''Note''' all examples shown here were created by forcing a SIGSEGV on ''gcalctool'' (via 'kill -11 `pidof gcaltool`'). Adjust as needed the crash filename.
+
+Sometimes a program crash is refused by <nowiki>[[Apport]]</nowiki> -- for example, an assertion failure. In these circumstances, the only viable way to find what happened (following our example, what caused the assertion failure) is to manually run <nowiki>[[http://www.gnu.org/software/gdb/|GDB]]</nowiki> against the coredump. 
+
+But -- again most of the times -- we do not have the necessary symbol tables installed to decipher a stack trace nicely, and might see something like:
+
+<pre>
+Stacktrace:
+# 0  0x00007f54c9452f58 in *__GI___poll (fds=0x1d6f530, nfds=8, 
+     timeout=<value optimized out>) at ../sysdeps/unix/sysv/linux/poll.c:83
+         oldtype = <value optimized out>
+         result = <value optimized out>
+# 1  0x00007f54c995a4a9 in ?? () from /lib/libglib-2.0.so.0
+ No symbol table info available.
+# 2  0x00007f54c995ac55 in g_main_loop_run () from /lib/libglib-2.0.so.0
+ No symbol table info available.
+# 3  0x00007f54cab50af7 in gtk_main () from /usr/lib/libgtk-x11-2.0.so.0
+ No symbol table info available.
+# 4  0x000000000040ad0d in main ()
+ No symbol table info available.
+</pre>
+
+Note the "No symbol table info available" lines. We know, from the first frame, that the program was waiting for something. But we have *no* idea of where it was in the other frames. In other words: due to the lack of symbol tables, this stacktrace is worthless.
+
+This is where Apport can help us. Instead of manually finding all needed symbol tables (via installing all needed debug symbols packages), we can leverage 'apport-retrace' to do the hard work for us.
+
+/!\ debug packages -- the ones with a package name ending in '-dbg' or '-dbgsym' are '''big'''. They may eat up a few hundreds of MBytes of disk space. For example, this is the view of my ''/usr'' partition before I installed the debug packages for gcalctool:
+    <pre>
+Filesystem           1K-blocks      Used Available Use% Mounted on
+/dev/mapper/sys-usr   15481840   3994040  10701368  28% /usr
+</pre> and this is after  -- about 128MBytes were used:
+    <pre>
+Filesystem           1K-blocks      Used Available Use% Mounted on
+/dev/mapper/sys-usr   15481840   4139108  10556300  29% /usr
+</pre>
+
+=== Using apport-retrace ===
+Now, for any package to be installed, you must be running as root (or under a ''fakeroot'' environment, not discussed here). So we run:
+<pre>
+cerdea@xango2:~$ sudo apport-retrace -o trash /var/crash/_usr_bin_gcalctool.1000.crash 
+WARNING: package libsepol1-dbgsym not available
+</pre>
+
+/!\ we could also run 'sudo apport-retrace -g /var/crash/_usr_bin_gcalctool.1000.crash', but it is not a very good idea to run GDB under root -- unless really needed.
+
+(...) those are the debug symbols packages that would be needed, but could not be found. Hopefully, they will not matter. Keeping on.
+<pre>
+WARNING: package perl-base-dbgsym not available
+Extracting templates from packages: 100%
+(Reading database ... 283513 files and directories currently installed.)
+Removing libc6-dbg ...
+Selecting previously deselected package busybox-initramfs-dbgsym.
+(Reading database ... 282933 files and directories currently installed.)
+Unpacking busybox-initramfs-dbgsym (from .../busybox-initramfs-dbgsym_1%3a1.13.3-1ubuntu9_amd64.ddeb) ...
+</pre>
+(...) humongous list of symbols packages cut off for sanity
+
+Now we can run, under our common userId, a GDB session on the crash:
+<pre>
+apport-retrace -g /var/crash/_usr_bin_gcalctool.1000.crash
+
+Setting up libvorbisfile3-dbgsym (1.2.3-3ubuntu1) ...
+GNU gdb (GDB) 7.1-ubuntu
+Copyright (C) 2010 Free Software Foundation, Inc.
+License GPLv3+: GNU GPL version 3 or later <http://gnu.org/licenses/gpl.html>
+This is free software: you are free to change and redistribute it.
+There is NO WARRANTY, to the extent permitted by law.  Type "show copying"
+and "show warranty" for details.
+This GDB was configured as "x86_64-linux-gnu".
+For bug reporting instructions, please see:
+<http://www.gnu.org/software/gdb/bugs/>.
+Reading symbols from /usr/bin/gcalctool...Reading symbols from /usr/lib/debug/usr/bin/gcalctool...done.
+done.
+[New Thread 6828]
+warning: Can't read pathname for load map: Input/output error.
+Reading symbols from /usr/lib/liblaunchpad-integration.so.1...Reading symbols from /usr/lib/debug/usr/lib/liblaunchpad-integration.so.1.0.0...done.
+done.
+Loaded symbols for /usr/lib/liblaunchpad-integration.so.1
+</pre>
+(...) now it is GDB telling us which symbol tables were read
+<pre>
+Reading symbols from /lib/libbz2.so.1.0...(no debugging symbols found)...done.
+Loaded symbols for /lib/libbz2.so.1.0
+Core was generated by `gcalctool'.
+Program terminated with signal 11, Segmentation fault.
+    at ../sysdeps/unix/sysv/linux/poll.c:83
+83	../sysdeps/unix/sysv/linux/poll.c: No such file or directory.
+	in ../sysdeps/unix/sysv/linux/poll.c
+(gdb) 
+
+</pre>
+GDB nicely prints out the first stack frame, and we are at the GDB prompt.  Now we ask for a backtrace:
+<pre>
+(gdb) bt
+    at ../sysdeps/unix/sysv/linux/poll.c:83
+(gdb) 
+</pre>
+Oh wonder! we now see the frames resolved -- except for #1, sigh, for which there was no debug symbol package available. Sometimes this happens. If the resulting backtrace (with some missing symbols) is usable or not will depend on what the problem is, and how important would be the missing frame. In this example, missing the second frame would probably be a hard hit on a real issue.
+
+What do do from here on would depend on the issue...
+
+----
+CategoryBugSquad
+CategoryDebugging

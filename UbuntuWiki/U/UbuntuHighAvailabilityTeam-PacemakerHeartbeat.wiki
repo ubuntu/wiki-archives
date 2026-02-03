@@ -1,0 +1,146 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+For the sample configuration we will have two nodes called ''ha01'' and ''ha02'', and we will service an IP address, that we will call the Virtual IP address (VIP), on an '''active / passive''' configuration. Both nodes will need to have name resolution configured either through DNS or the ''/etc/hosts'' file. 
+
+=== Installing Pacemaker-Heartbeat ===
+
+First of all, we need to add the repositories to be able to install heartbeat. We add the following to /etc/apt/sources.list
+
+<pre>
+deb http://ppa.launchpad.net/ubuntu-ha/ppa/ubuntu karmic main
+deb-src http://ppa.launchpad.net/ubuntu-ha/ppa/ubuntu karmic main
+</pre>
+
+Then, we issue the following:
+
+<pre>
+sudo apt-key adv --recv-keys --keyserver keyserver.ubuntu.com B64F0AFA
+</pre>
+
+Now, we can install pacemaker-heartbeat:
+
+<pre>
+sudo apt-get update && sudo apt-get install pacemaker-heartbeat
+</pre>
+
+=== Configuring ===
+
+Pacemaker-Heartbeat needs 3 main configuration files. These are /etc/ha.d/authkeys, /etc/ha.d/ha.cf, and /var/lib/heartbeat/crm/cib.xml. There is a fourth configuration file, /etc/logd.cf, which contains the log settings.
+
+* On the first host, edit /etc/ha.d/authekys. This file is the same in all Pacemaker-Heartbeat style configurations. It stores the  authentication information that will be used in the cluster nodes.
+
+<pre>
+auth 1
+1 md5 DesiredPassword
+</pre>
+
+* Then, change permissions of the file:
+
+<pre>
+sudo chmod 600 /etc/ha.d/authkeys
+</pre>
+
+* Then, we need to create the file which has the logging configurations (/etc/logd.cf):
+
+<pre>
+logfile /var/log/ha-log
+</pre>
+
+or do as root
+
+<pre>
+sed -e 's/#logfile*/logfile/' /usr/share/doc/heartbeat/logd.cf > /etc/logd.cf
+</pre>
+
+* Then, edit /etc/ha.d/ha.cf with the following:
+
+<pre>
+use_logd on
+udpport 694
+keepalive 2
+warntime 15
+deadtime 30
+initdead 30
+mcast eth0 239.0.0.43 694 1 0
+node ha01 ha02
+crm respawn
+</pre>
+
+* To finish, copy all configuration files to the second node:
+
+<pre>
+scp /etc/ha.d/authkeys ha02:~
+scp /etc/ha.d/ha.cf ha02:~
+scp /etc/logd.cf ha02:~
+</pre>
+
+* And move then to the corresponding directories in the second node.
+
+<pre>
+sudo mv authkeys /etc/ha.d/
+sudo mv ha.cf /etc/ha.d/
+sudo mv logd.cf /etc/
+</pre>
+
+* Then, start Heartbeat and wait for it to make intra cluster communication so that we can add the service to the cluster resources manager.
+
+<pre>
+sudo /etc/init.d/heartbeat start
+</pre>
+
+* Once it has made intra cluster configuration, specify some global options for the cluster resource manager:
+
+<pre>
+crm_attribute --attr-name symmetric-cluster --attr-value true
+crm_attribute --attr-name default-resource-stickiness --attr-value INFINITY
+crm_attribute --attr-name stonith-enabled --attr-value false
+</pre>
+
+* Then, edit the following file /tmp/resources.xml, which configuration parameters for the resource:
+
+<pre>
+	<group id="group_1">
+         <primitive class="ocf" id="VIP_eth0" provider="heartbeat" type="IPaddr2">
+           <operations>
+             <op id="VIP_eth0_mon" interval="5s" name="monitor" timeout="5s"/>
+           </operations>
+           <instance_attributes id="VIP_eth2_inst_attr">
+               <nvpair id="VIP_eth0_attr_0" name="ip" value="192.168.0.100"/>
+               <nvpair id="VIP_eth0_attr_1" name="netmask" value="24"/>
+               <nvpair id="VIP_eth0_attr_2" name="nic" value="eth0"/>
+           </instance_attributes>
+         </primitive>
+       	</group>
+</pre>
+
+* After creating above file, you need to tell Heartbeat to add it to the cluster configuration.
+
+<pre>
+cibadmin -o resources -C -x /tmp/resources.xml
+</pre>
+
+* Finally, we need to edit the following file again, /tmp/resources.xml, which will specify the constraints, that will tell the Cluster Resource Manager how it should failover the services.
+
+<pre>
+	<constraints>
+       	 <rsc_location id="rsc_location_group_1" rsc="group_1">
+          <rule id="prefered_location_group_1" score="100">
+           <expression attribute="#uname" id="prefered_location_group_1_expr" operation="eq" value="ha01"/>
+          </rule>
+       	 </rsc_location>
+	</constraints>
+</pre>
+
+After editing above file, you need to tell Heartbeat to add it to the cluster configuration.
+
+<pre>
+cibadmin -o constraints -C -x /tmp/resources.xml
+</pre>

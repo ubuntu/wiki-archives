@@ -1,0 +1,151 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+== System Contacts ==
+
+=== Key Requirements ===
+The following have been identified as key requirements and components that are needed in the Ubuntu Touch Contacts infrastructure:
+
+==== Centralized Contacts Service ====
+
+* Centralized access to contacts from multiple clients without requiring each to have own copy in memory. (telephony-app, people lens, etc..)
+* API’s friendly to both Qt/QML, WebApps, and system components
+* Ability for clients to query contacts based on pre-defined set of attributes (i.e. first name, last name, phone number).
+* Asynchronous results/partial result sets support in order to support performance and scalability
+* Event notification for changes to the underlying datastore so interested clients be notified
+* Basic CRUD operations on contacts
+
+==== Contact Aggregation ====
+
+* Unified Address Book - aggregation of contacts from multiple sources into single “meta-contact” view
+** Local Contacts
+** Ubuntu One Contacts
+** Google Contacts
+** Facebook friends
+** Twitter friends you follow
+** Telepathy contacts
+** Other TBD sources
+* Manual merging of contacts
+* Provide offline access to all contacts regardless of their data source
+
+==== Contact Exchange ====
+
+* Import from multiple data sources
+* Sync local and remote contacts: All changes on the contacts should be merged with the server information, if the server has changed since the last sync the changes on the server must be merged on the device
+
+==== Use cases ====
+
+* People lens displays contacts with latest facebook status update and tweets
+* Telephony app shows unified address book with contacts from multiple sources
+* Telephony app shows contacts with latest facebook status update and tweets
+* third-party apps sync additional contacts to the phone (e.g. LinkedIn, Skype...)
+* third-party app wants to display a contact chooser widget to allow scheduling a meeting
+* Easy way to look up a contact given their phone number
+* import / export / send contacts
+* need an API to query contacts
+
+==== Data Sources ====
+Define the list of supported sources for contacts, and what release they are required for:
+
+* SIM card
+* Google
+* Local contacts
+* U1
+* Facebook friends
+* Twitter - people you follow
+
+=== Analysis of existing components ===
+
+==== EDS ====
+Evolution Data Server (EDS) is used in the current Ubuntu Touch solution for contacts, but has some issues as described below. However it has been <nowiki>[[http://blogs.gnome.org/tvb/2013/01/15/getting-your-contacts-right-now/ | improved significantly]]</nowiki> in version 3.8 to address some of it’s memory and performance limitations. This makes it a lot more compelling for us to continue to use as part of the  Ubuntu Touch solution as it has many inherent advantages:
+
+* convergence with desktop environment
+* existing support for Ubuntu Online Accounts, Ubuntu One contacts, and Google contacts
+* pluggable architecture for other data sources
+* support exists for <nowiki>[[https://syncevolution.org/ | SyncEvolution]]</nowiki>
+* support for indexed look ups for fast access (i.e. look contact up based on phone number)
+
+Some of the negatives are:
+* It’s architecture is an address book (database) per data source, and does not support contact aggregation across address books
+* Performance issues (most have been addressed in version 3.8)
+* version 3.6 used xml file for caching of contacts which results in poor performance
+* version 3.6 did not use sqllite for backend database but instead BerkelyDB
+serialization between client and server was slow
+* Does not support partial results sets, only async result sets
+
+==== Akonadi ====
+<nowiki>[[http://community.kde.org/KDE_PIM/Akonadi | Akonadi]]</nowiki> is the PIM server used by KDE. We looked into this and inquired with people who have used it extensively in the past. The consensus was that it is overly complicated for what we want to do, as it’s more of a generic server with capabilities for mail, contacts, calendaring and synchronization. There were reports of instability as well. Also, the client libraries for accessing the server are tied to KDE and qt4.x libraries and would have to be modified significantly for us to use in our environment.
+
+=== Solutions ===
+
+==== Current Implementation ====
+
+'''Telephony App->QContacts->QtFolks->Folks->EDS'''
+
+The current implementation only meets some of the key requirements set out above. It is documented for reference and is not expected to be used as-is going forward. 
+
+All contacts information is stored in <nowiki>[[http://projects.gnome.org/evolution/arch.shtml | EDS]]</nowiki> and accessed through <nowiki>[[https://live.gnome.org/Folks/|Folks]]</nowiki>. Online contacts are merged automatically by Folks based on contact details.
+
+===== Pros =====
+
+All libraries already exists (avoid recreate the wheel);
+Some of the libraries are well maintained by community with bug fixes, new features every day and large use by other programs;
+
+===== Cons =====
+
+* We have so many layers:  EDS -> FOLKS -> QtFolks -> QContacts, this generate so many effort to maintain the code, implement new features or bug fixes.
+* People lens duplicates much of the code and has it’s own copy of contacts in memory
+* Folks keep all contacts in memory for each client (People Lens, Telephony App, etc...);
+* Telephony app uses QtFolks and QContacts to access the contacts information, which causes another copy of contacts in memory due the QContacts implementation;
+* The QtFolks is abandoned by the community since : August 25 2011 
+* QtContacts does not have a maintainer upstream
+* EDS does not sync the contacts online;
+* EDS performance is poor. Cache is stored in xml file.
+* No partial results supported.
+* There is no way to merge contacts manually;
+* The application is not able to manage/access the folks matching and merging APIs (for possibly merging telepathy contacts with EDS ones) 
+
+=== Proposed Implementation ===
+The proposed solution is as pictured in the following diagram:
+
+<nowiki>[[File:Contacts Architecture Revised.png]]</nowiki>
+
+==== Contacts Service ====
+The Contacts Service is the main daemon that exposes a dbus api to clients. This api will support all the of key requirements listed in the requirements sections (query, crud, paginated results. In addition, it will provide access to both a single address book or a“unified” address book spanning multiple content provider backends. The api to be exposed by the service needs to be defined. We should look at the UbuntuForAndroid api, as it was a dbus api that supported async queries and paginated result sets. In addition we should look at the api defined by Patrick Ohnly as part of the syncevolution/ivi project <nowiki>[[http://comments.gmane.org/gmane.comp.mobile.syncevolution/4009 | defined here]]</nowiki>.
+
+==== Aggregator ====
+This is a thin layer that sits above EDS and is responsible for aggregating contacts from EDS. The aggregator is necessary to support the unified address book requirement. It is done on the server side to prevent each client from having to individually manage address books. 
+
+The aggregator will interact with EDS via the Direct Read Access that was introduced in EDS 3.8 (see blog post <nowiki>[[http://blogs.gnome.org/tvb/2013/01/15/getting-your-contacts-right-now/ | here]]</nowiki>) to save on any dbus interaction at this level.
+
+The current implementation used in ubuntu-touch for the aggregator is Folks.
+
+==== EDS ====
+<nowiki>[[http://projects.gnome.org/evolution/arch.shtml | EDS]]</nowiki> will be used as the main data server, but it’s api’s will not be exposed directly by the Contacts Service. We will use version > 3.8 to gain the benefits of the <nowiki>[[http://blogs.gnome.org/tvb/2013/01/15/getting-your-contacts-right-now/ | performance enhancements]]</nowiki> that were done there. 
+
+==== Plugins/Contacts Provider ====
+EDS utilizes a plugin architecture to provide access to different backend data sources. We’ll leverage this architecture to provide access to a variety of data sources/backends, such as a local data store backed by sqlite, a u1db based backend to support eventual sync with Ubuntu One, Google Contacts backend, etc. 
+
+It’s envisioned that any third-party application that wants to expose it’s contacts to the system could use this mechanism and provide a plugin/backend for EDS 
+
+==== Client Access ====
+===== Qt/QML Applications =====
+These applications can leverage the work done in QtMobility by using the <nowiki>[[http://doc.qt.digia.com/qtmobility/qcontactmanager.html | QContactManager class]]</nowiki> to interact with the ContactsService. This will be accomplished by writing a <nowiki>[[http://doc.qt.digia.com/qtmobility/contactsengines.html | QContactManagerEngine]]</nowiki> (plugin) that uses the ContactsService as it’s backend, which will abstract away the details of the ContactsService and provide access directly through the standard QContact* classes. This plugin will be set as the default provider for the Ubuntu Touch platform.
+
+===== Other Clients =====
+Other clients in the system, such as scopes and system level components can access the contact service directly through it’s dbus api’s, using the appropriate language bindings.
+
+=== Additional Ideas ===
+* consider extending EDS to build the aggregation layer directly into it rather than having a separate server
+* investigate implementing a new EDS "aggregating" backend that acts as an aggregator of other eds data stores
+* investigate syncevolution solution, did they add an extra server or extends EDS?
+* don't support aggregation in V1, have QContactManagerEngine talk directly to EDS using the direct access
+* only partially populate contact result sets with minimal requested fields and then provide a way to fully fetch all the fields for a given contact

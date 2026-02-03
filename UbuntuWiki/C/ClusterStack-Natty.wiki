@@ -1,0 +1,660 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+'''Contents'''
+
+== Machine Overview ==
+
+{| class="wikitable"
+|-
+| '''Machine'''
+| '''Hostname'''
+| '''IP Address'''
+|-
+| Machine 1
+| natty1
+| 192.168.122.100
+|-
+| Machine 2
+| natty2
+| 192.168.122.101
+|}
+
+== Pacemaker/Corosync ==
+
+=== [both] Install Pacemaker and Corosync ===
+
+<pre>
+sudo apt-get install pacemaker corosync
+</pre>
+
+=== [natty1] Generate Corosync keys ===
+
+The cluster nodes, to be able to communicate within each other, they need a key to be able to authenticate the packages sent between them by corosync. This key is generated once and copied to the other nodes in the cluster:
+
+<pre>
+sudo corosync-keygen
+</pre>
+
+After executing the command, you need to generate entropy to have enough random bits to be able to generate the key. This can be achieved in many ways, such as keyboard pressing, mouse movement, or downloading files from the Internet, or even installing/upgrading packages of your system.
+
+Once the key generation has finished, you need to copy the keys to the other nodes. From '''natty1''' do as follows:
+
+<pre>
+sudo scp /etc/corosync/authkey <user>@<cluster-node-ip>:/home/<user>
+</pre>
+
+In '''natty2''' do as follows:
+
+<pre>
+sudo mv ~/authkey /etc/corosync
+</pre>
+
+=== [both] Configure Corosync ===
+Now, we need to configure corosync to be able to listen the messages that are going to be sent in the network. For this we edit the '''bindnetaddr''' field in '''/etc/corosync/corosync.conf''' and we set it to the "network address" of the subnet in used. In our case, is as follows:
+
+<pre>
+[...]
+        interface {
+######### The following values need to be set based on your environment 
+                ringnumber: 0
+                bindnetaddr: 192.168.122.0
+                mcastaddr: 226.94.1.1
+                mcastport: 5405
+        }
+[...]
+</pre>
+
+=== [both] Starting Corosync ===
+
+Before being able to start corosync, we need to edit '''/etc/default/corosync''' and enable it by changing the '''no''' to '''yes''':
+
+<pre>
+START=yes
+</pre>
+
+Once this is done, we can start corosync as follows:
+
+<pre>
+sudo service corosync start
+</pre>
+
+=== [natty1] Verifying Cluster Nodes ===
+
+After starting corosync and a few seconds have passed, the nodes should be part of the cluster. To verify this we do as follows:
+
+<pre>
+sudo crm_mon
+</pre>
+
+And we will see similar to the following when the cluster nodes join the cluster:
+
+<pre>
+============  ==
+Last updated: Fri Mar 18 16:27:48 2011
+Stack: openais
+Current DC: natty1 - partition with quorum
+Version: 1.0.9-da7075976b5ff0bee71074385f8fd02f296ec8a3
+2 Nodes configured, 2 expected votes
+0 Resources configured.
+============  ==
+
+Online: [ natty1 natty2 ]
+</pre>
+
+== DRBD ==
+=== Prepare Partitions ===
+
+The first step in setting up DRBD is to prepare the partitions/disks to be used as DRBD devices. We are assuming that we have a disk ('''vdb''') on which we will create a partition table, and a primary partition of 1Gb for the DRBD device.
+
+==== [natty1] Create the partitions ====
+
+First, we create the partition table as follows:
+
+<pre>
+sudo fdisk /dev/vdb
+</pre>
+
+And we select the following options:
+<pre>
+o -> To create an empty partition
+w -> To write the newly created partition table
+</pre>
+
+Once, this is done, we create a primary partition of 1Gb:
+
+<pre>
+sudo fdisk /dev/vdb
+</pre>
+
+And we use the following options:
+
+<pre>
+n -> New partition
+p -> Primary
+1 -> Partition # 1
+1 -> Where does partition starts
++1024 -> Size of partition (1Gb = 1024 bytes)
+w -> To write the changes
+</pre>
+
+==== [natty2] Copy partition table to natty2 ====
+
+First, on '''natty1''' we issue the following:
+
+<pre>
+sudo sfdisk -d /dev/vdb
+</pre>
+
+This will generate an output such as:
+
+<pre>
+unit: sectors
+
+/dev/vdb1 : start=       63, size=  1033137, Id=83
+/dev/vdb2 : start=        0, size=        0, Id= 0
+/dev/vdb3 : start=        0, size=        0, Id= 0
+/dev/vdb4 : start=        0, size=        0, Id= 0
+</pre>
+
+We need to copy the above output to '''natty2''' to be able to create the partition table. First, we do the following:
+
+<pre>
+sudo sfdisk -d /dev/vdb <<EOF
+</pre>
+
+then we copy the output, and we finish it with EOF. This looks like:
+
+<pre>
+sudo sfdisk -d /dev/vdb <<EOF
+> # partition table of /dev/vdb
+> unit: sectors
+
+> /dev/vdb1 : start=       63, size=  1033137, Id=83
+> /dev/vdb2 : start=        0, size=        0, Id= 0
+> /dev/vdb3 : start=        0, size=        0, Id= 0
+> /dev/vdb4 : start=        0, size=        0, Id= 0
+>
+> EOF
+</pre>
+
+'''NOTE:''' In case the above doesn't work for any reason, we can create the partition for '''natty2''' the same way the partition was create for '''natty1'''.
+
+=== Installing and Configuring DRBD Resources ===
+
+==== [both] Installing DRBD ====
+First, we need to install drbd utils, as the DRBD kernel module is already in mainline kernel.
+
+<pre>
+sudo apt-get install drbd8-utils
+</pre>
+
+Then, we need to bring up the kernel module:
+
+<pre>
+sudo modprobe drbd
+</pre>
+
+And add it to '''/etc/modules''':
+
+<pre>
+[...]
+loop
+lp
+drbd # -> added
+</pre>
+
+==== [both] Creating the DRBD resource ====
+
+Now that DRBD is up, we need to create a resource. For this, we create '''/etc/drbd.d/export.res''', and we copy:
+
+<pre>
+resource export {
+        device /dev/drbd0;
+        disk /dev/vdb1;
+        meta-disk internal;
+        on natty1 {
+                address 192.168.122.100:7788;
+        }
+        on natty2 {
+                address 192.168.122.101:7788;
+        }
+        syncer {
+                rate 10M;
+        }
+}
+</pre>
+
+The configuration file is explained as follows:
+
+* '''resource export''': Specifies the name that identifies the resourced
+* '''device /dev/drbd0''': Specifies the name of the DRBD block device to be used
+* '''disk /dev/vbd1''': Specifies that we are using /dev/vdb1 for the device above.
+* '''on natty1 | on natty2''': Note that these are the '''hostnames''' of the nodes and contains the respective IP address and port on which each DRBD node will communicate.
+
+Once the configuration file is saved, we can test its correctness as follows:
+
+<pre>
+sudo drbdadm dump export
+</pre>
+
+Now, that we have created the resources, we need to create the metadata as follows:
+
+<pre>
+sudo drbdadm create-md 
+</pre>
+
+And, then we have to bring it up:
+
+<pre>
+sudo drbdadm up export
+</pre>
+
+Once this command is issued, we can check that both DRBD nodes have made communication and we'll see that the data is inconsistent as no initial synchronization has been made. For this we do the following:
+
+<pre>
+sudo drbd-overview 
+</pre>
+
+And the result will be similar to:
+<pre>
+  0:export  Connected Secondary/Secondary Inconsistent/Inconsistent C r-----
+</pre>
+
+==== [natty1] Initial DRBD Synchronization ====
+
+Now, to be able to synchronize the data (and only if devices are identical) we do as follows:
+
+<pre>
+sudo drbdadm -- --clear-bitmap new-current-uuid export
+</pre>
+
+And this should show something similar to:
+
+<pre>
+  0:export  Connected Secondary/Secondary UpToDate/UpToDate C r-----
+</pre>
+
+In case the above command didn't work or wasn't used, then we can do as follows:
+
+<pre>
+drbdadm -- --overwrite-data-of-peer primary export
+</pre>
+
+Now, we have to make sure that '''natty1''' is primary to be able to create the filesystem. For this we do as follows:
+
+<pre>
+sudo drbdadm primary export
+sudo mkfs -t ext3 /dev/drbd0
+</pre>
+
+=== Master/Slave Integration with Pacemaker ===
+
+==== [both] Removing Startup symlinks ====
+
+It is not necessary for DRBD init scripts to bring up the resources configured, given that now pacemaker will manage the resources. So we simply remove the symlinks as follows:
+
+<pre>
+sudo update-rc.d -f drbd remove
+</pre>
+
+==== [natty1] Configuring the resources ====
+
+Now, we can configure the resources for pacemaker. The resources to configure are simply the resources needed to bring up the DRBD resources, and to be mount the DRBD partition into the filesystem. Additionally, other parameters are required to handle the master/slave states of drbd as well as when and where to become Master in one node. To be able to do so, we do as follows:
+
+<pre>
+sudo crm configure
+</pre>
+
+And we copy the following:
+
+<pre>
+crm(live)configure# primitive res_drbd_export ocf:linbit:drbd params drbd_resource="export" # Configures the DRBD resource, specifying its name
+crm(live)configure# primitive res_fs ocf:heartbeat:Filesystem params device="/dev/drbd0" directory="/mnt/export" fstype="ext3" # Mounts the filesystem specifying the DRBD device and mount point.
+crm(live)configure# ms ms_drbd_export res_drbd_export meta notify="true" master-max="1" master-node-max="1" clone-max="2" clone-node-max="1" # Master/Slave notification.
+crm(live)configure# colocation c_export_on_drbd inf: res_fs ms_drbd_export:Master # Tells Cluster to Mount the filesystem after DRBD has become primary in the node.
+crm(live)configure# order o_drbd_before_nfs inf: ms_drbd_export:promote res_fs:start # Tells the cluster to promote DRBD, and after that start the Fielsystem.
+crm(live)configure# property stonith-enabled=false 
+crm(live)configure# property no-quorum-policy=ignore
+crm(live)configure# commit
+crm(live)configure# exit
+</pre>
+
+Then, to finish, we do the following to commit the changes:
+
+<pre>
+commit
+</pre>
+
+Now, to verify the changes we do:
+
+<pre>
+sudo crm status
+</pre>
+
+which should show something similar to:
+
+<pre>
+============  ==
+Last updated: Fri Mar 18 17:12:36 2011
+Stack: openais
+Current DC: natty2 - partition with quorum
+Version: 1.0.9-da7075976b5ff0bee71074385f8fd02f296ec8a3
+2 Nodes configured, 2 expected votes
+2 Resources configured.
+============  ==
+
+Online: [ natty1 natty2 ]
+
+ Master/Slave Set: ms_drbd_export
+     Masters: [ natty1 ]
+     Slaves: [ natty2 ]
+ res_fs	(ocf::heartbeat:Filesystem):	Started natty1
+</pre>
+
+== HA Virtual IP Address ==
+
+=== [natty1] Preparing other resources ===
+Now, to be able to add the VIP to the above configuration, we are going to group resources. To be able to do so, the first thing we need to do is stop the '''res_fs''' so that we can group the VIP with it. To do that we do as follows:
+
+<pre>
+sudo crm resource stop res_fs
+</pre>
+
+=== [natty1] Adding a VIP Resource ===
+
+Now. to be able to add the VIP resource, we are gonna use the crm command line. We do as follows:
+
+<pre>
+sudo crm configure
+</pre>
+
+And then we add the '''res_ip''' resource:
+
+<pre>
+crm(live)configure# primitive res_ip ocf:heartbeat:IPaddr2 params ip="102.169.122.254" cidr_netmask="24" nic="eth0"
+crm(live)configure# commit
+crm(live)configure# exit
+</pre>
+
+=== [natty1] Grouping resources ===
+
+Now, given that we have to two resources (res_fs and res_ip) that we would like to bring up after DRBD, we need to group them. The grouping will bring up res_fs first, and after that, it will bring up res_ip. We do the following:
+
+<pre>
+crm(live)configure# group rg_export res_fs res_ip
+crm(live)configure# commit
+crm(live)configure# exit
+</pre>
+
+And you should see something like:
+
+<pre>
+INFO: resource references in colocation:c_export_on_drbd updated
+INFO: resource references in order:o_drbd_before_export updated
+</pre>
+
+This will update the '''colocation''' and '''order''' from using '''res_fs''' to '''rg_export'''. This means that it will automatically update the colocation and order rules to bring DRBD before bringing the group of resources. To verify, we check the status of the cluster (sudo crm status), and the result should be as follows:
+
+<pre>
+:~$ sudo crm status
+
+============  ==
+Last updated: Mon Mar 21 15:37:58 2011
+Stack: openais
+Current DC: natty1 - partition with quorum
+Version: 1.0.9-da7075976b5ff0bee71074385f8fd02f296ec8a3
+2 Nodes configured, 2 expected votes
+2 Resources configured.
+============  ==
+
+Online: [ natty1 natty2 ]
+
+ Master/Slave Set: ms_drbd_export
+     Masters: [ natty1 ]
+     Slaves: [ natty2 ]
+ Resource Group: rg_export
+     res_fs	(ocf::heartbeat:Filesystem):	Started natty1
+     res_ip	(ocf::heartbeat:IPaddr2):	Started natty1
+</pre>
+
+== HA NFS ==
+
+=== [both] Installing and Preparing NFS ===
+
+First, we need to install MySQL and disable the init script as it is going to be managed by pacemaker. To install we do:
+
+<pre>
+sudo apt-get install nfs-kernel-server
+</pre>
+
+And we disable the init script as follows:
+
+<pre>
+sudo update-rc.d -f nfs-kernel-server remove
+</pre>
+
+=== [natty1] Preparing DRBD ===
+
+Now, we are going to use the DRBD '''export''' resource as the resource NFS will use. This will allow us to have the NFS export data replicated between the two nodes. We can, however, create another resource for NFS only and call it '''nfsexport'''. But, for demonstrations purposes we are going to use the previously created one.
+
+This means that we are going to use the DRBD resource, mounted in '''/mnt/export''', for every single share we create. In this case, we are just going to create the NFS4 virtual root filesystem share, which will NOT have any shared data, and we will create another directory that will contain the shared data, and assign it to the share, as follows:
+
+<pre>
+/mnt/export         # NFSv4 root filesystem
+/mnt/export/export1 # Export 1
+/mnt/export/export2 # We can add more exports
+</pre>
+
+Now, on '''natty1''' (or where ever DRBD is '''primary''') we do the following:
+
+<pre>
+sudo mkdir /mnt/export/export1
+</pre>
+
+=== Integrating with Pacemaker ===
+
+==== [natty1] Creating a NFS resource ====
+
+The first thing we need to do is add the new resource that will start the NFS daemon and add a clone. For this we do as follows:
+
+<pre>
+sudo crm configure
+</pre>
+
+And add the following resource and clone. The clone allows the resource to be running in both cluster nodes at the same time for a smooth transition.
+
+<pre>
+crm(live)configure# primitive res_nfsserver lsb:nfs-kernel-server op monitor interval="30s"
+crm(live)configure# clone cl_nfsserver res_nfsserver
+crm(live)configure# commit
+</pre>
+
+==== [natty1] NFSv4 root virtual filesystem ====
+
+Now, we need to add resources for NFSv4 virtual root filesystem, so that both, NFSv4 and NFSv3 clients can mount the exports. For this we do as follows in the crm shell:
+
+<pre>
+crm(live)configure# primitive res_exportfs_root ocf:heartbeat:exportfs params fsid=0 directory="/mnt/export" options="rw,crossmnt" clientspec="192.168.122.0/255.255.255.0" op monitor interval="30s"
+crm(live)configure# clone cl_exportfs_root res_exportfs_root
+</pre>
+
+And we need to ensure that this clone gets started before the data to be exported. For this we do the following, which will start the exportfs root before the resource group of on which we will be starting the exported resources. We do as follows:
+
+<pre>
+crm(live)configure# order o_root_before_nfs inf: cl_exportfs_root rg_export:start
+crm(live)configure# colocation c_nfs_on_root inf: rg_export cl_exportfs_root
+crm(live)configure# commit
+</pre>
+
+Now, to verify that it has been started correctly we do the follows in both nodes:
+
+<pre>
+sudo exportfs -v
+</pre>
+
+The output should be similar to:
+
+<pre>
+/mnt/export	192.168.122.0/255.255.255.0(rw,wdelay,crossmnt,root_squash,no_subtree_check,fsid=0)
+</pre>
+
+==== [natty1] Non-root NFS Exports ====
+
+Now, we need to add the exports using pacemaker, instead of manually doing it on /etc/exports. For that we do as follows:
+
+<pre>
+crm(live)configure# primitive res_exportfs_export1 ocf:heartbeat:exportfs params fsid=1 directory="/mnt/export/export1" options="rw,mountpoint" clientspec="192.168.122.0/255.255.255.0" wait_for_leasetime_on_stop=true op monitor interval="30s"
+</pre>
+
+And then we need to edit the '''rg_export''' resource:
+
+<pre>
+crm(live)configure# edit rg_export
+</pre>
+
+And add this newly created resource before '''res_ip''':
+
+<pre>
+group rg_export res_fs res_exportfs_export1 res_ip
+</pre>
+
+Now, to verify we do:
+
+<pre>
+sudo exportfs -v
+</pre>
+
+And the output should be similar to:
+
+<pre>
+/mnt/export/export1
+		192.168.122.0/255.255.255.0(rw,wdelay,root_squash,no_subtree_check,fsid=1,mountpoint)
+/mnt/export	192.168.122.0/255.255.255.0(rw,wdelay,crossmnt,root_squash,no_subtree_check,fsid=0)
+</pre>
+
+=== [client] Verifying ===
+
+Now, to verify that we can mount the exported share from a client, we do the following using the ''VIP'' ('''res_ip'''):
+
+<pre>
+sudo mount -t nfs 192.168.122.254:export1 /mnt
+</pre>
+
+And the output of '''df''' should show:
+
+<pre>
+:~$ df -h
+[...]
+192.168.122.254:export1
+                      489M   32M  433M   7% /mnt
+</pre>
+
+== HA MySQL ==
+
+=== [both] Installing and Preparing MySQL ===
+
+First, we need to install MySQL and disable it's upstart job so that it doesn't start on boot. To install we do:
+
+<pre>
+sudo apt-get install mysql-server
+</pre>
+
+Once installed, we need to disable it's upstart job in '''/etc/init/mysql.conf''' by changing '''start on''' to '''stop on''', as follows:
+
+<pre>
+[...]
+stop on (net-device-up
+          and local-filesystems
+          and runlevel [2345])
+[...]
+</pre>
+
+This prevents MySQL from been started on boot, allowing Pacemaker to do so when necessary.
+
+Now, we also need to disable AppArmor's profile form MySQL, otherwise AppArmor won't allow MySQL to get installed into the DRBD resource. To do this we do the following:
+
+<pre>
+sudo ln -s /etc/apparmor.d/usr.sbin.mysqld /etc/apparmor.d/disable/
+sudo apparmor_parser -R /etc/apparmor.d/usr.sbin.mysqld
+</pre>
+
+Other way to achieve this is to edit the MySQL's AppArmor profile and add the directory of the DRBD resource where we are going to install MySQL's new data dir as detailed bellow ('''/mnt/export''')
+
+=== [natty1] Preparing DRBD ===
+
+Now, we are going to use the DRBD '''export''' resource as the resource MySQL will use. This will allow us to have the MySQL data replicated between the two nodes. We can, however, create another resource for MySQL only and call it '''mysql'''. But, for demonstrations purposes we are going to use the previously created one.
+
+Now, on '''natty1''' (or where ever DRBD is '''primary''') we do the following:
+
+<pre>
+sudo mysql_install_db --datadir=/mnt/export
+sudo chown -R mysql:mysql /mnt/export
+</pre>
+
+You should not see any errors at this point.
+
+=== [natty1] Integrating with Pacemaker ===
+
+Finally, we need to tell pacemaker to manage the MySQL. For this we will add a '''res_mysql1''' resource and add the newly created resource to the resource group. For this we first enter to the crm shell:
+
+<pre>
+sudo crm configure
+</pre>
+
+Then we add the resource:
+
+<pre>
+crm(live)configure# primitive res_mysql1 ocf:heartbeat:mysql params config=/etc/mysql/my.cnf datadir=/mnt/export/mysql binary=/usr/bin/mysqld_safe pid=/var/run/mysql/mysql1.pid socket=/var/run/mysql/mysql1.sock log=/var/log/mysql/mysql1.log additional_parameters="--bind-address=192.168.122.254" op start timeout=120s op stop timeout=120s op monitor interval=15s
+</pre>
+
+Once the resource has been added, we need to edit the resource group and add '''res_mysql1'''. We do this while in the crm shell above as follows:
+
+<pre>
+crm(live)configure# edit group rg_export
+</pre>
+
+The above command launches an editor, on which we add '''res_mysql1''' at the end, as follows:
+
+<pre>
+group rg_export res_fs res_ip res_mysql1
+</pre>
+
+Finally, we save the changes on the editor, and from the CRM shell we commit the changes as follows:
+
+<pre>
+crm(live)configure# commit
+crm(live)configure# exit
+</pre>
+
+=== [natty1] Verifying MySQL ===
+
+Now, the cluster status ('''sudo crm status''') should look as follows:
+
+<pre>
+============  ==
+Last updated: Tue Mar 22 15:27:07 2011
+Stack: openais
+Current DC: natty1 - partition with quorum
+Version: 1.0.9-da7075976b5ff0bee71074385f8fd02f296ec8a3
+2 Nodes configured, 2 expected votes
+2 Resources configured.
+============  ==
+
+Online: [ natty1 natty2 ]
+
+ Master/Slave Set: ms_drbd_export
+     Masters: [ natty1 ]
+     Slaves: [ natty2 ]
+ Resource Group: rg_export
+     res_fs	(ocf::heartbeat:Filesystem):	Started natty1
+     res_ip	(ocf::heartbeat:IPaddr2):	Started natty1
+     res_mysql1	(ocf::heartbeat:mysql):	Started natty1
+</pre>

@@ -1,0 +1,169 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+'''Note: this document was the initial spec on how the po2xpi processing should be done and how the format to expect would look like. This has changed at leasat slighty since, so don't assume the info here is accurate. We keep this document for reference reasons only''' (asac)
+
+=== .po file format ===
+XPI translations from launchpad are currently done in .po file format. Launchpad will also provide the original en-US.xpi files imported.
+
+The .po filename itself reveals information about the application (CUR_APP) and the language (e.g. CUR_LANG = de_DE.po (po syntax) == de-DE (mozilla syntax)), e.g.
+<pre>
+xpi/firefox/de_DE.po
+</pre>
+
+Due to the special assumptions of .xpi files, the .po file can have translation blocks formatted like below:
+<pre>
+msgid "The original en-US text"
+msgstr "The translated xx-XX text"
+
+msgid ""
+"The original en-US text"
+"but more then one line of it"
+msgstr ""
+"The translated xx-XX text"
+"also on more then one line"
+</pre>
+The first entry above is a standard single line translation block the second entry above is a standard multi-line translation block.  The multi-line translation block can have as many lines as it takes for the entry.
+
+Note that the multi-line translation block is designated by the inclusion of the double quote "" null string after the msgid and the msgstr both being followed by multi-lines of text until the the start of the next item.  This is not quite as simple as it appears since it is quite possible to have a single line empty string as shown below.
+
+The entries below are also possible and are special cases.
+<pre>
+msgid "The original en-US text"
+msgstr ""
+
+msgid ""
+msgstr ""
+
+msgid "The original en-US text"
+msgstr "The translated xx-XX text"
+
+msgid ""
+"The original en-US text"
+"but more then one line of it"
+msgstr ""
+""
+""
+Is this ^^ possible?
+
+msgid ""
+"The original en-US text"
+"but more then one line of it"
+msgstr ""
+Is this ^^ possible?
+</pre>
+To indicate that no translation is available yet, the msgstr id can be the empty
+string. xpi translation generators must use the msgid text to replace missing entities and properties if there is no translation available.  It is also possible that the both the msgstr and msgid are empty in which case you store a null string.  This is because when the data is written out it is done differently depending on the translation type.
+
+If a line like: '#, fuzzy' appears in a message, the translation should not be used at all,
+even if it's available. It means the translation may not be correct and is just there to
+be reviewed by a translator. Xpi translation generators must treat such translation blocks in the same way as the empty msgstr case above.
+
+The filename in the comment at the top of this block is important as well. It
+provides us with required path to reconstruct a similar .xpi file for translations.
+The filename in the comment can either be a "standard" path or a path pointing to
+a file withing a .jar file. The '!' indicates that the rest of the path refers to the file-
+structure in the .jar file. The last part after the ':' is the line number where it was found in the
+original import, and the following value is the message key.
+
+Further, there are two types of translation files that matter. Which type to use can be guessed by introspecting the file extension:
+
+ 1. .dtd - an xml dtd, that uses xml ENTITY definitions to map keys to translations.
+ <pre>
+<!ENTITY key "This is the translated text">
+<!ENTITY key "">
+ }}}
+ Note that in the case of a null string it is saved as the second entry above. 
+
+ 2. .properties - a standard properties file with a simple 
+ {{{
+firefox.translation.key=This is the translated text
+firefox.translation.key=
+ }}}
+ Note that in the case of a null string it is saved as the second entry above, with no double quotes saved.
+=== .xpi meta information ===
+
+firefox translations need two meta files:
+ 1. install.rdf - translation id,name,description as well as target applications and
+ target application min/max version requirements.
+ {{{
+<targetApplication>
+  <em:id>{ec8030f7-c20a-464f-9b0e-13a3a9e97384}</em:id> <!-- firefox -->
+  <em:minVersion>3.0a1</em:minVersion>
+  <em:maxVersion>3.0.*</em:maxVersion>
+</targetApplication>
+</pre> and <pre>
+    <em:id>langpack-en-US@firefox.ubuntu.com</em:id>
+    <em:name>Language Pack - Firefox, de-DE</em:name>
+    <em:desc>de-DE translations for the firefox web browser</em:desc>
+</pre>
+ 2. chrome.manifest - defines base directories within the .xpi to find locales.
+
+The meta files should not be created from scratch when creating a translation .xpi from a .po file, but instead the files exported in the en-US.xpi alongside the po files should be used as templates.
+
+=== .po -> .xpi algorithm ===
+
+creating a valid .xpi file requires three steps:
+ 1. create the required meta files for the .xpi format
+ 2. compile the translation files
+ 3. pack things up - create .jar files and .xpi
+
+<pre>
+(some) INPUT variables:
+1. a list of .po files (var:POFILES)
+2. path to a reference .xpi file (var:REFXPI)
+3. install directory (var:INSTALLDIR)
+
+function CREATE_META_FILES
+    1. guess the CUR_LANG and the CUR_APP by parsing the .po filename/path
+    2. create the directory INSTALLDIR/CUR_APP/CUR_LANG
+    3a. copy TEMPDIR/chrome.manifest to INSTALLDIR/CUR_APP/CUR_LANG/
+    3b. copy TEMPDIR/install.rdf to INSTALLDIR/CUR_APP/CUR_LANG/
+    4a. replace s/en-US/CUR_LANG/ the content of INSTALLDIR/CUR_APP/CUR_LANG/chrome.manifest
+    4b. replace s/en-US/CUR_LANG/ the content of INSTALLDIR/CUR_APP/CUR_LANG/install.rdf
+    4c. replace the install.rdf token @EM_ID@ with langpack-CUR_LANG@APP.ubuntu.com
+
+function APPEND_TRANSLATION_ENTRY
+    1. create TRANSLATION_ENTRY for the TRANSLATION_BLOCK
+      a. use properties format if PATH has a .properties extension
+      b. use dtd format if PATH has a .dtd extension
+    2. append TRANSLATION_ENTRY to the INSTALLDIR/PATH file (if no such
+       file exists yet, create a new file)
+
+function CREATE_TRANSLATION_FILES
+    1. guess the CUR_LANG and the CUR_APP by parsing the .po filename/path
+    2. for each TRANSLATION_BLOCK in .po file
+      1. replace s/en-US/CUR_LANG/ for the current TRANSLATION_BLOCK.comment
+      2. if PATH in the TRANSLATION_BLOCK.comment line indicates that
+        a) file is in a jar:
+          1. split the PATH in two parts ONE and TWO using the '!' separator
+          2. add ONE to the JAR_PATHS set (no duplicates in the set)
+      3. call APPEND_TRANSLATION_ENTRY
+
+function PACK_THINGS_UP
+    4. foreach JAR_PATH
+      1. create a jar (zip) JAR_PATH with the content in JAR_PATH!/
+         (e.g. => cd JAR_PATH!/; zip -r JAR_PATH . )
+      2. remove the JAR_PATH! directory
+    5. create a xpi INSTALL_DIR/CUR_LANG.xpi
+         (e.g. => cd INSTALL_DIR/CUR_LANG/; zip -r ../CUR_LANG.xpi . )
+
+MAIN
+## unzip reference .xpi to TEMPDIR
+## create an empty ordered set JAR_PATHS
+  2. foreach POFILE call
+    1. CREATE_META_FILES
+    2. CREATE_TRANSLATION_FILES
+    3. PACK_THINGS_UP
+</pre>
+
+----
+<nowiki>[[CategoryMozillaTeam]]</nowiki>
+CategoryTranslations

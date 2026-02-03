@@ -1,0 +1,243 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+
+== Howto for maintaining the linux-lowlatency kernel ==
+
+Currently, Ubuntu Studio kernel team is responsible for maintaining the kernel source, and building the debian packages. The packages are uploaded to a PPA, and from there, they are copied to the universe repository.
+
+==== Prerequisites ====
+
+If doing maintenance from a ubuntu machine
+<pre>
+$ sudo apt-get install git ubuntu-dev-tools debhelper build-essential kernel-wedge kernel-package fakeroot
+$ sudo apt-get build-dep linux-lowlatency
+</pre>
+
+Make sure you have a gpg signing key ready.
+
+=== First Setup ===
+
+==== Get the Source ====
+
+Clone Linus main linux tree into a bare git reporitory.
+<pre>
+$ git clone --bare git://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git linus-linux.git
+</pre>
+
+Clone Ubuntu generic trees using Linus tree as reference. The master tree we use will be ubuntu generic. 
+<pre>
+$ git clone --reference linus-linux.git git://kernel.ubuntu.com/ubuntu/ubuntu-precise.git ubuntu-precise-lowlatency
+$ git clone --reference linus-linux.git git://kernel.ubuntu.com/ubuntu/ubuntu-quantal.git ubuntu-quantal-lowlatency
+$ git clone --reference linus-linux.git git://kernel.ubuntu.com/ubuntu/ubuntu-raring.git ubuntu-raring-lowlatency
+$ git clone --reference linus-linux.git git://kernel.ubuntu.com/ubuntu/ubuntu-saucy.git ubuntu-saucy-lowlatency
+</pre>
+
+In each repo, add the lowlatency remote, and create a new branch for it (you'll need ssh access):
+<pre>
+$ git remote add lowlatency git@github.com:ubuntustudio-kernel/ubuntu-<release>-lowlatency.git
+$ git fetch lowlatency
+$ git fetch --tags lowlatency
+$ git checkout -b lowlatency lowlatency/lowlatency
+</pre>
+
+You'll now have the main linux vanilla tree that Linus maintains, and three much smaller Ubuntu linux-generic trees (precise, quantal, raring), which share objects with the tree they refer to (linus-linux.git), each containing a branch for lowlatency.
+
+=== Update Process ===
+
+When a tracker bug appears, like this one: <nowiki>[[http://bugs.launchpad.net/ubuntu/+source/linux-lowlatency/+bug/1095799 | LP: #1095799]]</nowiki>, it is good time to prepare the linux-lowlatency source tree. (In this case, we are updating linux-lowlatency-precise)
+
+First, make sure Linus vanilla tree is up to date. cd into ''linus-linux-git'', and do:
+
+<pre>
+$ git fetch
+</pre>
+
+Now, in our ubuntu-<release>-lowlatency repo, switch to the master branch (ubuntu-generic) and update that.
+
+<pre>
+$ git checkout origin/master
+$ git pull origin master
+$ git fetch origin master --tags
+</pre>
+
+Now, checkout the lowlatency branch, and begin with a cleanup. The cleanup also adds some extra files, which we will NOT add to the git tree. This procedure is needed in order to have the update script work(next step).
+
+<pre>
+$ git checkout lowlatency
+$ git clean -x -d -f
+$ git reset --hard #if needed - resets all changes in files
+$ fakeroot debian/rules clean
+</pre>
+
+Now, were going to do much of the maintenance procedure automatically, by using a script. Basically, it does a rebase against the generic kernel source, and does some nice looking git commits, as well as prepares the debian package for a new release version.
+<pre>
+$ ./debian.lowlatency/etc/update-from-master
+</pre>
+
+If all went fine, the last two lines... 
+<pre>
+* ** verify and tag the release.
+    git tag -s -m Lowlatency-3.2.0-36.35 Lowlatency-3.2.0-36.35
+</pre>
+...tell you to do a git tag, but before we do that, we need to add one more thing.
+
+Edit the debian changelog, to include the tracker bug
+<pre>
+$ nano debian.lowlatency/changelog
+</pre>
+
+Make it look something like this (with the correct bug report)
+<pre>
+linux-lowlatency (3.2.0-36.35) precise-proposed; urgency=low
+
+  [ Kaj Ailomaa ]
+
+** rebase to Ubuntu-3.2.0-36.56
+** Release Tracking Bug
+    - LP: #1095799
+</pre>
+
+Now, we need to redo the last commit by doing:
+<pre>
+$ git commit -a --amend
+</pre>
+
+Now, we do the tag:
+<pre>
+$ git tag -s -m Lowlatency-<version> Lowlatency-<version>
+</pre>
+
+Push to the '''lowlatency''' repo. Only push the recent lowlatency tag.
+<pre>
+$ git push --force lowlatency lowlatency
+</pre>
+
+And then just the one tag
+<pre>
+$ git push lowlatency Lowlatency-<version>
+</pre>
+All done.
+
+==== First push to a new remote ====
+
+First, set up the new remote. For example, calling it zequence. Then do initial pushes for both master and lowlatency branches. (using the git adress here only as example, as it should be ).
+
+<pre>
+$ git remote add zequence <repo_url>
+$ git push -u lowlatency master
+$ git push -u lowlatency lowlatency
+$ git push lowlatency lowlatency --tags
+</pre>
+
+=== Building the Packages ===
+
+For each kernel, make sure you have the orig tarball in the parent folder. Get them with:
+<pre>
+$ pull-lp-source -d linux-lowlatency precise
+$ pull-lp-source -d linux-lowlatency quantal
+etc..
+</pre>
+
+Then, before building the source package, we first clean the git repo:
+<pre>
+$ git clean -x -d -f
+</pre>
+
+In order to upload to PPA later, we need to remove "-proposed" from the release pocket description. So, initially, the top of the changelog will look something like this:
+<pre>
+linux-lowlatency (3.2.0-42.46) precise-proposed; urgency=low
+</pre>
+
+Remove "-proposed", and the result is:
+<pre>
+linux-lowlatency (3.2.0-42.46) precise; urgency=low
+</pre>
+
+==== Specifying The Version ====
+
+In order for the list of changes to be accurate for the built package later, we need to specify which version we are updating from.
+
+Sometimes there will be last minute updates to the source after a kernel already landed in the -proposed release pocket (see all available repos for /etc/apt/sources.list), and when doing the update, there will be no ABI bump. Also, there may already be a kernel in the -proposed pocket waiting to be released. 
+
+In this situation, use the last published version in the -updates pocket as reference, and not -proposed (the kernel in -proposed won't be published since an update is now expected).
+
+We use the "-v" option to specify the version. First clean (and by doing that, you set up some new files in the debian dir), then build.
+
+<pre>
+$ fakeroot debian/rules clean
+$ dpkg-buildpackage -S -v<version> -rfakeroot -I.git -I.gitignore -i'\.git.*'
+</pre>
+
+Example version used:
+<pre>
+$ dpkg-buildpackage -S -v3.2.0-41.45 -rfakeroot -I.git -I.gitignore -i'\.git.*'
+</pre>
+
+Hopefully all went well, and you now have a signed package, ready to be uploaded. You might want to double check the changes file to see that all looks as it should:
+
+<pre>
+$ cat ../linux-lowlatency_<version>_source.changes
+</pre>
+
+Now, to upload to the Ubuntu Studio kernel PPA, do:
+<pre>
+$ dput ppa:ubuntustudio-kernel/linux-lowlatency-sru ../linux-lowlatency_<version>_source.changes
+</pre>
+
+Finally, clean your git repo, so it's ready for the next round of maintenance work:
+<pre>
+$ git clean -x -d -f
+$ git reset --hard
+</pre>
+
+==== Build the Metas ====
+
+The Metas aren't kept in repos usually, since the only thing you usually need to update is the debian/changelog file. So, first, get the latest published version for each Ubuntu release:
+<pre>
+$ pull-lp-source linux-meta-lowlatency precise
+$ pull-lp-source linux-meta-lowlatency quantal
+etc..
+</pre>
+
+cd into the source dir, and update the changelog with:
+<pre>
+$ dch -i
+</pre>
+
+The new changelog entry might look something like this:
+<pre>
+linux-meta-lowlatency (3.2.0.41.33ubuntu1) UNRELEASED; urgency=low
+
+** 
+
+ -- Kaj Ailomaa <zequence@mousike.me>  Thu, 09 May 2013 11:12:10 +0200
+</pre>
+
+You need edit the version, the release, and add a description of the change. Ultimately, the new entry should look something like this:
+<pre>
+linux-meta-lowlatency (3.2.0.42.34) precise; urgency=low
+
+** Bump ABI
+
+ -- Kaj Ailomaa <zequence@mousike.me>  Thu, 09 May 2013 11:16:52 +0200
+</pre>
+
+Once you save the file, the source directory name will have changed, and you are now ready to build the new source package. Again, you need to specify the correct version you are updating from.
+<pre>
+$ fakeroot debian/rules clean
+$ dpkg-buildpackage -S -v<version> -rfakeroot
+</pre>
+
+Now, upload to PPA:
+<pre>
+$ dput ppa:ubuntustudio-kernel/linux-lowlatency-sru ../linux-meta-lowlatency_<version>_source.changes
+</pre>

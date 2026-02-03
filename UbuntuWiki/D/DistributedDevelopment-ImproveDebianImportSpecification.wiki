@@ -1,0 +1,155 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+* '''Launchpad Entry''': UbuntuSpec:foundations-lucid-distributed-development
+* '''Created''': 10 Jun 2009
+* '''Contributors''': JamesWestby and many others
+* '''Packages affected''': bzr-builddeb, bzr, Launchpad
+
+=== Summary ===
+
+We will make the branches we have of Debian source packages have some link with the packaging branch used by the Debian maintainer, where they declare one in a "Vcs-*" header. This will enable better collaboration, and also
+lead us to solve many of the issues that we will have to confront when we do a similar thing for upstream VCSs.
+
+=== Release Note ===
+
+None, as this is not a user-visible change.
+
+=== Rationale ===
+
+We now have branches of Debian source packages available on Launchpad, but are just imports of the packages. The Debian maintainer may use a Vcs for their packaging, and if they do these branches will be unrelated as far as bzr is concerned. This limits the general ability of Ubuntu and Debian developers to collaborate using the Vcs that will be most natural to them. The Ubuntu developer could use the Debian maintainer's Vcs, but it would be nice if they didn't have to "special case", and whichever branch they chose to use they could collaborate with the Debian maintainer, as well as with any other Ubuntu developer who is using the Ubuntu branch.
+
+Doing this will allow the Ubuntu developer to merge in the Debian maintainer's branch as they like, and also provide patches that apply directly to tip, and that are mergeable by them where the combination of Vcs support that.
+
+=== User stories ===
+
+** It's close to release time and Fabio wishes to merge the changes from the Debian maintainers VCS in to the Ubuntu package to upload before release. With the new system it is a simple `bzr merge` to do this.
+** Julie is making a change in Ubuntu and goes to forward the changes to Debian. With a few straightforward commands she produces and mails the changes such that they apply directly to the tip of the Debian maintainer's branch, even though they have packaged a new upstream version there.
+
+=== Assumptions ===
+
+** The Debian Vcs-* headers are not present for every package, and even when they are not there they may be incorrect.
+** The contents of the Debian Vcs-* branch may not be the same as the corresponding source package.
+** Not every upload to Debian may be represented in the Debian Vcs-* branch.
+
+=== Design ===
+
+The Debian maintainer is free to declare the Vcs that they use in the `debian/control` file, and so we can use this to automatically make the links. These fields aren't ubiquitous though, and even when they are there they may be incorrect, therefore the information will be used on a best effort basis. We shall continue importing the Debian packages in the same way as before, so we can still rely on there being an up-to-date branch that contains the source that is actually in Debian. Where possible we will improve these branches by adding extra revision parents such that bzr sees it as a shared history, and will do the right thing when across the branches.
+
+The basic idea is that when the importer finds a new Debian upload to import it can add an extra parent which is the relevant revision in the Debian maintainer's Vcs-* branch. The difficulty comes from the uncertainties about which revision that is, and so various heuristics will have to be employed to work this out.
+
+==== ./debian/-only vs. full-source ====
+
+The Debian Vcs-* branch may be a ./debian/-only layout, containing just the ./debian/ directory, or a full source branch, the same as you get from `dpkg-source -x`. (It may in fact be anything, but we will detect these two and not try to act on any other layout that we find). All the Ubuntu-created branches are the latter, and so where the Debian maintainer's branch differs there must be adjustments made.
+
+Consistency across packages is one of the aims for the Ubuntu branches, so that won't change, instead we will aim to set up the branches such that they share history in the ./debian/ part.
+
+We will rewrite all the Ubuntu branches to use the same file-ids as the import of the Debian maintainer's branch. This will be done whether the branch is full-source or debian-only. It means that the files will be be mergeable between the branches. We will also add revision parents such that the branches share history and will be directly mergeable, see the next section.
+
+==== Finding the revision to use ====
+
+Given a source package there needs to be a way to find the revision in the Vcs-* branch that most resembles it. There are various things that can help with that:
+
+** Tags: many Debian maintainers will tag their uploads, so we can use these to find the revisions. There may not be one scheme used across the board though.
+** Changelog: this should be a very strong indicator so that e.g. reverts of the code don't lead to the wrong revision being chosen.
+** Timestamps: the timestamps on the revisions closer to the timestamp in the changelog should be favoured.
+** Tree content: the closer the content the more likely it is to match.
+** Revision history: revisions already merged shouldn't be considered.
+
+A heuristic based on all of these inputs can try and find the revision of interest. This revision can simply then be added as an extra parent to the revision being committed.
+
+This will mean that the first time an upload is imported where a corresponding revision is found you will get a merge that introduces a second root, so the log looks a bit odd, and things like annotation will tend to point at the package change, rather than the change in the Debian maintainer's Vcs. However, this will diminish over time, and allows us to bootstrap more easily, and doesn't give bzr wrong information about the history, merely incomplete information.
+
+==== Timing of imports ====
+
+When searching for the revision to use it may be that the revision you need isn't public yet. To reduce the likelyhood of this we will ensure that we are looking at the most up-to-date revision history we have. Also, the method used for spotting new uploads to Debian does have some latency, increasing the dwell period in which the Debian maintainer can push their changes.
+
+This dwell period won't always suffice however, and so there will be cases where we don't add a revision parent that we could. We don't want to wait indefinitely though, as that would sacrifice the usability of these branches for correctness.
+
+It would be possible to watch for the desired revision for a while after importing, and if it is found add a new revision that doesn't change the tree, but adds the new parent. This would lead to a slightly uglier revision history, but would perhaps be more useful in a few cases. The effort that it would take to do this would be quite large though, and given that the number of times it would make a difference isn't known we won't implement this unless it is found that it would be of significant benefit.
+
+=== Implementation ===
+
+==== ./debian/-only vs. full-source ====
+
+./debian only branches will be detected by having one of the following things:
+
+** ./debian at the root of the branch with no other entries in the root (perhaps with a whitelist for .gitignore and the like)
+** Common debian files in the root of the branch, as some tools support versioning the contents of ./debian/ and not ./debian/. As there are no files that can be guaranteed to exist in a package maintainers branch (e.g. the VCS build tool could generate the changelog) then heuristics will be used (control/control.in, rules, changelog, copyright, etc.), and no ./debian/ directory.
+
+==== Finding the revision to use ====
+
+For this we will implement a class that can compare a set of bzr trees to another, single, bzr tree, and determine which is the best match, if any. It will be based on the heuristics from the Design section.
+
+We have a large corpus that we can test with, so we should be able to do a good job of tuning the heuristics to give satisfactory results.
+
+bzr-rewrite already contains some code to do something like this, so that could be built upon.
+
+==== Code imports ====
+
+We will want to have all of the Debian maintainers' branches available to compare with. We could either do this using bzr foreign branch support, or using Launchpad's vcs-imports and mirroring. Using the latter means that they are easily available for everyone, so that you can merge from them as you like without having to install extra bzr plugins, so that would be preferable.
+
+We will therefore have a job that watches for additions to and changes in Vcs-* fields and sets up the vcs-imports/mirrors on to launchpad (probably semi-automatically). This will require an API for setting up a code import, and
+for them to not have to be reviewed before being activated.
+
+We will need a well-known name for these imports on Launchpad, a consistent mapping from VCS-* URI to Launchpad name, or a database mapping between the two.
+
+We also can't know the branch to import from in e.g. git, so we need heuristics, or imports of all of them. Currently LP can only import "master" anyway, so that would need to change first.
+
+Also, when we are importing we want to ensure that we have access to the latest revisions on the branch. Therefore we would want a way to request Launchpad perform a mirror, and preferably get notification when the mirror is complete.
+
+Also, so that parallel imports are not a problem, it is very desirable for us to have Launchpad vcs-imports done with a system that makes it possible to do parallel imports. This is currently the case for git, but not for SVN, but the Launchpad developers have plans to change that for SVN.
+
+Much of this will require co-ordination with the Launchpad developers and discussion with them over the best way to implement it. It will be a lot of new imports for them (perhaps 5000 or more) and so will test the scaling of the systems.
+
+==== UI Changes ====
+
+None
+
+==== Code Changes ====
+
+Much of the changes here will be made to bzr-builddeb to allow it to add the extra parents as it is importing.
+
+There will also have to be changes to the driver scripts used by the importer in order to find the correct branches and tell bzr-builddeb about them.
+
+There are also several things required of Launchpad.
+
+==== Migration ====
+
+We will rewrite the revision history of the Ubuntu branches. This will mean that existing branches have to be migrated.
+
+bzr-rewrite already contains some code to do some of this, so we can build on that.
+
+There are two issues at hand:
+
+** revision ids "changing". We will have revisions that correspond to each upload on both the old and new branches, with different revision ids. We can provide a map between them such that a tool could modify the user's branch to refer to the new revision ids.
+** file ids changing. The id assigned to each file will change, so we have to change the file ids in any revision not present in the new branch, and in the users tree. We can again provide a (much larger) map from known old file ids to known new file ids, and can leave others alone. It may be that bzr-rewrite can help here, but we probably need to write most of this code, and figure out how to create and distribute the maps without too much cost.
+
+There will also be a flag day, where a user will try and pull and be told "No shared revision history". We can shout loudly before we do this and distribute instructions for dealing with it, but it is a poor user experience. We should discuss with the bzr developers how to improve it, so that it is either transparent, or the user is told what is going on.
+
+We can either try and have a single flag day by running two sets of imports in parallel, then switching the branches, or
+just have each package change as we add the information. As this is something that will keep changing as e.g. more vcs-imports succeed then we can't make it a single flag day for all packages, so it is probably not worth doing it for the first batch.
+
+=== Test/Demo Plan ===
+
+There will be unit-testing and manual testing of the bzr-builddeb changes as they are made.
+
+For integration testing we can run some imports with the new system in parallel for a while to catch any significant problems.
+
+=== Unresolved issues ===
+
+=== BoF agenda and discussion ===
+
+** File bugs in Debian where information is known to be wrong.
+** Document the way to set up Vcs such that it will work flawlessly, to allow those interested to ensure that they can get the benefit.
+
+----
+CategorySpec

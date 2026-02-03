@@ -1,0 +1,243 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== Introduction ==
+
+In this howto, Postfix integration with amavis-new will be presented. Amavis-new is a wrapper that can call any number of content filtering programs for spam detection, antivirus, etc. In this howto, integration with Spamassassin and Clamav will be presented. This is a classical installation of Postfix + Amavis-new + Spamassassin + Clamav.
+
+== Prerequisite ==
+
+You should have a functional Postfix server installed. If this is not the case, follow the <nowiki>[[Postfix]]</nowiki> guide.
+
+== Installation ==
+
+To begin, install (see InstallingSoftware) the following packages: 
+<pre>
+sudo apt-get install amavisd-new spamassassin clamav-daemon
+</pre>
+
+Install the optional packages for better spam detection (who does not want better spam detection?):
+<pre>
+sudo apt-get install libnet-dns-perl libmail-spf-perl pyzor razor
+</pre>
+
+Install these optional packages to enable better scanning of attached archive files:
+<pre>
+sudo apt-get install arj bzip2 cabextract cpio file gzip lha nomarch pax rar unrar unzip unzoo zip zoo
+</pre>
+'''Note:''' Ubuntu 12.04 LTS doesn't have unzoo.  Ubuntu 14.04 LTS doesn't have lha.  You may try to substitute lhasa.
+
+== Configuration ==
+
+=== Clamav ===
+
+The default behaviour of Clamav will fit our needs. A daemon is launched (clamd) and signatures are fetched every day.  For more Clamav configuration options, check the configuration files in <code>/etc/clamav</code>.
+
+Add <code>clamav</code> user to the <code>amavis</code> group and vice versa in order for Clamav to have access to scan files:
+<pre>
+sudo adduser clamav amavis
+sudo adduser amavis clamav
+</pre>
+
+'''Note''': especially when driven on small cloud instances, VPS or routers there were concerns about the memory consumption. There is a good summary why virus scanning in general has a <nowiki>[[http://unix.stackexchange.com/questions/114709/how-to-reduce-clamav-memory-usage|rather high memory]]</nowiki> consumption in general. An admin setting up such a solution needs to consider that ~200-350mb seem to be rather normal.
+
+=== Spamassassin ===
+
+As <code>amavis</code> is its own <code>spamassassin-daemon</code> (<code>amavis</code> uses the <code>spamassassin</code> libraries), there is no need in configuring or starting <code>spamassassin</code>. <code>amavis</code> will not use any running instance of <code>spamd</code>!
+
+The use of <code>razor</code> and <code>pyzor</code>must be enabled by
+
+<pre>
+}}}
+
+There is no need of configuring <code>razor</code> or <code>pyzor</code>.
+
+=== Amavis ===
+
+First, activate spam and antivirus detection in Amavis by editing <code>/etc/amavis/conf.d/15-content_filter_mode</code>:
+
+{{{
+use strict;
+
+@bypass_virus_checks_maps = (
+   \%bypass_virus_checks, \@bypass_virus_checks_acl, \$bypass_virus_checks_re);
+
+@bypass_spam_checks_maps = (
+   \%bypass_spam_checks, \@bypass_spam_checks_acl, \$bypass_spam_checks_re);
+
+1;  # insure a defined return
+</pre>
+
+After configuration Amavis needs to be restarted:
+<pre>
+sudo /etc/init.d/amavis restart
+</pre>
+
+=== Postfix integration ===
+
+For postfix integration, you need to add the <code>content_filter</code> configuration variable to the Postfix configuration file <code>/etc/postfix/main.cf</code>.  This instructs postfix to pass messages to amavis at a given IP address and port:
+<pre>
+content_filter = smtp-amavis:[127.0.0.1]:10024
+</pre>
+The following <code>postconf</code> command, run as root because of the preceding <code>sudo</code> command, adds the <code>content_filter</code> specification line above to <code>main.cf</code>:
+<pre>
+sudo postconf -e "content_filter = smtp-amavis:[127.0.0.1]:10024"
+</pre>
+Alternatively, you can manually edit <code>main.cf</code> yourself to add the <code>content_filter</code> line.
+
+Next edit <code>/etc/postfix/master.cf</code> and add the following to the end of the file:
+<pre>
+smtp-amavis	unix	-	-	-	-	2	smtp
+	-o smtp_data_done_timeout=1200
+	-o smtp_send_xforward_command=yes
+	-o disable_dns_lookups=yes
+	-o max_use=20
+
+127.0.0.1:10025	inet	n	-	-	-	-	smtpd
+	-o content_filter=
+	-o local_recipient_maps=
+	-o relay_recipient_maps=
+	-o smtpd_restriction_classes=
+	-o smtpd_delay_reject=no
+	-o smtpd_client_restrictions=permit_mynetworks,reject
+	-o smtpd_helo_restrictions=
+	-o smtpd_sender_restrictions=
+	-o smtpd_recipient_restrictions=permit_mynetworks,reject
+	-o smtpd_data_restrictions=reject_unauth_pipelining
+	-o smtpd_end_of_data_restrictions=
+	-o mynetworks=127.0.0.0/8
+	-o smtpd_error_sleep_time=0
+	-o smtpd_soft_error_limit=1001
+	-o smtpd_hard_error_limit=1000
+	-o smtpd_client_connection_count_limit=0
+	-o smtpd_client_connection_rate_limit=0
+	-o receive_override_options=no_header_body_checks,no_unknown_recipient_checks
+</pre>
+
+Also add the following two lines immediately below the "pickup" transport service:
+<pre>
+	 -o content_filter=
+	 -o receive_override_options=no_header_body_checks
+</pre>
+This will prevent messages that are generated to report on spam from being classified as spam.  
+
+For Postfix instances hosting virtual domains, Amavis also need to know what domain names are considered as local domain names. By default, only the FQDN of the localhost is treated as local. So in the file '/etc/amavis/conf.d/05-domain_id', list all your virtual domain names in `@local_domains_acl`
+<pre>
+         @local_domains_acl = ( ".$mydomain", ".example1.com", ".example2.com" );
+</pre>
+
+And In the file '/etc/amavis/conf.d/50-user', add
+<pre>
+         @whitelist_sender_acl = @local_domains_acl
+</pre>
+
+More information can be found from <nowiki>[[http://www.ijs.si/software/amavisd/README.postfix.txt|"README.postfix from amavisd-new"]]</nowiki> and <nowiki>[[http://www200.pair.com/mecham/spam/spamfilter20060701.html|"D.J.Fan"]]</nowiki>
+
+Reload postfix:
+{{{ 
+sudo /etc/init.d/postfix reload
+}}}
+
+Now content filtering with spam and virus detection is enabled.
+
+== Test ==
+
+First, test that the amavis SMTP is listening:
+<pre>
+telnet localhost 10024
+Trying 127.0.0.1...
+Connected to localhost.
+Escape character is '^]'.
+220 [127.0.0.1] ESMTP amavisd-new service ready
+^]
+</pre>
+
+Check on your <code>/var/log/mail.log</code> that everything goes well. If you raise the log level, you can check every step of the content filtering: spam check, virus check, etc. Don't forget to lower the log level after your checks!
+
+On messages that go through the content filter you should see:
+<pre>
+X-Spam-Level: 
+X-Virus-Scanned: Debian amavisd-new at example.com
+X-Spam-Status: No, hits=-2.3 tagged_above=-1000.0 required=5.0 tests=AWL, BAYES_00
+X-Spam-Level: 
+</pre>
+'''Note:''' $sa_tag_level in /etc/amavis/conf.d/20-debian_defaults must be lower than spam hit rating for the header to appear on the message. For troubleshooting set $sa_tag_level to -999
+
+== Troubleshooting ==
+
+If the filtering is not happening, adding the following to <code>/etc/amavis/conf.d/50-user</code> may help:
+
+<pre>
+@local_domains_acl = ( ".$mydomain" );
+</pre>
+
+If you receive mail for other domains, add them to the list.  This information was obtained from the Amavis-New FAQ <nowiki>[[http://www.ijs.si/software/amavisd/#faq-spam|here]]</nowiki>.
+
+If you see the following error in /var/log/syslog when amavisd is trying to scan a message:
+
+<code>amavis[30807]: (30807-01) (!!) ask_av (ClamAV-clamd) FAILED - unexpected result: /var/lib/amavis/tmp/amavis-20070615T125025-30807/parts: lstat() failed. ERROR\n</code>
+
+Try changing the permissions on <code>/var/lib/amavis/tmp</code>:
+
+<pre>
+chmod -R 775 /var/lib/amavis/tmp
+</pre>
+
+You can also change <code>AllowSupplementaryGroups</code> in <code>/etc/clamav/clamd.conf</code>:
+
+<pre>
+AllowSupplementaryGroups true
+</pre>
+
+Another way to trouble shoot errors associated with Amavisd-new, Spamassassin, Postfix, or Clamav is to restart all the services with Amavisd-new being the last one to start:
+<pre>
+sudo /etc/init.d/postfix restart
+sudo /etc/init.d/spamassassin restart
+sudo /etc/init.d/clamav-daemon restart
+sudo /etc/init.d/amavis restart
+</pre>
+
+Then check <code>/var/log/mail.log</code> and see if the error has gone away.
+
+'''Note''': $sa_tag_level in /etc/amavis/conf.d/20-debian_defaults must be lower than spam hit rating for the header to appear on the message. For troubleshooting set $sa_tag_level to -999
+
+== Amavis Performance ==
+To increase the number of processes that amavisd-new uses above the default 2 edit the file /etc/amavis/conf.d/50-user inserting the line:
+<pre>
+$max_servers = X;
+</pre>
+above the line:
+<pre>
+}}}
+where X is the number of processes you wish amavis to use.
+
+Amend the following line in /etc/postfix/master.cf with the same value for the max_procs (marked below as X)
+{{{
+smtp-amavis     unix    -       -       -       -       X       smtp
+</pre>
+Restart amavis and reload postfix's config
+<pre>
+sudo /etc/init.d/amavis restart
+sudo postfix reload
+</pre>
+You can check the configuration change has taken affect by running amavisd-nanny:
+<pre>
+sudo amavisd-nanny
+</pre>
+For guidance on how many processes to set this value to please see:
+<pre>
+zcat /usr/share/doc/amavisd-new/README.performance.gz | less
+</pre>
+and
+http://www.ijs.si/software/amavisd/amavisd-new-magdeburg-20050519.pdf
+
+<<BR>>
+'''Note:''' This guide has been tested on Ubuntu 7.10 (Gutsy Gibbon), Ubuntu 10.04 LTS Server (Lucid Lynx), Ubuntu 12.04.3 LTS (Precise Pangolin), Ubuntu 14.04.2 LTS (Trusty Tahr), and Ubuntu 20.04 LTS (Focal Fossa).
+----

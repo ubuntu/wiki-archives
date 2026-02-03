@@ -1,0 +1,437 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+Sometimes there are bugs in the hardware itself.  Quirks are software ways to work around these bugs.
+
+== Custom xorg.conf Snippets ==
+
+Starting from Ubuntu 12.04 is now possible to write quirks for specific laptop models which require custom xorg.conf snippets.
+
+=== Use case ===
+
+Laptops such as Lenovo's T420s require an option in xorg.conf (''Option "RegistryDwords" "EnableBrightnessControl=1"'') in order to control the backlight when using Nvidia's proprietary driver.
+
+=== Configuration Files ===
+
+X snippets are generated from quirks configuration files stored in ''/usr/share/nvidia-common/quirks''.
+
+As an example, let's create a configuration file for the T420s and call it ''thinkpad_t420'':
+
+<pre>
+Section "Quirk"
+    Identifier "Thinkpad T420"
+    Handler "nvidia-current|nvidia-current-updates"
+    Match "sys_vendor" "LENOVO"
+    Match "product_version" "ThinkPad T420"
+    XorgSnippet
+        Section "Device"
+            Identifier "My Card"
+            Driver "nvidia"
+            Option "NoLogo" "True"
+        EndSection
+
+        Section "Screen"
+            Identifier "My Screen"
+            Option "RegistryDwords" "EnableBrightnessControl=1"
+        EndSection
+    EndXorgSnippet
+EndSection
+</pre>
+
+As you can see, the file contains a '''Quirk''' section with a few options:
+* '''Identifier''': your custom quirk name
+* '''Handler''': a (pipe-separated) list of the only packages whose installation should trigger the creation and removal of this quirk
+* '''Match''': optional strings which match DMI data such as ''sys_vendor'' or ''product_version''
+* '''XorgSnippet''': a subsection where we can put our xorg.conf snippet. The subsection needs to end with an '''EndXorgSnippet''' tag
+
+=== Installing/Uninstalling Quirks ===
+
+In order to use quirks, packages need to call the '''quirks-handler''' script to either enable or to disable the quirk. Here are two examples:
+
+* an extract from ''nvidia-current'' 's '''post-installation script''':
+
+<pre>
+### Enable any quirks for the driver
+    if [ `which quirks-handler` ]; then
+        quirks-handler -e nvidia-current
+    fi
+</pre>
+
+* an extract from ''nvidia-current'' 's '''pre-removal script''':
+<pre>
+### Remove any quirks for the driver
+    if [ `which quirks-handler` ]; then
+        quirks-handler -d  nvidia-current
+    fi
+</pre>
+
+'''Note:''' you can also pass the '''-v''' parameter to get more verbose output.
+
+=== How it works ===
+
+If all the conditions (if any) in the configuration file match the data provided by DMI, a configuration file is written to ''/usr/share/X11/xorg.conf.d/''. This way we can make sure that only the right systems get the options we put in our configuration file. Of course, it is the packager's responsibility to make sure that, as previously shown, such xorg.confs are removed when the package is uninstalled.
+
+== KMS Quirks ==
+
+What follows is a brief overview of kernel code where graphics hardware can be quirked. 
+
+Quirks have tended to be one of the most important ways we fix up hardware specific graphics problems.
+
+Knowing where to look for quirks (and creating them where needed) is an important skill for people who do:  A) Hardware Enablement, B) Customer Support, C) Bug Triage, D) X Package Maintenance.
+
+Tip:  It is a very good idea to look in upstream's current git tree a few weeks before release.  A lot of times they'll have updated quirks which are well worth backporting into our release version.
+
+=== Monitor Quirking:  drm_edid.c ===
+
+Broken EDID is one of the most common kinds of issues we need to quirk for.  These bugs are monitor-specific, and sometimes even resolution-specific.  Typical symptoms include:
+
+** Incorrect font sizes
+** Wrongly selected resolutions
+** Wrongly selected refresh rates
+** Wrong physical screen dimensions reported
+
+These quirks are covered in the file drivers/gpu/drm/drm_edid.c.  The documentation in the source code is pretty vague.  I don't think there's a simple way to test out quirks other than patching the kernel code.  So if you suspect you have a monitor needing one of these quirks, add the monitor name and/or product_id to the edid_quirk_list[] list with the quirk you want to test.  Rebuild kernel, boot, and test.
+
+=== Radeon Output Quirking: radeon/radeon_atombios.c and radeon_combios.c ===
+
+The routine radeon_atom_apply_quirks() in the file radeon_atombios.c fixes issues related to bad output detection for newer ATI hardware that uses atombios.  So if a given piece of hardware has DVI but it shows up as HDMI or VGA, or reports DVI-D instead of DVI-I, or similar types of problems, this is where it's fixed.
+
+For older pre-atombios hardware, this is done in radeon_apply_legacy_quirks() in radeon_combios.c
+
+=== Radeon AGP Quirking: radeon/radeon_agp.c ===
+
+For older AGP-based systems, having the wrong AGP_Mode is a common problem.  Unfortunately these are often incompatibilities between the graphics card and the host bridge, and quirking is the only viable solution.
+
+I guess the best way for bug reporters to test this is to boot into UMS mode and test different AGP_Modes in their xorg.conf.  When one is found to work, add an appropriate quirk to the radeon_agpmode_quirk table.  You need to know the bus id (the first entry in lspci -vvnn) and the card pci id (also in lspci -vvnn - the line for the VGA card).
+
+=== Radeon Encoder Quirks: radeon/radeon_encoders.c ===
+
+I'm not sure when you'd want to do quirks to the encoder but this is done in atombios_apply_encoder_quirks() in radeon_encoders.c.  There is one macbook listed here.
+
+=== Intel No Display After Lid Close Quirks: i915/intel_lvds.c ===
+
+A common problem on Intel is laptop lids that incorrectly report their status.  This can result in the display turning black after the splash screen but before gdm shows up.  The system isn't hung (you can still hear the login sound) but the display just doesn't come on.
+
+The bad_lid_status[] list in intel_lvds.c contains the quirks for these devices.  You need to gather dmidecode output from the bug reporter in order to add these quirks, but given that it should be straightforward to construct a quirk patch.  Unfortunately with KMS I don't know of a way to let the user test a quirk without having to rebuild the kernel; with UMS there were options exposed by the driver that could be set in the xorg.conf which made testing easy.
+
+=== Intel Phantom LVDS Quirks: i915/intel_lvds.c ===
+
+Some systems report having a LVDS display when in reality they don't.  Hybrid systems like the Dell Studio Hybrid and various *Mini type systems are like this.  They have a laptop motherboard in a desktop case, and thus the confusion.
+
+These systems can be quirked in the intel_no_lvds[] list in intel_lvds.c
+
+=== Intel Bad SDVO TV Quirks: i915/intel_sdvo.c ===
+
+intel_sdvo_bad_tv[] in intel_sdvo.c lists systems that have an incorrect SDVO TV output that should be ignored.  Only one system is listed so this seems to be an unusual problem.  Again, dmidecode data is needed for making these quirks.
+
+== UMS Quirks ==
+
+=== Monitor Quirks ===
+
+When X starts up, it gathers the 'EDID' data from your monitor to get your monitor's id, and then looks up if there are quirks for that id to apply.  Monitor quirks are kept in the X server, in the file hw/xfree86/modes/xf86EdidModes.c.  Here is a listing of the current quirks:
+
+<pre>
+quirk_prefer_large_60:           Detailed timing is not preferred, use largest mode at 60Hz
+quirk_135_clock_too_high:        Recommended 135MHz pixel clock is too high
+quirk_prefer_large_75:           Detailed timing is not preferred, use largest mode at 75Hz
+quirk_detailed_h_in_cm:          Detailed timings give horizontal size in cm.
+quirk_detailed_v_in_cm:          Detailed timings give vertical size in cm.
+quirk_detailed_use_maximum_size: Use maximum size instead of detailed timing sizes.
+quirk_first_detailed_preferred:  First detailed timing was not marked as preferred.
+quirk_detailed_sync_pp:          Use +hsync +vsync for detailed timing.
+</pre>
+
+These all deal with issues where the monitor manufacturer didn't encode EDID properly (like putting values in centimeters rather than millimeters, etc.)
+
+If you look in the source of hw/xfree86/modes/xf86EdidModes.c in xorg-server, it references bug ID's that explain the problems in better detail.
+
+=== Intel Driver Quirks ===
+
+The open source -intel driver has a set of quirks contained in the file src/i830_quirks.c:
+
+<pre>
+quirk_pipea_force
+quirk_ignore_tv
+quirk_ignore_lvds
+quirk_mac_mini
+quirk_lenovo_tv_dmi
+quirk_ivch_dvob
+</pre>
+
+==== Force Pipe A Quirk ====
+
+This problem typically exhibits itself on Intel graphics hardware (most particularly i855) by locking up the machine when closing the lid.  The fix for this issue is to quirk your card to force enabling Pipe A. If you suspect you're having this bug, try setting this option in your xorg.conf:
+
+  Section "Device"
+    ...<<BR>>
+    Option "ForceEnablePipeA" "true"
+  !EndSection
+
+If that eliminates the issue, then please file a new bug report with the following information:
+
+** Title the bug report "Need a Pipe-A quirk for <your video card PCI ID>"
+** Paste in the output of `lspci -vvnn | grep -A1 "VGA compat"`
+** Run `sudo dmidecode > dmi.txt` and attach dmi.txt to the bug report
+** Give the laptop model name and number
+** Confirm that adding "ForceEnablePipeA" solved the problem
+
+Ref:  See bug number <nowiki>[[https://bugs.launchpad.net/bugs/138256|138256]]</nowiki>
+
+==== Ignore TV Output Quirk ====
+
+This problem typically exhibits itself as the GNOME panel seems sized to fit a different resolution than the one your monitor is actually displaying, as shown in this <nowiki>[[http://launchpadlibrarian.net/12354400/screen.png|screenshot]]</nowiki>.  This can be caused by the TV output being turned on when it shouldn't; the fix is to quirk your card to ignore the TV output by default.  If you suspect you're having this bug, first try setting this option in your xorg.conf:
+
+In section "Section "Device"" add the line:
+
+    Option "monitor-TV" "TV"
+
+Then the following new section:
+
+    Section "Monitor"
+        Identifier "TV"<<BR>>
+        Option "Ignore" "True"
+    !EndSection
+
+If that solves the problem, then please file a new bug report with the following information:
+
+** Title the bug report "Need TVout quirk for <your video card PCI ID>"
+** Paste in the output of the original `xrandr` (before modifying xorg.conf)
+** Paste in the output of `lspci -vvnn | grep -A1 "VGA compat"`
+** Run `sudo dmidecode > dmi.txt` and attach dmi.txt to the bug report
+** Give the laptop model name and number
+** Confirm that setting Ignore on the TV output fixed it
+
+[An example patch to add a <nowiki>[[http://git.kernel.org/?p=linux/kernel/git/anholt/drm-intel.git;a=blobdiff;f=drivers/gpu/drm/i915/intel_lvds.c;h=1e063796d5b4c1fd5ab71fb11dae818ac20fd3db;hp=ecbaa0fc798d4ff6b588b8d5d1b1e0af361952df;hb=facbc7845f2d9247d36d9b4365122c9cc50e2d1e;hpb=6e99bae73a1c21c3d4466e1cae8bf1ab24edaa7a|quirk to the kernel]]</nowiki> for KMS]
+
+==== Ignore LVDS Output Quirk ====
+
+This problem typically shows up as the screen going blank when X starts up, typically after usplash has shown the Ubuntu logo but before the gdm login screen appears.  In addition, switching to vt consoles just results in blank screens.  The system usually is not hung - it still responds to ctrl-alt-del and you may even hear the "login sound".  Switching to "vesa" usually makes the blanking problem go away.
+
+The issue is that on your hardware the LVDS is getting enabled when it shouldn't.  For instance, the intel driver assumes Mobile graphics chips always have an LVDS attached, so if you're using a mobile graphics chip in a non-laptop device, it'll break.  You can spot this by looking in your /var/log/Xorg.0.log and seeing if it's connecting the LVDS output to an output pipe.  
+
+If you suspect you have this problem, try explicitly disabling LVDS in your /etc/X11/xorg.conf:
+
+In section "Section "Device"" add the line:
+
+    Option "monitor-LVDS" "LVDS"
+
+Then the following new section:
+
+    Section "Monitor"
+        Identifier "LVDS"<<BR>>
+        Option "Ignore" "True"
+    !EndSection
+
+If that solves the problem, then please file a new bug report with the following information:
+
+** Title the bug report "Need LVDSout quirk for <your video card PCI ID>"
+** Explain the symptoms of the problem you encountered
+** Paste in the output of `lspci -vvnn | grep -A1 "VGA compat"`
+** Run `sudo dmidecode > dmi.txt` and attach dmi.txt to the bug report
+** Give the laptop model name and number
+** Confirm that setting Ignore on the LVDS output fixed it
+
+=== ATI Radeon Driver Quirks ===
+
+==== ATI AGP Mode Quirk ====
+Some ATI cards are incompatible with other stuff in your system, and only work with specific AGPMode values. One not uncommon situation is an incompatibility between the graphics card and motherboard's "host bridge", which is what this quirk deals with.
+
+Typical Symptoms:
+
+* X hangs (pointer still moves) or shows corruption:
+** shortly after startup,
+** after starting a 3D program, or
+** after a suspend/resume cycle.
+
+* The issues go away when:
+** Specifying <code>Option "AGPMode" "#"</code> in xorg.conf
+** Using vesa or fglrx driver
+** Using some older version of the -ati driver that used a different default AGPMode setting
+
+Verification:
+
+Try setting different values (1, 2, 4, 8) for AGPMode in your xorg.conf:
+
+<pre>
+Section "Device"
+    ...
+    Option "AGPMode" "2"
+EndSection
+</pre>
+
+Information Needed for Quirking:
+
+* Bug report URL or number
+* AGPMode value needed
+* Make/Model of laptop or motherboard
+* Host Bridge
+** See output of <code>lspci -nn | grep 00:00.0</code>
+** Sometimes also found in Xorg.0.log
+* Graphics Card and Subsystem
+** See output of <code>lspci -nnvv | grep -A1 "VGA compatible controller"</code>
+** Sometimes also found in Xorg.0.log
+* Is the system all factory hardware, or have any parts been replaced?
+* Is there an AGP Mode in the system BIOS?
+** If so, is it set to the factory default?
+
+Please add this information to your bug report and add "[Needs AGPMode quirk]" to the title. 
+
+Examples:
+
+<pre>
+* deb #462590
+  AGPMode needed: 4
+  Model:          (Unknown) DELL notebook
+  Host Bridge:    [8086,2570] 82865G/PE/P DRAM Controller/Host-Hub Interface
+  Graphics Card:  [1002,4a4e] ATI Technologies Inc M18 JN [Radeon Mobility 9800]
+  Card Subsystem: [1028,5106] Dell: Unknown device 5106
+  HW changes:     (Unknown)
+  BIOS:           (Unknown)
+
+* fdo #17360
+  AGPMode needed: 2
+  Model:          (Unknown)
+  Host Bridge:    [8086,3575] 82830 830 Chipset Host Bridge
+  Graphics Card:  [1002,4c59] Radeon Mobility M6 LY
+  Card Subsystem: [1028,00e3] Dell: Unknown device 00e3
+  HW changes:     (Unknown)
+  BIOS:           (Unknown)
+</pre>
+
+==== ATI Bus Type Quirk ====
+Sometimes the above is not enough to stop Xorg from crashing.
+Forcing the bus to PCI with
+
+<pre>
+Section "Device"
+...
+        Option          "BusType"       "PCI"
+EndSection
+</pre>
+
+helps.
+
+==== ATI AGP Aperture Size Quirk ====
+Recently the open source radeon driver has been updated to use 32 MB of AGP aperture by default. This might cause problems if for some reason your aperture size has been configured to a lower value than 32 MB in your BIOS.
+
+Typical error message in Xorg log would be ''"[agp] Could not bind"'' which isn't very informative. When AGP binding fails, DRI will not work and thus you lose accelerated OpenGL.
+
+If you encounter this type of error, check your BIOS settings and bump up aperture size to at least 32 MB if it's lower than that.
+
+== Input Quirks ==
+
+=== 2-button Mice ===
+
+Upstream has made middle-mouse button emulation is no longer enabled by default; this affects the version of X.org shipped in natty and newer.  Most all mice these days have 3 buttons (such as a clickable mouse-wheel), and having the emulation on universally causes pointer lagging for most users.  Instead, for the (rare) cases of 2 button mice, the specific hardware devices can be quirked.
+
+If you have a 2-button mouse and need middle-mouse emulation, here are the steps to follow to request adding a quirk for your hardware:
+
+1.  Create a file named /usr/share/X11/xorg.conf.d/middle-mouse-button.conf with the following contents:
+
+<pre>
+ Section "InputClass"
+     Identifier "middle button emulation class"
+     MatchIsPointer "on"
+     Option "Emulate3Buttons" "on"
+ EndSection
+</pre>
+
+2. If you use GNOME 3 or Unity, an additional step is needed. Execute the following command
+ gsettings set org.gnome.settings-daemon.peripherals.mouse middle-button-enabled true
+
+Otherwise, GNOME 3's settings will override X's.
+
+3.  Restart X, and verify this works.
+
+4.  File a bug with the title "Quirk for 2-button mouse <your mouse brand>", like this:
+
+ ubuntu-bug xserver-xorg-input-evdev
+
+5.  Attach to the bug report the output of 'sudo lsinput' and 'sudo dmidecode'
+
+== Intel Driver Resolution Kernel Quirks ==
+=== Intel Driver - Resolution Mis-detected due to lack of EDID quirks in kernel ===
+
+Monitors communicate their capabilities via "EDID", a chunk of binary data stored in the monitor itself, which can be probed by the graphics driver to determine what resolutions, or "modes", are supported.  The EDID is encoded in the monitor by the manufacturer, but sometimes manufacturers make mistakes and the EDID is incorrect.
+
+The xserver has collected a rich set of workarounds for various monitors to get it to set modes properly when faced with a known-buggy monitor.  These workarounds, or "quirks", are collected in <nowiki>[[http://cgit.freedesktop.org/xorg/xserver/tree/hw/xfree86/modes/xf86EdidModes.c|xf86EdidModes.c]]</nowiki> in the xserver.  More information about quirks is available on Ubuntu's <nowiki>[[X-Quirks|Quirks]]</nowiki> page.
+
+In order to improve boot-up performance the Intel video driver changed in 2009 from letting X.org set the mode, to depending on the Linux kernel to do this.  This is referred to as "kernel modesetting" (KMS).  When upstream moved the modesetting functionality to the kernel, they did not simultaneously copy over the quirk collection from the xserver.  Unfortunately for Ubuntu, at the point we pulled the kernel, it did not include these quirks.  This results in regressions for many users whose systems had been working due to the quirks that had been added in.  The quirks are being added to the kernel, but slowly - each is being reviewed and re-tested.
+
+=== Verification ===
+
+There are a couple ways to determine if your system required a quirk in X:
+
+* Find your monitor's vendor.name and vendor.prod_id (this can often be found in Xorg.0.log or by looking at `xrandr --verbose` or `get-edid|parse-edid` output.)  Check <nowiki>[[http://cgit.freedesktop.org/xorg/xserver/tree/hw/xfree86/modes/xf86EdidModes.c|xf86EdidModes.c]]</nowiki> and see if your monitor is listed in one of the quirks.
+
+* If you have an old Xorg.0.log handy (or can boot a Jaunty LiveCD), review the Xorg.0.log to see if it mentions a quirk being used.  The exact text used can be seen in <nowiki>[[http://cgit.freedesktop.org/xorg/xserver/tree/hw/xfree86/modes/xf86EdidModes.c|xf86EdidModes.c]]</nowiki> in the ddc_quirk_map_t table.
+
+* Ubuntu also carries one quirk that did not yet make it in upstream:
+** HP Compaq NC8430 LP154W01-TLA8 (LP: #380009) - quirk_detailed_v_in_cm
+
+=== Workarounds ===
+
+Unfortunately, knowing that you need a quirk is not enough to get your resolutions back directly.  While you're waiting on your bug, if you are comfortable with hacking on your xorg.conf, you may be able to manually work around the issue.
+
+Here is a template xorg.conf to start from:
+
+<pre>
+Section "Device"
+	Identifier	"Configured Video Device"
+	Driver		"intel"
+EndSection
+
+Section "Monitor"
+	Identifier	"Configured Monitor"
+	ModeLine        "1680x1050" 146.2 1680 1784 1960 2240 1050 1053 1059 1089
+EndSection
+
+Section "Screen"
+	Identifier	"Default Screen"
+	Monitor		"Configured Monitor"
+	Device		"Configured Video Device"
+	SubSection "Display"
+		Modes "1680x1050"
+	EndSubSection
+EndSection
+</pre>
+
+You'll want to replace the ModeLine and Modes with your own.  There are a few ways to figure out the modeline.
+
+The most typical approach is to use a tool such as <nowiki>[[http://xtiming.sourceforge.net/cgi-bin/xtiming.pl|xtiming]]</nowiki> to calculate it for you.
+
+An alternative is to review the output in your Xorg.0.log for a section like this:
+
+<pre>
+(II) MGA(0): Supported additional Video Mode:
+(II) MGA(0): clock: 146.2 MHz   Image Size:  433 x 271 mm
+(II) MGA(0): h_active: 1680  h_sync: 1784  h_sync_end 1960 h_blank_end 2240 h_border: 0
+(II) MGA(0): v_active: 1050  v_sync: 1053  v_sync_end 1059 v_blanking: 1089 v_border: 0
+(II) MGA(0): Ranges: V min: 48  V max: 85 Hz, H min: 30  H max: 94 kHz, PixClock max 170 MHz
+</pre>
+
+Your modeline will put this info into the following order:
+
+<pre>
+ModeLine <name> <clock> <4 horiz. timings> <4 vert. timings>
+</pre>
+
+=== Development Work ===
+
+Ultimately, the solution to this is to get the quirks ported over from the xserver.  
+
+* Go through the file <nowiki>[[http://cgit.freedesktop.org/xorg/xserver/tree/hw/xfree86/modes/xf86EdidModes.c|xf86EdidModes.c]]</nowiki>
+* Implement a kernel-side routine for each of the quirk_* functions
+* Review the <nowiki>[[http://git.kernel.org/?p=linux/kernel/git/torvalds/linux-2.6.git;a=blob_plain;f=drivers/gpu/drm/drm_edid.c;hb=HEAD|drm_edid.c in the linus tree]]</nowiki> to see if the quirk was already brought over and can be cherrypicked.
+* If not, add the quirk to <nowiki>[[http://kernel.ubuntu.com/git?p=ubuntu/ubuntu-karmic.git;a=blob_plain;f=drivers/gpu/drm/drm_edid.c|drm_edid.c in the ubuntu tree]]</nowiki>
+
+=== Device Tree Quirks ===
+* <nowiki>[[Specs-DeviceTreeQuirks]]</nowiki>

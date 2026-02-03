@@ -1,0 +1,227 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+== Convert a package to git for the first time from Debian ==
+
+All this procedure (except to push and remote changes) can be automatized by using <nowiki>[[https://git.launchpad.net/~canonical-desktop-team/+git/ubuntu-desktop-gbp-importer/|this script]]</nowiki> (might need to change some maps - see `projects-mapping.source` file - for non-GNOME packages), launching `./importer.sh <project-name>`
+
+Note: if we are in a -0ubuntuX package with X > 1 at an upstream which isn't in debian. This may fails in theory at the import new version phase at step 4 (no origin tarball referenced by the .dsc). As this use case wasn't present yet, please reach out on IRC so that we can cover this case. The theorical fix is to import the -0ubuntu1 and then import -0ubuntuX.
+
+'''1. Clone Debian repository and rename remote to "salsa".'''
+
+<pre>
+$ gbp clone git@salsa.debian.org:gnome-team/gnome-control-center.git --postclone="git remote rename origin salsa"
+gbp:info: Cloning from 'git@salsa.debian.org:gnome-team/gnome-control-center.git'
+gbp:info: Running Postclone hook
+</pre>
+ 
+
+'''2. Configure the branch'''
+
+Configure it by adding upstream and launchpad remotes. Also say in your local config to always push relevant tags on this repo without explicitely mentioning them
+<pre>
+$ cd gnome-control-center
+$ git remote add -f gnome git@gitlab.gnome.org:GNOME/gnome-control-center.git
+Updating gnome
+[…]
+$ git remote add origin lp:~ubuntu-desktop/ubuntu/+source/gnome-control-center
+$ git config push.followTags true
+</pre>
+
+'''3. Find common version with Debian'''
+
+Find back latest version we diverged from debian, and branch from it in a new ubuntu/master branch. Note that tags are mangled for version (for instance ':' becomes '%', '~' becomes '_'. Here, we diverged at '''1:3.27.92-1''', we this branch from the tag '''debian/1%3.27.92-1'''.
+
+If you're running on the latest ubuntu, you can find this information with a script such as:
+<pre>
+apt-get changelog gnome-control-center > "gnome-control-center.changelog"
+
+for ((i = 0; ; i += 1)); do
+  version="$(dpkg-parsechangelog -l "gnome-control-center.changelog" -S Version -o $i -c 1)";
+
+  if [[ "$version" =~ -[0-9]+ubuntu[0-9]+ ]]; then
+    continue
+  elif [[ "$version" =~ -[0-9]+$ ]]; then
+    echo "Last debian version found at $version (salsa tag is debian/$(echo "$version" | perl -p -e 'y/:~/%_/;s/\.(?=\.|$|lock$)/.#/g;'))"
+    break
+  elif [ -z "$version" ]; then
+    break;
+  fi
+done
+</pre>
+
+So you can switch to the found tag
+
+<pre>
+$ git checkout -b ubuntu/master debian/1%3.27.92-1
+Switched to branch 'ubuntu/master'
+</pre>
+
+'''4. Import bzr debian history (optional, but very nice to have)'''
+
+In order to be able to do this you need to have `git-remote-bzr` installed. However, if the package has an epoch (X: prefix) in version (as in this example), using an external directory where you just created a git repo with `bzr fast-export --rewrite-tag-names` (and then rewrite them) could be more convenient.
+
+'''4a. Add the ubuntu-bzr remote'''
+<pre>
+git remote add ubuntu-bzr bzr::lp:~ubuntu-desktop/gnome-control-center/ubuntu
+git fetch ubuntu-bzr
+</pre>
+
+'''4b. Import bzr debian revision tags'''
+
+Normally, '''ubuntu-bzr''' will have already the bzr tag imported (check if `git tag --merged ubuntu-bzr/master` lists them all). If not (like in this case), it's likely due to the fact that the revision contains a `:` which is illegal on debian tags, if using `git-remote-bzr` there's no other option than re-adding these tags with a script (converting `:`'s with `%`'s) such as:
+
+<pre>
+while read -r line; do
+  tag="$(echo "${line/:/%}" | sed -n "s,\([a-f0-9]\+\) releasing package gnome-control-center version \(.*[0-9]\+ubuntu[0-9]\+.*\),\2 \1,p")"
+  [ -n "$tag" ] && git tag $tag
+done < <(git log ubuntu-bzr/master --oneline)
+</pre>
+
+Then (in any case) we need to rename the bzr tags from `$version` to `ubuntu/$version`:
+
+<pre>
+for t in $(git tag --merged ubuntu-bzr/master); do git tag "ubuntu/$t" "$t"; git tag -d "$t"; done
+</pre>
+
+'''4c. Merge debian folder into the branch'''
+
+Merge the contents of the '''ubuntu-bzr''' branch as our new debian, removing what we currently have, as it's just the latest debian version.
+<pre>
+git merge --strategy ours --no-commit ubuntu-bzr/master --allow-unrelated-histories
+
+git rm -rf debian
+
+git read-tree --prefix=/ -u ubuntu-bzr/master
+git rm -rf --ignore-unmatch .bzr*
+</pre>
+
+'''4d. Do a merge commit to import the revision'''
+
+<pre>
+git commit -m "Importing lp:~ubuntu-desktop/gnome-control-center/ubuntu"
+
+git gc --aggressive
+</pre>
+
+'''4e. Get ready to actually import the ubuntu package content'''
+
+We have now to actually import the dsc and the whole source code content. However, as per the previous operation, we should now have the tag of the dsc revision we are going to import (as the last tag), and this will prevent `gbp import-dsc` to work (as it would think we're all set).
+
+To workaround this, we can just safely remove such tag, as this will be re-added anyway by `gbp` and at the proper level.
+
+<pre>
+git tag ubuntu/bzr-last-release $(git describe --tags --abbrev=0)
+git tag -d $(git describe --tags --abbrev=0)
+</pre>
+
+At this point you can just continue to work normally, following this process.
+
+'''5. Download latest ubuntu package from the development version and import it'''
+
+<pre>
+$ gbp import-dsc --debian-branch=ubuntu/master --debian-tag='ubuntu/%(version)s' ../gnome-control-center_3.28.1-0ubuntu4.dsc
+gbp:info: Version '1:3.28.1-0ubuntu4' imported under '/home/didrocks/work/gnome-control-center'
+</pre>
+ 
+'''6. Fix up `debian/control*`'''
+
+Mention the Launchpad URLs in `Vcs-Git` and copy Debian's to `XS-Debian-Vcs-Git` in debian/control*. For instance:
+
+<pre>
+XS-Debian-Vcs-Browser: https://salsa.debian.org/gnome-team/gnome-control-center
+XS-Debian-Vcs-Git: https://salsa.debian.org/gnome-team/gnome-control-center
+Vcs-Browser: https://git.launchpad.net/~ubuntu-desktop/ubuntu/+source/gnome-control-center
+Vcs-Git: https://git.launchpad.net/~ubuntu-desktop/ubuntu/+source/gnome-control-center
+</pre>
+
+'''7. Modify or create `debian/gbp.conf` containing:'''
+<pre>
+[DEFAULT]
+debian-branch=ubuntu/master
+upstream-branch=upstream/latest
+debian-tag=ubuntu/%(version)s
+upstream-vcs-tag=%(version)s
+pristine-tar=True
+</pre>
+
+Then, commit both changes:
+<pre>
+$ git commit -a
+</pre>
+
+Note: Adapt the upstream tag pattern as needed (check `git tag`). However, sometimes, upstream doesn't have a consistent tagging pattern. Debian has a tendency to comment out upstream-vcs-tag. However, it means that we can loose the rich upstream history by an import not using --upstream-vcs-tag when importing the package. Please prefer to always add one, even invalid, like `upstream-vcs-tag=InconsistentTaggingPattern-%(version)`.
+That way, it's clear that the upstream tag has to be specified manually on the command line for every new release import.
+
+'''8a. If you imported bzr ubuntu history, readd eventual bzr changes after release'''
+
+In most of cases, this step isn't needed. If you decided to keep the bzr history, and in bzr there were unreleased revisions, you might need to take some extra steps
+
+However, if the bzr branch had commits after the last release (or tag), in such case we should re-add those changes.
+This can be done manually, or just reusing the '''ubuntu-bzr''' remote as a source. However, cherry-picks won't work, as the commits are already in, technically, but you can instead just see in `git log ubuntu-bzr/master` which commits have been done from the last tag to the branch HEAD, and just go through them and use `git show <SHA> | git apply` to reapply them.
+
+To see them you can just use:
+<pre>
+git log ubuntugit show $commit | git apply -3/bzr-last-release..ubuntu-bzr/master --oneline
+</pre>
+
+And this process could be scripted with something like:
+<pre>
+for commit in $(git log ubuntu/bzr-last-release..ubuntu-bzr/master --format=format:%H); do
+  git show $commit | git apply -3
+  git commit -C $commit
+done
+</pre>
+
+'''8b. Remove the temporary ubuntu-bzr remote'''
+<pre>
+git remote remove ubuntu-bzr
+</pre>
+
+'''9. Push those branches and them set to track launchpad'''
+<pre>
+$ git push -u origin ubuntu/master       
+Counting objects: 3816, done.
+Delta compression using up to 8 threads.
+Compressing objects: 100% (888/888), done.
+Writing objects: 100% (3816/3816), 2.04 MiB | 2.66 MiB/s, done.
+Total 3816 (delta 2277), reused 3529 (delta 2243)
+To git+ssh://git.launchpad.net/~ubuntu-desktop/ubuntu/+source/gnome-control-center
+* [new branch]          ubuntu/master -> ubuntu/master
+Branch 'ubuntu/master' set up to track remote branch 'ubuntu/master' from 'origin'.
+$ git push -u origin upstream/latest
+[…]
+$ git push -u origin pristine-tar
+[…]
+
+git tag | grep -E '^ubuntu/|^debian/|^upstream/' | xargs --no-run-if-empty git push origin
+</pre>
+
+'''10. Configure launchpad'''
+
+Visit the repository page on Launchpad, and set the default branch to `ubuntu/master`. Also, remove the bzr branch if available to prevent other people relying on it, after checking that any pending change have been transferred to the git branch.
+
+You can now work with the repository. It's tracking the correct branches and version. Your layout should be:
+<pre>
+$ git branch -vv
+  debian/master   c02b29966 [salsa/debian/master] Revert "Don't recommend libnss-myhostname since it doesn't seem needed any more (LP: #1766575)"
+  pristine-tar    e59ab7422 [origin/pristine-tar] pristine-tar data for gnome-control-center_3.28.1.orig.tar.xz
+* ubuntu/master   ba45348d3 [origin/ubuntu/master] debian/gbp.conf: use gbp-buildpackage for ubuntu.
+  upstream/latest 83b100dc9 [origin/upstream/latest] New upstream version 3.28.1
+</pre>
+
+And you have 3 remotes:
+<pre>
+$ git remote show
+gnome
+origin
+salsa
+</pre>

@@ -1,0 +1,98 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+* '''Launchpad Entry''': UbuntuSpec:thinclient-sound
+* '''Created''':  by OliverGrawert
+* '''Contributors''': OliverGrawert
+* '''Packages affected''': 
+*** ltsp-client
+*** ltsp-server
+
+=== Summary ===
+Thin Client Audio Support how to get audio to the thin clients
+
+=== Rationale ===
+
+Since LTSP sessions currently run fully on the server and there is no tweakage done, the first LTSP Client grabs the available audio device to play sounds. For dapper the sound output needs to get redirected to the Thin Client over the network to use the actual sound device the user listens to :)
+
+=== Use cases ===
+
+Ian clicks on a menu item in Gnome and the "plop" sound used for the menu item gets played on the thin client's sound system as expected.
+
+Daniel is playing a tutorial video from a training website on his thin client at work.  His phone rings, and he mutes his volume control so he can hear.  It works as expected.
+
+Wilma has edited some wav files in the music class at her schoool where a edubuntu LTSP server is used. She can easily play back the edited sound files because there is sound support for the Thin Clients in Edubuntu LTSP.
+
+=== Scope ===
+
+Options:
+
+* ALSA itself does not support network operation, so an intermediary must be used.
+* esound has problems, but is a workable solution, and is used currently we can use it from gstreamer through the gstreamer-esd audiosink.
+* polypaudio is dead upstream.
+* jack needs kernel patches, has a bad security history and is not supportable in main.
+* gstreamer: too limited in scope and would at least require to write a sounddaemon for the client.
+* nas: poor performance leads to "stuttering" audio playback.
+* mas: dead upstream
+* vsound: only supports OSS, and not ALSA and is dead upstream since some time.
+
+=== Design ===
+
+Idea (network sound for the poor): Have ALSA output to a file/pipeline, and forward this (netcat/ssh) to the client. We should evaluate whether this works in principle (if this works we should make it the default for dapper+1 !).
+
+For dapper, ltsp should still default to esound since this is a long term working and proven solution in all LTSP implementations currently, since we dont want to make intrusive changes in dapper release cycle and all other implementations would require the development of a soundserver on the client. esound has known security issues we catch via having a read only filesystem, new sounddaemons would probably introduce new unpredictable bugs or security issues. We can automatically detect this in the planned automatic backend for gstreamer.
+
+=== Implementation ===
+
+* We will start the esound daemon as a system service from the ltsp-client-setup bootscript.
+* running esound as root wont affect security at all here, since thin clients have a read only filesystem
+* Use the configuration options necessary to have esound listen to TCP connections.
+* On the server side, gnome-session needs to use gstreamer-esd as sound output. The new automatic detection backend for gstreamer will detect esound.
+* The correct local ip address will have to be determined to allow esddsp on the server to be aware to which IP it shall send the sound. This will be done by a get_ip() function that is added to ldm.
+
+==== Code ====
+
+* The code below needs to go into the ldm binary:
+
+<pre>
+def get_ip(ifname):
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    return socket.inet_ntoa(fcntl.ioctl(
+        s.fileno(),
+        0x8915,  # SIOCGIFADDR
+        struct.pack('256s', ifname[:15])
+    )[20:24])
+</pre>
+
+{{{
+ssh_remote_command = ['env',
+                      'LTSP_CLIENT="%s"' % (socket.gethostname()),
+                       esddsp', '-m','--server=%s:16001' % (self.ip),
+                       session_manager,
+                       ';',
+                       'kill -1 $PPID']}}}
+
+   (self.ip is calling the get_ip() function that hands back the current client ip to the command. i.e. self.ip = get_ip('eth0'))
+
+* on the thin client the following commands will be run by ltsp-client-setup on startup if SOUND is set in lts.conf:
+** esd -nobeeps -public -tcp & (run and export esd to the network)
+* ltsp-server needs a depedency on esound-clients
+* ltsp-client needs a dependency on esound
+  
+* After a talk with martin pitt who implements the new desktop sound architecture we agreed on the following:
+** As outlined in GstreamerAudioBackend, gstreamer will have a priority list of audiosinks
+** The priority starts at the alsadmix sink and ends with esdsink. 
+** Since this is the wrong way around for us, martin will write a ltspsink that gets used if LTSP_CLIENT is s  et, it will get top priority to be choosen first if the variable is present. 
+** The code inside  ltspsink will simply initialize the esdsink.
+** According to Martin, this should be very quick to implement.
+----
+CategorySpec
+CategoryEdubuntuSpec

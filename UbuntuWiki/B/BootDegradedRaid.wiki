@@ -1,0 +1,328 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+=== Overview ===
+
+'''''This page is orphaned. The success of the "fixes" presented on this page can be measured by the bugs filed to mdadm, see ReliableRaid for an overwiew of what still needs to be fixed.'''''
+
+* '''Launchpad Entry''': https://blueprints.edge.launchpad.net/ubuntu/+spec/boot-degraded-raid
+* '''Created''': 2008-05-30
+* '''Contributors''': DustinKirkland
+* '''Packages affected''': mdadm, grub, initramfs, udev, lvm2
+* '''Bugs''':
+** Primary objectives for the current specification:
+** Bug:33649 - Fix Released
+** Bug:120375 - Fix Released
+** Bug:259127 - Fix Released
+** Bug:268580 - Fix Released
+** Related bugs:
+** Bug:157981
+** Bug:244792
+** Bug:259145
+
+=== Summary ===
+
+This specification defines a methodology for enhancing Ubuntu's boot procedures to configure and support booting a system dependent on a degraded RAID1 device.
+
+=== Rationale ===
+
+Ubuntu's installer currently supports installation to software RAID1 targets for /boot and /.  When one of the mirrored disks fails, and mdadm marks the RAID ''degraded'', it becomes impossible to reboot the system in an unattended manner.
+
+Booting Ubuntu with a failed device in a RAID1 will force the system into a recovery console.
+
+In some cases, this is the desired behavior, as a local system administrator would want to backup critical data, cleanly halt the system, and replace the faulty hardware immediately.
+
+In other cases, this behavior is highly undesired--particularly when the system administrator is remotely located and would prefer a system with redundant disks tolerate a failed device even on reboot.
+
+=== Use Cases ===
+
+* Kim uses software RAID since it is less expensive than hardware RAID, and since it is always available on any Ubuntu system with multiple disk devices.  She particularly likes it on low-end and small-form-factor servers without built-in Hardware RAID, such as her arrays of blades and 1-U rack mount systems.  She uses RAID1 (mirroring) as a convenient mechanism for providing runtime failover of hard disks in Ubuntu.  Kim remotely administers her systems, where she has taken great care to use redundant disks in a RAID1 configuration.  She absolutely wants to be able to tolerate a RAID degradation event and continue to boot such systems in an unattended manner until she is able to replace the faulty hardware.   After rebooting her system following a primary drive failure, the system automatically boots from the secondary drive and brings up the RAID in degraded mode in a fully functional (though unprotected) configuration, since she specified in her system configuration to boot even if the RAID is degraded.
+* Steph also uses software RAID1 on her /boot and / filesystems.  Steph is ''always'' physically present at the console when she reboots systems, and she always has spare disks on hand.  Steph ''never'' wants to boot into a system with a degraded MD array.  Steph configures her system to trap booting to a degraded array and instead deliver the system to a recovery console, thus more conservatively protecting her data at the expense of yielding her system unbootable in an unattended manner.
+* HotplugRaid
+=== Scope ===
+
+The scope of this specification is to solve this problem within Ubuntu's software raid support and default bootloader within the Intrepid Ibex development cycle.
+
+=== Design / Work Items ===
+
+* '''Bootloader'''
+** grub-install needs to detect (/boot on an md?) or be configured to install grub to multiple devices, thus rendering multiple disks bootable
+** should probably also document that manual BIOS changes may be required for disk boot failover to occur properly
+* '''MD Error Handling'''
+** more verbose error hook messages
+** teach md error handler how to bring up md in degraded mode
+** <code> /usr/share/initramfs-tools/scripts/init-premount/mdadm:mountroot_fail() </code>
+* '''Root Filesystem Wait'''
+** reduce rootfs wait timeout to 30 seconds (DONE)
+** option to abort rootfs wait, seems non-trivial, but quite handy
+
+Items deferred by DustinKirkland:
+** Switch to '''mdadm --incremental''' assembly, supported by mdadm since ubuntu 8.04.
+** What is beeing done to adequately boot degraded raids, so that failed members that get reconnected to ubuntus -ARs --no-degraded hotplug method can not get corrupted?
+
+=== Implementation ===
+
+==== Phase 1: mdadm/initramfs modifications ====
+
+The first phase of this specification involves modifications to '''mdadm''' and '''initramfs-tools''', see wiki:Bug:120375.  This patch is now available in the Intrepid repositories
+
+===== Testing Instructions =====
+
+The following are instructions for safely testing this in a KVM:
+ 1. Create a pair of smallish disk images, disk1.img and disk2.img
+** HOST: <code> seq 1 2 | xargs -i dd if=/dev/zero of=disk{}.img bs=1M count=1000 </code>
+ 1. Obtain an Ubuntu Server Intrepid ISO
+** HOST: <code> wget http://cdimage.ubuntu.com/ubuntu-server/daily/current/intrepid-server-amd64.iso </code>
+ 1. Install Intrepid into a KVM
+** HOST: <code> kvm -k en-us -hda disk1.img -hdb disk2.img -m 256 -cdrom intrepid-server-amd64.iso </code>
+** Use manual partitioning to create a pair of RAID partitions
+** create a RAID1 md device
+** format that device ext3
+** set that device to mount on /
+ 1. After installation, reboot and check that the RAID1 is set up properly, clean, and sync'd
+** KVM: <code> cat /proc/mdstat </code>
+** KVM: <code> mdadm --detail /dev/md0 </code>
+ 1. Update/upgrade your Ubuntu Intrepid installation
+** KVM: <code> sudo apt-get update </code>
+** KVM: <code> sudo apt-get upgrade </code>
+ 1. Reboot once to ensure that your working, standard, clean, sync'd RAID continues to boot
+** KVM: <code> sudo reboot </code>
+** KVM: ...
+ 1. Power down the virtual machine
+** KVM: <code> sudo poweroff </code>
+ 1. Start the KVM back up, without disk2.img
+** HOST: <code> kvm -k en-us -hda disk1.img -m 256 </code>
+** Allow it to boot to a busybox prompt, checking that the default behavior is preserved
+ 1. Start the KVM back up, without disk2.img
+** HOST: <code> kvm -k en-us -hda disk1.img -m 256 </code>
+** Test the various methods for booting and not booting degraded
+** Kernel command parameters
+### press ESC to enter the grub menu
+### press "e" to edit your kernel command options
+### press DOWN to highlight your kernel line
+### press "e" to edit your kernel line
+### add one of
+*** bootdegraded
+*** bootdegraded=true
+*** bootdegraded=1
+*** bootdegraded=yes
+### press ENTER
+### press "b" to boot
+** Interactive prompt
+*** KVM: Answer the prompt with "y" or "n" to boot the RAID degraded
+** Static configuration
+*** run <code> dpkg-reconfigure mdadm </code> when booted in the KVM with both disks working and synced and modify the BOOT_DEGRADED parameter
+** If it boots the RAID in degraded mode, check this with
+** KVM: <code> cat /proc/mdstat </code>
+** KVM: <code> mdadm --detail /dev/md0 </code>
+** Power down the virtual machine
+** KVM: <code> sudo poweroff </code>
+ 1. Start the KVM back up, this time with both disks
+** HOST: <code> kvm -k en-us -hda disk1.img -hdb disk2.img -m 256 </code>
+** Ensure that it boots, and check the status of your RAID
+** KVM: <code> cat /proc/mdstat </code>
+** KVM: <code> mdadm --detail /dev/md0 </code>
+** Note that it should only have the first of the 2 devices active.  This is because the system does not have any reason to trust the reliability of this second device, since it previously disappeared.
+** Manually add it back to the RAID
+** KVM: <code> sudo mdadm /dev/md0 --add /dev/sdb1 </code>
+** And wait a couple of minutes until it finishes done re-syncing
+** KVM: <code> watch -n1 cat /proc/mdstat </code>
+** Once it's done, reboot the virtual machine, and check that it comes back up with both disks active and sync'd
+** KVM: <code> sudo reboot </code>
+** KVM: ...
+** KVM: <code> cat /proc/mdstat </code>
+** KVM: <code> mdadm --detail /dev/md0 </code>
+** Now, test using the configuration file
+** KVM: <code> sudo echo "BOOT_DEGRADED=true" > /etc/initramfs-tools/conf.d/mdadm </code>
+** KVM: <code> sudo update-initramfs -u </code>
+** KVM: <code> sudo poweroff </code>
+ 1. Start the KVM back up, without disk2.img
+** <code> kvm -k en-us -hda disk1.img -m 256 </code>
+** ESC to the grub menu, and add "bootdegraded=false" to the kernel options
+** Test that the kernel option overrides the configuration file
+** It should boot to a busybox prompt
+ 1. Start the KVM up again without disk2.img
+** <code> kvm -k en-us -hda disk1.img -m 256 </code>
+** Do not edit the kernel options, let it find the BOOT_DEGRADED=true in the configuration file
+** It should boot with a degraded RAID again
+** KVM: <code> cat /proc/mdstat </code>
+** KVM: <code> mdadm --detail /dev/md0 </code>
+
+* Reattach the missing device after the array is running degegraded (simulating a delay in device initialisation or power supply). System will hang in a loop. Bug:244792
+ 
+
+==== Phase 2: grub/installer modifications ====
+
+The grub-installer has been updated to install the grub MBR on each disk in a RAID providing /boot, in the installer.
+
+The grub-install command has been updated to install the grub MBR on each disk in a RAID providing /boot, in a running operating system.
+
+=== Outstanding Issues ===
+
+I'm still working on a debconf question to be added to the installer to obtain the user's preference as to whether they want BOOT_DEGRADED=true|false.  See Bug:268580.
+
+=== References ===
+
+* https://blueprints.launchpad.net/ubuntu/+spec/boot-degraded-raid
+* https://wiki.ubuntu.com/UDS-Intrepid/Report/Server#head-75c995bdf63bb5afe0f08461aba9200b6c95814f
+* https://lists.ubuntu.com/archives/ubuntu-devel/2007-September/024221.html
+* http://www.outflux.net/blog/archives/2006/04/23/grub-yaird-mdadm-and-missing-drives/
+* http://osdir.com/ml/linux.redhat.anaconda.devel/2005-05/threads.html
+* Bug:120375
+* Bug:125471
+
+* Compare with HotplugRaid for a common use and test case.
+
+=== Comments ===
+
+==== Phase 1 ====
+
+In ubuntu md devices are set up by udev rules. The mdadm tool shiped with ubuntu supports the --incremental option  since 8.04, but it is not used (Causing errors Bug:157981 Bug:244792).
+
+'''It will be neccessary to adjust the following:'''
+
+ 1. package mdadm: Switch to mdadm --incremental (Degraded arrays hit many bugs in an environments that uses --non-degraded udev rules.)
+
+  Using the --incremental option in the udev rule will only start complete arrays, just as the "--assemble --no-degraded" before, but will more appropriately determine what to do with found array members. It will add devices to inactive or running arrays and will start the array in auto-readonly mode. This allows raid members that may come up later to join running arrays very smoothly without resyncing if nothing has been written to the array yet.
+
+  (With --incremental used in the udev rule, members appering while an array is degraded and not runnable won't trigger Bug:244792. When --incremantal / "auto-read" can be used with --run for selected arrays (Wish Bug:251646) members will even be able to join smoothly later. The --incremental option does not work together with --run --scan as the man page suggests (Bug:244808), but running only selected arrays degraded is much preferable anyway.)
+
+** The mdadm --incremental option does not create device nodes (Bug:251663), at least not yet in initramfs.  Furthermore the --incremental hotplugging feature of course uses the new device naming scheme for partitionable md devices (/dev/md/dXpY with /dev/md_dXpX symlinks).
+  (As a workaround you can make your existing devices static by "cp -a /dev/mdX /lib/udev/devices/", and configuring the auto=md scheme in /etc/mdadm/mdadm.conf) 
+
+** /etc/udev/rules.d/85-mdadm.rules:
+** The mdadm call needs to be changed to "mdadm --incremantal /dev/%k"
+*** The command "watershed" is not installed by default, at least not in xubuntu 8.04. Is this a build-in of udev?
+*** See: <code> /usr/lib/udev </code>
+**** I can't find a watershed file there.
+** Rules for removal events are needed. Bug:244803
+
+** "mdadm --incremental" will save state in a map file under /var/run/mdadm/map, but in both initramfs and early boot this directory does not yet exist and the state is saved in /var/run/mdadm.map.new (Change man page, it says /var/run/mdadm.map).  For early boot, there is a danger of racing with udev (i.e. hotplug).  This can be fixed with a initramfs-tools init-top/mdadm script that creates /var/run/mdadm before udevd is run in init-premount/udev.  (The initramfs /var/run is later copied to the real /var/run as part of the normal boot process).
+
+ 
+
+ 1. To start arrays that are necessary to boot in degraded mode some extra attention is needed:
+
+  In general, do not just run any array that may be partially available (mdadm --assemble --scan), but only those that are actually needed at the particular point of time. (i.e. it is not a good idea to start for example the /home array in degraded mode, when we just need the rootfs to boot first. Some slower or external disks of a /home array may become available later.)
+*** /usr/share/initramfs-tools/hooks/cryptroot contains code that determines devices that the root device depends on.
+
+  1. initramfs-tools/local: The mount script in the initramfs now checks if root is available, (Bug:83025) (Done):
+  <pre>
+        while [ ! -e "${ROOT}" ] || ! /lib/udev/vol_id "${ROOT}" >/dev/null 2>&1; do
+			/bin/sleep 0.1
+			slumber=$(( ${slumber} - 1 ))
+			[ ${slumber} -gt 0 ] || break
+	done
+</pre>
+
+  and failure hooks are called if the timeout has been reached. The failure hook and option parsing functions are implemented in current patches.
+
+  But the failure hooks currently provided by init-premount/mdadm will try to run even those arrays degraded, that are only available _after_ the non-coldpluggable local-top/cryptroot has opened new raid members and the full rootdelay has passed (no further looping in the failure hooks).
+ 
+
+  1. init-premount/mdadm: regular array degration with bootdegraded=yes. (depreciated/not necessary)
+  {{{
+        if the rootfs depends on /dev/mdX and /dev/mdX exsists # (crypted members may not be available, this case is handled by the failurehooks later)
+          while md device inactive do
+			/bin/sleep 0.1
+			slumber=$(( ${slumber} - 1 ))
+			[ ${slumber} -gt 0 ] || break
+	done
+        if timeout reached "mdadm --run /dev/mdX"
+   }}}
+
+*** Unfortunately with drives (with md devices on it) that are slow to apear the md device will not exist. Since introducing another waiting loop into the coldplug driven boot does not make much sence it'll be preferable to only do degration with failure hooks after a single rootdelay.
+
+*** But the setup of crypted array members (or any other non-udev-triggerable local-top script) could be speed up if the the rootdelay loop would not only sleep, but also run cryptroot, if crypted source device exists without a mapping. (Bug Bug:251164)
+
+  1. init.d/mdadm-raid: Provide same checking-loop as in initramfs for devices that are needed to set up the fstab.
+
+  Let /etc/init.d/mdadm loop-check try to start those inactive md devices that have timed out.
+
+  Without the selective approach (i.e. with -ARs instead of --run /dev/mdX) any partly pluged in array members (removable disks) will get started (and degraded!), leading to unsynced disks etc. (It is also more concise, when getting the hotplug event "new array available" allways means that all (active) members that are plugged in are actually working. Bug:244810 and may not be degraded as a sideffect of another array that needs to be run degraded during boot.)
+
+  1. Finally, when a disk fails in a running system, it doesn't stop by default, and probably should't. This is the reason for the mdadm notification functionality. So changing the default to bootdegraded=yes seems reasonable, once the patches are tested to work with enough configurations, and will be safe, if no other md devices than the ones neccessary to set up the fstab are touched.
+
+ 1. Desktop integration:
+** Show unstarted lonely array member partitions as icons with right-click "start degraded" option. Rules to stop md arrays when their filesystem is beeing unmounted, so that if members are removed after unmountig the filesystem they won't get set faulty.
+** A right-click "remove array member" option, to remove a (mirror) member from a running array.
+** Raid status monitoring frontend GUI to /proc/mdstat etc.
+
+==== Phase 2 ====
+
+==== Different Approaches ====
+
+(-> check features of grub2's grub-install or grub-mkrescue)
+
+ 1. Have grub on a /boot raid with mirror partitions on every drive that contains a member of a root array.
+
+  The package manager can manage /boot to its heart's content, and changes will automatically be made across all the boot drives. The setup is transparent post-install, with the possible exception of when grub's phase2 is upgraded and requires a reinstall of grub.
+
+** The /boot raid mirror partitions must be on identical positions on each drive.
+** The partition numbers of each /boot raid mirror must be identical.
+** "grub-install <device>" needs to be called each <device> with a /boot raid member on it.
+*** This approach probably fails at this point with a (some) degraded array(s), since the grub-install will proceed to tell each MBR to load the physical location of /boot/grub/phase2 etc but it appears to determine that physical location independently of where it's installing. Ie it'll point both HDs to the same copy of the mirrored grub, which will boot in one case but not the other (even when the /boot raid partitions are on identically partitioned drives). The fix for that is, in grub console, doing root (hd0,0)/setup (hd0)/root (hd1,0)/setup (hd1), which explicitly states which copy to use. Possibly "grub-install --root-directory (hd0,0) (hd0)" would also work. I think that using this setup might also allow you to use different partition tables on each drive without compromising boot. This requires more testing.
+** menu.lst must not have "savedefault" enabled, since it would unsync the array.
+
+ 1. Copy the grub images together with a copy of the /boot files to independent partitions on every drive that contains a member of a root array.
+** This does not have above restrictions and works just as well with additional backup boot devices like usb-sticks.
+** "grub-install --root-directory=<mountpoint> <device>" will create <mountpoint>/boot/grub, install grub images into it and setup the boot sector of <device> to load the images.
+** A new --copy-boot-dir option, that copies the contents of current /boot (with kernels, initrd, grub/menu.lst etc.) and sets up the boot sector, could be handy. This would need to be executed for all alternate /boot partitions on the raid mirror disks and for separate/backup boot media (usb-sticks) after kernel updates.
+
+ 1. With dedicated grub partitions the flexibiliy can be obtained without loss of grub-update and package management funtionality.
+
+  The kernels and menu.lst remain under control of the package manager and update-grub  (with enrypted rootfs a separate md device for /boot will still be needed (how about LVM?)) but /boot/grub will only be set up to be chainloaded. The separate grub partitions can be placed on different devices and can be set up in their boot records independently.
+
+** A dedicated /grub partition for hd0 can be created by mounting a partition from hd0 to /mnt and issuing "grub-install --root-directory=/mnt (hd0)".
+** A dedicated grub partition is also very convenient to boot parallel installations of a distribution or different OSes.
+** The dedicated grub partition will just need maintainance free chainloader menu.lst entries.
+** If grub-install would default to always setup the boot sector of its /boot partition to be chainloadable also (as a backup), recovering from an overwritten MBR would be as easy as chainloading the /boot or dedicated grub partition. (With a DOS mbr in place only the boot flag of the /boot partition needs to be set.)
+** update-grub could generate simple menu.lst entries (root <grub partition>; setup (hd0)) to setup MBRs (hdX) or floppies (fd0) to boot /boot/grub or a dedicated grub partition.
+** Grub on read-only boot media (floppy, cd, dvd,...) could check the integrity of MBRs, grub and /boot partitions.
+
+=== Some comments regarding the user interface (added by Tricky1): ===
+
+For safe operation Raid 1 (fully mirrored) systems are best set up with several md devices:
+
+md0: /boot (very small, unencrypted)
+md1: /     (just the minimum, evt. encrypted)
+md2: /home (the big data container, evt. encrypted).
+
+The partitions which might be encrypted could hold LVMs or several logical partitions. There is also interest in having the home directories of each user encrypted using individual keys. It must be kept in mind that other media like USB-sticks change the device names of the drives building the array.
+
+Using different menu entries in grub for selecting booting a degraded array imho is not optimal because it does not allow systems which should come up without manual intervention.
+
+My suggestion for the boot process:
+
+a) Check that s.m.a.r.t status of all disk drives is ok. 
+
+b) If any failure detected, display detailed warning message asking for users decision:
+
+   1) continue, 2) power down.
+
+Have a timer running down (e.g. as done in the grub menu) with the starting value 0 resulting in 
+no automatic action. The starting value can be specified during installation, default is 0.
+
+c) Try to boot with all arrays assembled as indicated by mdadm.conf.
+
+d) In case any of these arrays does not come up show detailed error message including /proc/mdstat.
+
+While the same kind of timer runs as described above, let the user enter a comma separated list of those arrays he wishes to be used in degraded mode. 
+
+Arrays not indicated by the user will not be started in degraded mode.
+
+Display a message like 
+
+"Booting with md2, md7 in degraded mode using only /dev/sdx2, /dev/sdy7" ok y/N ?"
+
+After confirmation continue booting in degraded mode.
+
+It would be a tremendous simplification of system administration, if that concept later became more sophisticated by adding some possibilities for assisted repair. At above step d) the user could have the additional choice to add a new drive to the array and start remirroring before booting.

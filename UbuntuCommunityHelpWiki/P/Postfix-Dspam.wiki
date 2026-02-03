@@ -1,0 +1,231 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+== Introduction ==
+
+<nowiki>[[http://dspam.nuclearelephant.com/about.php|DSPAM]]</nowiki> is a free software statistical spam filter written by Jonathan A. Zdziarski, author of the book Ending Spam and other books. It is intended to be a scalable, content-based spam filter for large multi-user systems. DSPAM is written in C and distributed under the terms of the GNU General Public License.
+
+DSPAM's original author claims that some users of DSPAM have reported as high as 99.5 to 99.95% accuracy, including "best recorded levels of accuracy ... 99.991% by one avid user (2 errors in 22,786) and 99.987% by the author.".
+
+== Installation ==
+
+In order to install Dspam, first install the '''dspam''' package from the Universe repository using your favorite package manager. For example:
+<pre>
+sudo aptitude install dspam
+</pre>
+
+Simply accept the defaults when the installation process asks questions. The configuration will be done in greater detail in the next stage.
+
+== Configuration ==
+
+There are two main configuration files for dspam:
+1. <code>/etc/default/dspam</code>
+2. <code>/etc/dspam/dspam.conf</code>
+
+=== Dspam configuration ===
+
+Edit the first file to allow dspam starting:
+<pre>
+START=yes
+
+USER=dspam
+
+</pre>
+
+Now, in order to start dspam as a daemon, we'll edit the second file:
+(here's a full dump of the file, without commented lines| <code>cat /etc/dspam/dspam.conf | egrep -v "^\s*(#|$)"</code>)
+<pre>
+Home /var/spool/dspam
+StorageDriver /usr/lib/dspam/libhash_drv.so
+TrustedDeliveryAgent "/usr/sbin/sendmail"
+DeliveryHost        127.0.0.1
+DeliveryPort        10024
+DeliveryIdent       localhost
+DeliveryProto       SMTP
+OnFail error
+Trust root
+Trust dspam
+Trust mail
+Trust mailnull 
+Trust smmsp
+Trust daemon
+Trust postfix
+Trust www-data
+TrainingMode teft
+TestConditionalTraining on
+Feature chained
+Feature whitelist
+Algorithm graham burton
+PValue graham
+Preference "spamAction=tag"
+Preference "signatureLocation=headers"	# 'message' or 'headers'
+Preference "showFactors=off"
+AllowOverride trainingMode
+AllowOverride spamAction spamSubject
+AllowOverride statisticalSedation
+AllowOverride enableBNR
+AllowOverride enableWhitelist
+AllowOverride signatureLocation
+AllowOverride showFactors
+AllowOverride optIn optOut
+AllowOverride whitelistThreshold
+HashRecMax		98317
+HashAutoExtend		on  
+HashMaxExtents		0
+HashExtentSize		49157
+HashMaxSeek		100
+HashConnectionCache	10
+Notifications	off
+PurgeSignatures 14          # Stale signatures
+PurgeNeutral    90          # Tokens with neutralish probabilities
+PurgeUnused     90          # Unused tokens
+PurgeHapaxes    30          # Tokens with less than 5 hits (hapaxes)
+PurgeHits1S	15          # Tokens with only 1 spam hit
+PurgeHits1I	15          # Tokens with only 1 innocent hit
+LocalMX 127.0.0.1
+SystemLog on
+UserLog   on
+Opt out
+TrackSources spam ham
+ParseToHeaders on
+ChangeModeOnParse on
+ChangeUserOnParse on
+ServerPort		11124
+ServerQueueSize		32
+ServerPID              /var/run/dspam/dspam.pid
+ServerMode auto
+ServerParameters	"--deliver=innocent -d %u"
+ServerIdent		"localhost.localdomain"
+ClientHost	127.0.0.1
+ClientPort	11124
+ProcessorBias on
+Include /etc/dspam/dspam.d/
+</pre>
+
+As you can see, we're going to bind the daemon to a localhost port to get more performance.
+
+=== Postfix Integration ===
+
+Now let's make Postfix speak to Dspam.
+
+Edit the <code>/etc/postfix/master.cf</code> and add the following:
+<pre>
+127.0.0.1:10024 inet n  -       n       -        -      smtpd
+        -o smtpd_authorized_xforward_hosts=127.0.0.0/8
+dspam-retrain   unix    -       n       n       -       10      pipe
+  flags=Ru user=dspam argv=/etc/dspam/dspam-retrain $nexthop $sender $recipient
+</pre>
+right after:
+<pre>
+smtp      inet  n       -       -       -       -       smtpd
+</pre>
+
+The dspam-retrain will be used to pass spam messages to dspam for training.
+
+Now edit <code>/etc/postfix/main.cf</code>, and replace in:
+<pre>
+smtpd_client_restrictions = 
+</pre>
+the last line (which usually ends in word `permit`), with the following:
+<pre>
+        check_client_access pcre:/etc/postfix/dspam_filter_access
+        permit_auth_destination
+</pre>
+
+You should get something like:
+<pre>
+smtpd_client_restrictions = 
+        permit_mynetworks
+        [...]
+        check_client_access pcre:/etc/postfix/dspam_filter_access
+        permit_auth_destination
+</pre>
+Also add somewhere (usually at the end of the file) the following:
+<pre>
+dspam_destination_recipient_limit = 1
+</pre>
+
+<code>/etc/postfix/dspam_filter_access</code> file should contain the rules to connect to dspam lmtp daemon:
+<pre>
+/./   FILTER lmtp:[127.0.0.1]:11124
+</pre>
+
+Now modify the <code>/etc/postfix/transport</code> to create the rules for training addresses:
+<pre>
+spam@your.domain.tld   dspam-retrain:spam
+ham@your.domain.tld    dspam-retrain:innocent
+</pre>
+
+In the end, let's create the file that will parse messages for training dspam. Create a perl script <code>/etc/dspam/dspam-retrain</code> with the following:
+<pre>
+
+$class  = $ARGV[0] || die; shift;
+$sender = $ARGV[0] || die; shift;
+$recip  = $ARGV[0] || die; shift;
+
+if ($recip =~ /^(spam|ham)-(\w+)@/) {
+### username is part of the recipient
+    $user = $2;
+} elsif ($sender =~ /^(\w+)@/) {
+### username is in the sender
+    $user = $1;
+} else {
+    print "Can't determine user\n";
+    exit 75;                    # EX_TEMPFAIL
+}
+
+while (<>) {
+    if ((! $subj) && (/^Subject: /)) {
+        $subj = $_;
+    } elsif (/(!DSPAM:[a-f0-9]+!)/) {
+        open(F, "|/usr/bin/dspam --source=error --class=$class --user $user");
+        print F "$subj\n$1\n";
+        close(F);
+    } elsif (/(X-DSPAM-Signature: [a-f0-9]+)/) {
+        open(F, "|/usr/bin/dspam --source=error --class=$class --user $user");
+        print F "$subj\n$1\n";
+        close(F);
+    }
+}
+</pre>
+Don't forget to add "#! /usr/bin/perl" and execution permission to the file:
+<pre>
+chmod +x /etc/dspam/dspam-retrain
+</pre>
+
+== Service management ==
+
+To start, stop or restart the service, use:
+<pre>
+invoke-rc.d dspam start
+invoke-rc.d dspam stop
+invoke-rc.d dspam restart
+</pre>
+
+Also after starting Dspam daemon, don't forget to restart Postfix:
+<pre>
+invoke-rc.d postfix restart
+</pre>
+
+== Debugging ==
+
+Use <code>dspam_stats -H</code> for stats monitoring.
+
+Also, your emails should now contain dspam header signatures. Something like:
+<pre>
+X-DSPAM-Result: Innocent
+X-DSPAM-Processed: Tue Jun 16 20:25:03 2009
+X-DSPAM-Confidence: 1.0000
+X-DSPAM-Probability: 0.0023
+X-DSPAM-Signature: 4a37d56f12661069814937
+</pre>
+
+That's all.

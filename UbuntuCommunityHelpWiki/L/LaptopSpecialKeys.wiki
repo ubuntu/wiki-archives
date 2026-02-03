@@ -1,0 +1,176 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+{| class="wikitable"
+|-
+| <tablestyle="float:right; font-size: 0.9em; width:40%; background:#F1F1ED; margin: 0 0 1em 1em;" style="padding:0.5em;"><<BR>>
+|}
+
+== Introduction ==
+
+This page gives instructions on configuring your special laptop keys like play/pause that are external to the keyboard, or the Fn key combinations like Fn+F1 (sleep on ASUS laptops).
+
+It is not intended for configuring extra keyboard keys - only those keys that produce the so-called ACPI events.
+
+In short, two things can go wrong, that will stop a special laptop key from working:
+ a. there is no ACPI event registered for the key, or
+ a. the action associated with the ACPI event fails.
+
+This guide will tackle these problems.
+
+== Making Sure it is an ACPI Key ==
+
+Let's say you pressed a key with the calculator icon on it, and you'd expect that a calculator application starts when you press it, but nothing happens. Run `acpi_listen` in a terminal and press that key again. If there is no output, that is not an ACPI key and this guide cannot help you.
+
+If pressing the key does produce some output, then it should look like:<pre>
+hotkey ATKD 00000055 00000000
+</pre>
+
+The meaning of the first number is ''ACPI code'' and that of the second number is ''number of times pressed until now''.
+
+== ACPI Event Definitions ==
+
+To see if this specific ACPI event is perhaps already treated somewhere, execute `grep 55 /etc/acpi/events/*`. The 55 refers to the acpi code as output by `acpi_listen`. If the key is already defined, skip to the section '''ACPI Action Definitions'''
+
+=== Creating an ACPI Event Definition ===
+
+Create a file in `/etc/acpi/events`, let's name it `custom-calculator` with the following content:<pre>
+event=hotkey (ATKD|HOTK) 00000055
+action=/etc/acpi/calcbtn.sh
+</pre>
+
+The first line defines the event - it matches `acpi_listen`'s output with a regular expression (you must obviously leave out the last token from acpi_listen's output). The above event occurs when the output of `acpi_listen` matches the regex `hotkey (ATKD|HOTK) 00000055`. The HOTK in the line is there just because I found it in other event definitions. I have only ever observed ATKD in `acpi_listen`'s output.
+
+The second line defines the action. It can be anything executable by the shell, in our case it's a shell script. The actions themselves could be embedded directly here under `action=`, but for the sake of manageability (the same actions may be referenced by different keys), they always point to a script in `/etc/acpi`.
+
+'''''Every time you modify an event, you must execute `sudo /etc/init.d/acpid reload`'''''
+
+== ACPI Action Definitions ==
+
+If the action referenced in the event definition exists, you're all set. If not, you need to create it.
+
+=== Creating an ACPI Action Definition ===
+You should best start with a copy of, for example, webbtn.sh, and modify the script so that it "looks right". In our case, the script calcbtn.sh does not exist and we create one with the content:<pre>
+
+test -f /usr/share/acpi-support/key-constants || exit 0
+
+. /usr/share/acpi-support/key-constants
+acpi_fakekey $KEY_CALC
+</pre>
+Note that I only changed WWW into CALC (assuming the original script made a call to `acpi_fakekey $KEY_WWW`).
+
+Where did I get that magic constant KEY_CALC from? Well, from the file `/usr/share/acpi-support/key-constants`, look there, and try to find a symbolic name for whatever special key you're trying to configure.
+
+== Testing Your Setup With xev ==
+
+Now start `xev` in a terminal, and press your special key, making sure the Event Tester window has focus. If you see no ''new'' output in the console when pressing the key, then your key doesn't work yet.
+
+If you see some output, then go on to System->Preferences->Keyboard Shortcuts and use your key. You're done.
+
+== Debugging Your Setup ==
+
+As outlined earlier, two problems can arise. Let's analyze each of them.
+
+=== Does the ACPI Event Ever Get Triggered? ===
+
+Edit the action script your event is supposed to trigger, and add something like the following to be the first thing executed in the script:<pre>
+touch /tmp/calcbtn.sh
+</pre>
+
+You may do whatever you want here, important is only that you can unambigously observe the effect of what you're trying to do. Now run the script manually (with `sudo`) and see if your change is visible with `ls /tmp/calcbtn.sh`. This should obviously work, and you should delete the temporary file so that you can observe its creation again when you test the script.
+
+Now press your special key, and check if the script got executed by checking whether the temporary file exists. If it does not, it means that the ACPI code simply does not match whatever is printed by `acpi_listen` when you press it. Make sure the event= line contains a regular expression that '''will''' match the output of `acpi_listen` when you press your special key.
+
+If you observe that the script does get executed, then whatever it is trying to do fails.
+
+=== How Does the Action Fail? ===
+
+Most of the time, the scripts will be faking keyboard events by using `acpi_fakekey` as in the `calcbtn.sh` script above. This will generate a keyboard event, which should then be picked up by the window manager. Since this does not happen, you're most probably a victim of <nowiki>[[https://bugs.launchpad.net/ubuntu/hardy/+source/linux/+bug/217504/comments/7|a change in the kernel, where the kernel disallows forwarding arbitrary keyboard events]]</nowiki>. The keyboard key must be ''defined'' with the command `setkeycodes` if you want it forwarded past this point in kernel. This is most probably the case. If not, skip the next section.
+
+==== Workaround for the Kernel Limitation ====
+
+You will need two scripts to ease this part. Name the first one `invalid_keycodes` and put this in it:<pre>
+sudo dumpkeycodes | sed -n 's/\([^ ]*\) 0/\1/p' | tail -n1
+</pre>
+This script will give you the next invalid keycode for your keyboard, which you can use to fool the kernel into believing your keyboard actually possesses an arbitrary key.
+
+The other one, name it `is_valid` should contain:<pre>
+. /usr/share/acpi-support/key-constants
+
+[ -z "$1" ] && echo "Must supply a key name" && exit 2
+[ -z "${!1}" ] && echo "Non-existent key name" && exit 1
+
+echo -n "Key $1(${!1}) is valid "
+sudo dumpkeycodes | grep -q "${!1}" && echo -n "and" || echo -n "but not"
+echo " recognized by the kernel"
+</pre>
+You call this script like `is_valid KEY_CALC` and it tells you whether that is a legal key name, and whether it will be forwarded by the kernel.
+
+Here's what you can get:
+* ''Non-existent key name'' - You typed the key name wrong. Check your ACPI action script and refer to /usr/share/acpi-support/key-constants.
+* ''Key KEY_CALC(140) is valid and recognized by the kernel'' - The key should work. Test it with xev.
+* ''Key KEY_CALC(140) is valid but not recognized by the kernel'' - You must make the kernel recognize the key. Run the following commands:<pre>
+. /usr/share/acpi-support/key-constants #Note the space after the dot
+echo `./invalid_keycodes` $KEY_CALC
+sudo setkeycodes `./invalid_keycodes` $KEY_CALC
+./is_valid KEY_CALC
+</pre>
+ Check the output of the `is_valid` script now. That should teach the kernel to respect the key you're trying to get forwarded to your window manager. Test your key with xev. Store the output line in a temporary buffer (in gedit, or other editor of choice, for example).
+
+This time, you should most definitely get some response in xev, and in return be able to assign your key to whatever you like.
+
+If you get no response in xev, you might be a victim of the bug in X that drops all keys with a value higher than 255. To see if that is the case, check the value of the key you're trying to use:<pre>
+. /usr/share/acpi-support/key-constants #Note the space after the dot
+echo $KEY_CALC #Replace this with whatever key name you are trying
+</pre>
+If you get a number higher than 255 then you're using a bad key name, try using another one, with value of 255 or less.
+
+==== Making Your Kernel Workaround Permanent ====
+
+''If there is a better way to do this, please correct me''
+
+You need to make the `setkeycodes` be executed on start-up, so that the proper mappings are preserved. You should have lines like the following sitting in your temporary buffer:<pre>
+e07f 140
+e07e 152
+</pre>
+Now open `/etc/rc.local/` for edditing and insert the `setkeycodes` command containing all these lines concatenated to a single line as arguments, just before the `exit 0` like this:<pre>
+setkeycodes e07f 140 e07e 152
+exit 0
+</pre>
+Notice that there is no `sudo` before `setkeycodes`. The `/etc/rc.local/` is run every time computer boots with root permissions.
+
+Your changes should be permanent now.
+
+==== What if the Script Doesn't Use acpi_fakekey? ====
+
+Then you are mostly on your own. You need to debug the command that gets executed to see where and how it fails. The `acpid` daemon runs as root, so remember to execute all the commands in these scripts with `sudo` while debugging.
+
+If you happen to try to debug the `/etc/acpi/asus-touchpad.sh` script because it doesn't work, you will see that manually calling `sudo synclient -l` will print the error message `Can't access shared memory. SHMConfig disabled?`. To remedy this, create the file `/etc/hal/fdi/policy/shmconfig.fdi` with contents:<pre>
+<?xml version="1.0" encoding="ISO-8859-1"?>
+<deviceinfo version="0.2">
+  <device>
+    <match key="input.x11_driver" string="synaptics">
+      <merge key="input.x11_options.SHMConfig" type="string">True</merge>
+    </match>
+  </device>
+</deviceinfo>
+</pre>
+A full restart is necessary for this file to take effect (if you are knowledgeable on .fdi files, feel free to correct this statement, or remove this remark). Your `asus-touchpad.sh` script should be working after the restart.
+
+== Links ==
+
+* MultimediaKeys - Quite old, but might be useful if you're trying to configure just your keyboard keys.
+* SynapticsTouchpad - For hints about configuring the Synaptics touchpad.
+* <nowiki>[[https://wiki.ubuntu.com/Hotkeys/Troubleshooting|Hotkeys Troublshooting]]</nowiki> - Some further information on hotkeys and involved components.
+* <nowiki>[[https://bugs.launchpad.net/ubuntu/hardy/+source/linux/+bug/217504/|Two]]</nowiki> <nowiki>[[https://bugs.launchpad.net/ubuntu/+source/hal/+bug/267682|bugs]]</nowiki> which were very helpful in understanding what is going on. They also provide alternative solutions, such as a replacement for acpi_fakekey, patch against the kernel etc.
+* <nowiki>[[http://www.thinkwiki.org/wiki/How_to_get_special_keys_to_work|How to get special keys to work]]</nowiki> from the <nowiki>[[http://www.thinkwiki.org|ThinkWiki]]</nowiki>.
+
+----

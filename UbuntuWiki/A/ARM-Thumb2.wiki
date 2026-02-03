@@ -1,0 +1,170 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+This page is intended to document information relevant to developers building or migrating packages to Thumb-2, related decisions and outstanding tasks.
+
+== Review Lists ==
+
+For lists of packages which may require review, see <nowiki>[[ARM-Thumb2PackageReviewList]]</nowiki>.
+
+== Default Build Options for Lucid ==
+
+GCC:
+* `-march=armv7-a -mthumb -mfpu=vfpv3-d16 -mfloat-abi=softfp -Wa,-mimplicit-it=thumb`
+** Note: `-Wa,-mimplicit-it=thumb` is not implemented as of `gcc-4.4` 4.4.2-3ubuntu1, but it's probably best to avoid manually adding this flag to packages which encounter build problems
+
+`as`:
+* `-march=armv7-a -mfpu=vfpv3-d16 -mfloat-abi=softfp`
+** Note: the assembler defaults to ARM.  GCC controls the assembler mode using directives passed in the input to `as`; typically `.syntax unified` / `.thumb`
+
+== Bug Tagging ==
+
+To make tracking easier, I suggest that the following tags are applied to every bug which is connected with the migration to ARMv7 or Thumb-2:
+* `armel` (as for all ARM-related bugs)
+* `armv7`
+
+For bugs where the only known workaround is to build the package with <code>-marm</code>, please also add the following tag:
+* `arm-mode`
+Please make sure you add the `arm-mode` tag when publishing any fix which involves specifying <code>-marm</code>.  This should help these cases to be reviewed later.
+
+== How to deal with build failures ==
+
+The following sections suggest what to do if packages fail to build for Thumb-2.
+
+Please subscribe the following people on any launchpad bug connected with ARMv7 / Thumb-2 migration:
+* `ubuntu-armel`
+* use the "Bug Tagging" mentioned in previous section
+
+=== Developer Advice ===
+
+See the Thumb-2 porting HOWTO page for detailed advice on how to make packages ready for Thumb-2 and ARMv7, and how to deal with build failures.
+
+https://wiki.ubuntu.com/ARM/Thumb2PortingHowto
+
+Some of the more common build problems are also summarised briefly below.
+
+=== Assembler errors ===
+
+If a build bails out with assembler errors, check the following, in roughly the order specified:
+
+* Does the affected assembly code do any of the following?  If so, the package may be making assumptions about instruction behaviour and instruction sizes which won't hold true in Thumb-2, or may not hold for ARMv7 in general.  These packages should be flagged up for manual porting:
+** (1) Use of the `swp` or `swpb` instructions, including conditional variants.  These should be ported to use the GCC `__sync_`... intrinsics where possible, or `ldrex`/`strex` and appropriate memory barriers in other cases.
+** (2) Use of any instruction with `.` or `pc` or `r15` as an explicit operand (including things like `mov pc, lr` / `adr pc, ...` / `add pc, pc, r1, lsl #2` / `ldr r1, . + 4` / `mov lr, pc` / `stm Rn, { ..., pc }` / `ldr Rd, [pc, ...]` etc.
+*** A specific exception to this rule is that `ldmfd sp!, { ..., pc }` is not an error and can be ignored.  (`r13` is an alias for `sp` and `ldmia` is an alias for `ldmfd`.)  This is usually OK in Thumb-2.
+*** Do not worry about substituted arguments in inline assembler.  GCC should never unsafely substitute `pc` for any `%`... substitution.
+
+* (3) Does any assembly code in the package use the `ldrex` or `strex` family of instructions?  If so, additional memory barriers are likely to be needed in order for the core to be multicore-safe.  Ideally, atomic operations implemented using `ldrex` and `strex` should be ported to use the GCC `__sync_`... intrinsics instead where available, since this is more portable and less prone to error.
+
+* Does the fail look like the following?  If so, and if none of the things mentioned above is present, the build failure will probably resolve itself when `-Wa,-mimplicit-it=thumb` is added as a default option to GCC.
+** `Assembler messages:` / `Error: thumb conditional instruction should be in IT block`
+
+* Does the package obviously contain a significant amount hand-optimised assembler, such as codec implementations etc.?  If so, it may be sensible add `-marm` to the `CFLAGS` and `CXXFLAGS` for the package, to build the whole thing as ARM.
+
+=== Compiler Errors ===
+
+If you hit compiler segfaults or other obscure compiler internal errors, this needs to be followed up.
+
+Please raise a bug in launchpad, preferably attaching the preprocessed compiler input and a script containing a suitable command line to reproduce the error.
+
+Please tag such bugs with `armel` and `armv7`, and subscribe:
+* `ubuntu-armel`
+* Dave Martin (`dave-martin-arm`)
+
+If you need to continue work in the meantime, because you want to purge all failures from a package or because it's a dependency of the package you're really interested in for example, you may be able to work around the error locally by doing one of the following before resuming your build:
+* rebuild the affected file without optimisation
+* rebuild the affected file with `-marm`
+...however, such workarounds should not be committed to the archive.
+
+=== Adding Thumb-2-specific workarounds ===
+
+If some Thumb-2-specific workaround code is needed in inline assembler in C or C++ source, or in assembler files which will be preprocessed (`.S` files), use:
+
+<pre>
+...
+...
+</pre>
+
+...or equivalent.  Some more manual approach may be needed for non-preprocessed assembler files.
+
+=== Using the GCC atomic intrinsics ===
+
+Where porting atomic operations to use the GCC atomic intrinsics, the correct way to check for presence of the intrinsics appears to be to check that GCC >= 4.4, so:
+
+For arch-indepdent use of the instrinsics:
+<pre>
+}}}
+
+For armel-specific use:
+{{{
+...
+...
+</pre>
+
+...*phew* ( if anyone knows a neater way to do that, please suggest it! :) )
+
+== Packages with outstanding issues ==
+
+Note: this is a manually-maintainted list, and may not be exhaustive!
+
+The numbers in (parentheses) refer to the relevant item in the <nowiki>[[#DealingWithBuildFailures|How to Deal With Build Failures]]</nowiki> section.
+
+* `gcc-4.4`
+** <nowiki>[[https://bugs.launchpad.net/ubuntu/+bug/490391|Bug #490391]]</nowiki> <nowiki>[[https://bugs.launchpad.net/ubuntu/+bug/490466|Bug #490466]]</nowiki> (duplicates?) -- internal compiler error
+** <nowiki>[[https://bugs.launchpad.net/ubuntu/+source/gcc-4.4/+bug/490440|Bug #490440]]</nowiki> -- duplicate label in generated code, seemingly only for `-mthumb`
+* glib2.0
+** <nowiki>[[https://bugs.launchpad.net/ubuntu/+source/glib2.0/+bug/491342|Bug #491342]]</nowiki> -- use of SWP instruction
+* `xulrunner-1.9.1`
+** (2) <nowiki>[[https://bugs.launchpad.net/ubuntu/+source/xulrunner-1.9.1/+bug/488354|Bug #488354]]</nowiki> -- assembler shim for calling between JavaScript (?) and C++ does not perform correct ARM/Thumb interworking
+** (2) <nowiki>[[https://bugs.launchpad.net/ubuntu/+source/xulrunner-1.9.1/+bug/490792|Bug #490792]]</nowiki> -- JIT implementation is not Thumb-2 aware
+* `qt4-x11`: <nowiki>[[https://bugs.launchpad.net/ubuntu/+source/qt4-x11/+bug/490371|Bug #490371]]</nowiki>
+** `configure` does not detect the correct architecture baseline
+** (1), (3) atomic operations implemented using `swp` need porting
+
+* <nowiki>[[https://bugs.launchpad.net/ubuntu/+bugs?field.tag=armv7|All bugs tagged with armv7]]</nowiki>
+
+== The Kernel ==
+
+The kernel is already being compiled for ARMv7.  We have investigated switching to thumb mode for the kernel to reduce kernel code size.  In summary it does not appear to be possible without significant engineering effort.
+
+The issue is that the kernel side support is a new 2.6.32 feature.  
+I had a look at what it might take to pull this back to a 2.6.31 code
+base and it seems to be minimally 11 patches to bring basic support.
+Even pulling those back I was unable to compile the kernel, architecture
+specific assembly needs to be corrected.  It also seemed to prevent 
+compilation of kexec a key feature for softboot.
+
+It does not appear sensible to try and support kernel side thumb support
+for 2.6.31 based kernels.  2.6.32 kernels should have this support 
+available and we should enable it when we have those kernels.
+
+== Information ==
+
+Sources of information:
+
+General:
+* ARMv7-AR Architecture Reference Manual: visit <nowiki>[[http://infocenter.arm.com/|ARM InfoCenter]]</nowiki> and browse to ARM Architecture (registration required)
+* `gcc` and `as` info pages (`gcc-doc` and `binutils-doc` packages).  In particular, see:
+** node `ARM-Dependent` in `as.info`
+** node `ARM Options` in `gcc.info`
+
+Thumb-2 syntax (very brief overview):
+* node `ARM-Instruction-Set` in `as.info`
+
+Lucid `armel` toolchain spec from UDS:
+* https://blueprints.edge.launchpad.net/ubuntu/+spec/mobile-lucid-arm-gcc-v7-thumb2
+
+NEON SIMD instruction set:
+* Introducing NEON Development Article: visit <nowiki>[[http://infocenter.arm.com/|ARM InfoCenter]]</nowiki> and browse to Developer Guides and Articles -> ARM Architecture
+
+Memory barriers and synchronisation:
+* GCC atomic intrinsics: <nowiki>[[http://refspecs.freestandards.org/elf/IA64-SysV-psABI.pdf|Intel Itanium Processor-specific Application Binary Interface]]</nowiki> -- see Section 7.4 (Synchronization Primitives)
+* Barrier Litmus Tests and Cookbook: visit <nowiki>[[http://infocenter.arm.com/|ARM InfoCenter]]</nowiki> and browse to Developer Guides and Articles -> ARM Architecture
+** This document is very comprehensive, but not so user-friendly!  If I can get a more compact / developer-oriented overview, I'll post links later.

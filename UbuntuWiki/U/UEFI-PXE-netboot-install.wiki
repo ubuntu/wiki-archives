@@ -1,0 +1,144 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== UEFI PXE netboot / install procedure ==
+
+''Method developed by Will Tinsdeall <will.tinsdeall+opensource@mercianlabels.com>''
+
+''Original article by Kamal Mostafa <kamal@canonical.com>''
+
+=== Using this method ===
+
+This method is an experimental method, which serves a UEFI signed grub image, loads the configuration in grub.cfg and boots the Linux kernel.
+
+The original method on this Wiki page used an all-in-one image, which was good for the simple install on diskless PCs, but made preseeding impossible without modifying the mini.iso
+
+==== Step 1: Get the files ====
+
+1. Download the UEFI signed grub image into /srv/tftp/: <nowiki>[[http://archive.ubuntu.com/ubuntu/dists/trusty/main/uefi/grub2-amd64/current/grubnetx64.efi.signed]]</nowiki>
+
+2. Download the correct netboot.tar.gz archive (navigate to the correct one!): <nowiki>[[http://cdimage.ubuntu.com/netboot/]]</nowiki>
+
+3. Extract netboot.tar.gz into /srv/tftp/
+
+==== Step 2: Get the files ====
+
+/!\ On releases after 14.04; you should also provide the file 'install/filesystem.squashfs' via HTTP or FTP to use to complete the netboot install.
+
+1. Create the file /srv/tftp/grub/grub.cfg with the following content. Add other entries as needed:
+
+For standard install (Not Preseeded):
+
+<pre>
+menuentry "Install Ubuntu" {
+set gfxpayload=keep
+linux /ubuntu-installer/amd64/linux gfxpayload=800x600x16,800x600 --- quiet
+initrd /ubuntu-installer/amd64/initrd.gz
+}
+</pre>
+
+/!\ On releases after 14.04; add "live-installer/net-image=$PATH_TO_FILESYSTEM_SQUASHFS" before the three dashes to provide a root filesystem for the installer to use as a base for the install; or use "live-installer/enable=false".
+
+For Preseeding (automatic hands-off install - you will need an HTTP server to serve the config):
+
+<pre>
+menuentry "Install Ubuntu" {
+set gfxpayload=keep
+linux /ubuntu-installer/amd64/linux gfxpayload=800x600x16,800x600 --- auto=true url=http://YOUR_PRESEED_SERVER/preseed.cfg quiet
+initrd /ubuntu-installer/amd64/initrd.gz
+}
+</pre>
+
+==== Step 3: Install TFTP and DHCP server (for simplicity, dnsmasq is used here) ====
+1. Install dnsmasq:
+
+<pre>
+sudo apt-get install dnsmasq
+</pre>
+
+2. Set your computer to use a static IP
+
+3. Configure dnsmasq add these lines to /etc/dnsmasq.conf
+
+<pre>
+interface=eth0
+bind-interfaces
+dhcp-range=192.168.99.10,192.168.99.254
+dhcp-boot=grubnetx64.efi.signed
+enable-tftp
+tftp-root=/srv/tftp/
+</pre>
+
+4. Reload dnsmasq
+
+<pre>
+sudo service dnsmasq restart
+</pre>
+
+=== Alternative method to create a boot image (all-in-one file) ===
+
+Exchange this for Step 1 and Step 2. These instructions are from the original wiki
+
+ 1. Install a regular Ubuntu system + updates, or use an existing Ubuntu system as the Server.    The Server can be any computer with a wired NIC; the Server itself does not need to be UEFI-capable.  (I installed ubuntu-11.10-desktop-amd64.iso from a USB stick on to an x220 laptop, but any Ubuntu installation should work).
+
+ 2. On the Server system, fetch a netboot "mini.iso" image and save it with a distinct filename (or substitute a different Ubuntu distro for "trusty"; see Notes below about Debian):
+ <pre>
+wget http://ftp.ubuntu.com/ubuntu/dists/trusty/main/installer-amd64/current/images/netboot/mini.iso  \
+		-O /tmp/mini-trusty.iso
+</pre>
+
+ 3. Generate a custom "grubnetx64.efi.signed" image with the mini-distro.iso embedded inside, and (Important!) with all available x86_64-efi grub modules enabled.  You will move the generated .efi image file from /tmp to the tftpboot directory in a moment:
+** the `ls|sed` sequence generates the list of all modules.
+** many of the modules are actually required, but surely not all; I don't know which are or aren't required.
+ <pre>
+sudo apt-get install grub-efi-amd64-bin
+
+grub-mkimage --format=x86_64-efi  \
+		--output=/tmp/grubnetx64.efi.signed   \
+		--memdisk=/tmp/mini-trusty.iso  \
+		`ls /usr/lib/grub/x86_64-efi  | sed -n 's/\.mod//gp'`
+</pre>
+** Note that some modules may cause the installation to stall with a ''error: no device connected'' message, in this case you will need to remove the drivers giving the error. For instance, to remove the ''pata'' module, change the module listing part to `ls /usr/lib/grub/x86_64-efi  | sed -n 's/\.mod//gp' | grep -v pata`
+
+Notes:
+* This method seems like it should work with Debian wheezy's netboot/mini.iso also, but it doesn't quite; the Clients just boot to a grub> prompt instead of a grub installer menu.  Perhaps wheezy's iso contains a grub.cfg someplace other than the /boot/grub dir that Ubuntu's grub expects?
+
+* If you see a "error: variable `prefix' isn't set" message, it can be safely ignored. Really, it doesn't mean anything. If your installation is stalling and this is visible on-screen, you should look at the "next" error, that's the one actually stopping it form working. If it ''really'' bothers you, play around with the '-p'  parameter to ''grub-mkimage'' and see you can make it go away.
+
+=== Optional Extras ===
+
+==== Install a package cacher ====
+
+This will ensure that your internet is not hammered by hundreds of PCs, by caching the downloads required for the install on a local server. If you are using preseed, add this to your HTTP Proxy settings in your preseed config (HTTP Proxy: http://[The IP Address]:3142/).
+
+1. Install apt-cacher-ng to provide http proxy service to the Clients (proxy listens on port 3142):
+
+<pre>
+sudo apt-get install apt-cacher-ng
+</pre>
+
+Notes:
+
+* The installed Client system will remember the proxy server setting in /etc/apt/apt.conf -- remove that file from the installed Client if you don't plan to keep it attached to the server's network.
+
+* If you use apt-cacher-ng as described above, subsequent client installs using this Server will be much faster than the first client install.
+
+=== Debugging Options ===
+
+A. Watch syslog on the Server with "tail -f /var/log/syslog"
+
+B. Run tcpdump on the server, to check which files are being requested (tcpdump must be installed):
+<pre>
+tcpdump -i eth0 port 69
+</pre>
+
+=== Notes ===
+
+* It is possible to configure dhcp to offer different images to different clients based on MAC address and some other variables, which could be used to offer UEFI (bootx64.efi) and legacy BIOS (pxelinux.0) images, but this is not covered here.

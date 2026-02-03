@@ -1,0 +1,172 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+This article describes how to install Feisty onto a machine that has a hard drive (Or, as I'll be doing, A CompactFlash (CF) card) for /boot only with root being on an NFS share somewhere on the network.
+
+First off, you'll want a MiniCD (<nowiki>[[Installation-MinimalCD]]</nowiki>) to install the base system. The base system when installed takes up about 850MB, so make sure your drive or CF card has enough space to handle this. You may prefer to install to hard drive first and transfer /boot to CF later on.
+
+Minimal install is pretty textbook, don't select any of the extra (BIND, LAMP, Xubuntu etc) packages yet, just get the base system installed. Note that when partitioning, you'll want to disable swap and ensure /boot has its own partition (100MB is more than enough).
+
+Once you are booted into your minimal install, login and:
+
+<pre>
+sudo su -
+cd /mnt/
+mkdir jarlsbergNFS/
+mount -tnfs -onolock 192.168.0.15:/mnt/storage/NFS jarlsbergNFS/
+</pre>
+
+You may want to install also nfs-common and smbfs packages if you have problems to mount the nfs:
+
+<pre>
+sudo apt-get install nfs-common smbfs
+</pre>
+
+This relies on there being a working NFS server on 192.168.0.15. The /etc/exports on that machine reads:
+
+<pre>
+/mnt/storage 192.168.0.1/24(rw,no_root_squash,async)
+</pre>
+
+Now you want to copy the current (mini) install over to the NFS server:
+<pre>
+cp -ax /. jarlsbergNFS/
+</pre>
+
+And make the NFS install our working directory:
+<pre>
+cd jarlsbergNFS/
+</pre>
+
+And now for some hackery. We need to add /proc and /sys to fstab if they do not exist already. Note there is no first / on /etc/fstab. We're editing the copy on the NFS server. You will also want to comment out the entries for / and swap, but leave /boot as it is.
+<pre>
+vim etc/fstab
+Add the lines:
+proc    /proc    proc    defaults   0 0
+sys     /sys     sysfs   defaults   0 0
+</pre>
+
+There is currently a bug in NetworkManager that means even though the machine gets an IP just fine from the kernel booting the network IF goes down and up again. This is bad, we don't want the network to go down while trying to read files over the network!
+
+A quick hack is...
+<pre>
+vim etc/network/interfaces
+Comment out the lines for eth0 (Or whatever your ethernet card is called)
+</pre>
+
+We also need to do this to stop NetworkManager messing with the network card. Bit of a hack...
+<pre>
+vim etc/default/NetworkManager
+vim etc/default/NetworkManagerDispatcher
+Add a line with "exit" to both files
+</pre>
+
+We now need to generate an NFS'able initramfs. (Note the first / means we're editing the local copy.)
+<pre>
+cd /etc/initramfs-tools/
+vim initramfs.conf
+Edit BOOT=local to read BOOT=nfs
+</pre>
+
+Before we update the init images, we should back up the current ones just so we can still get back into the local install if ever anything goes horribly wrong...
+<pre>
+cd /boot
+mv initrd.img-2.6.20-16-generic initrd.img-2.6.20-16-generic-OLD
+</pre>
+
+Now we want to update the initramfs image:
+<pre>
+update-initramfs -k all -c
+</pre>
+
+We (should!) have a new image called initrd.img-2.6.20-16-generic in /boot. We want this to be the NFS one.
+<pre>
+mv initrd.img-2.6.20-16-generic initrd.img-2.6.20-16-generic-NFS
+mv initrd.img-2.6.20-16-generic-OLD initrd.img-2.6.20-16-generic
+</pre>
+
+Now we need to edit grubs menu to make it boot from NFS rather than the local drive. You can substitute in an IP address rather than letting kernel sort the IP, but doing things by dhcp means things like nameservers will be set up for you (Provided your dhcp server is set up nicely! :-)
+<pre>
+vim /boot/grub/menu.lst
+Add the lines:
+title           Ubuntu, NFS Boot (POLARIS), kernel 2.6.20-16-generic
+root            (hd0,5)
+kernel          /vmlinuz-2.6.20-16-generic root=/dev/nfs nfsroot=192.168.0.15:/mnt/storage/NFS ip=dhcp
+initrd          /initrd.img-2.6.20-16-generic-NFS
+</pre>
+
+Now you might want to change back your initramfs.conf, just in case you want to get back to your non-NFS mini-install.
+<pre>
+vim /etc/initramfs-tools/initramfs.conf
+Change BOOT=nfs to BOOT=local
+</pre>
+
+Now you should be able to reboot, select the NFS boot grub option you added to menu.lst and boot into root-over-NFS ubuntu! Note that you will only have CLI access with very limited tools. So check you are up to date...:
+<pre>
+sudo apt-get update
+sudo apt-get upgrade
+</pre>
+
+And then install a flavour of ubuntu:
+<pre>
+sudo apt-get install <something>
+
+(Alternatives...)
+edubuntu-desktop - edubuntu desktop system
+kubuntu-desktop - Kubuntu desktop system
+ubuntu-desktop - The Ubuntu desktop system
+xubuntu-desktop - Xubuntu desktop system
+</pre>
+
+Hopefully by now you should have a working ubuntu desktop machine, with /boot on a small partition on hard drive (Or CompactFlash!) and everything else on your NFS server.
+
+You may wish to add swap to the machine; I ran into the problem of not having a local swap partition and having fun getting swap-over-NFS working. What follows are some instructions for getting nbd working. nbd (Network Block Device) allows you to sort-of do block devices over ethernet :). Seeing as linux kernel doesn't allow for swap-over-NFS, this seems to be the easiest way to get root over NFS with remote swap.
+
+Note that this _very_ buggy and can cause a lot of problems. I'm running without swap on my box and it seems to be fine :-)
+
+On your server, you'll want to grab the nbd-server package.
+<pre>
+apt-get install nbd-server
+</pre>
+
+Now you'll want to make some swap space. cd to your root-over-NFS root directory and mess around a bit.
+<pre>
+cd /mnt/jarlsbergNFS/
+mkdir swap/
+dd if=/dev/zero of=swap/swap count=256 bs=1024k
+chmod 777 swap
+</pre>
+
+Still on the server, you'll want to initialise the nbd-server.
+<pre>
+nbd-server 1100 /mnt/jarlsbergNFS/swap/swap
+</pre>
+
+Now back on your client machine (Replacing the IP with that of the server)
+<pre>
+apt-get install nbd-client
+nbd-client 192.168.0.33 1100 /dev/nbd0
+</pre>
+
+And now you will want to make this block device into swap, mount it and check everything is okay:
+<pre>
+mkswap /dev/nbd0
+swapon /dev/nbd0
+cat /proc/swaps
+>>Filename                                Type            Size    Used    Priority
+>>/dev/nbd0                               partition       262136  0       -1
+</pre>
+
+Having swap on a machine somewhere else on the network is going to get pretty slow when your machine does start to swap, so you are better off having lots and lots of RAM rather than relying on swap.
+
+Done!
+
+----
+CategoryInstallation CategoryNetworking

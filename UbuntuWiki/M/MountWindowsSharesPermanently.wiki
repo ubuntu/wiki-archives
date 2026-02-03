@@ -1,0 +1,221 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+
+This document describes how to mount CIFS shares permanently. The shares might be hosted on a Windows computer/server, or on a Linux/UNIX server running <nowiki>[[https://help.ubuntu.com/community/Samba|Samba]]</nowiki>. This document also applies to SMBFS shares, which are similar to CIFS but are deprecated and should be avoided if possible (<nowiki>[[https://bugzilla.samba.org/show_bug.cgi?id=1920#c0|link]]</nowiki>).
+
+(This document does ''not'' describe how to host the shares yourself, only how to access shares that are hosted somewhere else. For hosting shares, use <nowiki>[[https://help.ubuntu.com/community/Samba|Samba]]</nowiki>.)
+
+== Prerequisites ==
+We're assuming that:
+* Network connections have been configured properly.
+* Your local (Ubuntu) username is ''ubuntuusername''.
+* Share username on Windows computer is ''msusername''.
+* Share password on Windows computer is ''mspassword''.
+* The Windows computer's name is ''servername'' (this can be either an IP address or an assigned name).
+* The name of the share is ''sharename''.
+* You want to mount the share in ''/media/windowsshare''.
+
+== CIFS installation ==
+
+<pre>
+sudo apt-get install cifs-utils
+</pre>
+
+On older systems:
+
+<pre>
+sudo apt-get install smbfs
+</pre>
+
+== Mounting unprotected (guest) network folders ==
+
+First, let's create the mount directory. You will need a separate directory for each mount.
+<pre>
+sudo mkdir /media/windowsshare
+</pre>
+
+Then edit your /etc/fstab file (with root privileges) to add this line:
+<pre>
+//servername/sharename  /media/windowsshare  cifs  guest,uid=1000,iocharset=utf8  0  0
+</pre>
+
+Where
+* '''guest''' indicates you don't need a password to access the share,
+* '''uid=1000''' makes the Linux user specified by the id the owner of the mounted share, allowing them to rename files,
+* '''iocharset=utf8''' allows access to files with names in non-English languages. This doesn't work with shares of devices like the Buffalo Tera Station, or Windows machines that export their shares using ISO8895-15.
+* If there is any '''space in the server path''', you need to replace it by \040, for example //servername/My\040Documents
+
+After you add the entry to /etc/fstab type:
+<pre>
+sudo mount -a
+</pre>
+This will (re)mount all entries listed in /etc/fstab.
+
+== Mount password protected network folders ==
+
+The quickest way to auto-mounting a password-protected share is to edit /etc/fstab (with root privileges), to add this line:
+<pre>
+//servername/sharename  /media/windowsshare  cifs  username=msusername,password=mspassword,iocharset=utf8  0  0
+</pre>
+
+This is not a good idea however: /etc/fstab is readable by everyone and so is your Windows password in it. The way around this is to use a credentials file. This is a file that contains just the username and password.
+
+Using a text editor, create a file for your remote servers logon credential:
+
+<pre>
+gedit ~/.smbcredentials
+</pre>
+
+Enter your Windows username and password in the file:
+
+<pre>
+username=msusername
+password=mspassword
+</pre>
+
+Save the file, exit the editor.
+
+Change the permissions of the file to prevent unwanted access to your credentials:
+
+<pre>
+chmod 600 ~/.smbcredentials
+</pre>
+
+Then edit your /etc/fstab file (with root privileges) to add this line (replacing the insecure line in the example above, if you added it):
+
+<pre>
+//servername/sharename /media/windowsshare cifs credentials=/home/ubuntuusername/.smbcredentials,iocharset=utf8 0 0 
+</pre>
+
+Save the file, exit the editor.
+
+Finally, test the fstab entry by issuing:
+
+<pre>
+sudo mount -a
+</pre>
+
+If there are no errors, you should test how it works after a reboot. Your remote share should mount automatically.
+
+=== Special permissions ===
+
+If you need special permission (like chmod etc.), you'll need to add a ''uid'' (short for 'user id') or ''gid'' (for 'group id') parameter to the share's mount options.
+
+<pre>
+//servername/sharename  /media/windowsshare  cifs   uid=ubuntuuser,credentials=/home/ubuntuuser/.smbcredentials,iocharset=utf8   0       0
+</pre>
+
+=== Mount password protected shares using libpam_mount (Ubuntu 9.04) ===
+
+In addition to the initial assumptions, we're assuming that
+* '''Your username and password are the same on the Ubuntu machine and on the network drive.'''
+
+Install libpam-mount:
+<pre>
+sudo apt-get install libpam-mount
+</pre>
+
+Edit /etc/security/pam_mount.conf.xml using your preferred text editor.
+
+<pre>
+gksudo gedit /etc/security/pam_mount.conf.xml
+</pre>
+
+First, we're moving the user specific config bits to a file which users can actually edit themselves: remove the commenting tags (<!-- and -->) surrounding the section called <luserconf name=".pam_mount.conf.xml" />. Save the file when done. With this in place, users can create their own ~/.pam_mount.conf.xml.
+
+<pre>
+gedit ~/.pam_mount.conf.xml
+</pre>
+
+Add the following:
+
+<pre>
+<?xml version="1.0" encoding="utf-8" ?>
+
+<pam_mount>
+
+<volume options="uid=%(USER),gid=100,dmask=0700" user="*" mountpoint="/media/windowsshare" path="sharename" server="servername" fstype="cifs" />
+
+</pam_mount>
+</pre>
+
+== Troubleshooting ==
+
+=== Login errors ===
+
+If you get the error "mount error(13) permission denied", then the server denied your access. Here are the first things to check:
+* Are you using a valid username and password? Does that account really have access to this folder?
+* Do you have whitespace in your credentials file? It should be <code>password=mspassword</code>, not <code>password = mspassword</code>.
+* Do you need a domain? For example, if you are told that your username is <code>SALES\sally</code>, then actually your username is <code>sally</code> and your domain is <code>SALES</code>. The fstab entry should read: <code>...username=sally,password=pass,domain=SALES,...</code> Or: <code>...credentials=/path/to/file,domain=SALES,...</code>
+* The security and version settings are interrelated. SMB1 is insecure and no longer supported by default. At first, try to not specify either security or version: do not specify <code>sec=</code> or <code>vers=</code>. If you still have authentication errors then you may need to specify either <code>sec=</code> or <code>vers=</code> or both. You can try the options listed at the <nowiki>[[http://manpages.ubuntu.com/manpages/raring/en/man8/mount.cifs.8.html|mount.cifs man page]]</nowiki>. The man page list leaves out the option <code>sec=lanman</code> for some reason, but you should try that one as well (<nowiki>[[https://bugs.launchpad.net/ubuntu/+source/cifs-utils/+bug/1113395|see discussion]]</nowiki>).
+
+=== Unprotected network folder won't automount ===
+
+I've had a situation where an unprotected network folder wouldn't automount during bootup, but after manually entering "sudo mount -a" was mounted correctly. I solved this by replacing the "guest" option by "username=guest,password=". If anyone has an explanation for this, please leave a comment.
+
+<pre>
+//servername/sharename  /media/windowsshare  smbfs  username=guest,password=,uid=1000,iocharset=utf8,codepage=unicode,unicode  0  0
+</pre>
+
+=== Mount during login instead of boot ===
+
+If for some reason/etc/rc0.d/S31umountnfs.sh (networking problems for example) the automatic mounting during boot doesn't work, you can add the "noauto" parameter to your smbfs fstab entry and then have the share mounted at login.
+
+In /etc/fstab:
+<pre>
+//servername/sharename  /media/windowsshare  cifs  noauto,credentials=/home/ubuntuusername/.smbpasswd  0  0
+</pre>
+
+In /etc/rc.local:
+<pre>
+mount /media/windowsshare
+exit 0
+</pre>
+
+=== Slow shutdown due to a CIFS/Network Manager bug ===
+
+If you use Network Manager, and are getting really slow shutdowns, it's probably because NM shuts down before unmounting the network shares.  That will cause CIFS to hang and wait for 60 seconds or so. Here's how to fix it:/etc/rc0.d/S31umountnfs.sh
+
+<pre>
+sudo ln -s /etc/init.d/umountnfs.sh /etc/rc0.d/K14umountnfs.sh
+sudo ln -s /etc/init.d/umountnfs.sh /etc/rc6.d/K14umountnfs.sh
+</pre>
+
+Ubuntu 12.04 already runs '''umountnfs.sh''' at reboot and shutdown by default (/etc/rc0.d/S31umountnfs.sh and /etc/rc6.d/S31umountnfs.sh) so this is no longer necessary.
+
+----
+
+=== CIFS Options Deprecated ===
+
+20 Feb 2008 TW
+
+Using dmask or fmask in the fstab file produces the following warnings:
+WARNING: CIFS mount option 'dmask' is deprecated. Use 'dir_mode' instead.
+WARNING: CIFS mount option 'fmask' is deprecated. Use 'file_mode' instead.
+
+Instead use this format: file_mode=0777,dir_mode=0777 . Or in some cases you might need to use file_mode=0777,dir_mode=0777,nounix (<nowiki>[[http://superuser.com/a/410561|see discussion]]</nowiki>)
+----
+
+=== Use of tilde in pathnames such as "credentials=~/.smbcredentials" ===
+
+20 Feb 2008 TW
+
+Curiously, using credentials=~/.smbcredentials in fstab didn't work.
+I had to use the full path, i.e. /home/username/.smbcredentials
+
+(This is likely because the tilde "~" is only a shell short-hand alias for
+"$HOME"; it isn't something recognized system-wide by all programs,
+especially not in a system file table where the concept of "HOME"
+doesn't really exist. -Ian!)
+ 
+----
+CategoryDocumentation

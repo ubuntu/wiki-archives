@@ -1,0 +1,205 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+{| class="wikitable"
+|-
+| <tablestyle="float:right; font-size: 0.9em; width:40%; background:#F1F1ED; margin: 0 0 1em 1em;" style="padding:0.5em;"><<BR>>
+|}
+
+== Introduction ==
+
+~-Note: This guide was tested using Ubuntu Server 14.04.3 LTS. Previous versions may not work.-~
+
+This is a HowTo for setting up Upside-Down-Ternet on Ubuntu. Basically, when a user browses the web, all the images are flipped upside-down. While it's not useful, it's quite a good April Fool's prank.
+
+The process uses a transparent proxy, web server, and script to flip the images. Web traffic is routed to the proxy, instead of the default gateway, which is intercepted by the proxy which then downloads and modifies the images and then serves them back to the client browser.
+
+== Setting up the proxy ==
+
+The proxy used in this guide is Squid v3.3.8.
+
+=== Installation ===
+
+<pre>
+sudo apt-get install squid
+</pre>
+
+=== Configuration ===
+Squid's configuration file is located at `/etc/squid3/squid.conf`. The file comes pre-configured with default settings which you should not delete. Modify the file as follows:
+* On the line starting with ''#http_access allow localnet'', change it to read:
+<pre>
+acl localnet src [your network range, e.g. 192.168.0.0/16]
+http_access allow localnet
+</pre>
+* On the line starting with ''http_port 3128'', append ''transparent'' so it reads:
+<pre>
+http_port 3128 transparent
+</pre>
+* Find the section ''TAG: url_rewrite_program''. At the bottom of the section you should see ''#Default: none''. Replace that line with
+<pre>
+url_rewrite_program /usr/local/bin/flip.pl
+</pre>
+
+Reload the configuration file:
+<pre>
+sudo service squid3 restart
+</pre>
+
+== Setting up the webserver ==
+
+Apache 2 will be used as the web server.
+
+=== Installation ===
+<pre>
+sudo apt-get install apache2
+</pre>
+
+=== Configuration ===
+Apache's default configuration file works fine and does not need to be changed. 
+
+However, as Apache is going to be serving the modified images, a directory where those images are stored needs to be created. Create a directory where the images are to be stored and set the correct directory permissions:
+<pre>
+sudo mkdir /var/www/html/tmp
+sudo chown www-data:www-data /var/www/html/tmp
+sudo chmod 775 /var/www/html/tmp
+</pre>
+
+Add the user ''proxy'' to the group ''www-data'', so squid can write to the /var/www/images directory.
+<pre>
+sudo usermod -aG www-data proxy
+</pre>
+
+The images retrieved by Squid are owned by the user and group ''proxy''. Add ''www-data'' (the user Apache runs under) to the ''proxy'' group so Apache can access the images:
+<pre>
+sudo usermod -aG proxy www-data
+</pre>
+
+Restart Apache to load changes:
+<pre>
+sudo service apache2 restart
+</pre>
+
+== Image Script ==
+
+Install libwww-perl
+<pre>
+sudo apt-get install libwww-perl
+</pre>
+
+Create and edit a file called 'flipImages.pl' in `/usr/local/bin`. Paste the following:
+<pre>
+
+# !/usr/bin/perl
+use IO::Handle;
+use LWP::Simple;
+use POSIX strftime;
+
+$debug = 1;                               # Debug mode - create log file
+$ourIP = "192.168.0.33";                  # Our IP address
+$baseDir = "/var/www/html/tmp/";          # Needs be writable by 'nobody'
+$baseURL = "http://".$ourIP."/tmp";       # Location on websever
+$mogrify = "/usr/bin/mogrify";            # Path to mogrify
+
+$|=1;
+$flip = 0;
+$count = 0;
+$pid = $$;
+
+if ($debug == 1) { open (DEBUG, '>>/tmp/flipImages_debug.log'); }
+autoflush DEBUG 1;
+
+print DEBUG "########################################################################\n";
+print DEBUG strftime ("%d%b%Y-%H:%M:%S\t Server: $baseURL/\n",localtime(time()));
+print DEBUG "########################################################################\n";
+while (<>) {
+   chomp $_;
+   if ($_ =~ /(.*\.(gif|png|bmp|tiff|ico|jpg|jpeg))/i) {                         # Image format(s)
+      $url = $1;                                                                 # Get URL
+      if ($debug == 1) { print DEBUG "Input: $url\n"; }                          # Let the user know
+
+      $ext = ($url =~ m/([^.]+)$/)[0];                                           # Get the file extension
+      $file = "$baseDir/$pid-$count.$ext";                                       # Set filename + path (Local)
+      $filename = "$pid-$count.$ext";                                            # Set filename        (Remote)
+
+      getstore($url,$file);                                                      # Save image
+      system("chmod", "a+r", "$file");                                           # Allow access to the file
+      if ($debug == 1) { print DEBUG "Fetched image: $file\n"; }                 # Let the user know
+
+      $flip = 1;                                                                 # We need to do something with the image
+   }
+   else {                                                                        # Everything not a image
+      print "$_\n";                                                              # Just let it go
+      if ($debug == 1) { print DEBUG "Pass: $_\n"; }                             # Let the user know
+   }
+
+   if ($flip == 1) {                                                             # Do we need to do something?
+      system("$mogrify", "-flip", "$file");
+      system("chmod", "a+r", "$file");
+      if ($debug == 1) { print DEBUG "Flipped: $file\n"; }
+
+      print "$baseURL/$filename\n";
+      if ($debug == 1) { print DEBUG "Output: $baseURL/$filename, From: $url\n"; }
+   }
+   $flip = 0;
+   $count++;
+}
+
+close (DEBUG);
+
+</pre>
+
+Within the script, change 192.168.0.33 to your IP address.
+
+Change the scripts file permissions:
+<pre>
+sudo chmod 755 /usr/local/bin/flip.pl
+</pre>
+
+Install ''mogrify'', the program that flips the images. ''Mogrify'' is a part of imagemagick:
+<pre>
+sudo apt-get install imagemagick
+</pre>
+
+Note that you can change the script to blur or swirl the images instead of flipping them. Just edit the script and replace the ''-flip'' option with any valid mogrify option.
+
+== Networking Setup ==
+Finally, run the following commands to turn your computer into a gateway and redirect traffic to the proxy: 
+<pre>
+sudo iptables -F
+sudo iptables -t nat -F
+sudo iptables -t mangle -F
+sudo iptables -X
+
+echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward
+
+sudo iptables -t nat -A POSTROUTING -j MASQUERADE
+
+sudo iptables -t nat -A PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 3128
+</pre>
+
+You'll then need to configure your users' default gateway to point to your computer's IP address. This varies by setup so it's not detailed here.
+
+That's it, you're done, enjoy.
+
+== Cleaning Up ==
+You will end up with a lot of images in your /var/www/html/tmp/ directory. Simply add this to your /etc/crontab file:
+<pre>
+* /10 * * * * proxy rm /var/www/html/tmp/*
+</pre>
+This will clear the /var/www/html/tmp/ directory every 10 minutes. 
+
+== References ==
+
+* http://www.ex-parrot.com/~pete/upside-down-ternet.html - Upside-Down-Ternet, the original setup.
+* http://www.debian-administration.org/articles/71 - Transparent proxies via Squid.
+* https://wiki.aronsson.nu/howto/linux/turn-the-web-upside-down - Squid 3 implementation.
+* http://www.worldofvishnu.com/tech/hack-the-computers-in-your-lan/ - Upside-Down-Ternet for your LAN.
+* http://www.debian-administration.org/users/johns/weblog/1 - Another version with ARP spoofing.
+* http://breakingsystemsforfunandprofit.com/archives/118 - Uses a bash script

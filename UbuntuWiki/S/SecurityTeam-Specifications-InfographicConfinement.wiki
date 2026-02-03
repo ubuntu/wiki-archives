@@ -1,0 +1,81 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== DRAFT ==
+
+== Introduction ==
+The infographic displays visualized data provided by applications via the usermetrics API (eg, qtdeclarative5-usermetrics0.1). In Ubuntu 13.10, applications (confined and unconfined) would use the API to provide simple data that the infographic would then use to generate images to visualize the data.
+
+In Ubuntu 14.04, it is desired that 3rd party apps from the !AppStore are able to not only provide the data used by the infographic, but also provide and use alternate visualizers.
+
+== Confinement Implementation ==
+=== Considerations ===
+* 3rd party visualizers need a method to plug into the infographic framework
+* the infographic needs a way to feed data to the visualizer
+* the visualizer needs a way to give image data back to the infographic to display
+
+=== AppStore Policy and Ubuntu Trust model for visualizer helpers ===
+* 3rd party visualizers are considered untrusted
+* 3rd party visualizers shall be delivered via the AppStore using click packaging
+* 3rd party visualizers shall run in a confined environment
+
+=== Design ===
+The infographic implementation will support registering visualizers. Once registered, the infographic implementation will put visualization source data into a visualizer-specific source directory and will then exec the visualizer in a separate process under !AppArmor confinement, telling the visualizer where to obtain the source data. The visualizer will compute its visualization and give its results back via writes to an open file descriptor.
+
+Third party visualizers will be shipped via click, so a new 'infographic-visualization' user hook will be implemented. Eg, a click manifest might have:<pre>
+  ...
+  "hooks": {
+    "visualizer-foo": {
+      "infographic-visualization": "visualizer-registration.json",
+      "apparmor": "security.json"
+    }
+  }
+  ...
+</pre>
+
+Once multiple binaries in a click package are supported in Ubuntu and the AppStore, a visualizer can also be shipped alongside an app. Eg:
+<pre>
+  ...
+  "hooks": {
+    "foo-app": {
+      "desktop": "foo.desktop",
+      "security": "foo-security.json"
+    },
+    "visualizer-foo": {
+      "infographic-visualization": "visualizer-registration.json",
+      "apparmor": "security.json"
+    }
+  }
+  ...
+</pre>
+
+Security manifest supports a new 'ubuntu-infographic-visualization' template. The security json should specify only the template and policy version (policy groups will be ignored):<pre>
+{
+  "template": "ubuntu-infographic-visualization",
+  "policy_version": 1.1
+}
+</pre>
+
+==== Implementation ====
+# an app (eg, 'visualizer-foo') in the click manifest may specify a new hook type, called 'infographic-visualization'. If this hook is specified, no other user hooks (ie, 'desktop') may be specified
+# a click user hook will be run to register 'visualizer-foo' in the infographic framework. The hook will examine the json file specified with 'infographic-visualization' (ie, 'visualizer-registration.json' in the above example)
+# the click-apparmor system hook will be run to generate an apparmor profile for visualizer-foo using the security manifest specified (ie, "security.json" in the above example). The security policy will be very strict using readonly visualizer-specific directories source data. These directories will not overlap with other Ubuntu templates (eg, ubuntu-sdk or ubuntu-webapp). Specifically, the following is used to coordinate data flow between the visualizer and the infographic:
+** ~/.cache/usermetrics/sources/$APP_PKGNAME - visualizer-specific readonly access ($APP_PKGNAME is the 'name' field from the click manifest). The infographic will put source data here for the visualizer to read and visualize
+ 0. once visualizer-foo is plugged in to the infographic, the infographic implementation will execute visualizer-foo by doing something like:<pre>
+  fork
+  if <child>
+    if !change_profile(<profile name>)
+      abort()
+    exec(visualizer-foo, ...)
+</pre>
+
+=== Considerations ===
+* An alternate implementation could give the visualizer its source data via an open file descriptor such that the visualizer doesn't need access to ~/.cache/usermetrics/sources/** at all. If we did this, we could ship an !AppArmor profile with a well-known profile name (ie, we could skip the click-apparmor step and the infographic wouldn't have to discover the profile name of the visualizer). The infographic team stated this complicates their implementation significantly and this alternate implementation offers no security benefit over using a visualizer-specific profile.
+* If it is deemed 'safe enough' for a visualizer to have access to all visualization data, we could then give readonly access to ~/.cache/usermetrics/sources/** and still ship an !AppArmor profile with a well-known profile name. The infographic could still use separate directories, but a malicious visualizer would be able to obtain visualization data other than its own.

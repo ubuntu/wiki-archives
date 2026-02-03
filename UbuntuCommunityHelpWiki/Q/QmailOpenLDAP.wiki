@@ -1,0 +1,416 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+=== Introduction ===
+
+Qmail is a secure, reliable, efficient, simple message transfer agent. It is designed for typical Internet-connected UNIX hosts. As of October 2001, qmail is the second most common SMTP server on the Internet, and has by far the fastest growth of any SMTP server. 
+
+==== Installation ====
+
+This guide will help you easily set up a email server using Qmail as MTA, OpenLDAP as a back-end for users, and Courier IMAP for IMAP server. Follow These simple steps..
+
+==== Qmail ====
+
+In this setup I assume that your domain is yourdomain.com and it has a valid MX record setup as mail.yourdomain.com. Remember to replace yourdomain.com with your actual domain in the example codes in this howto. Also I assume that you know what an MX record is. To find out MX your type in a terminal:
+
+Note: I will use root login from here
+
+<pre>
+dig mx yourdomain.com
+</pre>
+
+Prerequisite packages for Qmail
+
+<pre>
+apt-get install libldap2-dev libssl-dev openssl sharutils unzip maildrop perl-suid
+</pre>
+<pre>
+mkdir /downloads
+cd /downloads
+wget http://www.qmailrocks.org/downloads/qmail-1.03.tar.gz
+wget http://www.qmailrocks.org/downloads/ucspi-tcp-0.88.tar.gz
+wget http://www.qmailrocks.org/downloads/daemontools-0.76.tar.gz
+wget http://www.qmailrocks.org/downloads/patches/daemontools-0.76.errno.patch
+wget http://www.qmailrocks.org/downloads/patches/ucspi-tcp-0.88.errno.patch
+wget http://www.qmailrocks.org/downloads/scripts/finalize/qmailctl
+wget http://www.nrg4u.com/qmail/qmail-ldap-1.03-20060201.patch.gz
+gunzip /downloads/qmail-ldap-1.03-20060201.patch.gz
+</pre>
+
+Creating users and groups..
+
+<pre>
+
+mkdir -p /var/qmail
+groupadd nofiles
+useradd -g nofiles -d /var/qmail/alias -s /sbin/nologin -p'*' alias
+useradd -g nofiles -d /var/qmail -s /sbin/nologin -p'*' qmaild
+useradd -g nofiles -d /var/qmail -s /sbin/nologin -p'*' qmaill
+useradd -g nofiles -d /var/qmail -s /sbin/nologin -p'*' qmailp
+groupadd qmail
+useradd -g qmail -d /var/qmail -s /sbin/nologin -p'*' qmailq
+useradd -g qmail -d /var/qmail -s /sbin/nologin -p'*' qmailr
+useradd -g qmail -d /var/qmail -s /sbin/nologin -p'*' qmails
+groupadd vmail
+useradd -g vmail -s /bin/true vmail
+mkdir /home/vmail
+chown vmail.vmail /home/vmail
+chmod 700 /home/vmail
+
+</pre>
+
+Qmail Complile
+
+<pre>
+
+mkdir -p /var/qmail
+mkdir /usr/src/qmail
+cd /usr/src/qmail
+tar zxvf /downloads/qmail-1.03.tar.gz
+cd qmail-1.03
+patch -p1 < /downloads/qmail-ldap-1.03-20060201.patch
+</pre>
+<pre>
+vi Makefile
+
+LDAPFLAGS=-DQLDAP_CLUSTER -DEXTERNAL_TODO -DDASH_EXT -DDATA_COMPRESS -DQMQP_COMPRESS -DSMTPEXECCHECK
+
+ZLIB=-lz
+
+MDIRMAKE=-DAUTOMAILDIRMAKE
+
+HDIRMAKE=-DAUTOHOMEDIRMAKE
+
+SHADOWLIBS=-lcrypt
+
+DEBUG=-DDEBUG
+</pre>
+<pre>
+make setup check
+</pre>
+
+Qmail Configure and ldap control files
+
+<pre>
+cd /var/qmail/control
+echo 100 > concurrencyincoming
+echo 255 > concurrencyremote
+echo ./Maildir/ > defaultdelivery
+echo yourdomain.com > defaultdomain
+echo 10000 > defaultquotacount
+echo 10000000 > defaultquotasize
+echo /var/qmail/bin/dirmaker > dirmaker
+echo yourdomain.com > defaultdomain
+echo dc=yourdomain,dc=com > ldapbasedn
+echo 0 > ldapcluster
+id -g vmail > ldapgid
+echo cn=manager,dc=yourdomain,dc=com > ldaplogin
+echo /home/vmail > ldapmessagestore
+echo qmailUser > ldapobjectclass
+echo secret > ldappassword
+echo 127.0.0.1 > ldapserver
+id -u vmail > ldapuid
+echo mail.yourdomain.com > me
+echo 80000000 > qmail-smtpd-softlimit
+echo 80000000 > qmail-pop3d-softlimit
+echo 3 > qmail-pop3d-loglevel
+echo 3 > qmail-start-loglevel
+echo yourdomain.com > rcpthosts
+ln -s rcpthosts locals
+</pre>
+
+UCSPI-TCP / Daemontools Install
+
+<pre>
+
+cd /usr/src/qmail
+tar zxvf /downloads/ucspi-tcp-0.88.tar.gz
+cd ucspi-tcp-0.88
+patch < /downloads/ucspi-tcp-0.88.errno.patch
+make && make setup check
+</pre>
+<pre>
+mkdir -p /package
+chmod 1755 /package
+cd /package
+tar zxvf /downloads/daemontools-0.76.tar.gz
+cd /package/admin/daemontools-0.76/src
+patch < /downloads/daemontools-0.76.errno.patch
+cd /package/admin/daemontools-0.76
+package/install
+/command/svscanboot &
+chmod 755 /etc/rc.local
+</pre>
+<pre>
+vi /etc/rc.local
+
+/command/svscanboot &
+exit 0
+
+</pre>
+
+Qmail Run Script Files
+
+<pre>
+mkdir /var/qmail/supervise
+cd /var/qmail/supervise
+mkdir -p qmail-smtpd/log qmail-send/log qmail-pop3d/log
+chmod +t qmail-smtpd qmail-send qmail-pop3d
+</pre>
+<pre>
+vi qmail-smtpd/run
+
+QUID=`id -u qmaild`
+QGID=`id -g qmaild`
+MAXD=`head -1 /var/qmail/control/concurrencyincoming`
+HOST=`head -1 /var/qmail/control/me`
+SOFT=`head -1 /var/qmail/control/qmail-smtpd-softlimit`
+CDBF="/etc/tcp.smtp.cdb"
+
+if [ -z "$QUID" -o -z "$QGID" -o -z "$MAXD" -o -z "$HOST" ]; then
+    echo QUID, QGID, MAXD, or HOST is unset in
+    echo /var/qmail/supervise/qmail-smtpd/run
+    exit 1
+fi
+
+exec    	/usr/local/bin/softlimit        	-m $SOFT     	\
+        	/usr/local/bin/tcpserver        	-v             	\
+                                        		-H             	\
+                                        		-R             	\
+                                        		-l $HOST       	\
+                                        		-x $CDBF       	\
+                                        		-c $MAXD	\
+                                        		-u $QUID        \
+                                        		-g $QGID    	\
+                                        		0              	\
+                                       		smtp            	\
+                              /var/qmail/bin/qmail-smtpd 		\
+             /var/qmail/bin/auth_smtp /usr/bin/true 2>&1
+</pre>
+<pre>
+vi qmail-smtpd/log/run
+
+export PATH=/var/qmail/bin:/usr/local/bin:/usr/bin:/bin
+exec /usr/local/bin/setuidgid qmaill /usr/local/bin/multilog t s10000000 n20 /var/log/qmail/qmail-smtpd 2>&1
+</pre>
+<pre>
+vi  /var/qmail/rc
+
+QLOG="`cat /var/qmail/control/qmail-start-loglevel`"
+DEFD="`cat /var/qmail/control/defaultdelivery`"
+exec env - PATH="/var/qmail/bin:$PATH" LOGLEVEL="$QLOG" qmail-start "$DEFD"
+</pre>
+<pre>
+vi qmail-send/run
+
+exec /var/qmail/rc
+</pre>
+<pre>
+vi qmail-send/log/run
+
+exec /usr/local/bin/setuidgid qmaill /usr/local/bin/multilog t s10000000 n20  /var/log/qmail/qmail-send  2>&1
+</pre>
+<pre>
+vi qmail-pop3d/run
+
+IP=`head -1 /var/qmail/control/me`
+LL=`head -1 /var/qmail/control/qmail-pop3d-loglevel`
+SL=`head -1 /var/qmail/control/qmail-pop3d-softlimit`
+exec                                                            		\
+        env LOGLEVEL=$LL                                        		\
+        softlimit -m $SL                                        		\
+        /usr/local/bin/tcpserver -v -R -H -l 0 0  pop3  			\
+        /var/qmail/bin/qmail-popup $IP                          		\
+        /var/qmail/bin/tcp-env                                  		\
+        /var/qmail/bin/auth_pop                                 		\
+        /var/qmail/bin/qmail-pop3d Maildir 2>&1
+</pre>
+<pre>
+vi qmail-pop3d/log/run
+
+exec /usr/local/bin/setuidgid qmaill /usr/local/bin/multilog t s10000000 n20  /var/log/qmail/qmail-pop3d  2>&1
+</pre>
+
+<pre>
+vi /var/qmail/bin/dirmaker
+
+echo '----------------------------------------------' >> /tmp/dirmaker
+date >> /tmp/dirmaker
+echo $1 >> /tmp/dirmaker
+id >> /tmp/dirmaker
+
+mkdir --parents -m 700 -p $1/Maildir
+mkdir --parents -m 700 -p $1/Maildir/tmp
+mkdir --parents -m 700 -p $1/Maildir/cur
+mkdir --parents -m 700 -p $1/Maildir/new
+chown -R vmail:vmail $1
+</pre>
+
+<pre>
+chmod 755 qmail-pop3d/run qmail-smtpd/run qmail-send/run
+chmod 755 qmail-pop3d/log/run qmail-smtpd/log/run qmail-send/log/run
+chmod 755 /var/qmail/rc /var/qmail/bin/dirmaker
+</pre>
+<pre>
+vi /etc/tcp.smtp
+
+127.:allow,RELAYCLIENT="",MAXRCPTCOUNT="200"
+192.168.:allow,BLOCKRELAYPROBE="",RCPTCHECK="",SENDERCHECK="",AUTHPREPEND="Authenticated user: ",SANITYCHECK="",SMTPAUTH="",LOGLEVEL="3",AUTHREQUIRED="",MAXRCPTCOUNT="100"
+:allow,BLOCKRELAYPROBE="",RCPTCHECK="",SANITYCHECK="",RETURNMXCHECK="STRICT",RBL="",REJECTEXEC="",LOGLEVEL="3",TARPITCOUNT="10",TARPITDELAY="10",SMTPAUTH="",MAXRCPTCOUNT="25"
+</pre>
+Note: 192.168. is my local ip range
+to know more about options used go to <nowiki>[[http://www.nrg4u.com/qmail/QLDAPINSTALL|www.nrg4u.com]]</nowiki>
+
+<pre>
+mkdir /var/log/qmail
+cd /var/log/qmail
+mkdir qmail-send qmail-smtpd qmail-pop3d
+chown -R qmaill:root /var/log/qmail
+chmod -R 750 /var/log/qmail
+cd /var/qmail
+cp -p /downloads/qmailctl /var/qmail/bin/.
+chmod 755 /var/qmail/bin/qmailctl
+ln -s /var/qmail/bin/qmailctl /usr/bin/
+qmailctl cdb
+cd /service/
+ln -s /var/qmail/supervise/qmail-* .
+</pre>
+
+==== OpenLDAP ====
+
+LDAP means Lightweight Directory Access Protocol, a simplified version of X500 protocol. You will find a more detailed presentation on Wikipedia. 
+LDAP is a way to make certain kinds of information available across a network. In this setup the information is user logins - their passwords, user IDs, and various details.
+
+First, install the ldap server daemon (slapd) on the server: install the following packages: slapd, ldap-utils, and db4.2-util. 
+
+<pre>
+sudo apt-get install slapd ldap-utils db4.2-util
+cp -p /usr/src/qmail/qmail-1.03/qmail.schema /etc/ldap/schema/
+</pre>
+Now Create a tmp configuration file 
+<pre>
+vi slapd-tmp.conf
+
+include         /etc/ldap/schema/core.schema
+include         /etc/ldap/schema/cosine.schema
+include         /etc/ldap/schema/inetorgperson.schema
+include         /etc/ldap/schema/nis.schema
+include         /etc/ldap/schema/qmail.schema
+
+pidfile         /var/run/slapd/slapd.pid
+argsfile        /var/run/slapd/slapd.args
+
+moduleload      back_hdb
+
+database        hdb
+suffix          "dc=yourdomain,dc=com"
+rootdn          "cn=manager,dc=yourdomain,dc=com"
+rootpw		{SSHA}+xDld2OXYtm0NRlJYXL050VGym/sYUn+
+
+index objectClass                       eq,pres
+index ou,cn,mail,surname,givenname      eq,pres,sub
+index uidNumber,gidNumber,loginShell    eq,pres
+index uid,memberUid                     eq,pres,sub
+index nisMapName,nisMapEntry            eq,pres,sub
+
+</pre>
+
+''Remember to change the rootpw by genrating new password hash use the command '''slappasswd'''''
+
+<pre>
+rm -rf /etc/ldap/slapd.d/*
+
+slaptest -f slapd-tmp.conf -F /etc/ldap/slapd.d -u
+
+chown openldap.openldap -R /etc/ldap/slapd.d
+chown openldap.openldap -R /var/lib/ldap
+
+/etc/init.d/slapd restart
+</pre>
+
+Now let's populate some database
+
+<pre>
+vi yourdomain.ldif
+
+dn: dc=yourdomain,dc=com
+objectClass: dcObject
+objectClass: organization
+o: yourdomain
+dc: yourdomain
+
+dn: ou=yourdomain.com,dc=yourdomain,dc=com
+objectClass: top
+objectClass: organizationalUnit
+ou: yourdomain.com
+</pre>
+<pre>
+vi test.ldif
+
+dn: uid=test,ou=yourdomain.com,dc=yourdomain,dc=com
+objectClass: top
+objectClass: inetOrgPerson
+objectClass: qmailUser
+cn: Test User
+sn::  User
+mail: test@yourdomain.com
+accountStatus: active
+mailMessageStore: yourdomain.com/test 
+uid: test
+mailHost: mail.yourdomain.com
+deliveryMode: noforward
+userPassword:: e0NSWVBUfUJuZGZpVzJHQkd0enc=
+</pre>
+<pre>
+ldapadd -x -D "cn=manager,dc=yourdomain,dc=com" -W -f yourdomain.ldif
+ldapadd -x -D "cn=manager,dc=yourdomain,dc=com" -W -f test.ldif
+
+</pre>
+
+==== Courier IMAP ====
+
+<pre>
+apt-get install courier-authdaemon courier-authlib courier-authlib-userdb courier-base courier-imap expect courier-ldap courier-authlib-ldap
+</pre>
+<pre>
+vi /etc/courier/authdaemonrc
+
+authmodulelist="authldap"
+authmodulelistorig="authldap"
+</pre>
+<pre>
+vi /etc/courier/authldaprc
+
+LDAP_URI		ldap://mail.yourdomain.com
+LDAP_BASEDN		dc=yourdomain,dc=com
+LDAP_BINDDN		cn=manager,dc=yourdomain,dc=com
+LDAP_BINDPW		secret
+LDAP_MAIL		uid
+LDAP_FILTER     (&(objectClass=qmailUser)(accountStatus=active))
+LDAP_GLOB_UID		vmail
+LDAP_GLOB_GID		vmail
+LDAP_HOMEDIR		mailMessageStore
+LDAP_MAILROOT        /home/vmail
+LDAP_DEFAULTDELIVERY	defaultDelivery
+</pre>
+<pre>
+vi /etc/courier/imapd
+
+IMAPDSTART=YES
+</pre>
+<pre>
+/etc/init.d/courier-ldap start
+/etc/init.d/courier-authdaemon start
+/etc/init.d/courier-imap start
+</pre>
+
+==== Webmail ====
+
+To configure webmail go to <nowiki>[[http://www.grosseosterhues.com/2011/04/setup-of-roundcube-webmail-0-5-x-on-ubuntu-10-10|Roundcube Mail]]</nowiki> to setup latest version ... 

@@ -1,0 +1,171 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== Wireless AP auto-selection with `/etc/network/interfaces` ==
+
+The legacy `/etc/network/interfaces` contains a `mapping` section that can be used to automatically select logical interface when we are bringing up an interface. This is useful for mobile users who regularly connect to different wireless access points at different places. <nowiki>[[#1|(note 1)]]</nowiki>
+
+I will use my laptop as an example; you can adapt this example to suit your own need. This laptop has two interfaces (`eth0` = wired, `eth1` = ipw2200 wireless). I am using wired interface whenever available, but it is enabled and disabled manually through `ifup` and `ifdown` command. The `eth1` interface is brought up automatically, and it can detect the wireless network (which ESSID, etc.) automatically via the `mapping` section with the help of a custom script (given below).
+
+The stuff below requires a wireless hardware that works with wireless-tools package. Some older wireless cards seem to not use wireless-tools at all, thus they are at disadvantage.
+
+=== Custom script /etc/network/custom/wireless-select ===
+
+<pre>
+auto lo
+auto eth1
+
+iface lo inet loopback
+
+iface eth0 inet static
+  address 192.168.0.176
+  netmask 255.255.255.0
+  network 192.168.0.0
+  broadcast 192.168.0.255
+  gateway 192.168.0.1
+
+mapping eth1
+  script /etc/network/custom/wireless-select
+  map  eth1-home    AP_MAC      NN:NN:NN:NN:NN:NN
+  map  eth1-office  AP_ESSID    Office_ESSID
+  map  eth1-NOT-FOUND AP_NOT_FOUND -
+
+iface eth1 inet static
+  wireless-essid THIS_IS_MY_ESSID
+  wireless-key THIS_IS_MY_WEP_KEY
+  wireless-keymode open
+  address 192.168.0.177
+  netmask 255.255.255.0
+  gateway 192.168.0.1
+
+iface eth1-home inet static
+  wireless-essid THIS_IS_MY_ESSID
+  wireless-key THIS_IS_MY_WEP_KEY
+  wireless-keymode open
+  address 192.168.0.177
+  netmask 255.255.255.0
+  gateway 192.168.0.1
+
+iface eth1-office inet dhcp
+  wireless-essid Office_ESSID
+
+iface eth1-NOT-FOUND inet static
+## EXPERIMENTAL [20081204]
+## Use this if we want to fail the eth1 setup when no right AP is found.
+  pre-up  /etc/network/custom/wireless-select-not-found
+  address 192.168.0.2
+  netmask 255.255.255.0
+  gateway 192.168.0.1
+
+</pre>
+
+=== Custom script /etc/network/custom/wireless-select ===
+
+<pre>
+
+set -e
+export LANG=C
+IFACE="$1"
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+
+AP_SCAN_TEXT=
+AP_SCANNED=
+
+scan_ap()
+{
+  if [ ! "$AP_SCANNED" ]; then
+    AP_SCANNED=yes
+### Disable the tee-ing if you don't want debugging
+    AP_SCAN_TEXT=$(/sbin/iwlist "$IFACE" scanning | tee /tmp/iwlist-$IFACE-scanning)
+  fi
+  echo "$AP_SCAN_TEXT"
+}
+
+match_ap_mac()
+{
+  local wanted_mac="$1"
+  scan_ap | grep -qiE "^.*Cell *[0-9]+ *- *Address: *$wanted_mac"
+}
+
+match_ap_essid()
+{
+  local wanted_essid="$1"
+  scan_ap \
+  | awk -v Wanted_ESSID="$wanted_essid"  '
+    BEGIN { notfound=1 }
+    /^[\t ]*ESSID: *"/ {
+      sub(/^[^"]+"/, "");
+      sub(/"[^"]*$/, "");
+      if ($0 == Wanted_ESSID) {
+        notfound=0
+        exit
+      }
+    }
+    END { exit(notfound) }
+    '
+}
+
+WHICH=
+while read ETH_SCHEME KIND VALUE JUNKIE; do
+  if [ "$WHICH" ]; then continue; fi
+  case "$KIND" in
+  AP_MAC)
+    if match_ap_mac "$VALUE"; then
+      WHICH=$ETH_SCHEME
+    fi
+    ;;
+  AP_ESSID)
+    if match_ap_essid "$VALUE"; then
+      WHICH=$ETH_SCHEME
+    fi
+    ;;
+  AP_NOT_FOUND|AP_DEFAULT)
+### Fallback scheme.
+    WHICH=$ETH_SCHEME
+    ;;
+  esac
+done
+
+if [ "$WHICH" ]; then 
+  echo "$WHICH"
+  exit 0
+else
+  exit 1
+fi
+</pre>
+
+=== Custom script /etc/network/custom/wireless-select-not-found ===
+
+<pre>
+
+echo "Cannot bring up the network interface $IFACE." >&2
+echo "Reason: no appropriate wireless AP found." >&2
+echo "Bailing out." >&2
+exit 1
+</pre>
+
+You'll need to change the MAC, ESSID, and WEP key. Using WPA/WPA2 is a different beast. Look at `man 5 wpa_supplicant.conf` as a starting point.
+
+== Further references ==
+
+I use the following references to get to the abovementioned setup:
+
+* Manual pages, e.g. `man 5 interfaces`
+
+* example files in `/usr/share/doc/ifupdown/examples/`
+
+== Footnotes ==
+
+ 1.  Some users, like me, want to continue using `/etc/network/interfaces` rather than the newly packaged NetworkManager. That package was okay, actually, but somehow it is too dependent on GUI for configuration. AFAIK there is no command-line tools to access NetworkManager facility. For machines that is occasionally accessed remotely via ssh, the use of GUI tools is not necessarily the best. I want a minimalist approach with as little dependence as possible. Or perhaps you are just a control freak, like I am. Back in the Feisty days, it seems that GNOME network management utility (network-admin) modifies /etc/network/interfaces to whatever configuration set up there.
+
+ 2. Please send me feedback if you find this article useful or you have an improvement idea. For reuse: All the scripts above are GPL2+ licensed. Use as you see appropriate.
+
+----
+CategoryNetworking CategoryNetworking

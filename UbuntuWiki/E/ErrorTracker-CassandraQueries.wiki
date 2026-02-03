@@ -1,0 +1,52 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+At the time of writing (April 16th, 2013), there are nearly 45 million reports in the database (44,799,616).
+
+Iterating the OOPS column family alone (where the reports live), with no other lookups and with the data passing through a single node takes approximately 10 hours.
+
+45 million reports / ~1,285 reports per second = 35,019 seconds (9.7 hours).
+
+On production (finfolk) it takes approximately 9.4 hours (1,330 reports per second).
+
+Test configuration:
+* pycassa.Column``Family(pool, 'OOPS').get_range(columns=['System``Identifier', 'Distro``Release'], buffer_size=10 * 1024, include_timestamp=True)
+** Going up to <code>buffer_size=20 * 1024</code> slows it down to 1,015 rows per second.
+
+{| class="wikitable"
+|-
+| From BlueFin
+| From finfolk
+|-
+| processed 61137 (933/s)<<BR>>processed 132453 (1004/s)<<BR>>processed 213929 (1101/s)<<BR>>processed 295449 (1157/s)<<BR>>processed 376930 (1186/s)<<BR>>processed 468641 (1216/s)<<BR>>processed 550162 (1229/s)<<BR>>processed 631666 (1239/s)<<BR>>processed 713185 (1246/s)<<BR>>processed 794678 (1254/s)<<BR>>processed 876226 (1261/s)<<BR>>processed 957740 (1266/s)<<BR>>processed 1039262 (1268/s)<<BR>>processed 1120755 (1271/s)<<BR>>processed 1202274 (1270/s)<<BR>>processed 1293981 (1276/s)<<BR>>processed 1375494 (1278/s)<<BR>>processed 1456979 (1280/s)<<BR>>processed 1538473 (1283/s)<<BR>>processed 1620010 (1285/s)<<BR>>processed 1701522 (1286/s)<<BR>>processed 1783011 (1284/s)<<BR>>processed 1864538 (1283/s)<<BR>>processed 1946040 (1284/s)<<BR>>processed 2037762 (1287/s)<<BR>>processed 2119265 (1287/s)<<BR>>processed 2190588 (1283/s)<<BR>>processed 2272100 (1284/s)<<BR>>processed 2353586 (1282/s)<<BR>>processed 2435095 (1282/s)<<BR>>processed 2516581 (1280/s)
+| processed 82398 (1373/s)<<BR>>processed 163023 (1341/s)<<BR>>processed 254688 (1344/s)<<BR>>processed 336191 (1332/s)<<BR>>processed 427882 (1342/s)<<BR>>processed 509401 (1334/s)<<BR>>processed 590923 (1335/s)<<BR>>processed 662248 (1316/s)<<BR>>processed 743751 (1317/s)<<BR>>processed 835453 (1324/s)<<BR>>processed 927166 (1335/s)<<BR>>processed 1008680 (1335/s)<<BR>>processed 1100397 (1342/s)<<BR>>processed 1181903 (1338/s)<<BR>>processed 1263406 (1338/s)<<BR>>processed 1344915 (1339/s)<<BR>>processed 1426415 (1336/s)<<BR>>processed 1518115 (1336/s)<<BR>>processed 1609819 (1339/s)<<BR>>processed 1701522 (1339/s)<<BR>>processed 1793209 (1342/s)<<BR>>processed 1884909 (1344/s)
+|}
+
+Things to try:
+* Use a batch mutator for small inserts (First``Error, etc).
+** http://pycassa.github.io/pycassa/api/pycassa/batch.html
+* Cache the entire contents of Column``Families read from inside the get_range() loop.
+* Multithreaded / multiprocess on <code>get_range(start='', finish='b'), get_range(start='b', finish='c'), ...</code>
+** This will not work:
+** https://github.com/pycassa/pycassa/issues/170
+** http://stackoverflow.com/questions/14730137/cassandra-randompartitioner-and-full-table-scans
+
+=== Additional scripts ===
+* tools/build_src_version_buckets.py processed 1549190 buckets at a rate of 1359/min when run from a retracer.
+
+=== Thursday, June 13th, 2013 ===
+
+We realised that after running build_errors_by_release.py for 0.5-1 day, it was going to take an awfully long time to complete:
+<pre>
+[10:41:45] <gnuoy>	 ev, the finfolk job claims to have processed  800000 somthings, how many somethings are there to be processed ?
+[10:42:49] <ev>	 gnuoy: 51 million
+</pre>
+
+This is again because we're using an inner loop against a second column family. <nowiki>[[http://paste.ubuntu.com/5760954/|Reducing the script]]</nowiki> to just the OOPS CF, with the intention of loading FirstError into memory, brings the time down to about 13-14 hours (1080/s). Running that same script under pypy gives a modest improvement of 1197 reports per second.

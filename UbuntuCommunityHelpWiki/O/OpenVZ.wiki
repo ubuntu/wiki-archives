@@ -1,0 +1,790 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+== Introduction ==
+
+This page describes the installation of OpenVZ on "Ubuntu Server" as a host.  In the Hardy release of Ubuntu, the OpenVZ packages are in the "universe" component, which does not have guarantees of support.
+Note that <nowiki>[[KVM]]</nowiki> is the main virtualization technology supported in Ubuntu.
+
+To properly implement the practical steps found in this guide, the reader should be a user of Ubuntu who is comfortable with the use of command-line applications, using the Bourne Again SHell (bash) environment, and editing system configuration files with their preferred text editor application.
+
+== About OpenVZ ==
+
+OpenVZ is a server virtualization solution for Linux. It enables one to create multiple virtual Linux servers which are isolated from the host and from each other, based on a technique called "Operating System Virtualization". Similar techniques are used in Solaris Zones, Linux-VServer and FreeBSD jails. This technique does not use hardware virtualization like KVM, XEN or VMware.
+The so called "Virtual Servers" or VPSs behave like stand alone servers. They consume less resources than their hardware virtualized counterparts, but must use the same kernel as the host. Therefor you can only have Linux VPSs on a Linux host.
+
+The original documentation can be found here: <nowiki>[[http://openvz.org/]]</nowiki> 
+
+== Alternates to OpenVZ ==
+
+<nowiki>[[LXC]]</nowiki> and <nowiki>[[Xen]]</nowiki> are alternatives to OpenVZ.
+
+== Installing OpenVZ ==
+
+* OpenVZ is supported on Ubuntu only for the 8.04 version.
+
+If you are looking for a host node more recent then Ubuntu 8.04 try <nowiki>[[http://pve.proxmox.com/wiki/Main_Page|Proxmox]]</nowiki> (Proxmox is Debian), Debian, or Centos. In general, OpenVZ support is better on .rpm systems first, Debian second. 
+
+If you are interested in seeing OpenVZ on .deb systems, please consider working with the OpenVZ project as the OpenVZ kernel patch is not maintained by the Ubuntu developers.
+
+=== 8.04 Hardy ===
+* Install the kernel and tools
+<pre>
+$ sudo apt-get install linux-openvz vzctl
+</pre>
+
+ '''Important!''' Please, make sure that you are using at least the linux-image-2.6.24-19-openvz kernel which is the first really stable kernel without basic usability issues.
+
+* Reboot into the openvz kernel
+
+* Remove the `-server` kernel or the `-generic` if you are on a desktop machine
+<pre>
+$ sudo apt-get remove --purge --auto-remove linux-image-.*server
+</pre>
+
+* Change the sysctl variables in `/etc/sysctl.conf`
+<pre>
+## On Hardware Node we generally need
+## packet forwarding enabled and proxy arp disabled
+  
+  net.ipv4.conf.default.forwarding=1
+  net.ipv4.conf.default.proxy_arp=1
+  net.ipv4.ip_forward=1
+  
+## Enables source route verification
+  net.ipv4.conf.all.rp_filter = 1
+  
+## Enables the magic-sysrq key
+  kernel.sysrq = 1
+  
+## TCP Explict Congestion Notification
+## net.ipv4.tcp_ecn = 0
+  
+## we do not want all our interfaces to send redirects
+  net.ipv4.conf.default.send_redirects = 1
+  net.ipv4.conf.all.send_redirects = 0
+</pre>
+
+* Apply the sysctl changes
+<pre>
+$ sudo sysctl -p
+</pre>
+
+* Create a symlink to /vz because most of the vz tools expects the OpenVZ folders to reside there. This step is not necessary, but can eliminate further problems when other vz related components are installed.
+<pre>
+$ sudo ln -s /var/lib/vz /vz
+</pre>
+
+=== 10.04 LTS (Lucid) ===
+'''The information below is old.''' Follow <nowiki>[[http://wiki.openvz.org/Install_kernel_from_RPM_on_Ubuntu_10.04|Install kernel from RPM on Ubuntu 10.04]]</nowiki>.
+
+'''Before you begin, please remeber that:'''
+* OpenVZ was only supported in Ubuntu 8.04 LTS (Hardy Heron), and not in Ubuntu 10.04 (Lucid Lynx)
+* At writing moment (november 2010) OpenVZ patch for kernel Linux 2.6.32 works, but is not yet released as stable, and for this reason is not recommended for production environments.
+* Ext4 filesystem is not yet supported by vzquota, then if you want to have host kernel stability, better use Ext3 for containers space in /vz or /var/lib/vz
+
+Be sure that the system is up-to-date (also kernel)
+<pre>
+sudo apt-get update
+sudo apt-get upgrade
+sudo apt-get upgrade
+</pre>
+
+We need now Bash as default Shell. In the next screen, select NO to install dash.
+<pre>
+sudo dpkg-reconfigure dash
+</pre>
+
+Install Required Packages For Kernel Compilation
+<pre>
+sudo apt-get install kernel-package libncurses5-dev fakeroot wget bzip2 module-assistant debhelper build-essential
+</pre>
+Select OpenVZ compile configuration (only one of them):
+<pre>
+Variant="linux-image-generic"
+VersionAppendix="-openvz"
+MyConfigFile="kernel-2.6.32-i686.config.ovz"
+
+Variant="linux-image-generic-pae"
+VersionAppendix="-openvz-pae"
+MyConfigFile="kernel-2.6.32-i686-PAE.config.ovz"
+
+Variant="linux-image-server"
+VersionAppendix="-openvz"
+MyConfigFile="kernel-2.6.32-x86_64.config.ovz"
+</pre>
+Satisfy the build dependencies for the source package
+<pre>
+Package="$(apt-cache showpkg $Variant | grep "^2\.6\.32" | grep "linux-image")"
+Package=$(ReturnWord () { echo $3; }; ReturnWord $Package)
+sudo apt-get build-dep --no-install-recommends $Package
+</pre>
+Prepare linux headers
+<pre>
+sudo m-a prepare
+</pre>
+Create configuration for kernel compiler
+<pre>
+sudo kernel-packageconfig
+</pre>
+Optimize compiler multi-core usage (only one time)
+<pre>
+Cores=$(Nr () { echo $#; }; Nr $(grep "processor" /proc/cpuinfo | cut -f2 -d":"))
+echo "CONCURRENCY_LEVEL := $(($Cores + 1))" | sudo tee -a /etc/kernel-pkg.conf
+</pre>
+Get Ubuntu Linux kernel source code for 2.6.32
+<pre>
+cd /usr/src
+sudo wget http://archive.ubuntu.com/ubuntu/pool/main/l/linux/linux_2.6.32.orig.tar.gz
+</pre>
+Get OpenVZ patch for kernel (you can <nowiki>[[http://download.openvz.org/kernel/branches/2.6.32/current/patches/|see here if the file has changed]]</nowiki>)
+<pre>
+cd /usr/src
+sudo wget http://download.openvz.org/kernel/branches/2.6.32/current/patches/patch-feoktistov.1-combined.gz
+</pre>
+Now download:
+<pre>
+cd /usr/src
+sudo wget http://download.openvz.org/kernel/branches/2.6.32/current/configs/$MyConfigFile
+</pre>
+
+Unpack the Kernel-Source
+<pre>
+cd /usr/src
+sudo rm -fR linux-2.6.32
+sudo tar -xpf linux_2.6.32.orig.tar.gz
+sudo rm -fR "linux-2.6.32$VersionAppendix"
+sudo mv linux-2.6.32 "linux-2.6.32$VersionAppendix"
+sudo rm linux
+sudo ln -s "linux-2.6.32$VersionAppendix" linux
+</pre>
+Apply OpenVZ patch and configuration
+<pre>
+cd /usr/src/linux
+sudo gunzip -dc /usr/src/patch-feoktistov.1-combined.gz | sudo patch -p1 --batch
+sudo cp -f "/usr/src/$MyConfigFile" .config
+sudo make oldconfig
+</pre>
+
+Fix some bugs:
+
+Edit file '''Documentation/lguest/Makefile''' and change
+<pre>
+all: lguest
+
+clean:
+</pre>
+to
+<pre>
+all:
+
+clean:
+</pre>
+(or you'll get a next compilation error with eventfd.h and zlib.h)
+
+Now the long kernel compilation and pack:
+<pre>
+cd /usr/src/linux
+sudo make-kpkg --initrd --append-to-version=$VersionAppendix --revision=1 kernel_image kernel_headers
+</pre>
+
+Install the Kernel
+<pre>
+cd /usr/src
+ls -l *.deb
+sudo dpkg -i linux-image-2.6.32.28-openvz_1_amd64.deb
+sudo dpkg -i linux-headers-2.6.32.28-openvz_1_amd64.deb
+</pre>
+
+Create a Initramfs and update Grubs menu.lst or grub.cfg (check the "2.6.32.28-openvz" string according to generated packages)
+<pre>
+sudo mkinitramfs -k 2.6.32.28-openvz -o /boot/initrd.img-2.6.32.28-openvz
+sudo update-grub
+</pre>
+
+* Create a new file, '''/etc/sysctl.d/10-openvz.conf''' with the following sysctl variables
+
+ This step might not be necessary once the vzctl package is going to be updated
+<pre>
+
+net.ipv4.conf.default.forwarding = 1
+net.ipv4.conf.default.proxy_arp = 1
+net.ipv4.ip_forward = 1
+
+net.ipv4.conf.all.rp_filter = 1
+
+kernel.sysrq = 1
+
+net.ipv4.conf.default.send_redirects = 0
+</pre>
+
+* Apply the sysctl changes
+<pre>
+$ sudo sysctl -p /etc/sysctl.d/10-openvz.conf
+</pre>
+
+Install OpenVZ management tools
+<pre>
+sudo apt-get install --no-install-recommends vzctl vzquota vzdump
+</pre>
+(only when you know the Ext4 support is complete and stable, may want to compile from <nowiki>[[http://download.openvz.org/utils/|sources]]</nowiki>)
+
+Create a Symlink to be FHS-compliant
+<pre>
+sudo ln -s /var/lib/vz /vz
+</pre>
+
+If you are using ext4, you almost certainly will encounter a kernel panic when starting a container. Some people mounts filesystem with a 'nodelalloc' option in /etc/fstab , but instead of kernel panic the system can freeze or collapse (See here:
+http://bugzilla.openvz.org/show_bug.cgi?id=1509)
+
+For the moment, the only alternative to use Ext4 is to set '''DISK_QUOTA=no''' in /etc/vz/vz.conf (then space quotas haven't effect to containers)
+
+Reboot into your new OpenVZ-Kernel
+<pre>
+sudo reboot
+</pre>
+
+Check your running Kernel
+<pre>
+sudo uname -rvo 
+</pre>
+
+This Command should give something like this:
+<pre>
+2.6.32.28-openvz #1 SMP Tue Sep 24 13:07:07 CEST 2010 GNU/Linux
+</pre>
+
+Ensure that all is fine now.
+<pre>
+sudo ps ax | grep -v "grep" | grep "vzmond"
+</pre>
+
+This should give some like:
+<pre>
+ 3890 ?        S      0:00 [vzmond]
+</pre>
+
+'''Congratulation. You're now running OpenVZ on Ubuntu 10.04 LTS'''
+
+* If you need FUSE mounts (such as SSHFS) and don't see the fuse module loaded (lsmod | grep fuse), you can enable it with:
+<pre>
+sudo modprobe --first-time fuse
+echo "fuse" | sudo tee -a /etc/modules
+</pre>
+To allow a container to mount fuse devices, you need to give it permissions (container may need to be restarted):
+<pre>
+sudo vzctl set 777 --devnodes fuse:rw --save
+</pre>
+
+== OpenVZ Guests ==
+=== Template(s) ===
+Before we can create a new Virtual Private Server, we first have to either download or create a template of the distro we want to use. OpenVZ uses "templates" or "cached templates". The difference is that "templates" are a sort of cookbook for "cached templates" A package manager is then used to download and create the cached template of the chosen distribution. Because most cached versions of popular distro's are already created and not that big, it is easiest to download the cached version and place it in the "/var/lib/vz/template/cache" directory (or the path you have chosen in the "/etc/vz/vz.conf" file).
+
+* "Official" cached templates can be found here <nowiki>[[http://openvz.org/download/template/cache/]]</nowiki>
+* "Community" or "contrib" templates can be found here <nowiki>[[http://ftp.openvz.org/template/precreated/contrib/]]</nowiki> 
+* <nowiki>[[https://wiki.ubuntu.com/BodhiZazen|BodhiZazen 's]]</nowiki> - <nowiki>[[http://blog.bodhizazen.net/linux/download-ubuntu-10-04-openvz-templates/|OpenVZ templates]]</nowiki> - These templates were submitted to the OpenVZ "contrib" set of templates.
+
+Once you have downloaded a template (for example ubuntu-8.04-i386-minimal.tar.gz) and placed it in "/var/lib/vz/template/cache" you can install it using the following command:
+
+<pre>
+sudo vzctl create 777 --ostemplate ubuntu-8.04-i386-minimal
+</pre>
+''In the example below CT ID of 777 is used; of course any other non-allocated ID could be used.''
+
+'''The section below explains how to create your own cached template. If you installed a default one as explained above, continue to <nowiki>[[#Administration]]</nowiki> to learn how to start and enter your new node.'''
+
+==== Create Template ====
+For more updated instructions on Ubuntu OpenVZ template creation see:
+<nowiki>[[http://blog.bodhizazen.net/linux/ubuntu-10-04-openvz-templates/|bodhi.zazen's blog, Ubuntu 10.04 OpenVZ Template Creation]]</nowiki>
+
+- Previous blog entries cover Ubuntu 9.10 -
+
+This section describes how to create an Ubuntu 8.04 Hardy minimal template. This information is somewhat dated and are biased on the <nowiki>[[http://wiki.openvz.org/Debian_template_creation|Openvz wiki - Debian template creation]]</nowiki>.
+
+Documentation format:
+* Run the command on the OpenVZ host system
+<pre>
+[HW] $ command
+</pre>
+
+* Run the command on the OpenVZ container
+<pre>
+[VPS] $ command
+</pre>
+
+==== Prerequisites ====
+* debootstrap 
+<pre>
+[HW] $ sudo apt-get install debootstrap
+</pre>
+
+==== Creating template ====
+
+===== Running debootstrap =====
+* Create a working directory:
+<pre>
+[HW] $ mkdir hardy-chroot
+</pre>
+
+* Run debootstrap to install a minimal Hardy Heron system into that directory:
+<pre>
+[HW] $ sudo debootstrap [--arch ''ARCH''] hardy hardy-chroot
+</pre>
+ If the ARCH of the host machine is equal to the one of the container, you can skip the --arch option, but if you need to build an OS template for another ''ARCH'', specify it explicitly:
+* for AMD64/x86_64, use `amd64`
+* for i386 `i386`
+
+===== Preparing/starting a container =====
+Now you have an installation created by `debootstrap`, you can run it as a container. In the example below CT ID of 777 is used; of course any other non-allocated ID could be used.
+
+* Moving installation to container private area
+<pre>
+[HW] $ sudo mv hardy-chroot /vz/private/777
+</pre>
+
+* All files needs to be owned by root
+<pre>
+[HW] $ sudo chown -R root /vz/private/777
+</pre>
+
+* Setting initial container configuration
+<pre>
+[HW] $ sudo vzctl set 777 --applyconfig vps.basic --save
+</pre>
+
+* Setting container's `OSTEMPLATE`
+<pre>
+[HW] $ echo "OSTEMPLATE=ubuntu-8.04" | sudo tee -a /etc/vz/conf/777.conf >/dev/null
+</pre>
+
+* Setting container's IP address. (This is just a temporary setting for the update process to work)
+<pre>
+[HW] $ sudo vzctl set 777 --ipadd x.x.x.x --save
+</pre>
+
+* Setting DNS server for the container (This is just a temporary setting for the update process to work)
+<pre>
+[HW] $ sudo vzctl set 777 --nameserver x.x.x.x --save
+</pre>
+
+* Removing `udev` from the `/etc/rcS.d` and `klogd` from the `/etc/rc2.d` folders
+
+ If udev was in place the container might not start, it could be stuck and even `vzctl enter` would not be able to access the container's command line. If klogd was in place it might not let the runlevel 2 change finish.
+<pre>
+[HW] $ sudo rm /vz/private/777/etc/rcS.d/S10udev /vz/private/777/etc/rc2.d/S11klogd
+</pre>
+
+* Starting the container
+<pre>
+[HW] $ sudo vzctl start 777
+</pre>
+
+===== Modify the installation =====
+* Enter a container:
+<pre>
+[HW] $ vzctl enter 777
+</pre>
+
+ '''Warning!!! Do not run the commands below on the hardware node, they are only to be run within the container!'''
+
+ Note: You will not need to use `sudo` within the container, you enter as root when you use `vzctl enter`.
+
+* Remove unnecessary packages:
+<pre>
+[VPS] $ apt-get remove --purge busybox-initramfs console-setup dmidecode eject \
+ethtool initramfs-tools klibc-utils laptop-detect libiw29 libklibc \
+libvolume-id0 mii-diag module-init-tools ntpdate pciutils pcmciautils ubuntu-minimal \
+udev usbutils wireless-tools wpasupplicant xkb-data tasksel tasksel-data
+</pre>
+ Note: If you want to use the `tasksel` tool, do not remove it — but then you have to let laptop-detect stay.
+
+ Note: On removing the deb-package `module-init-tools`, a fake-modprobe is needed for IPv6 addresses, see below!
+
+* The DHCP client can be also removed if you know that you will not need it.
+<pre>
+[VPS] $ apt-get remove --purge --auto-remove dhcp3-client dhcp3-common
+</pre>
+
+* Clean up after udev
+<pre>
+[VPS] $ rm -fr /lib/udev
+</pre>
+
+* Disable getty
+
+ On a usual Linux system, getty is running on a virtual terminals, which a container does not have. So, having getty running doesn't make sense; more to say, it complains it can not open a terminal device and this clutters the logs.
+
+<pre>
+[VPS] $ initctl stop tty1
+[VPS] $ initctl stop tty2
+[VPS] $ initctl stop tty3
+[VPS] $ initctl stop tty4
+[VPS] $ initctl stop tty5
+[VPS] $ initctl stop tty6
+[VPS] $ rm /etc/event.d/tty*
+[VPS] $ rm /etc/init/tty*
+</pre>
+
+* Set sane permissions for /root directory
+<pre>
+[VPS] $ chmod 700 /root
+</pre>
+
+* Disable root login
+<pre>
+[VPS] $ usermod -p ‘!’ root
+</pre>
+
+* "fake-modprobe" needed for IPv6 addresses
+<pre>
+[VPS] $ ln -s /bin/true /sbin/modprobe
+</pre>
+
+ On setup IPv6, the command "modprobe -Q IPv6" is called, which fails without the "fake-modprobe"
+
+* Set the default repositories for Hardy
+
+ Make sure that you replace the '''<YOURCOUNTRY>''' with the your country code
+<pre>
+[VPS] $ COUNTRY=<YOURCOUNTRY>. cat >/etc/apt/sources.list <<EOF
+deb http://${COUNTRY}archive.ubuntu.com/ubuntu/ hardy main restricted universe multiverse
+deb http://${COUNTRY}archive.ubuntu.com/ubuntu/ hardy-updates main restricted universe multiverse
+deb http://security.ubuntu.com/ubuntu hardy-security main restricted universe multiverse
+
+EOF
+</pre>
+ Note: Only the "main restricted universe multiverse" binary repositories are enabled. Change it if you need more.
+
+* Apply new security updates
+<pre>
+[VPS] $ apt-get update && apt-get upgrade
+</pre>
+
+* Install some more packages
+<pre>
+[VPS] $ apt-get install ssh quota
+</pre>
+
+* Fix SSH host keys
+
+ This is only useful if you installed SSH above. Each individual container should have its own pair of SSH host keys. The code below will wipe out the existing SSH keys and instruct the newly-created container to create new SSH keys on first boot.
+<pre>
+[VPS] $ rm -f /etc/ssh/ssh_host_*
+[VPS] $ cat << EOF > /etc/rc2.d/S15ssh_gen_host_keys
+ssh-keygen -f /etc/ssh/ssh_host_rsa_key -t rsa -N ''
+ssh-keygen -f /etc/ssh/ssh_host_dsa_key -t dsa -N ''
+rm -f \$0
+EOF
+[VPS] $ chmod a+x /etc/rc2.d/S15ssh_gen_host_keys
+</pre>
+
+* Link `/etc/mtab` to `/proc/mounts`, so `df` and friends will work:
+<pre>
+[VPS] $ rm -f /etc/mtab
+[VPS] $ ln -s /proc/mounts /etc/mtab
+</pre>
+
+* After that, it would make sense to disable `mtab.sh` script which messes with `/etc/mtab`
+<pre>
+[VPS] $ update-rc.d -f mtab.sh remove
+</pre>
+
+* Disable some services
+
+ In most of the cases you don't want klogd to run -- the only exception is if you configure iptables to log some events -- so you can disable it.
+<pre>
+[VPS] $ update-rc.d -f klogd remove
+</pre>
+
+* Set default hostname
+<pre>
+[VPS] $ echo "localhost" > /etc/hostname
+</pre>
+
+* Set `/etc/hosts`
+<pre>
+[VPS] $ echo "127.0.0.1 localhost.localdomain localhost" > /etc/hosts
+</pre>
+
+* Add `ptys` to `/dev`
+
+ This is needed in case `/dev/pts` will not be mounted after container start. In case `/dev/ttyp*` and `/dev/ptyp*` files are present, and LEGACY_PTYS support is enabled in the kernel, vzctl will still be able to enter the container.
+<pre>
+[VPS] $ cd /dev && /sbin/MAKEDEV ptyp
+</pre>
+
+* Remove nameserver(s)
+ [VPS] $ > /etc/resolv.conf
+
+* Clean aptcahche
+<pre>
+[VPS] $ apt-get clean
+</pre>
+
+* Cleaning up log files
+<pre>
+[VPS] $ > /var/log/messages; > /var/log/auth.log; > /var/log/kern.log; > /var/log/bootstrap.log; \
+> /var/log/dpkg.log; > /var/log/syslog; > /var/log/daemon.log; > /var/log/apt/term.log; rm -f /var/log/*.0 /var/log/*.1
+</pre>
+
+* Exit the container
+<pre>
+[VPS] $ exit
+</pre>
+
+===== Preparing for and packing template cache =====
+ '''The following commands should be run on the host system (i.e. not inside a container).'''
+
+* We don't need an IP for the container anymore, and we definitely do not need it in template cache, so remove it
+<pre>
+[HW] $ sudo vzctl set 777 --ipdel all --save
+</pre>
+
+* Stop the container
+<pre>
+[HW] $ sudo vzctl stop 777
+</pre>
+
+* Change dir to the container private
+<pre>
+[HW] $ cd /vz/private/777
+</pre>
+
+* Now create a cached OS tarball. In the command below, you'll want to replace <arch> with your architecture (i386, amd64).
+
+ '''Note the space and the dot at the end of the command'''.
+<pre>
+[HW] $ sudo tar -czf /vz/template/cache/ubuntu-8.04-<arch>-minimal.tar.gz .
+</pre>
+
+* Cleanup
+<pre>
+[HW] $ sudo vzctl destroy 777
+[HW] $ sudo rm -f /etc/vz/conf/777.conf.destroyed
+</pre>
+
+===== Testing template cache =====
+* We can now create a container based on the just-created template cache. Be sure to change `arch` to your architecture just like you did when you named the tarball above.
+<pre>
+[HW] $ sudo vzctl create 123456 --ostemplate ubuntu-8.04-<arch>-minimal
+</pre>
+
+* Now make sure that your new container works
+<pre>
+[HW] $ sudo vzctl start 123456
+[HW] $ sudo vzctl exec 123456 ps axf
+</pre>
+ You should see that a few processes are running.
+
+* Cleanup
+<pre>
+[HW] $ sudo vzctl stop 123456
+[HW] $ sudo vzctl destroy 123456
+[HW] $ sudo rm -f /etc/vz/conf/123456.conf.destroyed
+</pre>
+
+=== 9.10 (Karmic) VPS ===
+Create `openvz.conf` in `/etc/init` and fix init sequence to have OpenVZ working with upstart. <nowiki>[[http://blog.bodhizazen.net/linux/openvz-ubuntu-9-10-templates/|Original reference.]]</nowiki>
+
+<pre>
+[VPS] # cat << EOF >  /etc/init/openvz.conf
+description "Fix OpenVZ"
+start on startup
+
+task
+pre-start script
+mount -t proc proc /proc
+mount -t devpts devpts /dev/pts
+mount -t sysfs sys /sys
+mount -t tmpfs varrun /var/run
+mount -t tmpfs varlock /var/lock
+mkdir -p /var/run/network
+touch /var/run/utmp
+chmod 664 /var/run/utmp
+chown root.utmp /var/run/utmp
+if [ "$(find /etc/network/ -name upstart -type f)" ]; then
+chmod -x /etc/network/*/upstart || true
+fi
+end script
+
+script
+start networking
+initctl emit filesystem --no-wait
+initctl emit local-filesystems --no-wait
+initctl emit virtual-filesystems --no-wait
+init 2
+end script
+EOF
+</pre>
+Check `/bin/sh` symlinked to `bash`?:
+<pre>
+/bin/sh: symbolic link to `bash'
+</pre>
+Fix the `"init: tty1 main process ended, respawning"` syslog message
+<pre>
+[VPS] # find /etc/init/ -maxdepth 1 -type f -name tty\* -print0 | /usr/bin/xargs -r0 -i -t sed -i 's/respawn/#respawn/g' {}
+</pre>
+
+=== 10.04 LTS (Lucid) VPS ===
+To run a 10.04 VPS (VE in OpenVZ-speech) you need to make serveral adjustments inside the VPS to make it boot. The steps are outlined at http://blog.bodhizazen.net/linux/ubuntu-10-04-openvz-templates/ .
+
+== Administration ==
+
+When we create a VPS, we must give it a number. This number must be unique and it is used to control the VPS during it's existence. A good guideline is to use the last three digits of the ip address you are going to use for this VPS. i.e.: 10.0.0.101 would be VPS 101!
+
+=== Creating a container from OS template ===
+* Create a container
+<pre>
+[HW] $ sudo vzctl create <VEID> --ostemplate <the name of your template>
+</pre>
+
+* Set the IP, nameserver, hostname and start the container as described below
+
+* Enter into the container  (equivalent to chroot)
+<pre>
+[HW] $ sudo vzctl enter [VEID]
+</pre>
+
+* Install the langauge support. language-pack-[LANGUAGE]-base, for english use ''language-pack-en-base''
+<pre>
+[VPS] $ apt-get install language-pack-en-base
+</pre>
+ You might need to run apt-get update first
+
+* Set timezone
+<pre>
+[VPS] $ dpkg-reconfigure tzdata
+</pre>
+
+* Exit the container
+<pre>
+[VPS] $ exit
+</pre>
+
+=== Configuring a container ===
+* Adding IP address
+<pre>
+[HW] $ sudo vzctl set [VEID|VENAME] --ipadd [IP_ADDRESS] --save
+</pre>
+
+* Deleting IP address
+<pre>
+[HW] $ sudo vzctl set [VEID|VENAME] --ipdel [IP_ADDRESS] --save
+</pre>
+
+* Setting hostname
+<pre>
+[HW] $ sudo vzctl set [VEID|VENAME] --hostname [HOSTNAME] --save
+</pre>
+
+* Setting nameserver
+<pre>
+[HW] $ sudo vzctl set [VEID|VENAME] --nameserver [NAMESERVER_IP] --save
+</pre>
+
+* Setting virtual name
+<pre>
+[HW] $ sudo vzctl set [VEID] --name [VENAME] --save
+</pre>
+
+===== Start, stop, take snapshot or revert to snapshot =====
+* Start
+<pre>
+[HW] $ sudo vzctl start [VEID|VENAME]
+</pre>
+ '''Important!''' As of 2008-06-04 there is a <nowiki>[[https://bugs.launchpad.net/ubuntu/+source/linux/+bug/226335|bug]]</nowiki> in the linux-image-2.6.24-18-openvz and earlier kernels. It prevents the network settings from being copied into the VE, and you cannot use the cp and mv command inside your VE. 
+
+* Stop
+<pre>
+[HW] $ sudo vzctl stop [VEID|VENAME]
+</pre>
+
+* Take snapshot
+<pre>
+[HW] $ sudo vzctl chkpnt [VEID|VENAME] [--dumpfile <name>]
+</pre>
+
+* Revert to snapshot
+<pre>
+[HW] $ sudo vzctl restore [VEID|VENAME] [--dumpfile <name>]
+</pre>
+
+===== Destroying a container =====
+<pre>
+[HW] $ sudo vzctl destroy [VEID|VENAME]
+</pre>
+
+===== Monitoring =====
+* List running VPS
+<pre>
+[HW] $ sudo vzlist
+</pre>
+
+* List all VPS
+<pre>
+[HW] $ sudo vzlist -a
+</pre>
+
+===== Networking =====
+* Networking nodes using NAT or Bridge
+** http://ubuntuforums.org/showthread.php?p=3798970#post3798970
+
+===== Networking, IPv6 with venet0 device =====
+* Set the NET_ADMIN:on capability.
+<pre>
+[HW] $ sudo vzctl set VPSID --capability net_admin:on
+</pre>
+* Edit the `/etc/vz/dists/scripts/debian-add_ip.sh` script. Add the
+ `up route --inet6 add ::/0 venet0` line under the venet0 IPv6 configuration.
+<pre>
+iface venet0 inet6 static
+        address ::1
+        netmask 128
+        up route --inet6 add ::/0 venet0
+</pre>
+* Change the proxy_ndp and the ipv6 forwarding state to `1`.
+<pre>
+[HW] $ sudo echo "1" > /proc/sys/net/ipv6/conf/eth0/proxy_ndp
+[HW] $ sudo echo "1" > /proc/sys/net/ipv6/conf/eth0/forwarding
+[HW] $ sudo echo "1" > /proc/sys/net/ipv6/conf/venet0/forwarding
+</pre>
+* Change the sysctl variables in `/etc/sysctl.conf`
+<pre>
+net.ipv6.conf.default.forwarding = 1
+net.ipv6.conf.all.forwarding     = 1
+net.ipv6.conf.eth0.proxy_ndp     = 1
+</pre>
+* Add the IPv6 address for the virtual node.
+<pre>
+[HW] $ sudo vzctl set VEID --ipadd fc00::01 --save
+</pre>
+* Restart the virtual node.
+<pre>
+[HW] $ sudo vzctl restart VEID
+</pre>
+* Test Your configuration.
+<pre>
+[HW] $ sudo vzctl enter VEID
+[VPS] $ ip addr
+3: venet0: <BROADCAST,POINTOPOINT,NOARP,UP,LOWER_UP> mtu 1500 qdisc noqueue state UNKNOWN
+    link/void
+    inet 127.0.0.1/32 scope host
+    inet 123.45.67.89/32 scope global
+    inet6 ::1/128 scope host
+    inet6 fc00::1/128 scope global
+[VPS] $ ping6 -n www.6bone.net
+PING www.6bone.net(2001:5c0:0:2::24) 56 data bytes
+64 bytes from 2001:5c0:0:2::24: icmp_seq=1 ttl=52 time=203 ms
+</pre>
+
+== See also ==
+* <nowiki>[[http://wiki.openvz.org/Ubuntu|Ubuntu pages in OpenVZ wiki]]</nowiki>
+----

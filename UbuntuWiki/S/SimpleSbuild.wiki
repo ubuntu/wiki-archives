@@ -1,0 +1,336 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+This is an extract from SecurityTeam/BuildEnvironment that tries to make it as quick and easy as possible to reduce your pbuilder / PPA / distro build failure rate and improve your build and turnaround time, as well as allow you to debug the builds in an environment close to the Ubuntu builders.
+
+This has been tested on all stable releases starting with Xenial, although this guide is geared towards the current development release, Bionic.
+
+This guide assumes that your host architecture is amd64, although you can create schroots for different architectures. If you do so, remember to substitute amd64 with your arch in the following instructions. Step 10 has more details on creating an schroot that is not amd64.
+
+If you are not using the stock Ubuntu kernel, you need to make sure your kernel supports overlayfs (the mainline PPA kernels do not).
+
+The original wiki page deals with many more details (especially around security) that are not required on a daily basis, but make it quite cumbersome to actually follow the guide. If anything here doesn't work, or is unclear, or you want more detail, check the other page - maybe there's a solution to your issue. You could also try looking at <nowiki>[[https://wiki.debian.org/sbuild|the Debian wiki page]]</nowiki>, which uses a slightly different setup procedure than this page, but the procedures for ccache, autopkgtests, etc. are correct.
+
+=== Setting up and using sbuild ===
+
+==== Creating the schroots ====
+ 0. Install sbuild and schroot:<pre>
+$ sudo apt install sbuild debhelper ubuntu-dev-tools piuparts
+</pre>
+
+ 0. '''Optional:''' Install a local package proxy, so that downloaded packages get cached between sbuild/schroot runs: <pre>
+$ sudo apt install apt-cacher-ng
+$ echo 'Acquire::http::Proxy "http://127.0.0.1:3142";' | sudo tee /etc/apt/apt.conf.d/01acng
+</pre>
+
+ 0. Make sure you are in the 'sbuild' group:<pre>
+$ sudo adduser $USER sbuild
+</pre>
+
+ 0. Setup for mounting $HOME and extracting the ddebs:
+** Create the directory for the mount point: <pre>
+$ mkdir -p $HOME/ubuntu/scratch
+</pre>
+** Append to /etc/schroot/sbuild/fstab:<pre>
+/home/<username>/ubuntu/scratch  /scratch          none  rw,bind  0  0
+</pre>
+  If you use an encrypted home directory, your $HOME is mounted differently,
+  so you will also have to add:<pre>
+/home/<username>                 /home/<username>  none  rw,bind  0  0
+</pre>
+
+ 0. Create ~/.sbuildrc:<pre>
+$maintainer_name='Your Name <user@ubuntu.com>';
+
+$distribution = "bionic";
+$build_arch_all = 1;
+
+$purge_build_directory = 'successful';
+$purge_session = 'successful';
+$purge_build_deps = 'successful';
+
+$log_dir=$ENV{HOME}."/ubuntu/logs";
+
+1;
+</pre>
+
+ 0. Make the following directory (change if specified something different in ~/.sbuildrc):<pre>
+$ mkdir -p $HOME/ubuntu/{build,logs}
+</pre>
+
+ 0. Create ~/.mk-sbuild.rc:<pre>
+SCHROOT_CONF_SUFFIX="source-root-users=root,sbuild,admin
+source-root-groups=root,sbuild,admin
+preserve-environment=true"
+</pre>
+
+ 0. Enter the sbuild group if you were added during this session:<pre>
+$ sg sbuild
+</pre>
+
+ 0. Finally, create the schroots:<pre>
+$ mk-sbuild bionic
+</pre>
+
+ This creates the schroot for your current architecture but if you would like to specify another architecture, use the following command instead:<pre>
+$ mk-sbuild bionic --arch=<ARCH>
+</pre>
+
+ So for i386, you would use:<pre>
+$ mk-sbuild bionic --arch=i386
+</pre>
+
+ You cannot specify an architecture that is not supported by your processor (for example, you cannot create an amd64 schroot on an i386 system). Use `uname -p` if you are unsure what your system supports.
+
+ See ```man mk-sbuild``` for more details. Note that this will automatically use the host's `apt-cacher-ng` for the generated schroot if you installed it above.
+
+ 0. '''Optional''': It can often be useful to perform builds in /dev/shm, which is a tmpfs directory in RAM. While there are limitations on what you can compile and the number of concurrent builds that can be performed (based on how much memory your build machine has), building in /dev/shm can lead to much faster build times and reduce disk I/O. A way to create a 'shared' source schroot like so:<pre>
+$ sudo sh -c "sed -e 's#]#-shm]#' \
+  -e 's#^\(directory=.*\)#\1\nunion-overlay-directory=/dev/shm/schroot/overlay#' \
+  /etc/schroot/chroot.d/* > /etc/schroot/chroot.d/shm-overlays.conf"
+$ schroot --list
+</pre>
+
+ Please note that the directory you specify for 'union-overlay-directory' must exist before using the shm chroot (can add an entry to /etc/rc.local):<<BR>>
+
+ <pre>
+$ mkdir -p /dev/shm/schroot/overlay/ 
+</pre>
+
+ It might also be useful to remount /dev/shm with more memory than the default, which is 50% of RAM. Can adjust like so: 
+
+ <pre>
+$ sudo mount -o remount,size=75% /dev/shm
+</pre>
+
+ On the other hand, it is possible for a tmpfs to fill up and cause problems in some fairly common cases, since builds can easily approach the order of the size of RAM.  It is perfectly reasonable to skip this step and allow sbuild to use a disk-backed overlay, even though builds will be a bit slower as a result.
+
+==== Deleting a schroot ====
+
+ 0. Remove the stanza for the chroot:<pre>
+$ sudo rm /etc/schroot/chroot.d/sbuild-bionic-amd64
+</pre>
+
+ 0. Remove the chroot from the disk:<pre>
+$ sudo rm -rf /var/lib/schroot/chroots/bionic-amd64
+</pre>
+
+ 0. '''Optional''' Run the shm snippet above.
+
+==== Using the schroot ====
+ Using a schroot is similar to the chroot command but you specify the chroot and user you want to use rather than the directory.
+
+ <pre>
+$ schroot -c bionic-amd64 -u root
+</pre>
+
+ Or without root with:<pre>
+$ schroot -c bionic-amd64
+</pre>
+
+ Or building via ```sbuild``` directly:<pre>
+$ apt source foo
+$ cd ./foo-*
+$ dch -i
+$ update-maintainer
+$ sbuild -d bionic-amd64
+$ bzr bd -S
+$ sbuild -d bionic-amd64 ../foo_*.dsc
+</pre>
+
+==== Maintaining the schroots ====
+ Can see a listing of all your chroots with:<pre>
+$ schroot -l
+chroot:bionic-amd64
+chroot:bionic-amd64-shm
+source:bionic-amd64
+source:bionic-amd64-shm
+...
+</pre>
+
+ The 'source:' chroot is the pristine chroot and you shouldn't go into it unless you want to change something for all future schroots into the chroot. Eg, if you wanted to always have 'vim' installed in your bionic-amd64 chroot, use:<pre>
+$ schroot -c source:bionic-amd64 -u root
+$ apt install vim
+$ exit
+</pre>
+
+ Or, to upgrade the schroot (you shouldn't do that with PPAs enabled unless you have a "special" chroot for a certain PPA setup):<pre>
+$ schroot -c source:bionic-amd64 -u root
+$ apt update
+$ apt upgrade
+$ exit
+</pre>
+
+ Or, more simply:<pre>
+sbuild-update -udc bionic-amd64
+</pre>
+
+See also Barry's <nowiki>[[https://git.launchpad.net/~barry/+git/repotools/tree/chup|chup]]</nowiki> script for an easy way to keep your chroots up-to-date.
+
+==== Expiring active schroot sessions ====
+ Sometimes needed if schroots are left hanging around due to a crash or reboot. You can expire all active schroot sessions with:<pre>
+$ schroot -e --all-sessions
+</pre>
+
+=== Other hints, tips, and tricks ===
+
+==== Mount your home dir ====
+ To mount your home directory in the chroot, so that you can use files from there, add this entry to /etc/schroot/sbuild/fstab:<pre>
+/home/<username>                 /home/<username>  none  rw,bind  0  0
+</pre>
+ '''Note''': this is a read-write bind mount, so changes will be written to your real home directory.
+
+==== Parallel builds ====
+ To make use of all your machine's power, you can use the usual -jN option for sbuild:<pre>
+$ sbuild -d bionic-amd64 -j4
+</pre>
+
+==== Temporarily adding PPAs ====
+ To avoid "polluting" the chroot sbuild provides the options:
+## --extra-repository=spec
+## --extra-repository-key=file.asc<<BR>><<BR>>
+
+ For a given ppa one needs to get the key signing that ppa.
+ To do so one can go on a ppa's launchpad page and open the section "Technical details about this PPA"
+ In there one finds the "Signing key" id after the /.
+ This key has to be fetched and stored locally to be added to sbuild later.
+ As an example, to add https://launchpad.net/~ubuntu-toolchain-r/+archive/ubuntu/test for a build<pre>
+Find ID BA9EF27F on https://launchpad.net/~ubuntu-toolchain-r/+archive/ubuntu/test
+gpg --keyserver keyserver.ubuntu.com --recv BA9EF27F
+gpg --export --armour 'BA9EF27F' > /tmp/myrepo.asc
+gpg --delete-key "BA9EF27F"
+sbuild --extra-repository "<your repo spec>" --extra-repository-key=/tmp/myrepo.asc <your usual options>
+</pre>
+
+ If you just want to add a ppa and don't want to deal with the keys you can use apt feature options to add [trusted=yes] when adding the repo spec, example:<pre>
+ --extra-repository="deb [trusted=yes] http://ppa.launchpad.net/paelzer/deb-dpdk-16.07/ubuntu bionic main"
+</pre>
+
+ You can also access the source chroot directly in /var/lib/schroot/chroots/bionic-amd64/.
+
+ Another approach is to use sbuild's `--chroot-setup-command` to run a script which adds the PPA to 
+ sources.list and then updates to pick up any packages which are newer in the PPA.  It's a little tricky 
+ though because you actually have to copy the contents of the PPA's `.list` file to the top of sources.list.  
+ Take a look at <nowiki>[[http://bazaar.launchpad.net/~barry/+junk/repotools/view/head:/sbuildppa.sh|this example]]</nowiki> 
+ although you'll almost definitely need to adapt it to your needs.
+
+==== Local packages ====
+
+You sometimes need newer packages (libraries, whatnot) to build against. Sometimes you might have a new dependency that isn't yet in the archive, but you are working on the new packaging.  BarryWarsaw did some nice things to help with that.  Here's an article on his blog which <nowiki>[[http://www.wefearchange.org/2016/11/sbuild-redux.html|describes how to build Debian packages with local dependencies]]</nowiki> (and an <nowiki>[[http://www.wefearchange.org/2011/09/sbuild-with-local-newer-dependencies.html|older article with some now obsolete recommendations]]</nowiki>).  You can also check out his <nowiki>[[https://git.launchpad.net/~barry/+git/repotools|repo of useful tools and scripts]]</nowiki>.
+
+ 0. Clone repotools to your scratch:<pre>
+$ git clone https://git.launchpad.net/~barry/+git/repotools ~/ubuntu/repo
+</pre>
+
+ 0. Install sponge:<pre>
+$ sudo apt install moreutils
+</pre>
+
+ 0. Modify clean.sh and scan.sh to set the repository path:<pre>
+...
+where=/home/<username>/ubuntu/repo
+...
+</pre>
+
+ 0. Add the following snippet to your ~/.sbuildrc:<pre>
+$external_commands = {
+    "pre-build-commands" => [
+        ['/home/'.$ENV{USER}.'/ubuntu/repo/scan.sh'],
+    ],
+    "chroot-setup-commands" => [
+        ['/repo/prep.sh'],
+    ],
+};
+</pre>
+
+ 0. And add the following lines to /etc/schroot/sbuild/fstab:<pre>
+/home/<username>/ubuntu/repo     /repo             none  ro,bind  0  0
+</pre>
+
+ 0. Create a directory to hold your local debs:<pre>
+$ mkdir ~/ubuntu/debs
+</pre>
+
+ 0. Copy your local debs into <code>~/ubuntu/debs</code>
+
+ 0. Start an http server that will act as a local repository: <pre>
+$ cd ~/ubuntu/debs
+$ python3 -m http.server 8000 --bind 127.0.0.1
+</pre>
+
+ 0. Do the build:<pre>
+$ sbuild -d unstable \
+  --extra-repository="deb [trusted=yes] http://127.0.0.1:8000 ./" \
+  build-area/foo_9.0.1-1.dsc
+</pre>
+
+See the blog post for more details and recommendations (e.g. how to run ``autopkgtest`` against local debs).
+
+==== bzr-debuild ====
+ Install bzr-debuild (you already have it installed, right?) and create ~/.bazaar/builddeb.conf with those contents:<pre>
+[BUILDDEB]
+builder=sbuild -d bionic --arch=amd64 -c bionic-amd64-shm -j9
+quick-builder=debuild -j9
+</pre>
+ This way calling <code>`$ bzr bd`</code> in a bzr tree will build in your shiny in-memory sbuild chroot. You can still call <code>`$ bzr bd --quick`</code> for the usual build with debuild.
+
+ Read <nowiki>[[http://jameswestby.net/bzr/builddeb/user_manual/configuration.html|bzr-builddeb docs]]</nowiki> for more info.
+
+==== CCache ====
+ Read Debian's "<nowiki>[[https://wiki.debian.org/sbuild#Using_ccache_with_sbuild|Using ccache with sbuild]]</nowiki>" wiki entry.
+
+==== EatMyData ====
+ Recent versions of mk-sbuild support a "--eatmydata" flag, which enables eatmydata (discarding blocking fsync calls) in that chroot. 
+
+==== ARM ====
+ARM should basically Just Work, e.g. by creating an armhf chroot:
+
+ <code>$ mk-sbuild --target armhf bionic</code>
+
+Now, everything works just as if you were building i386 packages on amd64.  Just use "armhf" as the host architecture. See CrossBuilding for more info.
+
+==== Pre-populated chroots ====
+A lot of time is spent on apt and dpkg installing build dependencies. You can just create a custom chroot, e.g. for bionic:
+
+ <code>$ mk-sbuild --target armhf --name foo-amd64-armhf bionic</code>
+
+Start a root session that makes persistent changes:
+
+ <code>$ schroot --chroot source:foo-amd64-armhf --user root </code>
+
+Install all build dependencies for project foo:
+
+ <code>(foo-amd64-armhf)$ apt build-dep --host-architecture=armhf foo</code>
+
+Then, when building with that chroot, you can skip apt updates, and it will go straight into building:
+
+ <code>$ sbuild --chroot foo-amd64-armhf --no-apt-update --no-apt-distupgrade </code>
+
+==== Dirty builds ====
+If you want to save even more time, you can use "dirty" builds. Prepare a pre-populated chroot as above, and either build packages:
+
+ {{{
+ $ schroot --chroot foo-amd64-armhf
+ (foo-amd64-armhf)$ dpkg-buildpackage -aarmhf -nc }}}
+
+Or just configure and build yourself:
+
+ {{{
+ $ schroot --chroot foo-amd64-armhf
+ (foo-amd64-armhf)$ export `dpkg-architecture -aarmhf`
+ (foo-amd64-armhf)$ cmake
+ (foo-amd64-armhf)$ make }}}
+
+==== Juju ====
+ '''TBD''': maybe it'd be possible to deploy this locally with Juju and LXD/LXC?
+
+----
+CategoryPackaging

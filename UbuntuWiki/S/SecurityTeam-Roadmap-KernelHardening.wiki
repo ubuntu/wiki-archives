@@ -1,0 +1,225 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+There are several kernel hardening features that have appeared in other hardened operating systems that would improve the security of Ubuntu, and Linux in general.  They have been controversial, so this page attempts to describe them, including their controversy and discussion over the years, so as much information is available to make an educated decision about potential implementations.
+
+Variations on these approaches have appeared in many projects, including <nowiki>[[http://www.openwall.com/Owl/|Openwall]]</nowiki> and <nowiki>[[http://www.grsecurity.net/|grsecurity]]</nowiki>.
+
+=== Since Ubuntu 10.10 (Maverick) ===
+
+==== Symlink Protection ====
+
+A long-standing class of security issues is the symlink-based <nowiki>[[http://en.wikipedia.org/wiki/Time-of-check-to-time-of-use|ToCToU]]</nowiki> race, most commonly seen in world-writable directories like `/tmp/`.  The common method of exploitation of <nowiki>[[http://cve.mitre.org/cgi-bin/cvekey.cgi?keyword=tmp+symlink|this flaw]]</nowiki> is crossing privilege boundaries when following a given symlink (i.e. a `root` user follows a symlink belonging to another user).
+
+The solution is to not permit symlinks to be followed when users do not match, but only in a world-writable sticky directory (with an additional improvement that the directory owner's symlinks can always be followed, regardless who is following them).
+
+Some links to the history of its discussion:
+
+* 1996 Aug, Zygo Blaxell http://marc.info/?l=bugtraq&m=87602167419830&w=2
+* 1996 Oct, Andrew Tridgell http://lkml.indiana.edu/hypermail/linux/kernel/9610.2/0086.html
+* 1997 Dec, Albert D Cahalan http://lkml.org/lkml/1997/12/16/4
+* 2005 Feb, Lorenzo Hernández García-Hierro  http://lkml.indiana.edu/hypermail/linux/kernel/0502.0/1896.html
+
+Past objections and rebuttals could be summarized as:
+* Violates POSIX.
+** POSIX didn't consider this situation, and it's not useful to follow a broken specification at the cost of security.  Also, please reference where POSIX says this.
+* Might break unknown applications that use this feature.
+** Applications that break because of the change are easy to spot and fix. Applications that are vulnerable to symlink ToCToU by not having the change aren't.
+* Applications should just use `mkstemp()` or `O_CREATE|O_EXCL`.
+** True, but applications are not perfect, and new software is written all the time that makes these mistakes; blocking this flaw at the kernel is a single solution to the entire class of vulnerability.
+
+Code history:
+
+* <nowiki>[[https://lists.ubuntu.com/archives/kernel-team/2010-May/010491.html|initial proposed patch in Ubuntu]]</nowiki>
+* <nowiki>[[http://kernel.ubuntu.com/git?p=kees/linux-2.6.git;a=shortlog;h=refs/heads/symlink|proposed upstream patch]]</nowiki>
+* <nowiki>[[http://git.kernel.org/linus/800179c9b8a1e796e441674776d11cd4c05d61d7|final upstream patch]]</nowiki>
+
+Accepted in upstream v3.6, enabled via setting `/proc/sys/fs/protected_symlinks` to `1`.
+
+==== Hardlink Protection ====
+
+Hardlinks can be abused in a <nowiki>[[http://cve.mitre.org/cgi-bin/cvekey.cgi?keyword=hardlink|similar fashion]]</nowiki> to symlinks above, but they are not limited to world-writable directories.  If `/etc/` and `/home/` are on the same partition, a regular user can create a hardlink to `/etc/shadow` in their home directory.  While it retains the original owner and permissions, it is possible for privileged programs that are otherwise symlink-safe to mistakenly access the file through its hardlink.  Additionally, a very minor untraceable quota-bypassing local denial of service is possible by an attacker exhausting disk space by filling a world-writable directory with hardlinks.
+
+The solution is to not allow the creation of hardlinks to files that a given user would be unable to write to originally.
+
+Some links to the history of its discussion:
+
+* 1997 Dec, Yuri Kuzmenko http://lkml.org/lkml/1997/12/29/20
+* 2002 Apr, Chris Wright http://lkml.org/lkml/2002/4/13/99
+
+Past objections and rebuttals could be summarized as:
+* Violates POSIX.
+** POSIX didn't consider this situation, and it's not useful to follow a broken specification at the cost of security.  Also, please reference where POSIX says this.
+* Might break atd, courier, and other unknown applications that use this feature.
+** These applications are easy to spot and can be tested and fixed.  Applications that are vulnerable to hardlink attacks by not having the change aren't.
+** atd could be easily "repaired" by including a real uid==0 check, like Linux 2.4.x-ow does for that reason, or it might have been fixed since then, or better yet <nowiki>[[http://cvsweb.openwall.com/cgi/cvsweb.cgi/Owl/packages/vixie-cron/|OpenBSD-derived crond]]</nowiki> should be used instead, which includes at(1) support (and it never had the problem with hardlinks).  The latter solution also gets rid of a SUID root program (at(1) is SGID to group crontab then) and of a root-privileged daemon (cron and atd are replaced with just one crond).
+** Courier was only broken by the original most restrictive -ow patch; it was "repaired" in newer -ow patch revisions by adding the "or is writable by the current user" check, which is also present in the proposed patches below (in other words, Courier won't break with these patches)
+* Applications should correctly drop privileges before attempting to access user files.
+** True, but applications are not perfect, and new software is written all the time that makes these mistakes; blocking this flaw at the kernel is a single solution to the entire class of vulnerability.
+
+Code history:
+
+* <nowiki>[[https://lists.ubuntu.com/archives/kernel-team/2010-May/010495.html|initial proposed patch]]</nowiki>
+* <nowiki>[[http://kernel.ubuntu.com/git?p=kees/linux-2.6.git;a=shortlog;h=refs/heads/hardlink|proposed upstream patch]]</nowiki>
+* <nowiki>[[http://git.kernel.org/linus/800179c9b8a1e796e441674776d11cd4c05d61d7|final upstream patch]]</nowiki>
+
+Accepted in upstream v3.6, enabled via setting `/proc/sys/fs/protected_hardlinks` to `1`.
+
+==== ptrace Protection ====
+
+As Linux grows in popularity, it will become a growing target for malware.  One particularly troubling weakness of the Linux process interfaces is that a single user is able to examine the memory and running state of any of their processes.  For example, if one application (e.g. firefox) was compromised, it would be possible for an attacker to attach to other running processes (e.g. gpg-agent) to extract additional credentials and continue to expand the scope of their attack.
+
+This is not a theoretical problem.  <nowiki>[[http://www.storm.net.nz/projects/7|SSH session hijacking]]</nowiki> and even <nowiki>[[http://c-skills.blogspot.com/2009/10/injectso-32bit-x86-port.html|arbitrary code injection]]</nowiki> is fully possible if ptrace is allowed normally.
+
+For a solution, some applications use `prctl()` to specifically disallow such `ptrace` attachment (e.g. `ssh-agent`).  A more general solution is to only allow `ptrace` directly from a parent to a child process (i.e. direct `gdb` and `strace` still work), or as the root user (i.e. `gdb BIN PID`, and `strace -p PID` still work as root).
+
+This behavior is controlled via the `/proc/sys/kernel/yama/ptrace_scope` sysctl value.  The default is "1" to block non-child ptrace.  A value of "0" restores the prior more permissive behavior, which may be more appropriate for some development systems and servers with only admin accounts.  Using "sudo" can also grant temporarily ptrace permissions via the CAP_SYS_PTRACE capability, though this method allows the ptrace of any process.
+
+Code history:
+
+* <nowiki>[[https://lists.ubuntu.com/archives/kernel-team/2010-May/010499.html|initial proposed patch]]</nowiki>
+* <nowiki>[[http://kernel.ubuntu.com/git?p=kees/linux-2.6.git;a=shortlog;h=refs/heads/ptrace|proposed upstream patch]]</nowiki>
+* <nowiki>[[http://git.kernel.org/linus/2d514487faf188938a4ee4fb3464eeecfbdcf8eb|final upstream patch]]</nowiki>
+
+Accepted in upstream v3.4 as CONFIG_SECURITY_YAMA (as a stand-alone LSM) and CONFIG_SECURITY_YAMA_STACKED since v3.7 (to be stacked with another LSM like AppArmor).
+
+=== Since Ubuntu 9.10 (Karmic) ===
+
+==== Partial NX Emulation ====
+
+Non-executable memory is likely one of the most important protections in modern computing.  Hardware support exists for it in modern CPUs, but many systems do not benefit from this security.
+
+To simulate the execute bit in the kernel's memory page tables, the CS register is used to break memory into two regions.  This allows for a fast way to distinguish between memory above and below the CS-limit.  Executable regions are loaded below the CS-limit.  This is fast but not perfectly accurate, since the BSS regions of loaded libraries will remain in the executable region.  It does provide a split between the loaded libraries (and BSS) and text segment from the brk and mmap heap and stack regions.
+
+Versions of this patch have been carried by RedHat, SUSE, Openwall, grsecurity and others for a long time.
+
+Code history:
+
+* <nowiki>[[http://kernel.ubuntu.com/git?p=kees/linux-2.6.git;a=shortlog;h=refs/heads/nx-emu|proposed upstream patch]]</nowiki>
+
+No plans for upstreaming; Ubuntu requires PAE now.
+
+=== Not Currently Proposed For Ubuntu ===
+
+==== chroot Protection ====
+
+Many administrators attempt to contain potentially exploitable services in chroots.  Unfortunately, chroots are not designed to be a security protection (they are for development and debugging).  It is possible to reasonably contain a non-privileged process in a chroot, but attempting to contain a root user is fraught with pitfalls.  While it is certainly possible to patch the kernel to have a hardened `chroot()` (for example, grsecurity has a large set of protections that lock down chroots) so many behaviors are changed and come in conflict with the more common development configurations.
+
+Solutions are varied.  Among the methods of chroot escape is manipulating the current working directory to be outside the current chroot via a second `chroot()` call (others include using `/proc/*/cwd`, `fchdir()`, and `ptrace`).  This single flaw is trivial to fix, but does not block the other avenues, so the gain is very small when compared with the down-side of carrying a delta from the upstream kernel.
+
+A better solution is to side-step the problem entirely.  Since these security protections are being designed correctly with containers (see <nowiki>[[Manpage:clone|CLONE_NEW*]]</nowiki>), it would be better to use containers or MAC from the start when trying to isolate a service.
+
+Some links to the history of its discussion:
+
+* 2007 Sep, David Newall http://lkml.indiana.edu/hypermail/linux/kernel/0709.3/0721.html
+
+Past objections and rebuttals could be summarized as:
+* Violates POSIX.
+** POSIX didn't consider or really define this situation, and it's not useful to follow a broken specification at the cost of security.
+* Might break `debootstrap`, `debian-installer`, and anything else that expects to `chroot()` within a chroot.
+** True, but maybe disallowing double-chroot is okay.
+* Can escape chroots in a large number of ways; containers are better.
+** Fix each flaw.  Containers are not very easy to use yet.
+
+<nowiki>[[http://people.canonical.com/~kees/0001-chroot-cwd-protection.patch|Example implementation of cwd fix]]</nowiki>
+
+=== Upstream Hardening ===
+
+Here is a rough plan for things to do to the upstream Linux kernel to make it harder for security vulnerabilities to become exploitable. Many `CONFIG_*` items below refer to <nowiki>[[http://grsecurity.net/test.php|PaX and grsecurity]]</nowiki>. Feel free to claim something to work on, or add a feature you think would be useful to have, including features from other hardening patches (e.g. Openwall's, etc):
+
+==== Kernel protections ====
+
+===== Planned =====
+* ASLR for kernel code (Kees Cook: IN PROGRESS)
+* remove remaining kernel address leaks that prevent ASLR from being effective (Dan Rosenberg)
+** https://patchwork.kernel.org/patch/487751/
+** kernel/cgroup.c
+** kernel/kprobes.c
+** kernel/lockdep_proc.c
+** /proc/mtrr
+** /proc/slabinfo
+** /proc/asound/cards
+** /sys/devices/*/*/resources
+** /proc/net/ptype
+** /sys/kernel/slab/*/ctor
+** /proc/iomem
+** inet_diag NETLINK socket addresses
+** ...
+* chase down const-ification of function pointers (Kees Cook)
+** Emese Revfy's patches
+** Lionel Debroux's grsecurity extractions
+** http://lkml.org/lkml/2010/11/7/51
+** http://lkml.org/lkml/2010/11/7/52
+** http://lkml.org/lkml/2010/11/7/53
+** http://lkml.org/lkml/2010/11/8/14
+* examine page permissions and get rid of rwx mappings
+* implement `__read_only` for things that can't really be const, like CONFIG_PAX_KERNEXEC
+* disable set_kernel_text_rw() and friends via sysctl
+* module autoloading control, like CONFIG_GRKERNSEC_MODHARDEN
+** http://lkml.org/lkml/2010/11/7/212
+* block hibernation image attacks (Vasiliy Kulikov)
+** http://permalink.gmane.org/gmane.linux.kernel/1108853
+* copy_*_user() hardening, like CONFIG_PAX_USERCOPY
+** keep length under MAX_INT
+** validate targets against compiler knowledge of static buffers or look up buffer sizes from heap allocator
+* User/Kernel memory segmentation, like CONFIG_PAX_MEMORY_UDEREF or Intel SMEP
+* Kernel stack ASLR, like CONFIG_PAX_RANDKSTACK
+* Kernel stack clearing, like CONFIG_PAX_STACKLEAK
+* Kernel refcount overflow protection, like CONFIG_PAX_REFCOUNT
+* kernel symbol name hiding, like CONFIG_GRKERNSEC_HIDESYM
+* add -Wextra and perform associated cleanups
+* restricted access to vm86-related syscall/features, like CONFIG_HARDEN_VM86 in Linux 2.4.x-ow, but turned into a sysctl
+* ability to set/lock/force a process (and/or any children it might spawn) to 32-bit only or 64-bit only (or implement a general "personality lock" and have main/compat syscall availability be actually affected by the current personality, which is currently not the case)
+** this will be particularly useful with container-based virtualization (LXC, OpenVZ, vserver), where the container startup program will lock the bitness/personality before launching the container's /sbin/init (e.g., a prctl() affecting _only_ child processes - e.g., not yet vzctl, but the container's /sbin/init - will do for this purpose)
+* allowlist filesystem module autoloading. similar to rare network module denylist
+
+===== Done =====
+* "mode 2" (syscall bitmap) SECCOMP (Will Drewry)
+** http://lwn.net/Articles/332438/
+* block /sys/kernel/debug/acpi/custom_method (Kees Cook)
+** https://lkml.org/lkml/2011/2/22/369
+** http://git.kernel.org/?p=linux/kernel/git/torvalds/linux-2.6.git;a=commitdiff;h=526b4af47f44148c9d665e57723ed9f86634c6e3
+* Ignore BIOS NX-disabling bit for Intel CPUs (Kees Cook)
+** http://lkml.org/lkml/2010/11/9/558
+** http://git.kernel.org/?p=linux/kernel/git/torvalds/linux-2.6.git;a=commitdiff;h=ae84739c27b6b3725993202fe02ff35ab86468e1
+* get module ro/nx actually into linus's tree (Matthieu Castet)
+** http://git.kernel.org/?p=linux/kernel/git/torvalds/linux-2.6.git;a=commitdiff;h=84e1c6bb38eb318e456558b610396d9f1afaabf0
+* `/proc/net` info leaks, via %pK (Dan Rosenberg)
+* dmesg visibility protection, like CONFIG_GRKERNSEC_DMESG (Dan Rosenberg)
+** http://lkml.org/lkml/2010/11/8/516
+* Kernel address leaks, similar to CONFIG_GRKERNSEC_HIDESYM (multiple contributors)
+** /proc/net/*
+** /proc/kallsyms
+** /proc/modules
+** /sys/module/*/sections/*
+** /proc/timer_list
+** /proc/dri/*/vma
+** /proc/<PID>/stack
+
+==== Userspace protections ====
+** Unclaimed
+** fifo restrictions (CONFIG_GRKERNSEC_FIFO), closely related to the linking restrictions mentioned above
+** mprotect hardening (CONFIG_PAX_MPROTECT)
+** segv respawn restriction (CONFIG_GRKERNSEC_BRUTE)
+** `/proc` visibility restriction (CONFIG_GRKERNSEC_PROC_USER)
+** safer set*uid() behavior on error (don't fail & return, instead SIGSEGV if has to fail because of resource shortage), was implemented unconditionally in Linux 2.4.x-ow but needs different treatment for 2.6.x/upstream (maybe sysctl'able)
+** destroy shm not in use (CONFIG_HARDEN_SHM from Linux 2.4.x-ow), which is needed to prevent RLIMIT_AS*RLIMIT_NPROC bypasses
+** nx-emulation (RedHat Exec-Shield, CONFIG_PAX_SEGMEXEC, or better yet CONFIG_PAX_PAGEEXEC)
+*** http://git.kernel.org/?p=linux/kernel/git/frob/linux-2.6-roland.git;a=shortlog;h=refs/heads/fedora/x86-nx-emulation
+** ASCII-armor ASLR (RedHat Exec-Shield)
+*** needs serious entropy improvement if it should be used at all
+*** http://git.kernel.org/?p=linux/kernel/git/frob/linux-2.6-roland.git;a=shortlog;h=refs/heads/fedora/32bit-mmap-exec-randomization
+*** http://scarybeastsecurity.blogspot.com/2012/03/some-random-observations-on-linux-aslr.html
+*** at least with RHEL5'ish kernels (not tested on Ubuntu specifically), exec-shield appears to provide ASCII-armor for mmap'ed shared libs with 32-bit kernels, but does not do it when running 32-bit binaries on 64-bit kernels (64-bit bins are OK) - looks like a code bug (or incomplete implementation) to chase down and fix (this is needed for our own use regardless of upstream submission)
+** "enforcing" mode for W^X (ignore GNU ELF flags), sysctl'able and/or per process tree and/or per-container
+** TARPIT netfilter target https://bugs.launchpad.net/ubuntu/+source/linux/+bug/78361
+** CAPs-less ping: http://marc.info/?l=linux-kernel&m=129434182105135
+
+OK, some of the above are actually new security hardening features to implement from scratch, so perhaps they should be listed in their own section first (not as ready candidates for upstream submission).

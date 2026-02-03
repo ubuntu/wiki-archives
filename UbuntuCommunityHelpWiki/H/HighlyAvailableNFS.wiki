@@ -1,0 +1,387 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+=== Introduction ===
+In this tutorial we will set up a highly available server providing NFS services to clients.  Should a server become unavailable, services provided by our cluster will continue to be available to users.
+
+Our highly available system will resemble the following:
+<nowiki>[[File:drbd.jpg]]</nowiki>
+
+<pre>
+NFS server1: node1.home.local IP address: 10.10.1.251 
+NFS server2: node2.home.local IP address: 10.10.1.252 
+NFS Server Virtual IP address 10.10.1.250 
+We will use the /srv/data directory as the highly available NFS export.
+</pre>
+
+To begin, set up two Ubuntu 9.04 (Jaunty Jackalope) systems.  In this guide, the servers will be set up in a virtual environment using KVM-84.  Using a virtual environment will allow us to add additional disk devices and NICs as needed.
+
+The following partition scheme will be used for the Operating System installation:
+<pre>
+/dev/vda1 -- 10 GB / (primary' jfs, Bootable flag: on)
+/dev/vda5 -- 1 GB swap (logical)
+</pre>
+
+=== Create bonded network interface ===
+
+After the installation of Ubuntu on both servers, we will install packages required to configure a bonded network interface, and in-turn assign static IP addresses to bond0 of node1 and node2.  Using a bonded interface will prevent a single point of failure should the user accessible network fail.  As we will be using round-robin for the bonded interface, this will also provide load balancing on the interface.
+
+<pre>
+apt-get install ifenslave
+</pre>
+
+Append the following to /etc/modprobe.d/aliases.conf:
+<pre>
+alias bond0 bonding
+options bonding mode=0 miimon=100 downdelay=200 updelay=200
+</pre>
+
+Modify our network configuration and assign eth0 and eth1 as slaves of bond0.
+Example /etc/network/interfaces:
+<pre>
+auto lo
+iface lo inet loopback
+
+auto bond0
+iface bond0 inet static
+        address 10.10.1.251
+        netmask 255.255.255.0
+        broadcast 10.10.1.255
+        network 10.10.1.0
+        gateway 10.10.1.1
+        up /sbin/ifenslave bond0 eth0
+        up /sbin/ifenslave bond0 eth1
+</pre>
+
+We do not need to define eth0 or eth1 in /etc/network/interfaces as they will be brought up when the bond comes up.  If for documentation purposes, you wish to include them in /etc/network/interfaces the following should be the configuration:
+<pre>
+auto eth0
+iface eth0 inet manual
+auto eth1
+iface eth1 inet manual
+</pre>
+
+You can view the current status of our bonded interface by:
+<pre>
+cat /proc/net/bonding/bond0
+</pre>
+
+Please note:  A bonded network interface supports multiple modes.  In this example eth0 and eth1 are in an round-robin configuration.
+
+=== Install/Configure DRBD ===
+
+Shutdown both servers and add additional devices (using a virtual environment makes this a snap).  We will add additional disks to contain the DRBD meta data the data that is mirrored between the two servers.  We will also add an isolated network for the two servers to communicate and transfer the DRBD data.
+
+The following partition scheme will be used for the DRBD data:
+<pre>
+/dev/vdb1 -- 1 GB unmounted (primary) DRBD meta data
+/dev/vdc1 -- 10 GB unmounted (primary) DRBD device
+
+Sample output from fdisk -l:
+Disk /dev/vda: 10.7 GB, 10737418240 bytes
+255 heads, 63 sectors/track, 1305 cylinders
+Units = cylinders of 16065 * 512 = 8225280 bytes
+Disk identifier: 0x0000f190
+
+   Device Boot      Start         End      Blocks   Id  System
+/dev/vda1   *           1        1244     9992398+  83  Linux
+/dev/vda2            1245        1305      489982+   5  Extended
+/dev/vda5            1245        1305      489951   82  Linux swap / Solaris
+
+Disk /dev/vdb: 1073 MB, 1073741824 bytes
+16 heads, 63 sectors/track, 2080 cylinders
+Units = cylinders of 1008 * 512 = 516096 bytes
+Disk identifier: 0xb52f5f07
+
+   Device Boot      Start         End      Blocks   Id  System
+/dev/vdb1               1        2080     1048288+  83  Linux
+
+Disk /dev/vdc: 10.7 GB, 10737418240 bytes
+16 heads, 63 sectors/track, 20805 cylinders
+Units = cylinders of 1008 * 512 = 516096 bytes
+Disk identifier: 0xb1f8476d
+
+   Device Boot      Start         End      Blocks   Id  System
+/dev/vdc1               1       20805    10485688+  83  Linux
+</pre>
+
+The isolated network between the two servers will be:
+<pre>
+NFS server1:     node1-private IP address: 10.10.2.251
+NFS server2:     node2-private IP address: 10.10.2.252
+</pre>
+
+Sample /etc/network/interfaces:
+
+<pre>
+auto lo
+iface lo inet loopback
+
+auto bond0
+iface bond0 inet static
+        address 10.10.1.251
+        netmask 255.255.255.0
+        broadcast 10.10.1.255
+        network 10.10.1.0
+        gateway 10.10.1.1
+        up /sbin/ifenslave bond0 eth0
+        up /sbin/ifenslave bond0 eth1
+
+auto eth2
+iface eth2 inet static
+    address 10.10.2.251
+    netmask 255.255.255.0
+    broadcast 10.10.2.255
+    network 10.10.2.0
+</pre>
+
+Ensure that /etc/hosts contains the names and IP addresses of the two servers.
+
+Sample /etc/hosts:
+<pre>
+127.0.0.1         localhost
+10.10.1.251     node1.home.local    node1
+10.10.1.252     node2.home.local    node2
+10.10.2.251     node1-private
+10.10.2.252     node2-private
+</pre>
+
+Install NTP to ensure both servers have the same time.
+
+<pre>
+apt-get install ntp
+</pre>
+
+You can verify the time is in sync with the date command.
+Install drbd and heartbeat.
+
+<pre>
+apt-get install drbd8-utils heartbeat
+</pre>
+
+Using /etc/drbd.conf as an example create your resource configuration.
+Example /etc/drbd.conf:
+<pre>
+resource nfs {
+
+        protocol C;
+        
+        handlers {
+                pri-on-incon-degr "echo o > /proc/sysrq-trigger ; halt -f";
+                pri-lost-after-sb "echo o > /proc/sysrq-trigger ; halt -f";
+                local-io-error "echo o > /proc/sysrq-trigger ; halt -f";
+                outdate-peer "/usr/lib/heartbeat/drbd-peer-outdater -t 5";      
+        }
+
+        startup {
+                degr-wfc-timeout 120;
+        }
+
+        disk {
+                on-io-error detach;
+        }
+
+        net {
+                cram-hmac-alg sha1;
+                shared-secret "password";
+                after-sb-0pri disconnect;
+                after-sb-1pri disconnect;
+                after-sb-2pri disconnect;
+                rr-conflict disconnect;
+        }
+
+        syncer {
+                rate 100M;
+                verify-alg sha1;
+                al-extents 257;
+        }
+
+        on node1 {
+                device  /dev/drbd0;
+                disk    /dev/vdc1;
+                address 10.10.2.251:7788;
+                meta-disk /dev/vdb1[0];
+        }
+
+        on node2 {
+                device  /dev/drbd0;
+                disk    /dev/vdc1;
+                address 10.10.2.252:7788;
+                meta-disk /dev/vdb1[0];
+        }
+}
+</pre>
+
+Duplicate the DRBD configuration to the other server.
+<pre>
+scp /etc/drbd.conf root @ 10.10.1.251:/etc/
+</pre>
+
+As we will be using heartbeat with drbd, we need to change ownership and permissions on several DRBD related files on both servers:
+
+<pre>
+chgrp haclient /sbin/drbdsetup
+chmod o-x /sbin/drbdsetup
+chmod u+s /sbin/drbdsetup
+chgrp haclient /sbin/drbdmeta
+chmod o-x /sbin/drbdmeta
+chmod u+s /sbin/drbdmeta 
+</pre>
+
+Initialize the meta-data disk on both servers.
+<pre>
+drbdadm create-md nfs
+</pre>
+
+Decide which server will act as a primary for the DRBD device and initiate the first full sync between the two servers.  We will execute the following on node1:
+<pre>
+drbdadm -- --overwrite-data-of-peer primary nfs
+</pre>
+
+You can view the current status of DRBD with:
+<pre>
+cat /proc/drbd
+
+Example output:
+version: 8.3.0 (api:88/proto:86-89)
+GIT-hash: 9ba8b93e24d842f0dd3fb1f9b90e8348ddb95829 build by ivoks@ubuntu, 2009-01-17 07:49:56
+ 0: cs:SyncSource ro:Primary/Secondary ds:UpToDate/Inconsistent C r---
+    ns:610184 nr:0 dw:0 dr:618272 al:0 bm:37 lo:4 pe:13 ua:256 ap:0 ep:1 wo:b oos:9875900
+    [>...................] sync'ed:  5.9% (9644/10239)M
+    finish: 0:17:30 speed: 9,336 (9,528) K/sec
+</pre>
+
+I prefer to wait for the initial sync to complete.  Once completed, we will format /dev/drbd0 and mount it on node1: 
+<pre>
+mkfs.jfs /dev/drbd0
+mkdir -p /srv/data
+mount /dev/drbd0 /srv/data
+</pre>
+
+To ensure replication is working correctly, we will now create data on node1 and then switch node2 to be primary.
+
+Create data:
+<pre>
+dd if=/dev/zero of=/srv/data/test.zeros bs=1M count=1000
+</pre>
+
+Switch to node2 and make it the Primary DRBD device:
+<pre>
+On node1:
+[node1]umount /srv/data
+[node1]drbdadm secondary nfs
+On node2:
+[node2]mkdir -p /srv/data
+[node2]drbdadm primary nfs
+[node2[mount /dev/drbd0 /srv/data
+</pre>
+
+You should now see the 1GB file in /srv/data on node2.  We will now delete this file and make node1 the primary DRBD server to ensure replication is working in both directions.
+<pre>
+On node2:
+[node2]rm /srv/data/test.zeros
+[node2]umount /srv/data
+[node2[drbdadm secondary nfs
+On node1:
+[node1]drbdadm primary nfs
+[node1]mount /dev/drbd0 /srv/nfs
+</pre>
+
+Performing an ls /srv/data on node1 will verify the file is now removed and synchronization successfully occured in both directions.
+
+Next we will install NFS server on both servers.  Our plan is to have heartbeat control the service instead of init, thus we will prevent NFS from starting with the normal init routines.  We will then place the NFS file locks on the DRBD device so both servers will have the information available when they are the primary DRBD device.
+
+=== Install/Configure NFS ===
+
+Install NFS on node1 and node2.
+<pre>
+apt-get install nfs-kernel-server
+</pre>
+
+Remove the runlevel init scripts on node1 and node2.
+<pre>
+update-rc.d -f nfs-kernel-server remove
+update-rc.d -f nfs-common remove
+update-rc.d nfs-kernel-server stop 20 0 1 2 3 4 5 6 .
+update-rc.d nfs-common  stop 20 0 1 2 3 4 5 6 .
+</pre>
+
+Relocate the nfs lock files and configuration to our DRBD device.
+<pre>
+On node1:
+[node1]mount /dev/drbd0 /srv/data
+[node1]mv /var/lib/nfs/ /srv/data/
+[node1]ln -s /srv/data/nfs/ /var/lib/nfs
+[node1]mv /etc/exports /srv/data
+[node1]ln -s /srv/data/exports /etc/exports
+On node2:
+[node2]rm -rf /var/lib/nfs
+[node2]ln -s /srv/data/nfs/ /var/lib/nfs
+[node2]rm /etc/exports
+[node2]ln -s /srv/data/exports /etc/exports
+</pre>
+
+Define our exported file system.
+<pre>
+On node1:
+[node1]mkdir /srv/data/export
+[node1]Example /etc/exports:
+[node1[/srv/data/export        10.10.1.10/24(rw,no_subtree_check)
+</pre>
+
+=== Configure Heartbeat ===
+
+Last but not least configure heartbeat to control a Virtual IP address and failover NFS in the case of a node failure.
+
+On node1, define the cluster within /etc/heartbeat/ha.cf.
+Example /etc/heartbeat/ha.cf:
+<pre>
+logfacility     local0
+keepalive 2
+deadtime 30
+warntime 10
+initdead 120
+bcast bond0
+bcast eth2
+node node1
+node node2
+</pre>
+
+On node1, define the authentication mechanism  within /etc/heartbeat/authkeys the cluster will use.
+Example /etc/heartbeat/authkeys:
+<pre>
+auth 3
+3 md5 password
+</pre>
+
+Change the permissions of /etc/heartbeat/authkeys.
+<pre>
+chmod 600 /etc/heartbeat/authkeys
+</pre>
+
+On node1, define the resources that will run on the cluster within /etc/heartbeat/haresources.  We will define the master node for the resource, the Virtual IP address, the file systems used, and the service to start.
+Example /etc/heartbeat/haresources:
+<pre>
+node1 IPaddr::10.10.1.250/24/bond0 drbddisk::nfs Filesystem::/dev/drbd0::/srv/data::jfs nfs-kernel-server
+</pre>
+
+Copy the cluster configuration files from node1 to node2.
+<pre>
+[node1]scp /etc/heartbeat/ha.cf root @ 10.10.1.252:/etc/heartbeat/
+[node1]scp /etc/heartbeat/authkeys root @ 10.10.1.252:/etc/heartbeat/
+[node1]scp /etc/heartbeat/haresources root @ 10.10.1.252:/etc/heartbeat/
+</pre>
+
+Reboot both servers.
+
+=== Additional Information ===
+
+On a side note, gui tools are available to configure both heartbeat and DRBD.  Once such tool can be found at: http://www.drbd.org/mc/management-console/

@@ -1,0 +1,206 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+Parent page: <nowiki>[[InternetAndNetworking| Internet and Networking]]</nowiki>
+
+'''Securing a small Wireless network using VPN'''
+
+TODO: this document should be split into VPN and wireless specific parts.
+
+TODO: Reorganize this page with other VPN pages, especially the <nowiki>[[OpenVPN]]</nowiki> page. Use categories?
+
+=== Summary ===
+While Wifi encryption generally provides a first protective layer for a wireless network, it is far from being perfect:
+* WEP is still widely used and must be considered as very insecure
+* WPA can also be broken (it requires more efforts), and many devices are still not WPA-enabled
+
+This document intends to provide a complementary approach to secure a wireless network, by using an additional encryption level using a Virtual Private Network (VPN). It is assumed that the reader understands basic IP networks routing and Linux system administration. However, in an attempt to widen the audience to non-experts, this document will not cover many technical aspects of VPN.
+
+This document contains instructions to setup a routed VPN using a static key, which will work with one client only. Multiple-clients setup requires a public key infrastructure (PKI), which is slightly more complex, and is not treated here.
+
+=== Routing ===
+Ideally, the wireless access point, as well as the Wifi machine, have no direct Internet access. It should be connected to the VPN server, so that all the routing can be handled by the router. In practice, the VPN server would be connected to the LAN_SUBNET with one network interface, and to the wireless access point with another network interface. It is highly recommended to configure different subnets for these two interfaces.
+
+In the document, the network topology is expected to look like:
+<pre>
+[WIFI_MACHINE]----(WIFI)---->[WIRELESS_ACCESS_POINT]----(LAN)---->[VPN_SERVER]----->INTERNET (potentially via a local gateway)
+</pre>
+''Example:''
+* The Internet gateway: eth0 inet adr:192.168.0.10  bcast:192.168.0.255 (LAN_SUBNET)
+* The VPN server: eth0 inet adr:192.168.0.1  bcast:192.168.0.255 (LAN_SUBNET)
+* The VPN server: eth1 inet adr:192.168.1.1  bcast:192.168.1.255 (WIFI_SUBNET)
+* The wireless access point: eth0 inet adr:192.168.1.2 bcast:192.168.1.255 (WIFI_SUBNET)
+* Wifi machine (SYSTEM):   eth0 inet adr:192.168.1.3  bcast:192.168.1.255 (WIFI_SUBNET)
+
+The following <nowiki>[[IptablesHowTo|iptables]]</nowiki> configuration could be installed on the VPN server to route the traffic:
+
+<pre>
+* filter
+:INPUT DROP [0:0]
+:FORWARD ACCEPT [0:0]
+:OUTPUT ACCEPT [0:0]
+
+-A INPUT -i lo -p all -j ACCEPT
+
+-A INPUT -p all -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+
+-A FORWARD -d LAN_SUBNET -j DROP
+
+-A INPUT -i tun+ -j ACCEPT
+-A FORWARD -i tun+ -j ACCEPT
+
+-A INPUT -p udp --dport 1194 -j ACCEPT
+
+-A INPUT -s LAN_SUBNET -p all -j ACCEPT
+
+-A INPUT -p tcp -m tcp --dport 22 -j ACCEPT
+
+COMMIT
+</pre>
+
+=== Setting up an OpenVPN server ===
+* Install OpenVPN
+
+Install the following package: <code>openvpn</code> (see InstallingSoftware).
+
+* Generate a shared static key
+<pre>
+cd /etc/openvpn/ && sudo /usr/sbin/openvpn --genkey --secret static.key
+</pre>
+
+and change its permissions because now it can't be read by other users but root:
+
+<pre>
+sudo chmod 644 /etc/openvpn/static.key
+</pre>
+
+* Comment all the lines from /etc/default/openvpn, and add:
+<pre>
+AUTOSTART="openvpn"
+</pre>
+
+* Populate the configuration file /etc/openvpn/openvpn.conf:
+
+<pre>
+dev tun
+local 192.168.1.1
+ifconfig 10.1.0.1 10.1.0.2
+script-security 3
+up ./office.up
+secret static.key
+ping 15
+tun-mtu 1200
+mssfix 1400
+verb 3
+</pre>
+
+'''Note:''' be carefull to change the IP in the line ''local 192.168.1.1'' to match the server's IP.
+
+* Create /etc/openvpn/office.up and put in it:
+<pre>
+route add -net 10.0.1.0 netmask 255.255.255.0 gw $5
+</pre>
+
+Make it executable:
+<pre>
+sudo chmod +x /etc/openvpn/office.up
+</pre>
+
+* Finally, we can complete the routing for the wireless network in the <nowiki>[[IptablesHowTo|iptables]]</nowiki> configuration:
+<pre>
+* nat
+:PREROUTING ACCEPT [0:0]
+:POSTROUTING ACCEPT [0:0]
+:OUTPUT ACCEPT [0:0]
+
+-A POSTROUTING -s VPN_CLIENT -o eth0 -j MASQUERADE
+    
+COMMIT
+</pre>
+
+* If you are trying to start OpenVPN the first time and you want to check everything is OK, then execute:
+<pre>
+cd /etc/openvpn
+sudo openvpn openvpn.conf
+</pre>
+
+If you have tested OpenVPN, then it's better to start it as a service with:
+<pre>
+sudo /etc/init.d/openvpn start
+</pre>
+
+==== Other considerations ====
+OpenVPN's default port number is now 1194, based on an official port number assignment by IANA.  OpenVPN 2.0-beta16 and earlier used 5000 as the default port.
+
+=== Setting up an OpenVPN client ===
+* Install OpenVPN
+<pre>
+sudo apt-get install openvpn
+</pre>
+
+* Copy the static key /etc/openvpn/static.key to the client system in /etc/openvpn.
+
+* Comment all the lines from /etc/default/openvpn, and add:
+<pre>
+AUTOSTART="openvpn"
+</pre>
+
+* Populate the configuration file /etc/openvpn/openvpn.conf with:
+<pre>
+dev tun
+
+local 192.168.1.3
+remote 192.168.1.1
+nobind
+ifconfig 10.1.0.2 10.1.0.1
+up ./home.up
+down ./home.down
+secret static.key
+ping 15
+tun-mtu 1200
+mssfix 1400
+verb 3
+</pre>
+
+* Create /etc/openvpn/home.up with this content:
+<pre>
+route add -net 10.0.0.0 netmask 255.255.255.0 gw $5
+route add -net 0.0.0.0 netmask 0.0.0.0 dev tun0
+route del -net 0.0.0.0 netmask 0.0.0.0 dev eth0
+</pre>
+
+Make it executable:
+<pre>
+sudo chmod +x /etc/openvpn/home.up
+</pre>
+
+* Create /etc/openvpn/home.down with this content:
+<pre>
+route add -net 0.0.0.0 netmask 0.0.0.0 dev eth0
+</pre>
+
+Make it executable:
+<pre>
+sudo chmod +x /etc/openvpn/home.down
+</pre>
+
+* Start the OpenVPN service:
+<pre>
+sudo /etc/init.d/openvpn start
+</pre>
+
+* If the following ping commands do not return an error, it worked!
+<pre>
+ping 10.1.0.1
+ping 10.1.0.2
+</pre>
+
+----
+CategoryVPN

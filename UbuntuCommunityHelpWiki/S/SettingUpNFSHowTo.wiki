@@ -1,0 +1,441 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+== TL;DR ==
+
+A much shorter guide is available in <nowiki>[[https://help.ubuntu.com/stable/serverguide/network-file-system.html|the Ubuntu Server Guide]]</nowiki> If you need more info, read below.
+
+== Introduction ==
+
+NFS (Network File System) allows you to 'share' a directory located on one networked computer with other computers/devices on that network. The computer where directory located is called the server and computers or devices connecting to that server are called clients. Clients usually 'mount' the shared directory to make it a part of their own directory structure.
+
+NFS is perfect for creating NAS (Networked Attached Storage) in Linux/Unix environment. It is a native Linux/Unix protocol as opposed to Samba which uses the SMB protocol developed by Microsoft. The Apple OS has good support for NFS. Windows 7 has some support for NFS.
+
+NFS is perhaps best for more 'permanent' network mounted directories such as `/home` directories or regularly accessed shared resources. If you want a network share that guest users can easily connect to, Samba is more suited. This is because tools exist more readily across old and proprietary operating systems to temporarily mount and detach from Samba shares.
+
+Ubuntu Before deploying NFS you should be familiar with:
+
+* Linux file and directory permissions
+* Mounting and detaching (unmounting) filesystems
+
+This HowTo makes Ubuntu server NFSv4 ready.
+
+== NFS quick start ==
+
+Providing you understand what you are doing, use this brief walk-through to set up an NFSv4 server on Ubuntu (with no authentication security). Then mount the share on an Ubuntu client. It has been tested on Ubuntu 14.04. 
+
+=== NFS server ===
+
+To check the NFS server is not installed, you can do...
+ <pre>
+$ dpkg -l | grep nfs-kernel-server
+</pre>
+
+Install the required packages...
+
+ <pre>
+}}}
+
+For easier maintenance we will isolate all NFS exports in single
+directory, where the real directories will be mounted with the
+<code>--bind</code> option.
+
+ Let's say we want to export our users' home directories in <code>/home/users</code>. First we create the export filesystem:
+
+ {{{
+
+ It's important that /export and /export/users have 777 permissions as we will be accessing the NFS share from the client without LDAP/NIS authentication.  This will not apply if using authentication (see below).
+
+ Now mount the real users directory with:
+
+ {{{
+
+ To save us from retyping this after every reboot we add the following
+ line to <code>/etc/fstab</code>
+ {{{
+/home/users    /export/users   none    bind  0  0}}}
+
+There are three configuration files that relate to an NFS server: <code>/etc/default/nfs-kernel-server</code>, <code>/etc/default/nfs-common</code> and <code>/etc/exports</code>.
+
+ The only important option in <code>/etc/default/nfs-kernel-server</code> for now is NEED_SVCGSSD. It is set to "no" by default, which is fine, because we are not activating NFSv4 security this time.
+
+In order for the ID names to be automatically mapped, both the client and server require the <code>/etc/idmapd.conf</code> file to have the same contents with the correct domain names.   Furthermore, this file should have the following lines in the <code>Mapping</code> section:
+ {{{
+[Mapping]
+
+Nobody-User = nobody
+Nobody-Group = nogroup
+ }}}
+ However, the client may have different requirements for the <code>Nobody-User</code> and <code>Nobody-Group</code>.  For example on RedHat  variants, it's <code>nfsnobody</code> for both.  <code>cat /etc/passwd</code> and <code>cat /etc/group</code> should show the "nobody" accounts. 
+
+This way, server and client do not need the users to share same UID/GUID. <<BR>><<BR>>
+
+For those who use LDAP-based authentication, add the following lines to your client's idmapd.conf:
+
+{{{
+[Translation]
+
+Method = nsswitch
+</pre>
+
+This will cause idmapd to know to look at nsswitch.conf to determine where it should look for credential information (and if you have LDAP authentication already working, nsswitch shouldn't require further explanation).
+
+To export our directories to a local network <code>192.168.1.0/24</code> we add the following two lines to <code>/etc/exports</code>
+<pre>
+/export       192.168.1.0/24(rw,fsid=0,insecure,no_subtree_check,async)
+/export/users 192.168.1.0/24(rw,nohide,insecure,no_subtree_check,async)
+</pre>
+
+==== Portmap Lockdown ====
+~- optional -~
+
+Add the following line to /etc/hosts.deny:
+<pre>
+rpcbind mountd nfsd statd lockd rquotad : ALL
+</pre>
+By blocking all clients first, only clients in /etc/hosts.allow below will be allowed to access the server.
+
+Now add the following line to /etc/hosts.allow:
+<pre>
+rpcbind mountd nfsd statd lockd rquotad : list of IP addresses
+</pre>
+Where the "list of IP addresses" string is, you need to make a list
+of IP addresses that consists of the server and all clients. These have
+to be IP addresses because of a limitation in portmap (it doesn't like
+hostnames). Note that if you have NIS set up, just add these to the
+same line.
+
+'''Note:''' Ensure that the list of authorised IP addresses includes the localhost address ('''127.0.0.1''') as the startup scripts in recent versions of Ubuntu use the '''rpcinfo''' command to discover NFSv3 support, and this will be disabled if localhost is unable to connect.
+
+Now restart the service
+ <pre>
+
+=== NFSv4 client ===
+
+Install the required packages:
+
+ {{{
+
+On the client we can mount the complete export tree with one command:
+ {{{
+ You can also specify the NFS server hostname instead of its IP, but in this case you need to assure the hostname can be resolved to an IP on the client side (you can use /etc/hosts file for that).
+ Note that <code><nfs-server-IP>:/export</code> is not necessary in NFSv4, as it is in NFSv3. The root export <code>:/</code> defaults to export with <code>fsid=0</code>.
+
+We can also mount an exported ''subtree'' with:
+ {{{
+
+To save us from retyping this after every reboot we add the following line to <code>/etc/fstab</code>:
+ {{{
+<nfs-server-IP>:/   /mnt   nfs    auto  0  0}}}
+ If after mounting, the entry in <code>/proc/mounts</code> appears as <code><nfs-server-IP>://</code> (with two slashes), then you might need to specify two slashes in <code>/etc/fstab</code>, or else <code>umount</code> might complain that it cannot find the mount.
+
+ The <code>auto</code> option mounts on startup. However this will not work if your client uses a wifi connection managed at the user level (after login), because the network will not be available at boot time.  In Ubuntu 12.04 LTS and later, wifi connections are managed at the system level by default, so auto-mounting of NFS shares at boot time should work fine.
+
+Ubuntu Server doesn't come with any init.d/netfs or other scripts to do this for you.
+
+==== Portmap Lockdown ====
+
+~- optional -~
+
+Add the following line to /etc/hosts.deny:
+{{{
+rpcbind : ALL
+</pre>
+By blocking all clients first, only clients in /etc/hosts.allow below will be allowed to access the server.
+
+Now add the following line to /etc/hosts.allow:
+<pre>
+rpcbind : NFS server IP address
+</pre>
+Where "NFS server IP address" is the IP address of the server. '''This must be numeric!''' It's the way portmap works.
+
+== NFS Server ==
+
+=== Pre-Installation Setup ===
+'''None of the following pre-installation steps are strictly necessary.'''
+
+===== User Permissions =====
+
+NFS user permissions are based on user ID (UID). UIDs of any users on the client must match those on the server in order for the users to have access. The typical ways of doing this are:
+
+* Manual password file synchronization
+* Use of <nowiki>[[LDAPClientAuthentication|LDAP]]</nowiki>
+* Use of <nowiki>[[SettingUpNISHowTo|NIS]]</nowiki>
+
+It's also important to note that you have to be careful on
+systems where the main user has root access - that user can change
+UID's on the system to allow themselves access to anyone's files. This
+page assumes that the administrative team is the only group with root
+access and that they are all trusted. Anything else represents a more
+advanced configuration, and will not be addressed here.
+
+===== Group Permissions =====
+
+With NFS, a user's access to files is determined by his/her membership of groups on the client, not on the server.  However, there is an important limitation: a maximum of 16 groups are passed from the client to the server, and, if a user is member of more than 16 groups on the client, some files or directories might be unexpectedly inaccessible.
+
+===== Host Names =====
+~- optional if using DNS -~
+
+Add any client name and IP addresses to /etc/hosts. The ''real'' (not 127.0.0.1) IP address of the server should already be here. This ensures that NFS will still work even if
+DNS goes down. You could rely on DNS if you wanted, it's up to you.
+
+===== NIS =====
+~- optional - perform steps only if using NIS -~
+
+'''Note:''' This '''only''' works if using NIS. Otherwise, you can't use netgroups, and should specify individual IP's or hostnames in <code>/etc/exports</code>. Read the '''BUGS''' section in <code>man netgroup</code>.
+
+Edit /etc/netgroup and add a line to classify your clients. (This
+step is not necessary, but is for convenience).
+<pre>
+myclients (client1,,) (client2,,)
+</pre>
+Obviously, more clients can be added. <code>myclients</code> can be anything
+you like; this is a ''netgroup name''.
+
+Run this command to rebuild the YP database:
+<pre>
+sudo make -C /var/yp
+</pre>
+
+===== Portmap Lockdown =====
+~- optional -~
+
+Add the following line to /etc/hosts.deny:
+<pre>
+rpcbind mountd nfsd statd lockd rquotad : ALL
+</pre>
+By blocking all clients first, only clients in /etc/hosts.allow below will be allowed to access the server.
+
+Now add the following line to /etc/hosts.allow:
+<pre>
+rpcbind mountd nfsd statd lockd rquotad : list of IP addresses
+</pre>
+Where the "list of IP addresses" string is, you need to make a list
+of IP addresses that consists of the server and all clients. These have
+to be IP addresses because of a limitation in portmap (it doesn't like
+hostnames). Note that if you have NIS set up, just add these to the
+same line.
+
+=== Installation and Configuration ===
+
+===== Install NFS Server =====
+
+<pre>
+sudo apt-get install rpcbind nfs-kernel-server
+</pre>
+
+===== Shares =====
+
+Edit /etc/exports and add the shares:
+<pre>
+/home @myclients(rw,sync,no_subtree_check)
+/usr/local @myclients(rw,sync,no_subtree_check)
+</pre>
+
+The above shares /home and /usr/local to all clients in the
+myclients netgroup.
+
+<pre>
+/home 192.168.0.10(rw,sync,no_subtree_check) 192.168.0.11(rw,sync,no_subtree_check)
+/usr/local 192.168.0.10(rw,sync,no_subtree_check) 192.168.0.11(rw,sync,no_subtree_check)
+</pre>
+
+The above shares /home and /usr/local to two clients with fixed ip addresses.
+Best used only with machines that have static ip addresses.
+
+<pre>
+/home 192.168.0.0/255.255.255.0(rw,sync,no_subtree_check)
+/usr/local 192.168.0.0/255.255.255.0(rw,sync,no_subtree_check)
+</pre>
+
+The above shares /home and /usr/local to all clients in the
+private network falling within the designated ip address range.
+
+<code>rw</code> makes the share read/write, and <code>sync</code> requires
+the server to only reply to requests once any changes have been flushed
+to disk. This is the safest option (<code>async</code> is faster, but
+dangerous. It is strongly recommended that you read <code>man exports</code>.
+
+After setting up /etc/exports, export the shares:
+<pre>
+sudo exportfs -ra
+</pre>
+
+You'll want to do this command whenever <code>/etc/exports</code> is modified.
+
+===== Restart Services =====
+
+By default, portmap only binds to the loopback interface. To enable access to portmap from remote machines, you need to change /etc/default/portmap to get rid of either "-l" or "-i 127.0.0.1".
+
+If /etc/default/portmap was changed, portmap will need to be restarted: 
+<pre>
+sudo service portmap restart
+</pre>
+
+The NFS kernel server will also require a restart: 
+<pre>
+sudo service nfs-kernel-server restart
+</pre>
+
+==== Security Note ====
+
+Aside from the UID issues discussed above, it should be noted that an
+attacker could potentially masquerade as a machine that is allowed to
+map the share, which allows them to create arbitrary UIDs to access
+your files. One potential solution to this is <nowiki>[[IPSecHowTo|IPSec]]</nowiki>, see also the NFS and IPSec section below. You can set up all your domain members to talk only to each other over IPSec, which will effectively authenticate that your client is who it says it is.
+
+IPSec works by encrypting traffic to the server with the server's key,
+and the server sends back all replies encrypted with the client's key.
+The traffic is decrypted with the respective keys. If the client doesn't have the keys that the client is supposed to have, it can't send or receive data.
+
+An alternative to IPSec is physically separate networks. This requires a separate network switch and separate ethernet cards, and physical security of that network.
+
+== NFS Client ==
+
+=== Installation ===
+
+<pre>
+sudo apt-get install rpcbind nfs-common
+</pre>
+
+===== Portmap Lockdown =====
+
+~- optional -~
+
+Add the following line to /etc/hosts.deny:
+<pre>
+rpcbind : ALL
+</pre>
+By blocking all clients first, only clients in /etc/hosts.allow below will be allowed to access the server.
+
+Now add the following line to /etc/hosts.allow:
+<pre>
+rpcbind : NFS server IP address
+</pre>
+Where "NFS server IP address" is the IP address of the server. '''This must be numeric!''' It's the way portmap works.
+
+===== Host Names =====
+
+~- optional if using DNS -~
+
+Add the server name to /etc/hosts.  This ensures the NFS mounts will still work even if
+DNS goes down. You could rely on DNS if you wanted, it's up to you.
+
+==== Mounts ====
+
+===== Check to see if everything works =====
+
+You should try and mount it now. The basic template you will use is:
+<pre>
+sudo mount ServerIP:/folder/already/setup/to/be/shared /home/username/folder/in/your/local/computer
+</pre>
+
+so for example:
+
+<pre>
+sudo mount 192.168.1.42:/home/music /home/poningru/music
+</pre>
+
+===== Mount at startup =====
+
+NFS mounts can either be automatically mounted when accessed using autofs or can be setup with static mounts using entries in /etc/fstab. Both are explained below.
+
+===== Automounter =====
+
+Install autofs:
+<pre>
+sudo apt-get install autofs
+</pre>
+
+The following configuration example sets up home directories to automount off an NFS server upon logging in.  Other directories can be setup to automount upon access as well.
+
+Add the following line to the end of /etc/auto.master:
+<pre>
+  /home         /etc/auto.home
+</pre>
+
+Now create /etc/auto.home and insert the following:
+<pre>
+** solarisbox1.company.com.au,solarisbox2.company.com.au:/export/home/&
+</pre>
+The above line automatically mounts any directory accessed at /home/[username] on the client machine from either solarisbox1.company.com.au:/export/home/[username] or solarisbox2.company.com.au:/export/home/[username].
+
+Restart autofs to enable the configuration:
+<pre>
+sudo service autofs start
+</pre>
+
+===== Static Mounts =====
+
+Prior to setting up the mounts, make sure the directories that will act as mountpoints are already created.
+
+In /etc/fstab, add lines for shares such as:
+<pre>
+servername:dir /mntpoint nfs rw,hard,intr 0 0
+</pre>
+The <code>rw</code> mounts it read/write. Obviously, if the server is sharing
+it read only,
+the client won't be able to mount it as anything more than that. The
+<code>hard</code> mounts the share such that if the server becomes
+unavailable, the program will wait until it is available. The
+alternative is <code>soft</code>. <code>intr</code> allows you to interrupt/kill the
+process. Otherwise, it will ignore you. Documentation for these can be
+found in the <code>Mount options for nfs</code> section of <code>man mount</code>.
+
+The filesystems can now be mounted with <code>mount /mountpoint</code>, or <code>mount -a</code> to mount everything that should be mounted at boot.
+
+==== Notes ====
+===== Minimalistic NFS Set Up =====
+
+The steps above are very comprehensive. The minimum number of steps required to set up NFS are listed here:
+
+<nowiki>[[http://www.ubuntuforums.org/showthread.php?t=249889]]</nowiki>
+
+===== Using Groups with NFS Shares =====
+When using groups on NFS shares (NFSv2 or NFSv3), keep in mind that this might not work if a user is a member of more than 16 groups. This is due to limitations in the NFS protocol. You can find more information on Launchpad (<nowiki>[[https://bugs.launchpad.net/ubuntu/+source/linux-source-2.6.20/+bug/110132|"Permission denied when user belongs to group that owns group writable or setgid directories mounted via nfs"]]</nowiki>) and in this article: <nowiki>[[http://nfsworld.blogspot.com/2005/03/whats-deal-on-16-group-id-limitation.html|"What's the deal on the 16 group id limitation in NFS?"]]</nowiki>
+
+=== IPSec Notes ===
+
+If you're using IPSec, the default shutdown order in Breezy/Dapper causes the client to hang as it's being shut down because IPSec goes down before NFS does. To fix it, do:
+
+<pre>
+sudo update-rc.d -f setkey remove
+sudo update-rc.d setkey start 37 0 6 S .
+</pre>
+
+A bug has been filed here:
+https://launchpad.net/distros/ubuntu/+source/ipsec-tools/+bug/37536
+
+=== Troubleshooting ===
+
+==== Mounting NFS shares in encrypted home won't work on boot ====
+
+Mounting an NFS share inside an encrypted home directory will only work after you are successfully logged in and your home is decrypted. This means that using <code>/etc/fstab</code> to mount NFS shares on boot will not work - because your home has not been decrypted at the time of mounting. There is a simple way around this using Symbolic links:
+
+* Create an alternative directory to mount the NFS shares in:
+<pre>
+$ sudo mkdir /nfs
+$ sudo mkdir /nfs/music
+</pre>
+
+* Edit <code>/etc/fstab</code> to mount the NFS share into that directory instead:
+<code>nfsServer:music    /nfs/music    nfs    auto    0 0</code>
+
+* Create a symbolic link inside your home, pointing to the actual mount location (in our case delete the 'Music' directory already existing there first):
+<pre>
+$ rmdir /home/user/Music
+$ ln -s /nfs/music/ /home/user/Music
+</pre>
+
+=== Other resources ===
+* <nowiki>[[https://en.wikipedia.org/wiki/Network_File_System|Network File System]]</nowiki> on Wikipedia
+
+----

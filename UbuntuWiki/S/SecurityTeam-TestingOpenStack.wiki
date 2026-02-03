@@ -1,0 +1,3595 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+== Introduction ==
+This page aims to help someone set up !OpenStack in a standalone virtual machine using libvirt and has been tested on 11.10 - 13.10 and 14.04 LTS (in progress). !OpenStack should be accessible to other virtual machines in the libvirt network (ie, the one that the !OpenStack vm is on). Other machines on the libvirt network should be able to use euca2ools or juju to interface with the !OpenStack vm and have it start instances, etc. Note, this is not intended to by a guide for a production deployment of !OpenStack and as such does not enable security features that may be present in !OpenStack.
+
+For convenience, here is a table of Ubuntu releases with the corresponding !OpenStack codename for that release:
+{| class="wikitable"
+|-
+| '''Ubuntu'''
+| '''!OpenStack'''
+|-
+| 11.10
+| Diablo
+|-
+| 12.04 LTS
+| Essex
+|-
+| 12.10
+| Folsom
+|-
+| 13.04
+| Grizzly
+|-
+| 13.10
+| Havana
+|-
+| 14.04 LTS
+| Icehouse
+|-
+| 14.10
+| Juno
+|}
+
+== VM host configuration ==
+This document assumes you have created a VM with enough memory and disk space. The VM should have (at least) the following characteristics):
+* 2048M RAM
+* 2 network interfaces
+* 20480M (20G) disk
+** partitions:
+** 10G vda1 - LVM
+** 5G vda5 - LVM
+** 5G vda6 - LVM
+** rest vda7 - swap
+** volume groups (VGs):
+** 10G - vda1 - openstack-quantal-amd64 (ie, give hostname as the VG name)
+** 5G - vda5 - NovaVG (needed when using libvirt_images_volume_group=NovaVG in nova.conf)
+** 5G - vda6 - nova-volumes (12.10 and lower) / cinder-volumes (13.04 and higher)
+** logical volumes (LVs):
+** 'root' from openstack-quantal-amd64 VG
+** don't do anything with the other volume groups (will be used below)
+** mount points
+** / on 'root' LV
+
+'''Note''': on 13.04 you may need to add 'nomodeset' to the kernel command line due to <nowiki>[[https://bugs.launchpad.net/ubuntu/+source/linux/+bug/1100386|LP: #1100386]]</nowiki>
+
+=== Networking on the OpenStack VM ===
+Since the !OpenStack VM is a host on the 192.168.122.0/24 libvirt network, we need to make sure that it is setup correctly so it is reachable by other hosts on the VM network. As mentioned, the !OpenStack VM will have two interfaces:
+* eth0 (the public interface)
+* eth1 (the private interface)
+
+!OpenStack will create a network on the eth1 interface and use dnsmasq, etc via libvirt for private addressing of instances via a bridge. We then will associate public addresses to private ones, and then expose them via euca-authorize (EC2 security groups). To make this all work seemlessly, lets create a static address for eth0 that uses 192.168.122.0/25 and then in nova expose public addresses in 192.168.122.128/25. This seems to make networking within a libvirt virtual network work correctly.
+
+ 0. Setup a static IP address for eth0 in /etc/network/interfaces:
+** 13.04 and lower:<pre>
+auto eth0
+iface eth0 inet static
+	address 192.168.122.3
+	network 192.168.122.0
+	netmask 255.255.255.128
+	broadcast 192.168.122.127
+	gateway 192.168.122.1
+
+iface eth1 inet manual
+iface eth1 inet6 manual
+</pre>
+** 13.10+:<pre>
+auto eth0
+iface eth0 inet static
+	address 192.168.122.3
+	network 192.168.122.0
+	netmask 255.255.255.128
+	broadcast 192.168.122.127
+	gateway 192.168.122.1
+
+iface eth1 inet manual
+        up ifconfig $IFACE 0.0.0.0 up
+        up ifconfig $IFACE promisc
+iface eth1 inet6 manual
+</pre>
+ 0. Adjust /etc/resolvconf/resolv.conf.d/base to have:<pre>
+search defaultdomain
+nameserver 192.168.122.1
+</pre>
+ 0. Reboot to make sure it all comes up ok.
+
+==== Accessing OpenStack from the host ====
+Since we are using a static ip address for the !OpenStack VM, it is helpful to put an entry in /etc/hosts on the host machine (ie the host that runs the !OpenStack VM):<pre>
+192.168.122.3		openstack-precise-amd64
+</pre>
+
+After add that, send dnsmasq a HUP:<pre>
+$ sudo kill -HUP `cat /var/run/libvirt/network/default.pid`
+</pre>
+
+At this point you can login to the !OpenStack VM with:<pre>
+$ ssh openstack-precise-amd64
+Welcome to Ubuntu precise (development branch) (GNU/Linux 3.2.0-18-generic x86_64)
+...
+openstack-precise-amd64:~$
+</pre>
+
+== Setup OpenStack packages ==
+=== Package installation ===
+Install the necessary packages:
+* On 11.10:<pre>
+$ sudo apt-get install rabbitmq-server mysql-server nova-compute nova-api nova-scheduler nova-objectstore nova-network glance python-mysqldb euca2ools unzip
+</pre>
+* on 12.04 LTS:<pre>
+$ sudo apt-get install rabbitmq-server mysql-server nova-compute nova-api nova-scheduler nova-objectstore nova-network glance keystone python-mysqldb euca2ools nova-cert
+</pre>
+* on 12.10:<pre>
+sudo apt-get install rabbitmq-server mysql-server nova-compute nova-api nova-scheduler nova-objectstore nova-network glance keystone python-mysqldb euca2ools nova-cert cinder-api cinder-scheduler cinder-volume python-cinderclient
+</pre>
+* on 13.04:<pre>
+sudo apt-get install rabbitmq-server mysql-server nova-compute nova-api nova-conductor nova-scheduler nova-objectstore nova-network glance keystone python-mysqldb euca2ools nova-cert cinder-api cinder-scheduler cinder-volume python-cinderclient
+</pre>
+* on 13.10 (omit nova-network if going to use neutron):<pre>
+sudo apt-get install rabbitmq-server mysql-server nova-compute nova-api nova-conductor nova-scheduler nova-objectstore nova-network glance keystone python-mysqldb euca2ools nova-cert cinder-api cinder-scheduler cinder-volume python-cinderclient heat-api heat-api-cfn heat-engine
+</pre>
+* on 14.04 LTS (omit nova-network if going to use neutron):<pre>
+sudo apt-get install rabbitmq-server mysql-server nova-compute nova-api nova-conductor nova-scheduler nova-objectstore nova-network glance keystone python-mysqldb euca2ools nova-cert cinder-api cinder-scheduler cinder-volume python-cinderclient heat-api heat-api-cfn heat-engine
+</pre>
+
+You will be prompted for a MySQL root password which you will be prompted for in the next step (if just a testing VM, use 'pass' as the MySQL root password).
+
+=== libvirt setup ===
+ 0. Add yourself to the libvirtd group:<pre>
+$ sudo adduser $USER libvirtd
+</pre>
+# Logout and back in, or use `sg libvirtd` so you are in the libvirtd group
+# Redefine the default libvirt network to use 192.168.123.0/24 instead of 192.168.122.0/24 (so it won't get in the way of things-- this network isn't used by nova anyway, but nova does expect certain firewall rules to be in effect):<pre>
+$ virsh net-dumpxml default | sed 's/192.168.122/192.168.123/g' > /tmp/xml
+$ virsh net-destroy default
+$ virsh net-define /tmp/xml
+</pre>
+
+=== mysql setup ===
+!OpenStack can be configured to store much of its state and configuration in a database, and MySQL is one of the supported databases.
+ 0. Setup the mysql databases:<pre>
+$ mysql -v -u root -p
+mysql> create database glance;
+mysql> create database keystone;
+mysql> create database nova;
+mysql> create database cinder;
+mysql> create database heat;
+mysql> create database neutron;
+mysql> create database ovs_neutron;
+mysql> grant all privileges on glance.* to 'glance'@'localhost' identified by 'glancemysqlpasswd';
+mysql> grant all privileges on keystone.* to 'keystone'@'localhost' identified by 'keystonemysqlpasswd';
+mysql> grant all privileges on nova.* to 'nova'@'localhost' identified by 'novamysqlpasswd';
+mysql> grant all privileges on cinder.* to 'cinder'@'localhost' identified by 'cindermysqlpasswd';
+mysql> grant all privileges on heat.* to 'heat'@'localhost' identified by 'heatmysqlpasswd';
+mysql> grant all privileges on heat.* to 'heat'@'%' identified by 'heatmysqlpasswd';
+mysql> grant all privileges on neutron.* to 'neutron'@'localhost' identified by 'neutronmysqlpasswd';
+mysql> grant all privileges on neutron.* to 'neutron'@'%' identified by 'neutronmysqlpasswd';
+mysql> grant all privileges on ovs_neutron.* to 'ovs_neutron'@'localhost' identified by 'ovs_neutronmysqlpasswd';
+mysql> grant all privileges on ovs_neutron.* to 'ovs_neutron'@'%' identified by 'ovs_neutronmysqlpasswd';
+mysql> quit
+</pre>
+
+Note that keystone is not used on 11.10 since the package in the archive does not contain the necessary files to integrate with nova.
+
+=== rabbitmq setup ===
+Rabbitmq is a messaging service and it is used to coordinate messaging between various components within !OpenStack. Setup rabbitmq by running the following:<pre>
+$ sudo rabbitmqctl add_vhost nova
+$ sudo rabbitmqctl add_user 'nova' 'rabbitmqpasswd'
+$ sudo rabbitmqctl set_permissions -p nova nova ".*" ".*" ".*"
+</pre>
+
+=== nova setup ===
+Nova is the compute service within !OpenStack and is responsible for launching and managing VMs. Configure nova:
+ 0. Add the following to /etc/nova/nova.conf to have:
+** 11.10:<pre>
+--sql_connection=mysql://nova:%s@localhost/nova
+--rabbit_host=localhost
+--rabbit_userid=nova
+--rabbit_password=rabbitmqpasswd
+--rabbit_virtual_host=nova
+--rabbit_vhost=nova
+--rpc_backend=nova.rpc.impl_carrot
+--network_manager=nova.network.manager.FlatDHCPManager
+--auth_driver=nova.auth.dbdriver.DbDriver
+--keystone_ec2_url=http://localhost:5000/v2.0/ec2tokens
+--ec2_url=http://localhost:8773/services/Cloud
+--image_service=nova.image.glance.GlanceImageService
+--glance_api_servers=127.0.0.1:9292
+</pre>
+** 12.04: <pre>
+--sql_connection=mysql://nova:novamysqlpasswd@localhost/nova
+--rabbit_host=localhost
+--rabbit_userid=nova
+--rabbit_password=rabbitmqpasswd
+--rabbit_virtual_host=nova
+--rabbit_vhost=nova
+--network_manager=nova.network.manager.FlatDHCPManager
+--auth_strategy=keystone
+--keystone_ec2_url=http://localhost:5000/v2.0/ec2tokens
+</pre>
+** 12.10:<pre>
+sql_connection=mysql://nova:novamysqlpasswd@localhost/nova
+rabbit_host=localhost
+rabbit_userid=nova
+rabbit_password=rabbitmqpasswd
+rabbit_virtual_host=nova
+rabbit_vhost=nova
+network_manager=nova.network.manager.FlatDHCPManager
+ec2_url=http://localhost:8773/services/Cloud
+auth_strategy=keystone
+keystone_ec2_url=http://localhost:5000/v2.0/ec2tokens
+volume_api_class=nova.volume.cinder.API
+enabled_apis=ec2,osapi_compute,metadata
+</pre>
+** 13.04 and higher:<pre>
+sql_connection=mysql://nova:novamysqlpasswd@localhost/nova
+rabbit_host=localhost
+rabbit_userid=nova
+rabbit_password=rabbitmqpasswd
+rabbit_virtual_host=nova
+rabbit_vhost=nova
+ec2_url=http://localhost:8773/services/Cloud
+auth_strategy=keystone
+keystone_ec2_url=http://localhost:5000/v2.0/ec2tokens
+network_manager=nova.network.manager.FlatDHCPManager
+</pre>
+ 0. Sync the nova database:<pre>
+$ sudo nova-manage db sync
+</pre>
+ 0. Restart the nova services:
+** 12.10 and lower:<pre>
+$ for i in nova-api nova-scheduler nova-network nova-compute nova-objectstore ; do sudo service $i restart ; done
+</pre>
+** 13.04 and higher:<pre>
+$ for i in nova-api nova-scheduler nova-network nova-conductor nova-compute nova-objectstore ; do sudo service $i restart ; done
+</pre>
+ 0. verify it worked:<pre>
+$ sleep 10 ; netstat -n | egrep '5672'
+tcp        0      0 127.0.0.1:47836         127.0.0.1:5672          ESTABLISHED
+tcp        0      0 127.0.0.1:47838         127.0.0.1:5672          ESTABLISHED
+tcp        0      0 127.0.0.1:47832         127.0.0.1:5672          ESTABLISHED
+tcp        0      0 127.0.0.1:47837         127.0.0.1:5672          ESTABLISHED
+tcp6       0      0 127.0.0.1:5672          127.0.0.1:47837         ESTABLISHED
+tcp6       0      0 127.0.0.1:5672          127.0.0.1:47836         ESTABLISHED
+tcp6       0      0 127.0.0.1:5672          127.0.0.1:47838         ESTABLISHED
+tcp6       0      0 127.0.0.1:5672          127.0.0.1:47832         ESTABLISHED
+</pre>
+
+=== glance setup ===
+Glance is the image service and is responsible for providing VM images (for nova) within !OpenStack. Configure glance:
+ 0. edit /etc/glance/glance-registry.conf to have:
+** 13.10 and lower:<pre>
+sql_connection = mysql://glance:glancemysqlpasswd@localhost/glance
+</pre>
+** 14.04 LTS and higher, adjust the `[database]` section to have:<pre>
+[database]
+...
+connection = mysql://glance:glancemysqlpasswd@localhost/glance
+</pre>
+ Then on Ubuntu 12.04 LTS and higher, append to end:<pre>
+[paste_deploy]
+flavor = keystone
+</pre>
+ 0. adjust /etc/glance/glance-api.conf (nothing needs to be done on 11.10):
+** 12.04: append to end of /etc/glance/glance-api.conf:<pre>
+[paste_deploy]
+flavor = keystone
+</pre>
+** 12.10 - 13.10: edit /etc/glance/glance-api.conf to have:<pre>
+sql_connection = mysql://glance:glancemysqlpasswd@localhost/glance
+</pre>
+  Then append to end:<pre>
+[paste_deploy]
+flavor = keystone
+</pre>
+** 14.04 LTS and higher, adjust the `[database]` section to have:<pre>
+[database]
+...
+connection = mysql://glance:glancemysqlpasswd@localhost/glance
+</pre>
+  Then adjust `[paste_deploy]` to have:<pre>
+flavor = keystone
+</pre>
+ 0. On 11.10, edit /etc/glance/glance-scrubber.conf to have:<pre>
+sql_connection = mysql://glance:glancemysqlpasswd@localhost/glance
+</pre>
+ 0. On 13.10+, remove /var/lib/glance/glance.sqlite:<pre>
+$ sudo rm -f /var/lib/glance/glance.sqlite
+</pre>
+ 0. stop glance:<pre>
+$ sudo stop glance-api
+$ sudo stop glance-registry
+</pre>
+ 0. set version control on the glance db (see <nowiki>[[https://bugs.launchpad.net/ubuntu/+source/glance/+bug/981111|bug 981111]]</nowiki>):
+** 13.10 and earlier:<pre>
+$ sudo glance-manage version_control 0
+</pre>
+** 14.04 LTS and higher:<pre>
+$ sudo glance-manage db_version_control 0
+</pre>
+ 0. sync the glance db:
+** 13.10 and earlier:<pre>
+$ sudo glance-manage db_sync
+</pre>
+** 14.04 LTS (due to <nowiki>[[https://bugs.launchpad.net/glance/+bug/1279000|LP: #1279000]]</nowiki>, <nowiki>[[http://www.brucemartins.com/2014/04/critical-glance-valueerror-tables.html|additional steps]]</nowiki> need to happen to clean up the mysql tables): <pre>
+$ mysql -u root -p glance
+mysql> alter table migrate_version convert to character set utf8 collate utf8_unicode_ci;
+mysql> flush privileges;
+mysql> quit
+$ sudo glance-manage db_sync
+</pre>
+ 0. start glance:<pre>
+$ sudo start glance-api
+$ sudo start glance-registry
+</pre>
+ 0. verify it worked:<pre>
+$ netstat -nl | egrep '(9191|9292)'
+tcp        0      0 0.0.0.0:9292            0.0.0.0:*               LISTEN
+tcp        0      0 0.0.0.0:9191            0.0.0.0:*               LISTEN
+</pre>
+
+=== cinder setup (12.10+) ===
+Cinder is the volume service used in !OpenStack Grizzly (Ubuntu 13.04) and higher. Ubuntu 12.10 has both nova-volume and cinder available with nova-volume being deprecated in 13.04. (Note: this assumes that the cinder mysql database is setup and the necessary changes to nova are made (see above)).
+ 0. Make sure the 'cinder-volumes' volume group exists (or if on 12.10, 'nova-volumes' if want to toggle between nova-volume and cinder):<pre>
+$ sudo vgdisplay cinder-volumes
+  --- Volume group ---
+  VG Name               cinder-volumes
+...
+</pre>
+ 0. Verify /etc/cinder/api-paste.ini has:
+** 13.04 and earlier:<pre>
+[filter:authtoken]
+paste.filter_factory = keystone.middleware.auth_token:filter_factory
+service_protocol = http
+service_host = 127.0.0.1
+service_port = 5000
+auth_host = 127.0.0.1
+auth_port = 35357
+auth_protocol = http
+admin_tenant_name = services
+admin_user = cinder
+admin_password = cinder
+</pre>
+** 13.10 and higher, make sure the `[filter:authtoken]` section has:<pre>
+[filter:authtoken]
+paste.filter_factory = keystoneclient.middleware.auth_token:filter_factory
+auth_host = 127.0.0.1
+auth_port = 35357
+auth_protocol = http
+admin_tenant_name = services
+admin_user = cinder
+admin_password = cinder
+</pre>
+ 0. Add to `[DEFAULT]` section of /etc/cinder/cinder.conf:<pre>
+sql_connection = mysql://cinder:cindermysqlpasswd@localhost/cinder
+rabbit_host = localhost
+rabbit_userid = nova
+rabbit_password = rabbitmqpasswd
+rabbit_virtual_host = nova
+rabbit_vhost = nova
+</pre>
+ 0. '''Optional''': on 12.10, re-use the 'nova-volumes' VG in /etc/cinder/cinder.conf if you don't have 'cinder-volumes':<pre>
+volume_group = nova-volumes
+</pre>
+ 0. sync the cinder database:<pre>
+$ sudo cinder-manage db sync
+</pre>
+ 0. restart cinder:<pre>
+for i in cinder-volume cinder-api cinder-scheduler ; do sudo service $i restart ; done
+</pre>
+ 0. On 13.04 and earlier, adjust /etc/tgt/targets.conf to have (<nowiki>[[https://bugs.launchpad.net/cinder/+bug/1057904|LP: #1057904]]</nowiki>):<pre>
+include /etc/tgt/conf.d/cinder_tgt.conf
+include /etc/tgt/conf.d/nova_tgt.conf
+</pre>
+ Then restart tgt:<pre>
+$ sudo service tgt restart
+</pre>
+
+=== heat setup (13.10+) ===
+Heat is the orchestration service for !OpenStack. It is in universe in 13.10 and in main in 14.04 LTS and higher. If configured, Horizon will have an 'Orchestration' section under the 'Projects' tab after logging in.
+
+Configure heat:
+ 0. edit /etc/heat/heat.conf:
+** on 13.10, adjust to have in the `[DEFAULT]` section:<pre>
+sql_connection = mysql://heat:heatmysqlpasswd@localhost/heat
+verbose = True
+rabbit_host = localhost
+rabbit_userid = nova
+rabbit_password = rabbitmqpasswd
+rabbit_virtual_host = nova
+rabbit_vhost = nova
+</pre>
+** on 14.04 LTS and higher, adjust the `[database]` section to have:<pre>
+connection=mysql://heat:heatmysqlpasswd@localhost/heat
+</pre>
+  Adjust the `[DEFAULT]` section to have:<pre>
+verbose = True
+log_dir=/var/log/heat
+rabbit_host = localhost
+rabbit_userid = nova
+rabbit_password = rabbitmqpasswd
+rabbit_virtual_host = nova
+rabbit_vhost = nova
+heat_metadata_server_url = http://localhost:8000
+heat_waitcondition_server_url = http://localhost:8000/v1/waitcondition
+</pre>
+ 0. edit /etc/heat/heat.conf to have in the `[ec2authtoken]` section:<pre>
+auth_uri = http://localhost:5000/v2.0
+keystone_ec2_uri = http://localhost:5000/v2.0/ec2tokens
+</pre>
+ 0. edit /etc/heat/heat.conf to add the `[keystone_authtoken]` section:<pre>
+[keystone_authtoken]
+auth_host = localhost
+auth_port = 35357
+auth_protocol = http
+auth_uri = http://localhost:5000/v2.0
+admin_tenant_name = services
+admin_user = heat
+admin_password = heat
+</pre>
+ 0. Remove /var/lib/heat/heat.sqlite:<pre>
+$ sudo rm -f /var/lib/heat/heat.sqlite
+</pre>
+ 0. sync the heat database:<pre>
+$ sudo heat-manage db_sync
+</pre>
+ May see the following, which appears 'ok':<pre>
+No handlers could be found for logger "heat.common.config"
+</pre>
+ 0. restart heat:<pre>
+for i in heat-api heat-api-cfn heat-engine ; do sudo service $i restart ; done
+</pre>
+ 0. verify it worked:<pre>
+$ netstat -nl | egrep '(8000|8004)'
+tcp        0      0 0.0.0.0:8000            0.0.0.0:*               LISTEN
+tcp        0      0 0.0.0.0:8004            0.0.0.0:*               LISTEN
+</pre>
+
+=== keystone setup (12.04 LTS+) ===
+Keystone is the authentication service for !OpenStack. It uses tenants for authentication and various !OpenStack services use tenants as the basis for users, services and roles for authorizing actions. Keystone was not finished when 11.10 was released and has not been updated since.
+
+Configure keystone:
+ 0. edit /etc/keystone/keystone.conf:
+ adjust admin token:<pre>
+admin_token = keystoneadmintoken
+</pre>
+ adjust connection (`[sql]` on 13.10 and lower, `[database]` on 14.04 LTS and higher):<pre>
+connection = mysql://keystone:keystonemysqlpasswd@localhost/keystone
+</pre>
+ 0. on 13.04 and earlier, verify /etc/keystone/keystone.conf is using the sql driver and not kvs:<pre>
+[ec2]
+driver = keystone.contrib.ec2.backends.sql.Ec2
+</pre>
+ 0. [OPTIONAL] for debugging, adjust /etc/keystone/logging.conf to have:<pre>
+...
+[logger_root]
+level=DEBUG
+...
+</pre>
+ 0. sync the keystone db:<pre>
+$ sudo keystone-manage db_sync
+</pre>
+ 0. restart keystone:<pre>
+$ sudo stop keystone
+$ sudo start keystone
+</pre>
+ 0. verify it worked:<pre>
+$ netstat -nl | egrep '(35357|5000)'
+tcp        0      0 0.0.0.0:35357           0.0.0.0:*               LISTEN
+tcp        0      0 0.0.0.0:5000            0.0.0.0:*               LISTEN
+</pre>
+ 0. test with python-keystoneclient:<pre>
+$ export SERVICE_ENDPOINT=http://localhost:35357/v2.0/
+$ export SERVICE_TOKEN=keystoneadmintoken
+$ keystone user-list # 12.04 LTS
++----+---------+-------+------+
+| id | enabled | email | name |
++----+---------+-------+------+
++----+---------+-------+------+
+$ keystone user-list # 12.10
+
+$
+</pre>
+
+=== swift setup (12.04+) ===
+Swift provides an object store for !OpenStack similar to S3. Setup instructions here on based on <nowiki>[[http://docs.openstack.org/essex/openstack-compute/starter/content/Swift-d2s742.html|upstream documentation]]</nowiki>. Note, once swift is configured, it takes a while to start and will affect how soon !OpenStack is available on the host (ie, it might take 5 minutes or more for swift to fully come up).
+
+ 0. Install:<pre>
+$ sudo apt-get install swift swift-proxy memcached swift-account swift-container swift-object curl xfsprogs rsync python-pastedeploy
+</pre>
+ 0. setup the storage device (loopback, 1G):
+** Setup the loopback:<pre>
+$ sudo dd if=/dev/zero of=/srv/swift-disk bs=1024 count=0 seek=1000000
+$ sudo mkfs.xfs -i size=1024 /srv/swift-disk
+$ file /srv/swift-disk
+/srv/swift-disk: SGI XFS filesystem data (blksz 4096, inosz 1024, v2 dirs)
+</pre>
+** Create the /mnt/swift_backend mountpoint:<pre>
+$ sudo mkdir /mnt/swift_backend
+</pre>
+** update /etc/fstab:<pre>
+/srv/swift-disk /mnt/swift_backend xfs loop,noatime,nodiratime,nobarrier,logbufs=8 0 0
+</pre>
+** mount it:<pre>
+$ sudo mount /mnt/swift_backend
+</pre>
+** create some nodes to be used as storage devices:<pre>
+$ cd /mnt/swift_backend
+$ sudo mkdir node1 node2 node3 node4
+$ cd -
+$ sudo chown swift.swift /mnt/swift_backend/*
+$ for i in {1..4}; do sudo ln -s /mnt/swift_backend/node$i /srv/node$i; done
+</pre>
+** Create some directories for use by other parts of swift:<pre>
+$ sudo mkdir -p /etc/swift/account-server /etc/swift/container-server /etc/swift/object-server /srv/node1/device /srv/node2/device /srv/node3/device /srv/node4/device
+$ sudo mkdir /run/swift
+$ sudo chown -L -R swift.swift /etc/swift /srv/node[1-4]/ /run/swift
+</pre>
+** adjust /etc/rc.local to have to make sure everything is setup on boot:<pre>
+mkdir /run/swift
+chown swift.swift /run/swift
+</pre>
+** adjust permissions of /etc/rc.local:<pre>
+$ sudo chmod 755 /etc/rc.local
+</pre>
+ 0. setup rsync:
+** update create /etc/rsyncd.conf:<pre>
+uid = swift
+gid = swift
+log file = /var/log/rsyncd.log
+pid file = /run/rsyncd.pid
+address = 127.0.0.1
+
+[account6012]
+max connections = 25
+path = /srv/node1/
+read only = false
+lock file = /run/lock/account6012.lock
+
+[account6022]
+max connections = 25
+path = /srv/node2/
+read only = false
+lock file = /run/lock/account6022.lock
+
+[account6032]
+max connections = 25
+path = /srv/node3/
+read only = false
+lock file = /run/lock/account6032.lock
+
+[account6042]
+max connections = 25
+path = /srv/node4/
+read only = false
+lock file = /run/lock/account6042.lock
+
+[container6011]
+max connections = 25
+path = /srv/node1/
+read only = false
+lock file = /run/lock/container6011.lock
+
+[container6021]
+max connections = 25
+path = /srv/node2/
+read only = false
+lock file = /run/lock/container6021.lock
+
+[container6031]
+max connections = 25
+path = /srv/node3/
+read only = false
+lock file = /run/lock/container6031.lock
+
+[container6041]
+max connections = 25
+path = /srv/node4/
+read only = false
+lock file = /run/lock/container6041.lock
+
+[object6010]
+max connections = 25
+path = /srv/node1/
+read only = false
+lock file = /run/lock/object6010.lock
+
+[object6020]
+max connections = 25
+path = /srv/node2/
+read only = false
+lock file = /run/lock/object6020.lock
+
+[object6030]
+max connections = 25
+path = /srv/node3/
+read only = false
+lock file = /run/lock/object6030.lock
+
+[object6040]
+max connections = 25
+path = /srv/node4/
+read only = false
+lock file = /run/lock/object6040.lock
+</pre>
+** update /etc/default/rsync to have `RSYNC_ENABLE=true`
+** restart rsync with:<pre>
+$ sudo service rsync restart
+</pre>
+ '''Note:''' this doesn't actually work, the rsync URL is wrong resulting in rsync errors in /var/log/syslog. Eg:<pre>
+Jun 19 21:19:04 openstack-precise-amd64 container-replicator ERROR rsync failed with 5: ['rsync', '--quiet', '--no-motd', '--timeout=10', '--contimeout=1', '--whole-file', '/srv/node3/device/containers/158175/450/9a77d83eedc63e13f3800a4a3c326450/9a77d83eedc63e13f3800a4a3c326450.db', '[127.0.0.1]::container/device/tmp/dcb8059c-adf3-44a0-89ec-4708abec182f']
+</pre>
+ 0. Setup proxy server
+** create /etc/swift/proxy-server.conf:<pre>
+$ sudo sh -c 'zcat /usr/share/doc/swift-proxy/proxy-server.conf-sample.gz > /etc/swift/proxy-server.conf'
+</pre>
+** update /etc/swift/proxy-server.conf to have (if not listed, use defaults):<pre>
+[DEFAULT]
+bind_port = 8080
+workers = 1
+user = swift
+swift_dir = /etc/swift
+
+</pre>
+ Then adjust the `[pipeline:main]` section to replace `tempauth` with `authtoken keystone`. Eg:
+[pipeline:main]
+pipeline = catch_errors healthcheck cache ratelimit authtoken keystone proxy-server
+}}}
+
+ Adjust `[app:proxy-server]` like so:<pre>
+[app:proxy-server]
+use = egg:swift#proxy
+allow_account_management = true
+account_autocreate = true
+set log_name = swift-proxy
+set log_facility = LOG_LOCAL0
+set log_level = INFO
+set access_log_name = swift-proxy
+set access_log_facility = SYSLOG
+set access_log_level = INFO
+set log_headers = True
+</pre>
+** configure for keystone by adding to end of /etc/swift/proxy-server.conf:
+** 12.04:<pre>
+[filter:authtoken]
+paste.filter_factory = keystone.middleware.auth_token:filter_factory
+service_protocol = http
+service_host = 127.0.0.1
+service_port = 5000
+admin_user = swift
+admin_password = swift
+admin_tenant_name = services
+admin_token = keystoneadmintoken
+auth_host = 127.0.0.1
+auth_port = 35357
+auth_protocol = http
+delay_auth_decision = 0
+
+[filter:keystone]
+paste.filter_factory = keystone.middleware.swift_auth:filter_factory
+operator_roles = admin, swiftoperator
+is_admin = true
+</pre>
+** 12.10:<pre>
+[filter:authtoken]
+paste.filter_factory = keystone.middleware.auth_token:filter_factory
+service_protocol = http
+service_host = 127.0.0.1
+service_port = 5000
+admin_user = swift
+admin_password = swift
+admin_tenant_name = services
+admin_token = keystoneadmintoken
+auth_host = 127.0.0.1
+auth_port = 35357
+auth_protocol = http
+signing_dir = /tmp/keystone-signing-swift
+delay_auth_decision = 0
+
+[filter:keystone]
+paste.filter_factory = keystone.middleware.swift_auth:filter_factory
+operator_roles = admin, swiftoperator
+is_admin = true
+</pre>
+** 13.04 and higher:<pre>
+[filter:authtoken]
+paste.filter_factory = keystoneclient.middleware.auth_token:filter_factory
+service_protocol = http
+service_host = 127.0.0.1
+service_port = 5000
+admin_user = swift
+admin_password = swift
+admin_tenant_name = services
+admin_token = keystoneadmintoken
+auth_host = 127.0.0.1
+auth_port = 35357
+auth_protocol = http
+signing_dir = /var/cache/swift/keystone-signing-dir
+delay_auth_decision = 0
+
+[filter:keystone]
+use = egg:swift#keystoneauth
+operator_roles = admin, swiftoperator, Member
+</pre>
+ 0. Setup account server
+** First copy /etc/swift/account-server.conf into place:
+** 13.10 and earlier:<pre>
+$ sudo cp /usr/share/doc/swift-account/account-server.conf-sample /etc/swift/account-server.conf
+</pre>
+** 14.04 LTS and higher:<pre>
+$ sudo sh -c 'zcat /usr/share/doc/swift-account/account-server.conf-sample.gz > /etc/swift/account-server.conf'
+</pre>
+** update it to have:
+** 13.10 and earlier:<pre>
+[DEFAULT]
+bind_ip = 0.0.0.0
+workers = 1
+
+[pipeline:main]
+pipeline = account-server
+
+[app:account-server]
+use = egg:swift#account
+
+[account-replicator]
+
+[account-auditor]
+
+[account-reaper]
+</pre>
+** 14.04 LTS and higher, adjust the `[DEFAULT]` section to have (rest are defaults):<pre>
+bind_ip = 0.0.0.0
+workers = 1
+</pre>
+** Create device configuration by creating /etc/swift/account-server/1.conf:<pre>
+[DEFAULT]
+devices = /srv/node1
+mount_check = false
+bind_port = 6012
+user = swift
+log_facility = LOG_LOCAL2
+
+[pipeline:main]
+pipeline = account-server
+
+[app:account-server]
+use = egg:swift#account
+
+[account-replicator]
+vm_test_mode = no
+
+[account-auditor]
+
+[account-reaper]
+</pre>
+** then create the device configuration for node2, node3 and node4:<pre>
+$ sudo cp /etc/swift/account-server/1.conf /etc/swift/account-server/2.conf
+$ sudo cp /etc/swift/account-server/1.conf /etc/swift/account-server/3.conf
+$ sudo cp /etc/swift/account-server/1.conf /etc/swift/account-server/4.conf
+$ sudo sed -i 's/6012/6022/g;s/LOCAL2/LOCAL3/g;s/node1/node2/g' /etc/swift/account-server/2.conf
+$ sudo sed -i 's/6012/6032/g;s/LOCAL2/LOCAL4/g;s/node1/node3/g' /etc/swift/account-server/3.conf
+$ sudo sed -i 's/6012/6042/g;s/LOCAL2/LOCAL5/g;s/node1/node4/g' /etc/swift/account-server/4.conf
+</pre>
+ 0. Setup container server:
+** Create /etc/swift/container-server.conf:
+** 13.10 and lower:<pre>
+$ sudo cp /usr/share/doc/swift-container/container-server.conf-sample /etc/swift/container-server.conf
+</pre>
+** 14.04 LTS and higher:<pre>
+$ sudo sh -c 'zcat /usr/share/doc/swift-container/container-server.conf-sample.gz > /etc/swift/container-server.conf'
+</pre>
+** Update it to have:
+** 13.10 and earlier:<pre>
+[DEFAULT]
+bind_ip = 0.0.0.0
+workers = 1
+
+[pipeline:main]
+pipeline = container-server
+
+[app:container-server]
+use = egg:swift#container
+
+[container-replicator]
+
+[container-updater]
+
+[container-auditor]
+
+[container-sync]
+
+</pre>
+** 14.04 LTS and higher, adjust the `[DEFAULT]` section to have (rest are defaults):<pre>
+bind_ip = 0.0.0.0
+workers = 1
+</pre>
+** Create container server configuration for /etc/swift/container-server/1.conf:<pre>
+[DEFAULT]
+devices = /srv/node1
+mount_check = false
+bind_port = 6011
+user = swift
+log_facility = LOG_LOCAL2
+
+[pipeline:main]
+pipeline = container-server
+
+[app:container-server]
+use = egg:swift#container
+
+[container-replicator]
+vm_test_mode = no
+
+[container-updater]
+
+[container-auditor]
+
+[container-sync]
+</pre>
+** then create the device container configuration for node2, node3 and node4:<pre>
+$ sudo cp /etc/swift/container-server/1.conf /etc/swift/container-server/2.conf
+$ sudo cp /etc/swift/container-server/1.conf /etc/swift/container-server/3.conf
+$ sudo cp /etc/swift/container-server/1.conf /etc/swift/container-server/4.conf
+$ sudo sed -i 's/6011/6021/g;s/LOCAL2/LOCAL3/g;s/node1/node2/g' /etc/swift/container-server/2.conf
+$ sudo sed -i 's/6011/6031/g;s/LOCAL2/LOCAL4/g;s/node1/node3/g' /etc/swift/container-server/3.conf
+$ sudo sed -i 's/6011/6041/g;s/LOCAL2/LOCAL5/g;s/node1/node4/g' /etc/swift/container-server/4.conf
+</pre>
+ 0. Setup object server
+** Create /etc/swift/object-server.conf:
+** 13.10 and lower:<pre>
+$ sudo cp /usr/share/doc/swift-object/object-server.conf-sample /etc/swift/object-server.conf
+</pre>
+** 14.04 LTS and higher:<pre>
+sudo sh -c 'zcat /usr/share/doc/swift-object/object-server.conf-sample.gz > /etc/swift/object-server.conf'
+</pre>
+** Adjust it to have:
+** 13.10 and lower:<pre>
+[DEFAULT]
+bind_ip = 0.0.0.0
+workers = 1
+
+[pipeline:main]
+pipeline = object-server
+
+[app:object-server]
+use = egg:swift#object
+
+[object-replicator]
+
+[object-updater]
+
+[object-auditor]
+</pre>
+** 14.04 LTS and higher, adjust the `[DEFAULT]` section to have (rest are defaults):<pre>
+bind_ip = 0.0.0.0
+workers = 1
+</pre>
+** Create object server configuration for /etc/swift/object-server/1.conf:<pre>
+[DEFAULT]
+devices = /srv/node1
+mount_check = false
+bind_port = 6010
+user = swift
+log_facility = LOG_LOCAL2
+
+[pipeline:main]
+pipeline = object-server
+
+[app:object-server]
+use = egg:swift#object
+
+[object-replicator]
+vm_test_mode = no
+
+[object-updater]
+
+[object-auditor]
+</pre>
+** then create the device object configuration for node2, node3 and node4:<pre>
+$ sudo cp /etc/swift/object-server/1.conf /etc/swift/object-server/2.conf
+$ sudo cp /etc/swift/object-server/1.conf /etc/swift/object-server/3.conf
+$ sudo cp /etc/swift/object-server/1.conf /etc/swift/object-server/4.conf
+$ sudo sed -i 's/6010/6020/g;s/LOCAL2/LOCAL3/g;s/node1/node2/g' /etc/swift/object-server/2.conf
+$ sudo sed -i 's/6010/6030/g;s/LOCAL2/LOCAL4/g;s/node1/node3/g' /etc/swift/object-server/3.conf
+$ sudo sed -i 's/6010/6040/g;s/LOCAL2/LOCAL5/g;s/node1/node4/g' /etc/swift/object-server/4.conf
+</pre>
+ 0. create /etc/swift/swift.conf:<pre>
+[swift-hash]
+swift_hash_path_suffix = secretswifthash
+</pre>
+ 0. adjust permissions of /etc/swift/swift.conf:<pre>
+$ sudo chown swift:swift /etc/swift/swift.conf
+$ sudo chmod 640 /etc/swift/swift.conf
+</pre>
+ 0. Configure swift rings
+** Create ring builder files <pre>
+$ cd /etc/swift
+$ sudo swift-ring-builder object.builder create 18 3 1
+$ sudo swift-ring-builder container.builder create 18 3 1
+$ sudo swift-ring-builder account.builder create 18 3 1
+</pre>
+** Add zones and balance the rings:<pre>
+$ cd /etc/swift
+$ sudo swift-ring-builder object.builder add z1-127.0.0.1:6010/device 1
+$ sudo swift-ring-builder object.builder add z2-127.0.0.1:6020/device 1
+$ sudo swift-ring-builder object.builder add z3-127.0.0.1:6030/device 1
+$ sudo swift-ring-builder object.builder add z4-127.0.0.1:6040/device 1
+$ sudo swift-ring-builder object.builder rebalance
+$ sudo swift-ring-builder container.builder add z1-127.0.0.1:6011/device 1
+$ sudo swift-ring-builder container.builder add z2-127.0.0.1:6021/device 1
+$ sudo swift-ring-builder container.builder add z3-127.0.0.1:6031/device 1
+$ sudo swift-ring-builder container.builder add z4-127.0.0.1:6041/device 1
+$ sudo swift-ring-builder container.builder rebalance
+$ sudo swift-ring-builder account.builder add z1-127.0.0.1:6012/device 1
+$ sudo swift-ring-builder account.builder add z2-127.0.0.1:6022/device 1
+$ sudo swift-ring-builder account.builder add z3-127.0.0.1:6032/device 1
+$ sudo swift-ring-builder account.builder add z4-127.0.0.1:6042/device 1
+$ sudo swift-ring-builder account.builder rebalance
+</pre>
+ 0. Adjust ownership of /etc/swift:<pre>
+$ sudo chown -R swift.swift /etc/swift
+</pre>
+ 0. adjust ownership of /var/cache/swift (12.10+):<pre>
+$ sudo chown -R swift.swift /var/cache/swift
+</pre>
+ 0. Create the keystone signing dir (13.04+):<pre>
+$ sudo mkdir /var/cache/swift/keystone-signing-dir
+$ sudo chown swift:swift /var/cache/swift/keystone-signing-dir
+</pre>
+ 0. Start the services:<pre>
+$ sudo swift-init main start # takes a while
+$ sudo swift-init rest start # takes a while
+</pre>
+ 0. Restart swift: <pre>
+$ sudo swift-init rest stop
+$ sudo swift-init main stop
+$ for i in `ls -1 /etc/init/swift* | cut -d '/' -f 4 | cut -d '.' -f 1` ; do sudo stop $i ; sudo start $i ; done
+</pre>
+
+=== neutron setup (13.10+, experimental) ===
+Neutron provides networking for !OpenStack and replaces nova-network on earlier releases and replaces Quantum. If you configured a system with nova-network installed, then you must completely disable it to start using neutron.
+ 0. Disable any networks from nova-network:<pre>
+$ sudo nova-manage floating list
+None	192.168.122.225	None	nova	eth0
+...
+$ sudo nova-manage floating delete 192.168.122.224/27
+$ sudo nova-manage floating list
+No floating IP addresses have been defined.
+$ sudo nova-manage network list
+id   	IPv4              	IPv6           	start address  	DNS1           	DNS2           	VlanID         	project        	uuid
+1    	10.0.0.0/24       	None           	10.0.0.2       	8.8.4.4        	None           	None           	None           	7bd0ebaa-a0bf-41d9-92e3-ec79c8a97cb4
+$ sudo nova-manage network delete --uuid=7bd0ebaa-a0bf-41d9-92e3-ec79c8a97cb4
+$ sudo nova-manage network list
+id   	IPv4              	IPv6           	start address  	DNS1           	DNS2           	VlanID         	project        	uuid
+No networks found
+$ nova network-list
+
+$
+</pre>
+ 0. Adjust /etc/nova/nova.conf to disable the network service:<pre>
+}}}
+ 0. Uninstall nova-network if it is installed:{{{
+$ sudo nova-manage service disable --host openstack-saucy-amd64 --service nova-network # --host is what is seen in 'sudo nova-manage service list'
+$ sudo service nova-network stop
+$ sudo apt-get remove nova-network
+</pre>
+ 0. Stop all of nova:<pre>
+$ for i in nova-api nova-scheduler nova-conductor nova-compute nova-objectstore ; do sudo service $i stop ; done
+</pre>
+ 0. Backup the nova mysql database:<pre>
+$ mysqldump -u root -p nova > ./nova-backup.sql
+</pre>
+ 0. Update the nova database to remove nova-network:<pre>
+$ mysql -u root -p nova -e "select id,service_id,hypervisor_hostname from compute_nodes"
++----+------------+-----------------------+
+| id | service_id | hypervisor_hostname   |
++----+------------+-----------------------+
+|  1 |          4 | openstack-saucy-amd64 |
++----+------------+-----------------------+
+
+$ for i in openstack-saucy-amd64 ; do mysql -u root -p nova -e "select id,host,topic from services where topic='network' and host='$i'" ; done
++----+-----------------------+---------+
+| id | host                  | topic   |
++----+-----------------------+---------+
+|  3 | openstack-saucy-amd64 | network |
++----+-----------------------+---------+
+
+$ for i in openstack-saucy-amd64 ; do mysql -u root -p nova -e "delete from services where topic='network' and host='$i'" ; done
+
+$ for i in openstack-saucy-amd64 ; do mysql -u root -p nova -e "select id,host,topic from services where topic='network' and host='$i'" ; done
+
+</pre>
+ 0. Start the nova services and verify everything is ok:<pre>
+$ for i in nova-api nova-scheduler nova-conductor nova-compute nova-objectstore ; do sudo service $i start ; done
+$ sleep 30 && sudo nova-manage service list
+Binary           Host                                 Zone             Status     State Updated_At
+nova-scheduler   openstack-saucy-amd64                internal         enabled    :-)   2014-06-20 13:55:04
+nova-conductor   openstack-saucy-amd64                internal         enabled    :-)   2014-06-20 13:55:04
+nova-compute     openstack-saucy-amd64                nova             enabled    :-)   2014-06-20 13:55:05
+nova-cert        openstack-saucy-amd64                internal         enabled    :-)   2014-06-20 13:55:05
+$ sudo nova-manage db sync
+$ for i in nova-api nova-scheduler nova-conductor nova-compute nova-objectstore ; do sudo service $i restart ; done
+$ sleep 30 && sudo nova-manage service list
+Binary           Host                                 Zone             Status     State Updated_At
+nova-scheduler   openstack-saucy-amd64                internal         enabled    :-)   2014-06-20 13:55:04
+nova-conductor   openstack-saucy-amd64                internal         enabled    :-)   2014-06-20 13:55:04
+nova-compute     openstack-saucy-amd64                nova             enabled    :-)   2014-06-20 13:55:05
+nova-cert        openstack-saucy-amd64                internal         enabled    :-)   2014-06-20 13:55:05
+</pre>
+ 0. Verify /etc/network/interfaces has:<pre>
+iface eth1 inet manual
+        up ifconfig $IFACE 0.0.0.0 up
+        up ifconfig $IFACE promisc
+iface eth1 inet6 manual
+</pre>
+# TODO: should we setup a static IP address for br-eth1 and then modify rc.local to have 'ifup br-eth1' so it has an IP address?
+# Install:<pre>
+$ sudo apt-get install neutron-server neutron-plugin-openvswitch neutron-plugin-openvswitch-agent neutron-dhcp-agent neutron-l3-agent
+</pre>
+# If you haven't already, add the neutron database to mysql (see above)
+# Configure core components for neutron by adjusting /etc/neutron/neutron.conf (TODO: update to use ML2 on 14.04):<pre>
+[DEFAULT]
+...
+core_plugin = neutron.plugins.openvswitch.ovs_neutron_plugin.OVSNeutronPluginV2
+...
+rpc_backend = neutron.openstack.common.rpc.impl_kombu
+...
+control_exchange = neutron
+...
+rabbit_host = localhost
+rabbit_password = rabbitmqpasswd
+rabbit_port = 5672
+rabbit_userid = nova
+rabbit_virtual_host = nova
+...
+notification_driver = neutron.openstack.common.notifier.rpc_notifier
+notification_driver = neutron.openstack.common.notifier.rabbit_notifier
+...
+[keystone_authtoken]
+auth_host = 127.0.0.1
+auth_port = 35357
+auth_protocol = http
+admin_tenant_name = services
+admin_user = neutron
+admin_password = neutron
+auth_url = http://localhost:35357/v2.0
+auth_strategy = keystone
+signing_dir = $state_path/keystone-signing
+...
+[database]
+connection = mysql://neutron:neutronmysqlpasswd@localhost/neutron
+</pre>
+ 0. Remove the sqlite database:<pre>
+$ sudo rm -f /var/lib/neutron/neutron.sqlite
+</pre>
+ 0. adjust /etc/neutron/api-paste.ini:<pre>
+[filter:authtoken]
+paste.filter_factory = keystoneclient.middleware.auth_token:filter_factory
+admin_tenant_name = services
+admin_user = neutron
+admin_password = neutron
+auth_uri = http://localhost:35357/v2.0
+</pre>
+ 0. Adjust neutron plugin:
+** 13.10: Adjust /etc/neutron/plugins/openvswitch/ovs_neutron_plugin.ini to have (TODO: should we just use 'vlan' here rather than 'local'):<pre>
+[ovs]
+tenant_network_type = local
+integration_bridge = br-int
+bridge_mappings = default:br-eth1
+...
+[database]
+connection = mysql://ovs_neutron:ovs_neutronmysqlpasswd@localhost/ovs_neutron
+...
+[securitygroup]
+firewall_driver = neutron.agent.linux.iptables_firewall.OVSHybridIptablesFirewallDriver
+</pre>
+** 14.04: TODO - equivalent for ML2
+ 0. Restart neutron:<pre>
+$ sudo service neutron-server restart
+neutron-server stop/waiting
+neutron-server start/running, process 17981
+</pre>
+ 0. Verify it worked:<pre>
+$ netstat -nl | egrep 9696
+tcp        0      0 0.0.0.0:9696            0.0.0.0:*               LISTEN
+</pre>
+* Restart neutron-plugin-openvswitch-agent:<pre>
+$ sudo service neutron-plugin-openvswitch-agent restart
+neutron-plugin-openvswitch-agent stop/waiting
+neutron-plugin-openvswitch-agent start/running, process 17033
+</pre>
+ 0. Adjust /etc/neutron/metadata_agent.ini to have:<pre>
+auth_url = http://localhost:5000/v2.0
+auth_region = RegionOne
+admin_tenant_name = services
+admin_user = neutron
+admin_password = neutron
+metadata_proxy_shared_secret = metadata_pass
+nova_metadata_ip = localhost
+</pre>
+ 0. Restart neutron-metadata-agent:<pre>
+$ sudo service neutron-metadata-agent restart
+neutron-metadata-agent stop/waiting
+neutron-metadata-agent start/running, process 17298
+</pre>
+ 0. Configure nova for neutron by adjusting /etc/nova/nova.conf to have:<pre>
+network_api_class=nova.network.neutronv2.api.API
+neutron_admin_username=neutron
+neutron_admin_password=neutron
+neutron_admin_auth_url=http://localhost:35357/v2.0/
+neutron_auth_strategy=keystone
+neutron_admin_tenant_name=services
+neutron_url=http://localhost:9696
+neutron_url=http://localhost:9696
+neutron_metadata_proxy_shared_secret=metadata_pass
+linuxnet_interface_driver = nova.network.linux_net.LinuxOVSInterfaceDriver
+firewall_driver=nova.virt.firewall.NoopFirewallDriver
+security_group_api=neutron
+</pre>
+* update the nova database:<pre>
+$ sudo nova-manage db sync
+</pre>
+* Restart nova and neutron:<pre>
+$ for i in nova-api nova-scheduler nova-conductor neutron-server ; do sudo service $i restart ; done
+nova-api stop/waiting
+nova-api start/running, process 11090
+nova-scheduler stop/waiting
+nova-scheduler start/running, process 11108
+nova-conductor stop/waiting
+nova-conductor start/running, process 11131
+neutron-server stop/waiting
+neutron-server start/running, process 11146
+</pre>
+* Verify it worked:<pre>
+$ netstat -n | egrep '5672'
+tcp        0      0 127.0.0.1:38233         127.0.0.1:5672          ESTABLISHED
+tcp        0      0 127.0.0.1:38281         127.0.0.1:5672          ESTABLISHED
+...
+</pre>
+ 0. Add internal and external openvswitch bridges:<pre>
+$ sudo ovs-vsctl list-br
+$ sudo ovs-vsctl add-br br-int
+$ sudo ovs-vsctl list-br
+br-int
+</pre>
+ 0. Add the br-eth1 bridge and port:<pre>
+$ sudo ovs-vsctl add-br br-eth1
+$ sudo ovs-vsctl list-br
+br-eth1
+br-int
+$ sudo ovs-vsctl add-port br-eth1 eth1
+$ sudo ovs-vsctl list-ports br-eth1
+eth1
+$ sudo ovs-vsctl show
+8648ecc4-5c91-4eaa-8361-a9f764cbbf02
+    Bridge br-int
+        Port br-int
+            Interface br-int
+                type: internal
+        Port "int-br-eth1"
+            Interface "int-br-eth1"
+    Bridge "br-eth1"
+        Port "eth1"
+            Interface "eth1"
+        Port "br-eth1"
+            Interface "br-eth1"
+                type: internal
+        Port "phy-br-eth1"
+            Interface "phy-br-eth1"
+    ovs_version: "1.10.2"
+</pre>
+ 0. Restart openvswitch-switch:<pre>
+$ sudo service openvswitch-switch restart
+openvswitch-switch stop/waiting
+openvswitch-switch start/running
+</pre>
+ 0. Adjust /etc/sysctl.conf to have:<pre>
+net.ipv4.ip_forward=1
+net.ipv4.conf.all.rp_filter=0
+net.ipv4.conf.default.rp_filter=0
+</pre>
+ 0. Update sysctl:<pre>
+$ sudo sysctl -p
+net.ipv4.ip_forward = 1
+net.ipv4.conf.all.rp_filter = 0
+net.ipv4.conf.default.rp_filter = 0
+</pre>
+ 0. Adjust /etc/neutron/dhcp_agent.ini to have (TODO: 14.04 and ML2?):<pre>
+interface_driver = neutron.agent.linux.interface.OVSInterfaceDriver
+dhcp_driver = neutron.agent.linux.dhcp.Dnsmasq
+use_namespaces = True
+</pre>
+ 0. Restart the DHCP agent:<pre>
+$ sudo service neutron-dhcp-agent restart
+neutron-dhcp-agent stop/waiting
+neutron-dhcp-agent start/running, process 4626
+</pre>
+ 0. Adjust /etc/neutron/l3_agent.ini to have (TODO: 14.04 and ML2?):<pre>
+interface_driver = neutron.agent.linux.interface.OVSInterfaceDriver
+use_namespaces = True
+</pre>
+ 0. Restart the neutron-l3-agent:<pre>
+$ sudo service neutron-l3-agent restart
+neutron-l3-agent stop/waiting
+neutron-l3-agent start/running, process 15762
+</pre>
+
+== OpenStack tenants, users, and roles (12.04 LTS+) ==
+By this point, the packages should be installed and configured to work together. Specifically:
+* nova, glance and keystone can use mysql
+* nova should be able to talk to rabbitmq
+* nova is configured to use the local keystone for authentication
+* glance is configured to use the keystone flavor
+* nova, glance and keystone are all up and running on the localhost
+
+Now we need to setup various tenants in keystone. Tenants form the basis for users and services, and users, services and roles combine to form various access controls and permissions within !OpenStack.
+
+=== Create tenants ===
+ 0. create an admin tenant:<pre>
+$ keystone tenant-create --name "admin" --description "Admin tenant"
++-------------+----------------------------------+
+|   Property  |              Value               |
++-------------+----------------------------------+
+| description | Admin tenant                     |
+| enabled     | True                             |
+| id          | ec949719d82c442cb32729be66e2e8ae |
+| name        | admin                            |
++-------------+----------------------------------+
+</pre>
+ For ease of use, export the admin tenant id based on the above:<pre>
+export ADMIN_TENANT_ID=ec949719d82c442cb32729be66e2e8ae
+</pre>
+ 0. create a users tenant:<pre>
+$ keystone tenant-create --name "users" --description "Users tenant"
++-------------+----------------------------------+
+|   Property  |              Value               |
++-------------+----------------------------------+
+| description | Users tenant                     |
+| enabled     | True                             |
+| id          | 9deb2be4a0db4644905a3f752cf5f010 |
+| name        | users                            |
++-------------+----------------------------------+
+</pre>
+ For ease of use, export the client tenant id based on the above:<pre>
+export USERS_TENANT_ID=9deb2be4a0db4644905a3f752cf5f010
+</pre>
+ 0. create a service tenant:<pre>
+$ keystone tenant-create --name "services" --description "Services tenant"
++-------------+----------------------------------+
+|   Property  |              Value               |
++-------------+----------------------------------+
+| description | Services tenant                  |
+| enabled     | True                             |
+| id          | 7ecb9778577446929e3e93e10f6f6347 |
+| name        | services                         |
++-------------+----------------------------------+
+</pre>
+ For ease of use, export the servant tenant id based on the above:<pre>
+export SERVICES_TENANT_ID=7ecb9778577446929e3e93e10f6f6347
+</pre>
+
+=== Roles ===
+ 0. Create the Member role:<pre>
+$ keystone role-create --name Member
++----------+----------------------------------+
+| Property |              Value               |
++----------+----------------------------------+
+| id       | 6eb5cff58ad94114ae1131511d15b0d7 |
+| name     | Member                           |
++----------+----------------------------------+
+$ export MEMBER_ROLE_ID=6eb5cff58ad94114ae1131511d15b0d7
+</pre>
+ 0. Create the admin role:<pre>
+$ keystone role-create --name admin
++----------+----------------------------------+
+| Property |              Value               |
++----------+----------------------------------+
+| id       | 836c77dd3e5b4720bc93f06ed0e5f4f3 |
+| name     | admin                            |
++----------+----------------------------------+
+$ export ADMIN_ROLE_ID=836c77dd3e5b4720bc93f06ed0e5f4f3
+</pre>
+ 0. On 14.04 LTS and higher, create the heat_stack_user role:<pre>
+$ keystone role-create --name heat_stack_user
++----------+----------------------------------+
+| Property |              Value               |
++----------+----------------------------------+
+|    id    | 47c5d459fdf447fcae630c4a92dce6d0 |
+|   name   |         heat_stack_user          |
++----------+----------------------------------+
+</pre>
+
+=== Users ===
+ 0. Create an admin user in keystone:<pre>
+$ keystone user-create --tenant_id $ADMIN_TENANT_ID --name admin --pass adminpasswd --enabled true
++----------+-------------------------------------------------------------------------------------------------------------------------+
+| Property |                                                          Value                                                          |
++----------+-------------------------------------------------------------------------------------------------------------------------+
+| email    | None                                                                                                                    |
+| enabled  | true                                                                                                                    |
+| id       | 00869ca8093f4187a9188473a84d7fd1                                                                                        |
+| name     | admin                                                                                                                   |
+| password | $6$rounds=40000$mrA5YzZ9EgoC0LV3$3en5FCybROr0T..z2QwgYcQZhS3gGmq6B/4Tcd8VZ5vzYm/ecivlIUbe9zc9j2/Iels960kVz1.O4DL.28EVj/ |
+| tenantId | ec949719d82c442cb32729be66e2e8ae                                                                                        |
++----------+-------------------------------------------------------------------------------------------------------------------------+
+$ export ADMIN_USER_ID=00869ca8093f4187a9188473a84d7fd1
+</pre>
+ 12.04 LTS:<pre>
+$ keystone user-role-add --user $ADMIN_USER_ID --tenant_id $ADMIN_TENANT_ID --role $ADMIN_ROLE_ID
+</pre>
+ 12.10:<pre>
+$ keystone user-role-add --user_id $ADMIN_USER_ID --tenant_id $ADMIN_TENANT_ID --role_id $ADMIN_ROLE_ID
+</pre>
+ 0. Create a glance user in keystone:<pre>
+$ keystone user-create --tenant_id $SERVICES_TENANT_ID --name glance --pass glance --enabled true
++----------+-------------------------------------------------------------------------------------------------------------------------+
+| Property |                                                          Value                                                          |
++----------+-------------------------------------------------------------------------------------------------------------------------+
+| email    | None                                                                                                                    |
+| enabled  | true                                                                                                                    |
+| id       | d151c25d87384b7bb2231dd1d546c80f                                                                                        |
+| name     | glance                                                                                                                  |
+| password | ...                                                                                                                     |
+| tenantId | 7ecb9778577446929e3e93e10f6f6347                                                                                        |
++----------+-------------------------------------------------------------------------------------------------------------------------+
+$ export GLANCE_USER_ID=d151c25d87384b7bb2231dd1d546c80f
+</pre>
+ 12.04 LTS:<pre>
+$ keystone user-role-add --user $GLANCE_USER_ID --tenant_id $SERVICES_TENANT_ID --role $ADMIN_ROLE_ID
+</pre>
+ 12.10:<pre>
+$ keystone user-role-add --user_id $GLANCE_USER_ID --tenant_id $SERVICES_TENANT_ID --role_id $ADMIN_ROLE_ID
+</pre>
+ 0. Create a nova user in keystone:<pre>
+$ keystone user-create --tenant_id $SERVICES_TENANT_ID --name nova --pass nova --enabled true
++----------+-------------------------------------------------------------------------------------------------------------------------+
+| Property |                                                          Value                                                          |
++----------+-------------------------------------------------------------------------------------------------------------------------+
+| email    | None                                                                                                                    |
+| enabled  | true                                                                                                                    |
+| id       | b566a3ccf3ad4d9dbe2b83f5a4b971cadd1d546c80f                                                                             |
+| name     | nova                                                                                                                    |
+| password | ...                                                                                                                     |
+| tenantId | 7ecb9778577446929e3e93e10f6f6347                                                                                        |
++----------+-------------------------------------------------------------------------------------------------------------------------+
+$ export NOVA_USER_ID=b566a3ccf3ad4d9dbe2b83f5a4b971ca
+</pre>
+ 12.04 LTS:<pre>
+$ keystone user-role-add --user $NOVA_USER_ID --tenant_id $SERVICES_TENANT_ID  --role $ADMIN_ROLE_ID
+</pre>
+ 12.10:<pre>
+$ keystone user-role-add --user_id $NOVA_USER_ID --tenant_id $SERVICES_TENANT_ID --role_id $ADMIN_ROLE_ID
+</pre>
+ 0. create a cinder user in keystone (12.10+):<pre>
+$ keystone user-create --tenant_id $SERVICES_TENANT_ID --name cinder --pass cinder --enabled true
++----------+-------------------------------------------------------------------------------------------------------------------------+
+| Property |                                                          Value                                                          |
++----------+-------------------------------------------------------------------------------------------------------------------------+
+|  email   |                                                                                                                         |
+| enabled  |                                                           True                                                          |
+|    id    |                                             69212f8f08c94977b1b2da5520ef63b7                                            |
+|   name   |                                                          cinder                                                         |
+| password | $6$rounds=40000$GJxCEBeFDo9QJqkx$Yf4quoM3kFmO/jgjqzPBzhCXKicPZczYYbwFz070mm2Cl3D31pr/1kqpvUx1ndftgzqqo3Vfg7BuvBhaP67860 |
+| tenantId |                                             6848eb90f2184084af4de2a9268ceae3                                            |
++----------+-------------------------------------------------------------------------------------------------------------------------+
+$ export CINDER_USER_ID=69212f8f08c94977b1b2da5520ef63b7
+$ keystone user-role-add --user_id $CINDER_USER_ID --tenant_id $SERVICES_TENANT_ID --role_id $ADMIN_ROLE_ID
+</pre>
+ 0. create a heat user in keystone (13.10+) (Note: do not include --tenant_id here):<pre>
+$ keystone user-create --name heat --pass heat --enabled true
++----------+----------------------------------+
+| Property |              Value               |
++----------+----------------------------------+
+|  email   |                                  |
+| enabled  |               True               |
+|    id    | 7458d307358347c985764eeb7abba8cb |
+|   name   |               heat               |
++----------+----------------------------------+
+$ export HEAT_USER_ID=7458d307358347c985764eeb7abba8cb
+$ keystone user-role-add --user_id $HEAT_USER_ID --tenant_id $SERVICES_TENANT_ID --role_id $ADMIN_ROLE_ID
+</pre>
+ 0. create a swift user in keystone (12.04+):<pre>
+$ keystone user-create --tenant_id $SERVICES_TENANT_ID --name swift --pass swift --enabled true
++----------+-------------------------------------------------------------------------------------------------------------------------+
+| Property |                                                          Value                                                          |
++----------+-------------------------------------------------------------------------------------------------------------------------+
+| email    | None                                                                                                                    |
+| enabled  | True                                                                                                                    |
+| id       | e92d45b4af07418eaaba17ad66f1b7c0                                                                                        |
+| name     | swift                                                                                                                   |
+| password | $6$rounds=40000$S544Q1bxFWgxsyXe$5xZNh6v714tmdNwkpA5qux5ZpaxuSCYUVWYcQ.9DVI0jvsJyxsTpr7SpuAutgBcF77cVk7.vRcozTcPQgDZvm. |
+| tenantId | 27b5af4a40ec44d6af28d7b04715d4a3                                                                                        |
++----------+-------------------------------------------------------------------------------------------------------------------------+
+$ export SWIFT_USER_ID=e92d45b4af07418eaaba17ad66f1b7c0
+</pre>
+ 12.04 LTS:<pre>
+$ keystone user-role-add --user $SWIFT_USER_ID --tenant $SERVICES_TENANT_ID --role $ADMIN_ROLE_ID
+</pre>
+ 12.10:<pre>
+$ keystone user-role-add --user_id $SWIFT_USER_ID --tenant_id $SERVICES_TENANT_ID --role_id $ADMIN_ROLE_ID
+</pre>
+
+ 0. create a neutron user in keystone (13.10+)  (Note: do not include --tenant_id here):<pre>
+$ keystone user-create --name neutron --pass neutron --enabled true
++----------+----------------------------------+
+| Property |              Value               |
++----------+----------------------------------+
+|  email   |                                  |
+| enabled  |               True               |
+|    id    | 03e61dbc66b143a6907c6fba620b85ec |
+|   name   |             neutron              |
+| tenantId | 4b155073131748f0ac9a7d3f0d2586c0 |
++----------+----------------------------------+
+$ export NEUTRON_USER_ID=03e61dbc66b143a6907c6fba620b85ec
+$ keystone user-role-add --user_id $NEUTRON_USER_ID --tenant_id $SERVICES_TENANT_ID --role_id $ADMIN_ROLE_ID
+</pre>
+
+=== Verify ===
+ 0. verify the tenants:<pre>
+$ keystone tenant-list
++----------------------------------+----------+---------+
+|                id                |   name   | enabled |
++----------------------------------+----------+---------+
+| 7ecb9778577446929e3e93e10f6f6347 | services | True    |
+| 9deb2be4a0db4644905a3f752cf5f010 | users    | True    |
+| ec949719d82c442cb32729be66e2e8ae | admin    | True    |
++----------------------------------+----------+---------+
+</pre>
+ 0. Verify roles:<pre>
+$ keystone role-list
++----------------------------------+--------+
+|                id                |  name  |
++----------------------------------+--------+
+| 6eb5cff58ad94114ae1131511d15b0d7 | Member |
+| 836c77dd3e5b4720bc93f06ed0e5f4f3 | admin  |
++----------------------------------+--------+
+</pre>
+ 0. Verify users (output slightly different on 12.10 (it will also have a cinder user) and 13.10 (it will have heat and neutron users):<pre>
+$ keystone user-list
++----------------------------------+---------+-------+--------+
+|                id                | enabled | email |  name  |
++----------------------------------+---------+-------+--------+
+| 00869ca8093f4187a9188473a84d7fd1 | true    | None  | admin  |
+| b566a3ccf3ad4d9dbe2b83f5a4b971ca | true    | None  | nova   |
+| d151c25d87384b7bb2231dd1d546c80f | true    | None  | glance |
++----------------------------------+---------+-------+--------+
+</pre>
+
+== OpenStack services and endpoints ==
+Now we can start creating the services that !OpenStack will support and create endpoints based on these. Endpoints are what client tools will communicate with to utilize the services.
+
+=== Services ===
+ 0. Create the image service:<pre>
+$ keystone service-create --name glance --type image --description "Openstack Image Service"
++-------------+----------------------------------+
+|   Property  |              Value               |
++-------------+----------------------------------+
+| description | Openstack Image Service          |
+| id          | b490a930975b42acaf930fa3703e2c77 |
+| name        | glance                           |
+| type        | image                            |
++-------------+----------------------------------+
+$ export GLANCE_SERVICE_ID=b490a930975b42acaf930fa3703e2c77
+</pre>
+ 0. Create the compute service:<pre>
+$ keystone service-create --name nova --type compute --description "Nova compute service"
++-------------+----------------------------------+
+|   Property  |              Value               |
++-------------+----------------------------------+
+| description | Nova compute service             |
+| id          | 0661c898e1134fec950d64b65149489b |
+| name        | nova                             |
+| type        | compute                          |
++-------------+----------------------------------+
+$ export NOVA_SERVICE_ID=0661c898e1134fec950d64b65149489b
+</pre>
+ 0. Create the EC2 compatibility layer service:<pre>
+$ keystone service-create --name ec2 --type ec2 --description "EC2 compatability layer"
++-------------+----------------------------------+
+|   Property  |              Value               |
++-------------+----------------------------------+
+| description | EC2 compatability layer          |
+| id          | b0d3b407616a4f1faee28cebeb1eb78c |
+| name        | ec2                              |
+| type        | ec2                              |
++-------------+----------------------------------+
+$ export EC2_SERVICE_ID=b0d3b407616a4f1faee28cebeb1eb78c
+</pre>
+ 0. Create the identity service:<pre>
+$ keystone service-create --name keystone --type identity --description "Keystone identity service"
++-------------+----------------------------------+
+|   Property  |              Value               |
++-------------+----------------------------------+
+| description | Keystone identity service        |
+| id          | bd639962a35446238812030b270d05cf |
+| name        | keystone                         |
+| type        | identity                         |
++-------------+----------------------------------+
+$ export KEYSTONE_SERVICE_ID=bd639962a35446238812030b270d05cf
+</pre>
+ 0. Create the nova-volume service (12.10 and below):<pre>
+$ keystone service-create --name nova-volume --type volume --description "Nova volume service"
++-------------+----------------------------------+
+|   Property  |              Value               |
++-------------+----------------------------------+
+| description |       Nova volume service        |
+|      id     | 62aa972d9ba0432c9f331708dc2bdfc9 |
+|     name    |           nova-volume            |
+|     type    |              volume              |
++-------------+----------------------------------+
+$ export NOVA_VOLUME_ID=62aa972d9ba0432c9f331708dc2bdfc9
+</pre>
+ 0. Create the cinder volume service (12.10+):<pre>
+$ keystone service-create --name cinder --type volume --description "Cinder volume service"
++-------------+----------------------------------+
+|   Property  |              Value               |
++-------------+----------------------------------+
+| description |      Cinder volume service       |
+|      id     | 95b02339c5a844f2a02ec8b26376475b |
+|     name    |              cinder              |
+|     type    |              volume              |
++-------------+----------------------------------+
+$ export CINDER_VOLUME_ID=95b02339c5a844f2a02ec8b26376475b
+</pre>
+ 0. Create the heat services (13.10+):<pre>
+$ keystone service-create --name heat --type orchestration --description "Heat Orchestration API"
++-------------+----------------------------------+
+|   Property  |              Value               |
++-------------+----------------------------------+
+| description |      Heat Orchestration API      |
+|      id     | c9c6dbc511e24e66b0acea89e35e3f5a |
+|     name    |               heat               |
+|     type    |          orchestration           |
++-------------+----------------------------------+
+$ export HEAT_ORCHESTRATION_ID=c9c6dbc511e24e66b0acea89e35e3f5a
+$ keystone service-create --name heat-cfn --type cloudformation --description "Heat CloudFormation API"
++-------------+----------------------------------+
+|   Property  |              Value               |
++-------------+----------------------------------+
+| description |     Heat CloudFormation API      |
+|      id     | e8e568475cc74793a21395c525eccf8f |
+|     name    |             heat-cfn             |
+|     type    |          cloudformation          |
++-------------+----------------------------------+
+$ export HEAT_CLOUDFORM_ID=e8e568475cc74793a21395c525eccf8f
+</pre>
+ 0. Create the swift service (12.04+):<pre>
+$ keystone service-create --name swift --type object-store --description "Swift storage service"
++-------------+----------------------------------+
+|   Property  |              Value               |
++-------------+----------------------------------+
+| description | Swift storage service            |
+| id          | b95b453356a24625ab01aaa0fc9620f3 |
+| name        | swift                            |
+| type        | object-store                     |
++-------------+----------------------------------+
+$ export SWIFT_STORAGE_ID=b95b453356a24625ab01aaa0fc9620f3
+</pre>
+ 0. Create the neutron service (13.10+):<pre>
+$ keystone service-create --name neutron --type network --description "OpenStack Networking Service"
++-------------+----------------------------------+
+|   Property  |              Value               |
++-------------+----------------------------------+
+| description |   OpenStack Networking Service   |
+|      id     | 8445140fa1eb46d096e5975caf5fd215 |
+|     name    |             neutron              |
+|     type    |             network              |
++-------------+----------------------------------+
+$ export NEUTRON_NETWORK_ID=8445140fa1eb46d096e5975caf5fd215
+</pre>
+ 0. Create the endpoint for the image service (glance):<pre>
+$ keystone endpoint-create --region RegionOne --service_id $GLANCE_SERVICE_ID --publicurl http://localhost:9292/v1 --adminurl http://localhost:9292/v1 --internalurl http://localhost:9292/v1
++-------------+----------------------------------+
+|   Property  |              Value               |
++-------------+----------------------------------+
+| adminurl    | http://localhost:9292/v1         |
+| id          | af6ac78dac2844c09619b2536d5661e2 |
+| internalurl | http://localhost:9292/v1         |
+| publicurl   | http://localhost:9292/v1         |
+| region      | RegionOne                        |
+| service_id  | b490a930975b42acaf930fa3703e2c77 |
++-------------+----------------------------------+
+</pre>
+** '''OPTIONAL''': On folsom (Ubuntu 12.10) and higher, can specify another endpoint that uses a different API (eg, 'v2' -- see `curl -v http://localhost:9292/versions` for supported API versions) with:<pre>
+$ keystone endpoint-create --region RegionOne --service_id $GLANCE_SERVICE_ID --publicurl http://localhost:9292/v2 --adminurl http://localhost:9292/v2 --internalurl http://localhost:9292/v2
++-------------+----------------------------------+
+|   Property  |              Value               |
++-------------+----------------------------------+
+|   adminurl  |     http://localhost:9292/v2     |
+|      id     | 4934bd662add4c369793ad4568f9ee9e |
+| internalurl |     http://localhost:9292/v2     |
+|  publicurl  |     http://localhost:9292/v2     |
+|    region   |            RegionOne             |
+|  service_id | b490a930975b42acaf930fa3703e2c77 |
++-------------+----------------------------------+
+  }}}
+ 0. Create the endpoint for the compute service (nova):{{{
+$ keystone endpoint-create --region RegionOne --service_id $NOVA_SERVICE_ID --publicurl "http://localhost:8774/v1.1/\$(tenant_id)s" --adminurl "http://localhost:8774/v1.1/\$(tenant_id)s" --internalurl "http://localhost:8774/v1.1/\$(tenant_id)s"
++-------------+------------------------------------------+
+|   Property  |                  Value                   |
++-------------+------------------------------------------+
+| adminurl    | http://localhost:8774/v1.1/$(tenant_id)s |
+| id          | a91042f9b0974bedb58d1e86b0c0da19         |
+| internalurl | http://localhost:8774/v1.1/$(tenant_id)s |
+| publicurl   | http://localhost:8774/v1.1/$(tenant_id)s |
+| region      | RegionOne                                |
+| service_id  | 0661c898e1134fec950d64b65149489b         |
++-------------+------------------------------------------+
+</pre>
+ 0. Create the endpoint for the EC2 compatibility service:<pre>
+$ keystone endpoint-create --region RegionOne --service_id $EC2_SERVICE_ID --publicurl http://localhost:8773/services/Cloud --adminurl http://localhost:8773/services/Cloud --internalurl http://localhost:8773/services/Cloud
++-------------+--------------------------------------+
+|   Property  |                Value                 |
++-------------+--------------------------------------+
+| adminurl    | http://localhost:8773/services/Cloud |
+| id          | 791db816885349e79481db8e2d92ae16     |
+| internalurl | http://localhost:8773/services/Cloud |
+| publicurl   | http://localhost:8773/services/Cloud |
+| region      | RegionOne                            |
+| service_id  | b0d3b407616a4f1faee28cebeb1eb78c     |
++-------------+--------------------------------------+
+</pre>
+ 0. Create the endpoint for the identity service (keystone):<pre>
+$ keystone endpoint-create --region RegionOne --service_id $KEYSTONE_SERVICE_ID  --publicurl http://localhost:5000/v2.0 --adminurl http://localhost:35357/v2.0 --internalurl http://localhost:5000/v2.0
++-------------+----------------------------------+
+|   Property  |              Value               |
++-------------+----------------------------------+
+| adminurl    | http://localhost:35357/v2.0      |
+| id          | 41272efb56194e78b6497e79a2285f4c |
+| internalurl | http://localhost:5000/v2.0       |
+| publicurl   | http://localhost:5000/v2.0       |
+| region      | RegionOne                        |
+| service_id  | bd639962a35446238812030b270d05cf |
++-------------+----------------------------------+
+</pre>
+ 0. Create the endpoint for the nova volume service (12.10 and below):<pre>
+$ keystone endpoint-create --region RegionOne --service_id $NOVA_VOLUME_ID --publicurl "http://localhost:8776/v1/\$(tenant_id)s" --adminurl "http://localhost:8776/v1/\$(tenant_id)s" --internalurl "http://localhost:8776/v1/\$(tenant_id)s"
++-------------+----------------------------------------+
+|   Property  |                 Value                  |
++-------------+----------------------------------------+
+|   adminurl  | http://localhost:8776/v1/$(tenant_id)s |
+|      id     |    cb2b92ceecdb4319a32156f6dfc2f7ae    |
+| internalurl | http://localhost:8776/v1/$(tenant_id)s |
+|  publicurl  | http://localhost:8776/v1/$(tenant_id)s |
+|    region   |               RegionOne                |
+|  service_id |    62aa972d9ba0432c9f331708dc2bdfc9    |
++-------------+----------------------------------------+
+</pre>
+ 0. Create the endpoint for the cinder volume service (12.10+ - '''IMPORTANT''': this will override the nova-volume service):<pre>
+$ keystone endpoint-create --region RegionOne --service_id $CINDER_VOLUME_ID --publicurl "http://localhost:8776/v1/\$(tenant_id)s" --adminurl "http://localhost:8776/v1/\$(tenant_id)s" --internalurl "http://localhost:8776/v1/\$(tenant_id)s"
++-------------+----------------------------------------+
+|   Property  |                 Value                  |
++-------------+----------------------------------------+
+|   adminurl  | http://localhost:8776/v1/$(tenant_id)s |
+|      id     |    5cccb5d952824b89ba8ceb6d7d77b881    |
+| internalurl | http://localhost:8776/v1/$(tenant_id)s |
+|  publicurl  | http://localhost:8776/v1/$(tenant_id)s |
+|    region   |               RegionOne                |
+|  service_id |    95b02339c5a844f2a02ec8b26376475b    |
++-------------+----------------------------------------+
+</pre>
+ 0. Create the endpoint for the heat orchestration service (13.10+):<pre>
+$ keystone endpoint-create --region RegionOne --service_id $HEAT_ORCHESTRATION_ID --publicurl http://localhost:8004/v1/%\(tenant_id\)s --internalurl http://localhost:8004/v1/%\(tenant_id\)s --adminurl http://localhost:8004/v1/%\(tenant_id\)s
++-------------+----------------------------------------+
+|   Property  |                 Value                  |
++-------------+----------------------------------------+
+|   adminurl  | http://localhost:8004/v1/%(tenant_id)s |
+|      id     |    57148358a3344524976c4ac4eb02ba4e    |
+| internalurl | http://localhost:8004/v1/%(tenant_id)s |
+|  publicurl  | http://localhost:8004/v1/%(tenant_id)s |
+|    region   |               RegionOne                |
+|  service_id |    94d40e0b8f674b268da487e613ad6345    |
++-------------+----------------------------------------+
+$ keystone endpoint-create --region RegionOne --service-id $HEAT_CLOUDFORM_ID --publicurl http://localhost:8000/v1 --internalurl http://localhost:8000/v1 --adminurl http://localhost:8000/v1
++-------------+----------------------------------+
+|   Property  |              Value               |
++-------------+----------------------------------+
+|   adminurl  |     http://localhost:8000/v1     |
+|      id     | f7e64f33494f4a488ac528eabff9b1f1 |
+| internalurl |     http://localhost:8000/v1     |
+|  publicurl  |     http://localhost:8000/v1     |
+|    region   |            RegionOne             |
+|  service_id | e8e568475cc74793a21395c525eccf8f |
++-------------+----------------------------------+
+</pre>
+ 0. Create the endpoint for the swift storage service (12.04+):<pre>
+$ keystone endpoint-create --region RegionOne --service_id $SWIFT_STORAGE_ID --publicurl 'http://localhost:8080/v1/AUTH_$(tenant_id)s' --adminurl 'http://localhost:8080/v1' --internalurl 'http://localhost:8080/v1/AUTH_$(tenant_id)s'
++-------------+---------------------------------------------+
+|   Property  |                    Value                    |
++-------------+---------------------------------------------+
+| adminurl    | http://localhost:8080/v1                    |
+| id          | 6ae033fabf424fd39edbfd2ff1a02172            |
+| internalurl | http://localhost:8080/v1/AUTH_$(tenant_id)s |
+| publicurl   | http://localhost:8080/v1/AUTH_$(tenant_id)s |
+| region      | RegionOne                                   |
+| service_id  | b95b453356a24625ab01aaa0fc9620f3            |
++-------------+---------------------------------------------+
+</pre>
+ 0. Create the endpoint for the neutron network service (13.10+):<pre>
+$ keystone endpoint-create --region RegionOne --service-id $NEUTRON_NETWORK_ID --publicurl http://localhost:9696/ --adminurl http://localhost:9696/ --internalurl http://localhost:9696/
++-------------+----------------------------------+
+|   Property  |              Value               |
++-------------+----------------------------------+
+|   adminurl  |      http://localhost:9696       |
+|      id     | 868560ade1274b6cb3d5b210ada68322 |
+| internalurl |      http://localhost:9696       |
+|  publicurl  |      http://localhost:9696       |
+|    region   |            RegionOne             |
+|  service_id | 8445140fa1eb46d096e5975caf5fd215 |
++-------------+----------------------------------+
+</pre>
+ 0. Verify with:<pre>
+$ keystone service-list # 12.10+ also has cinder, 13.10+ has heat
++----------------------------------+-------------+--------------+---------------------------+
+|                id                |   name      |   type       |        description        |
++----------------------------------+-------------+--------------+---------------------------+
+| 0661c898e1134fec950d64b65149489b | nova        | compute      | Nova compute service      |
+| 62aa972d9ba0432c9f331708dc2bdfc9 | nova-volume | volume       | Nova volume service       |
+| b95b453356a24625ab01aaa0fc9620f3 | swift       | object-store | Swift storage service     |
+| b0d3b407616a4f1faee28cebeb1eb78c | ec2         | ec2          | EC2 compatability layer   |
+| b490a930975b42acaf930fa3703e2c77 | glance      | image        | Openstack Image Service   |
+| bd639962a35446238812030b270d05cf | keystone    | identity     | Keystone identity service |
++----------------------------------+-------------+--------------+---------------------------+
+$ keystone endpoint-list # 12.10+ also has cinder, 13.10+ has heat
++----------------------------------+-----------+---------------------------------------------+---------------------------------------------+------------------------------------------+
+|                id                |   region  |                publicurl                    |               internalurl                   |                adminurl                  |
++----------------------------------+-----------+---------------------------------------------+---------------------------------------------+------------------------------------------+
+| 41272efb56194e78b6497e79a2285f4c | RegionOne | http://localhost:5000/v2.0                  | http://localhost:5000/v2.0                  | http://localhost:5000/v2.0               |
+| 791db816885349e79481db8e2d92ae16 | RegionOne | http://localhost:8773/services/Cloud        | http://localhost:8773/services/Cloud        | http://localhost:8773/services/Cloud     |
+| a91042f9b0974bedb58d1e86b0c0da19 | RegionOne | http://localhost:8774/v1.1/$(tenant_id)s    | http://localhost:8774/v1.1/$(tenant_id)s    | http://localhost:8774/v1.1/$(tenant_id)s |
+| af6ac78dac2844c09619b2536d5661e2 | RegionOne | http://localhost:9292/v1                    | http://localhost:9292/v1                    | http://localhost:9292/v1                 |
+| cb2b92ceecdb4319a32156f6dfc2f7ae | RegionOne | http://localhost:8776/v1/$(tenant_id)s      | http://localhost:8776/v1/$(tenant_id)s      | http://localhost:8776/v1/$(tenant_id)s   |
+| 6ae033fabf424fd39edbfd2ff1a02172 | RegionOne | http://localhost:8080/v1/AUTH_$(tenant_id)s | http://localhost:8080/v1/AUTH_$(tenant_id)s | http://localhost:8080/v1                 |
++----------------------------------+-----------+---------------------------------------------+------------------------------------------+---------------------------------------------+
+</pre>
+ 0. Verify the catalog:<pre>
+$ unset SERVICE_ENDPOINT
+$ unset SERVICE_TOKEN
+$ export OS_USERNAME=admin OS_PASSWORD=adminpasswd OS_TENANT_NAME=admin OS_AUTH_URL=http://localhost:5000/v2.0/
+$ keystone catalog
+Service: image
++-------------+--------------------------+
+|   Property  |          Value           |
++-------------+--------------------------+
+| adminURL    | http://localhost:9292/v1 |
+| internalURL | http://localhost:9292/v1 |
+| publicURL   | http://localhost:9292/v1 |
+| region      | RegionOne                |
++-------------+--------------------------+
+Service: compute
++-------------+-------------------------------------------------------------+
+|   Property  |                            Value                            |
++-------------+-------------------------------------------------------------+
+| adminURL    | http://localhost:8774/v1.1/ec949719d82c442cb32729be66e2e8ae |
+| internalURL | http://localhost:8774/v1.1/ec949719d82c442cb32729be66e2e8ae |
+| publicURL   | http://localhost:8774/v1.1/ec949719d82c442cb32729be66e2e8ae |
+| region      | RegionOne                                                   |
++-------------+-------------------------------------------------------------+
+Service: ec2
++-------------+--------------------------------------+
+|   Property  |                Value                 |
++-------------+--------------------------------------+
+| adminURL    | http://localhost:8773/services/Cloud |
+| internalURL | http://localhost:8773/services/Cloud |
+| publicURL   | http://localhost:8773/services/Cloud |
+| region      | RegionOne                            |
++-------------+--------------------------------------+
+Service: object-store
++-------------+----------------------------------------------------------------+
+|   Property  |                             Value                              |
++-------------+----------------------------------------------------------------+
+| adminURL    | http://localhost:8080/v1                                       |
+| internalURL | http://localhost:8080/v1/AUTH_5c7aadef135d4921ae53509531369321 |
+| publicURL   | http://localhost:8080/v1/AUTH_5c7aadef135d4921ae53509531369321 |
+| region      | RegionOne                                                      |
++-------------+----------------------------------------------------------------+
+Service: identity
++-------------+-----------------------------+
+|   Property  |            Value            |
++-------------+-----------------------------+
+| adminURL    | http://localhost:35357/v2.0 |
+| internalURL | http://localhost:5000/v2.0  |
+| publicURL   | http://localhost:5000/v2.0  |
+| region      | RegionOne                   |
++-------------+-----------------------------+
+Service: volume
++-------------+-----------------------------------------------------------+
+|   Property  |                           Value                           |
++-------------+-----------------------------------------------------------+
+|   adminURL  | http://localhost:8776/v1/448c5952839d4b52aa87ff61c4c8950a |
+|      id     |              cb2b92ceecdb4319a32156f6dfc2f7ae             |
+| internalURL | http://localhost:8776/v1/448c5952839d4b52aa87ff61c4c8950a |
+|  publicURL  | http://localhost:8776/v1/448c5952839d4b52aa87ff61c4c8950a |
+|    region   |                         RegionOne                         |
++-------------+-----------------------------------------------------------+
+$ keystone token-get
++-----------+----------------------------------+
+|  Property |              Value               |
++-----------+----------------------------------+
+| expires   | 2012-03-16T16:03:32Z             |
+| id        | 8eeb40cbc6e643a1a1c6a040f9b57086 |
+| tenant_id | ec949719d82c442cb32729be66e2e8ae |
+| user_id   | 00869ca8093f4187a9188473a84d7fd1 |
++-----------+----------------------------------+
+$ keystone catalog --service ec2
+Service: ec2
++-------------+--------------------------------------+
+|   Property  |                Value                 |
++-------------+--------------------------------------+
+| adminURL    | http://localhost:8773/services/Cloud |
+| internalURL | http://localhost:8773/services/Cloud |
+| publicURL   | http://localhost:8773/services/Cloud |
+| region      | RegionOne                            |
++-------------+--------------------------------------+
+</pre>
+If <code>keystone catalog</code> fails here with a <code>'Client' object has no attribute 'service_catalog'</code> error, ensure that the <code>SERVICE_ENDPOINT</code> and <code>SERVICE_TOKEN</code> environment variables are unset.
+
+=== Starting your services ===
+Now adjust nova and glance to use the credentials we created before. Note that the username and password are what we gave to 'keystone user-create'.
+ 0. Edit /etc/nova/api-paste.ini to add to the [filter:authtoken] section:
+** 12.04 LTS:<pre>
+admin_user = nova
+admin_password = nova
+admin_tenant_name = services
+admin_token = keystoneadmintoken
+</pre>
+** 12.10:<pre>
+admin_user = nova
+admin_password = nova
+admin_tenant_name = services
+admin_token = keystoneadmintoken
+auth_host = 127.0.0.1
+auth_port = 35357
+auth_protocol = http
+</pre>
+ 0. Edit /etc/glance/glance-api-paste.ini to add the following to the [filter:authtoken] section:
+** 12.04 LTS:<pre>
+admin_tenant_name = services
+admin_user = glance
+admin_password = glance
+admin_token = keystoneadmintoken
+</pre>
+** 12.10:<pre>
+admin_tenant_name = services
+admin_user = glance
+admin_password = glance
+admin_token = keystoneadmintoken
+auth_host = 127.0.0.1
+auth_port = 35357
+auth_protocol = http
+</pre>
+ 0. Edit /etc/glance/glance-registry-paste.ini to add the following to the [filter:authtoken] section:
+** 12.04 LTS:<pre>
+admin_tenant_name = services
+admin_user = glance
+admin_password = glance
+admin_token = keystoneadmintoken
+</pre>
+** 12.10:<pre>
+admin_tenant_name = services
+admin_user = glance
+admin_password = glance
+admin_token = keystoneadmintoken
+auth_host = 127.0.0.1
+auth_port = 35357
+auth_protocol = http
+</pre>
+ 0. Restart glance-api glance-registry, nova-api and nova-compute:
+** 12.10 and lower:<pre>
+$ for i in glance-api glance-registry nova-api nova-compute ; do sudo stop $i ; sudo start $i ; done
+</pre>
+** 13.04 and higher:<pre>
+$ for i in glance-api glance-registry nova-api nova-conductor nova-compute ; do sudo stop $i ; sudo start $i ; done
+</pre>
+ 0. Verify /etc/swift/proxy-server.conf has:
+** 12.04:<pre>
+[filter:authtoken]
+paste.filter_factory = keystone.middleware.auth_token:filter_factory
+service_protocol = http
+service_host = 127.0.0.1
+service_port = 5000
+admin_user = swift
+admin_password = swift
+admin_tenant_name = services
+admin_token = keystoneadmintoken
+auth_host = 127.0.0.1
+auth_port = 35357
+auth_protocol = http
+delay_auth_decision = 0
+
+[filter:keystone]
+paste.filter_factory = keystone.middleware.swift_auth:filter_factory
+operator_roles = admin, swiftoperator
+is_admin = true
+</pre>
+** 12.10:<pre>
+[filter:authtoken]
+paste.filter_factory = keystone.middleware.auth_token:filter_factory
+service_protocol = http
+service_host = 127.0.0.1
+service_port = 5000
+admin_user = swift
+admin_password = swift
+admin_tenant_name = services
+admin_token = keystoneadmintoken
+auth_host = 127.0.0.1
+auth_port = 35357
+auth_protocol = http
+signing_dir = /tmp/keystone-signing-swift
+delay_auth_decision = 0
+
+[filter:keystone]
+paste.filter_factory = keystone.middleware.swift_auth:filter_factory
+operator_roles = admin, swiftoperator
+is_admin = true
+</pre>
+** 13.04:<pre>
+[filter:authtoken]
+paste.filter_factory = keystoneclient.middleware.auth_token:filter_factory
+service_protocol = http
+service_host = 127.0.0.1
+service_port = 5000
+admin_user = swift
+admin_password = swift
+admin_tenant_name = services
+admin_token = keystoneadmintoken
+auth_host = 127.0.0.1
+auth_port = 35357
+auth_protocol = http
+signing_dir = /var/cache/swift/keystone-signing-dir
+delay_auth_decision = 0
+
+[filter:keystone]
+use = egg:swift#keystoneauth
+operator_roles = admin, swiftoperator, Member
+</pre>
+ 0. restart swift: <pre>
+$ for i in `ls -1 /etc/init/swift* | cut -d '/' -f 4 | cut -d '.' -f 1` ; do sudo stop $i ; sudo start $i ; done
+</pre>
+ 0. Verify swift works:<pre>
+$ swift -v -V 2.0 -A http://127.0.0.1:5000/v2.0/ -U services:swift -K swift stat
+StorageURL: http://localhost:8080/v1/AUTH_27b5af4a40ec44d6af28d7b04715d4a3
+Auth Token: 2515b10e8cde4bc5a4fe921300bf0f28
+   Account: AUTH_27b5af4a40ec44d6af28d7b04715d4a3
+Containers: 0
+   Objects: 0
+     Bytes: 0
+Accept-Ranges: bytes
+X-Trans-Id: tx927efb019299448dbffc54d71195330b
+</pre>
+
+== Making OpenStack available to the LAN ==
+=== nova-network ===
+Assuming that networking is setup properly on the !OpenStack host, we can now configure networking within nova:
+ 0. Bring eth1 into the 'up' state:<pre>
+$ sudo ifconfig eth1 up
+</pre>
+ 0. Setup the private network (10.0.0.1-10.0.0.254):<pre>
+$ sudo nova-manage network create private 10.0.0.0/24 1 256 --bridge=br100 --bridge_interface=eth1 --multi_host=True
+</pre>
+ 0. Setup the public facing IP addresses (just 192.168.122.225-192.168.122.254):
+** 11.10:<pre>
+$ sudo nova-manage floating create --ip_range=192.168.122.224/27
+</pre>
+** 12.04 LTS and higher: <pre>
+$ sudo nova-manage floating create 192.168.122.224/27
+</pre>
+ 0. Add to /etc/nova/nova.conf to have (12.04+ - due to <nowiki>[[https://bugs.launchpad.net/nova/+bug/834633|bug #834633]]</nowiki>, auto-assignment of IP addresses does not work on 11.10)
+** 12.04:<pre>
+--auto_assign_floating_ip
+</pre>
+** 12.10:<pre>
+auto_assign_floating_ip=True
+</pre>
+** 13.04 (see bug:1092347 for `share_dhcp_address=True`:<pre>
+auto_assign_floating_ip=True
+share_dhcp_address=True
+</pre>
+ 0. Restart nova-network with:<pre>
+$ sudo restart nova-network
+</pre>
+ 0. Verify it worked:<pre>
+$ sudo nova-manage network list
+id   	IPv4              	IPv6           	start address  	DNS1           DNS2           	VlanID         	project        	uuid
+1    	10.0.0.0/24       	None           	10.0.0.2       	8.8.4.4        None           	None           	None           	2cfbc990-d993-463b-94e5-119404e6488f
+$ sudo nova-manage floating list
+None	192.168.122.225	None	nova	eth0
+None	192.168.122.226	None	nova	eth0
+None	192.168.122.227	None	nova	eth0
+...
+</pre>
+ 0. '''12.10''' and higher: adjust /etc/rc.local to <nowiki>[[https://access.redhat.com/knowledge/docs/en-US/Red_Hat_Enterprise_Linux/6/html/Virtualization_Host_Configuration_and_Guest_Installation_Guide/ch11s02.html|add a firewall]]</nowiki> rule for use with FlatDHCPManager:
+** adjust /etc/rc.local to have (before the call to exit):<pre>
+/sbin/iptables -A POSTROUTING -t mangle -p udp --dport 68 -j CHECKSUM --checksum-fill
+</pre>
+** make /etc/rc.local executable:<pre>
+$ sudo chmod 755 /etc/rc.local
+</pre>
+ '''Note''': run the iptables command manually before trying to start guests
+
+=== neutron (13.10+) ===
+Before setting up different networks, reboot and verify everything is working correctly:<pre>
+$ sudo reboot
+...
+$ keystone catalog --service network
+Service: network
++-------------+----------------------------------+
+|   Property  |              Value               |
++-------------+----------------------------------+
+|   adminURL  |      http://localhost:9696       |
+|      id     | cf08445c409b441c9ae191bae8059df9 |
+| internalURL |      http://localhost:9696       |
+|  publicURL  |      http://localhost:9696       |
+|    region   |            RegionOne             |
++-------------+----------------------------------+
+$ neutron agent-list
++--------------------------------------+--------------------+-----------------------+-------+----------------+
+| id                                   | agent_type         | host                  | alive | admin_state_up |
++--------------------------------------+--------------------+-----------------------+-------+----------------+
+| 1f2c29eb-9efd-46cd-96a7-1173dbf1f0fc | L3 agent           | openstack-saucy-amd64 | :-)   | True           |
+| 1f8e3673-b893-4e39-be89-9e6c86296d4e | Open vSwitch agent | openstack-saucy-amd64 | :-)   | True           |
+| db1a3611-8727-40ad-b9c2-a2c2e4976970 | DHCP agent         | openstack-saucy-amd64 | :-)   | True           |
++--------------------------------------+--------------------+-----------------------+-------+----------------+
+</pre>
+
+'''Note:''' on Ubuntu 14.04 LTS the agents don't come up correctly on boot and you might see:<pre>
++--------------------------------------+--------------------+------------------------+-------+----------------+
+| id                                   | agent_type         | host                   | alive | admin_state_up |
++--------------------------------------+--------------------+------------------------+-------+----------------+
+| 037e69a6-44a4-4831-ae1c-f7166245644e | Open vSwitch agent | openstack-trusty-amd64 | xxx   | True           |
+| 6c221845-7515-4cdf-9270-0a9124c08bbc | Metadata agent     | openstack-trusty-amd64 | :-)   | True           |
+| b36f19d7-7087-4e2e-a62e-ed7fd196da34 | DHCP agent         | openstack-trusty-amd64 | xxx   | True           |
+| ec707f38-2856-4741-92f7-3a66dae706e9 | L3 agent           | openstack-trusty-amd64 | xxx   | True           |
++--------------------------------------+--------------------+------------------------+-------+----------------+
+</pre>
+
+If this happens, just start them manually:<pre>
+$ sudo service neutron-plugin-openvswitch-agent restart
+neutron-plugin-openvswitch-agent stop/waiting
+neutron-plugin-openvswitch-agent start/running, process 2850
+$ sudo service neutron-dhcp-agent restart
+stop: Unknown instance:
+neutron-dhcp-agent start/running, process 2954
+$ sudo service neutron-l3-agent restart
+stop: Unknown instance:
+neutron-l3-agent start/running, process 2983
+$ neutron agent-list
++--------------------------------------+--------------------+------------------------+-------+----------------+
+| id                                   | agent_type         | host                   | alive | admin_state_up |
++--------------------------------------+--------------------+------------------------+-------+----------------+
+| 037e69a6-44a4-4831-ae1c-f7166245644e | Open vSwitch agent | openstack-trusty-amd64 | :-)   | True           |
+| 6c221845-7515-4cdf-9270-0a9124c08bbc | Metadata agent     | openstack-trusty-amd64 | :-)   | True           |
+| b36f19d7-7087-4e2e-a62e-ed7fd196da34 | DHCP agent         | openstack-trusty-amd64 | :-)   | True           |
+| ec707f38-2856-4741-92f7-3a66dae706e9 | L3 agent           | openstack-trusty-amd64 | :-)   | True           |
++--------------------------------------+--------------------+------------------------+-------+----------------+
+</pre>
+
+At this point, should be able to go in to horizon and verify that the network service is running (System Info) and that the Networks and Routers tabs work properly.
+
+==== neutron (common setup) ====
+Create the base neutron networks:
+ 0. Create the ext-net external network:<pre>
+$ neutron net-create ext-net -- --router:external=True
+Created a new network:
++---------------------------+--------------------------------------+
+| Field                     | Value                                |
++---------------------------+--------------------------------------+
+| admin_state_up            | True                                 |
+| id                        | 8e6d4a81-37a0-49c5-9e06-db69aca0c29f |
+| name                      | ext-net                              |
+| provider:network_type     | local                                |
+| provider:physical_network |                                      |
+| provider:segmentation_id  |                                      |
+| router:external           | True                                 |
+| shared                    | False                                |
+| status                    | ACTIVE                               |
+| subnets                   |                                      |
+| tenant_id                 | 2578ec1b0e2e4a7097dcb4429798219e     |
++---------------------------+--------------------------------------+
+export EXT_NET_ID=8e6d4a81-37a0-49c5-9e06-db69aca0c29f
+</pre>
+ 0. Create the associated subnet with the same gateway:<pre>
+$ neutron subnet-create ext-net --allocation-pool start=192.168.122.129,end=192.168.122.254 --gateway=192.168.122.1 --enable_dhcp=False 192.168.122.128/25
+Created a new subnet:
++------------------+--------------------------------------------------------+
+| Field            | Value                                                  |
++------------------+--------------------------------------------------------+
+| allocation_pools | {"start": "192.168.122.129", "end": "192.168.122.254"} |
+| cidr             | 192.168.122.128/25                                     |
+| dns_nameservers  |                                                        |
+| enable_dhcp      | False                                                  |
+| gateway_ip       | 192.168.122.1                                          |
+| host_routes      |                                                        |
+| id               | bd31dfb6-417b-4819-89c2-3463e1164a9a                   |
+| ip_version       | 4                                                      |
+| name             |                                                        |
+| network_id       | 8e6d4a81-37a0-49c5-9e06-db69aca0c29f                   |
+| tenant_id        | 2578ec1b0e2e4a7097dcb4429798219e                       |
++------------------+--------------------------------------------------------+
+</pre>
+ 0. Create the router attached to the external network:<pre>
+$ neutron router-create ext-to-int --tenant-id $SERVICES_TENANT_ID
+Created a new router:
++-----------------------+--------------------------------------+
+| Field                 | Value                                |
++-----------------------+--------------------------------------+
+| admin_state_up        | True                                 |
+| external_gateway_info |                                      |
+| id                    | 1ed99d31-2b4e-49c6-9bcb-90fa2a96fb69 |
+| name                  | ext-to-int                           |
+| status                | ACTIVE                               |
+| tenant_id             | 4b155073131748f0ac9a7d3f0d2586c0     |
++-----------------------+--------------------------------------+
+export EXT_TO_INT_ID=1ed99d31-2b4e-49c6-9bcb-90fa2a96fb69
+</pre>
+ 0. Connect the router to ext-net by setting the gateway for the router as ext-net:<pre>
+$ neutron router-gateway-set $EXT_TO_INT_ID $EXT_NET_ID
+Set gateway for router 1ed99d31-2b4e-49c6-9bcb-90fa2a96fb69
+</pre>
+ 0. Create an internal network:<pre>
+$ neutron net-create --tenant-id $SERVICES_TENANT_ID testnet1
+Created a new network:
++---------------------------+--------------------------------------+
+| Field                     | Value                                |
++---------------------------+--------------------------------------+
+| admin_state_up            | True                                 |
+| id                        | 458c315b-2832-40ca-8bcb-2b4c56bfd883 |
+| name                      | testnet1                             |
+| provider:network_type     | local                                |
+| provider:physical_network |                                      |
+| provider:segmentation_id  |                                      |
+| shared                    | False                                |
+| status                    | ACTIVE                               |
+| subnets                   |                                      |
+| tenant_id                 | 4b155073131748f0ac9a7d3f0d2586c0     |
++---------------------------+--------------------------------------+
+
+$ neutron subnet-create --tenant-id $SERVICES_TENANT_ID testnet1 10.0.6.0/24 --gateway 10.0.6.1
+Created a new subnet:
++------------------+--------------------------------------------+
+| Field            | Value                                      |
++------------------+--------------------------------------------+
+| allocation_pools | {"start": "10.0.6.2", "end": "10.0.6.254"} |
+| cidr             | 10.0.6.0/24                                |
+| dns_nameservers  |                                            |
+| enable_dhcp      | True                                       |
+| gateway_ip       | 10.0.6.1                                   |
+| host_routes      |                                            |
+| id               | 00d6832d-ec95-4654-8d16-87100685b8bb       |
+| ip_version       | 4                                          |
+| name             |                                            |
+| network_id       | 458c315b-2832-40ca-8bcb-2b4c56bfd883       |
+| tenant_id        | 4b155073131748f0ac9a7d3f0d2586c0           |
++------------------+--------------------------------------------+
+$ export TESTNET1_SUBNET_ID=00d6832d-ec95-4654-8d16-87100685b8bb
+
+$ neutron router-interface-add $EXT_TO_INT_ID $TESTNET1_SUBNET_ID
+Added interface abbaa81b-465d-4461-a8de-4c4cdd61d112 to router 1ed99d31-2b4e-49c6-9bcb-90fa2a96fb69.
+</pre>
+
+ 0. Verify it worked:<pre>
+$ nova network-list
++--------------------------------------+------------+------+
+| ID                                   | Label      | Cidr |
++--------------------------------------+------------+------+
+| 458c315b-2832-40ca-8bcb-2b4c56bfd883 | testnet1   | None |
+| 8e6d4a81-37a0-49c5-9e06-db69aca0c29f | ext-net    | None |
++--------------------------------------+------------+------+
+
+$ neutron router-list
++--------------------------------------+------------+-----------------------------------------------------------------------------+
+| id                                   | name       | external_gateway_info                                                       |
++--------------------------------------+------------+-----------------------------------------------------------------------------+
+| 1ed99d31-2b4e-49c6-9bcb-90fa2a96fb69 | ext-to-int | {"network_id": "8e6d4a81-37a0-49c5-9e06-db69aca0c29f", "enable_snat": true} |
++--------------------------------------+------------+-----------------------------------------------------------------------------+
+
+$ neutron net-list
++--------------------------------------+------------+---------------------------------------------------------+
+| id                                   | name       | subnets                                                 |
++--------------------------------------+------------+---------------------------------------------------------+
+| 458c315b-2832-40ca-8bcb-2b4c56bfd883 | testnet1   | 00d6832d-ec95-4654-8d16-87100685b8bb 10.0.6.0/24        |
+| 8e6d4a81-37a0-49c5-9e06-db69aca0c29f | ext-net    | bd31dfb6-417b-4819-89c2-3463e1164a9a 192.168.122.128/25 |
++--------------------------------------+------------+---------------------------------------------------------+
+
+$ neutron subnet-list
++--------------------------------------+------+--------------------+--------------------------------------------------------+
+| id                                   | name | cidr               | allocation_pools                                       |
++--------------------------------------+------+--------------------+--------------------------------------------------------+
+| 00d6832d-ec95-4654-8d16-87100685b8bb |      | 10.0.6.0/24        | {"start": "10.0.6.2", "end": "10.0.6.254"}             |
+| bd31dfb6-417b-4819-89c2-3463e1164a9a |      | 192.168.122.128/25 | {"start": "192.168.122.129", "end": "192.168.122.254"} |
++--------------------------------------+------+--------------------+--------------------------------------------------------+
+
+</pre>
+ 0. Start a server on the ext-net network like so (image is from `glance index`, net-id is the id from `neutron net-list` for ext-net):<pre>
+$ nova boot --image 9d43eb86-7868-44de-856f-c8c757eb81fc --flavor m1.tiny --key_name mykey --nic net-id=68359581-6a06-49e2-9fd5-6811b1930c2b testme
+...
+</pre>
+
+TODO: the above works but the routing is off
+
+==== neutron (single flat network) ====
+Reference: http://docs.openstack.org/havana/install-guide/install/apt/content/section_neutron-single-flat.html
+
+'''TODO''': needs updating for 'local' provider or instructions updated for 'vlan'
+
+ 0. Create a internal shared network for the services tenant:<pre>
+$ neutron net-create --tenant-id $SERVICES_TENANT_ID sharednet1 --shared
+Created a new network:
++---------------------------+--------------------------------------+
+| Field                     | Value                                |
++---------------------------+--------------------------------------+
+| admin_state_up            | True                                 |
+| id                        | 98fff12f-b602-4f50-b5af-c9d58185fbda |
+| name                      | sharednet1                           |
+| provider:network_type     | local                                |
+| provider:physical_network |                                      |
+| provider:segmentation_id  |                                      |
+| shared                    | True                                 |
+| status                    | ACTIVE                               |
+| subnets                   |                                      |
+| tenant_id                 | 4b155073131748f0ac9a7d3f0d2586c0     |
++---------------------------+--------------------------------------+
+</pre>
+ 0. Create a subnet on the network:<pre>
+$ neutron subnet-create --tenant-id $SERVICES_TENANT_ID sharednet1 10.0.1.0/24
+Created a new subnet:
++------------------+--------------------------------------------+
+| Field            | Value                                      |
++------------------+--------------------------------------------+
+| allocation_pools | {"start": "10.0.1.2", "end": "10.0.1.254"} |
+| cidr             | 10.0.1.0/24                                |
+| dns_nameservers  |                                            |
+| enable_dhcp      | True                                       |
+| gateway_ip       | 10.0.1.1                                   |
+| host_routes      |                                            |
+| id               | a540ef51-b80d-46ed-9130-9199a71675bc       |
+| ip_version       | 4                                          |
+| name             |                                            |
+| network_id       | 98fff12f-b602-4f50-b5af-c9d58185fbda       |
+| tenant_id        | 4b155073131748f0ac9a7d3f0d2586c0           |
++------------------+--------------------------------------------+
+</pre>
+ 0. Verify it worked:<pre>
+$ nova network-list
++--------------------------------------+------------+------+
+| ID                                   | Label      | Cidr |
++--------------------------------------+------------+------+
+| 458c315b-2832-40ca-8bcb-2b4c56bfd883 | testnet1   | None |
+| 8e6d4a81-37a0-49c5-9e06-db69aca0c29f | ext-net    | None |
+| 98fff12f-b602-4f50-b5af-c9d58185fbda | sharednet1 | None |
++--------------------------------------+------------+------+
+
+$ neutron router-list
++--------------------------------------+------------+-----------------------------------------------------------------------------+
+| id                                   | name       | external_gateway_info                                                       |
++--------------------------------------+------------+-----------------------------------------------------------------------------+
+| 1ed99d31-2b4e-49c6-9bcb-90fa2a96fb69 | ext-to-int | {"network_id": "8e6d4a81-37a0-49c5-9e06-db69aca0c29f", "enable_snat": true} |
++--------------------------------------+------------+-----------------------------------------------------------------------------+
+
+$ neutron net-list
++--------------------------------------+------------+---------------------------------------------------------+
+| id                                   | name       | subnets                                                 |
++--------------------------------------+------------+---------------------------------------------------------+
+| 458c315b-2832-40ca-8bcb-2b4c56bfd883 | testnet1   | 00d6832d-ec95-4654-8d16-87100685b8bb 10.0.6.0/24        |
+| 8e6d4a81-37a0-49c5-9e06-db69aca0c29f | ext-net    | bd31dfb6-417b-4819-89c2-3463e1164a9a 192.168.122.128/25 |
+| 98fff12f-b602-4f50-b5af-c9d58185fbda | sharednet1 | a540ef51-b80d-46ed-9130-9199a71675bc 10.0.1.0/24        |
++--------------------------------------+------------+---------------------------------------------------------+
+
+$ neutron subnet-list
++--------------------------------------+------+--------------------+--------------------------------------------------------+
+| id                                   | name | cidr               | allocation_pools                                       |
++--------------------------------------+------+--------------------+--------------------------------------------------------+
+| 00d6832d-ec95-4654-8d16-87100685b8bb |      | 10.0.6.0/24        | {"start": "10.0.6.2", "end": "10.0.6.254"}             |
+| a540ef51-b80d-46ed-9130-9199a71675bc |      | 10.0.1.0/24        | {"start": "10.0.1.2", "end": "10.0.1.254"}             |
+| bd31dfb6-417b-4819-89c2-3463e1164a9a |      | 192.168.122.128/25 | {"start": "192.168.122.129", "end": "192.168.122.254"} |
++--------------------------------------+------+--------------------+--------------------------------------------------------+
+
+$ neutron net-show sharednet1
++---------------------------+--------------------------------------+
+| Field                     | Value                                |
++---------------------------+--------------------------------------+
+| admin_state_up            | True                                 |
+| id                        | 98fff12f-b602-4f50-b5af-c9d58185fbda |
+| name                      | sharednet1                           |
+| provider:network_type     | local                                |
+| provider:physical_network |                                      |
+| provider:segmentation_id  |                                      |
+| router:external           | False                                |
+| shared                    | True                                 |
+| status                    | ACTIVE                               |
+| subnets                   | a540ef51-b80d-46ed-9130-9199a71675bc |
+| tenant_id                 | 4b155073131748f0ac9a7d3f0d2586c0     |
++---------------------------+--------------------------------------+
+</pre>
+ 0. Start a server on this network like so (image is from `glance index`, net-id is the id from `neutron net-list` for sharednet1):<pre>
+$ nova boot --image 9d43eb86-7868-44de-856f-c8c757eb81fc --flavor m1.tiny --key_name mykey --nic net-id=1b6b3c60-c3f7-491a-9da7-8d020d213b6b testme
+</pre>
+
+TODO: the above works in that the an IP is allocated, but the VM doesn't find it
+
+Note: when using a single flat network you can't auto-associate floating IPs like with nova-network. Should use a 'provider router with private networks' (or similar) for that.
+
+=== neutron (provider router with private networks) ===
+Reference: http://docs.openstack.org/havana/install-guide/install/apt/content/section_networking-provider-router_with-provate-networks.html
+
+TODO
+
+== Volume management ==
+=== 11.10 - 12.10 ===
+Nova allows <nowiki>[[http://docs.openstack.org/trunk/openstack-compute/admin/content/configure-nova-volume.html|management of volumes]]</nowiki>. This sets up nova to work with lvm. To configure:
+# <code> sudo apt-get install lvm2 nova-volume </code>
+# Make sure you have a volume group (VG) named 'nova-volumes' that is at least 5G (as noted in 'VM host configuration', above). Eg:<pre>
+$ sudo vgdisplay
+  --- Volume group ---
+  VG Name               nova-volumes
+  System ID
+  Format                lvm2
+...
+</pre>
+ If you do not, you can add either:
+** add this volume group to an existing physical volume (PV) using:<pre>
+$ sudo vgcreate nova-volumes /dev/vd...
+</pre>
+** Create a partition of type '8e' (Linux LVM) on /dev/vda (or /dev/sda), run 'sudo partprobe', then create a VG and LV named 'nova-volumes' on the newly created partition:<pre>
+$ sudo pvcreate /dev/vd[a-z][1-9]
+$ sudo vgcreate nova-volumes /dev/vd[a-z][1-9]
+</pre>
+** Add a new virtio disk with virt-manager (/dev/vdb), then add a single partition of type '8e' and create a VG and LV named 'nova-volumes', then reference /dev/vdb1 with pvcreate and vgcreate.
+ 0. Restart nova-volume:<pre>
+$ sudo stop nova-volume
+$ sudo start nova-volume
+</pre>
+ 0. Make sure the nova-volume service is running (need to source ~/.openstackrc):<pre>
+$ sudo nova-manage service list
+Binary           Host                                 Zone             Status     State Updated_At
+nova-scheduler   openstack-quantal-amd64              nova             enabled    :-)   2012-12-12 13:54:33
+nova-compute     openstack-quantal-amd64              nova             enabled    :-)   2012-12-12 13:54:33
+nova-network     openstack-quantal-amd64              nova             enabled    :-)   2012-12-12 13:54:32
+nova-volume      openstack-quantal-amd64              nova             enabled    :-)   2012-12-12 13:54:28
+</pre>
+ 0. Create a new 2G (it should be smaller than the total sizeof the VG) volume named 'myvolume':
+** 11.10:<pre>
+$ euca-create-volume -s 2 -z nova
+VOLUME	vol-00000001	2	creating (proj, None, None, None)	2013-01-25T21:01:39Z
+$ euca-describe-volumes
+VOLUME	vol-00000001	 2		nova	available (proj, openstack-oneiric-amd64, None, None)	2013-01-25T21:01:39Z
+</pre>
+  This volume can now be attached to an instance, like so:<pre>
+$ euca-attach-volume -i i-00000009 -d /dev/vdb vol-00000001
+</pre>
+** 12.04 and higher: <pre>
+$ nova volume-create --display_name myvolume 2
++---------------------+--------------------------------------+
+| Property            | Value                                |
++---------------------+--------------------------------------+
+| attachments         | []                                   |
+| availability_zone   | nova                                 |
+| created_at          | 2012-12-12T14:20:04.681466           |
+| display_description | None                                 |
+| display_name        | myvolume                             |
+| id                  | b0e429f0-aefb-4b6d-a573-339a2c1368bf |
+| metadata            | {}                                   |
+| size                | 2                                    |
+| snapshot_id         | None                                 |
+| status              | creating                             |
+| volume_type         | None                                 |
++---------------------+--------------------------------------+
+$ nova --no-cache volume-list
++--------------------------------------+-----------+--------------+------+-------------+-------------+
+| ID                                   | Status    | Display Name | Size | Volume Type | Attached to |
++--------------------------------------+-----------+--------------+------+-------------+-------------+
+| b0e429f0-aefb-4b6d-a573-339a2c1368bf | available | myvolume     | 2    | None        |             |
++--------------------------------------+-----------+--------------+------+-------------+-------------+
+</pre>
+  This volume can now be attached to an instance, like so:<pre>
+$ nova volume-attach <uuid of instance> <uuid of volume> <device>
+</pre>
+  Eg:<pre>
+$ nova volume-attach 97c4965e-1383-4e3d-82ba-f00c8cde2302 b0e429f0-aefb-4b6d-a573-339a2c1368bf /dev/vdb
++----------+--------------------------------------+
+| Property | Value                                |
++----------+--------------------------------------+
+| device   | /dev/vdb                             |
+| id       | b0e429f0-aefb-4b6d-a573-339a2c1368bf |
+| serverId | 97c4965e-1383-4e3d-82ba-f00c8cde2302 |
+| volumeId | b0e429f0-aefb-4b6d-a573-339a2c1368bf |
++----------+--------------------------------------+
+</pre>
+
+  You get the 'uuid of instance' from `nova list` and the 'uuid of volume' from `nova volume-list`. Volumes can also be manipulated via the !OpenStack dashboad (horizon (see below). Once, the volume is attached, should see something like this in /var/log/kern.log in the instance:<pre>
+Dec 12 14:47:54 server-97c4965e-1383-4e3d-82ba-f00c8cde2302 kernel: [  250.094235]  vdb: unknown partition table
+</pre>
+
+=== 13.04 and higher (and 12.10 that uses cinder) ===
+Follow the above instructions for creating the appropriate VG and the cinder service and endpoint. Once done, can use the 'nova volume-*' (see above) commands, the euca2ools commands and also new cinder commands like so:<pre>
+$ cinder list
+
+$ cinder create 1
++---------------------+--------------------------------------+
+|       Property      |                Value                 |
++---------------------+--------------------------------------+
+|     attachments     |                  []                  |
+|  availability_zone  |                 nova                 |
+|      created_at     |      2013-02-21T16:41:55.095106      |
+| display_description |                 None                 |
+|     display_name    |                 None                 |
+|          id         | 729ef2c6-f85a-4bc1-a2c3-557d7731874c |
+|       metadata      |                  {}                  |
+|         size        |                  1                   |
+|     snapshot_id     |                 None                 |
+|        status       |               creating               |
+|     volume_type     |                 None                 |
++---------------------+--------------------------------------+
+$ cinder list
++--------------------------------------+-----------+--------------+------+-------------+-------------+
+|                  ID                  |   Status  | Display Name | Size | Volume Type | Attached to |
++--------------------------------------+-----------+--------------+------+-------------+-------------+
+| 729ef2c6-f85a-4bc1-a2c3-557d7731874c | available |     None     |  1   |     None    |             |
++--------------------------------------+-----------+--------------+------+-------------+-------------+
+$ nova --no-cache volume-list
++--------------------------------------+-----------+--------------+------+-------------+-------------+
+| ID                                   | Status    | Display Name | Size | Volume Type | Attached to |
++--------------------------------------+-----------+--------------+------+-------------+-------------+
+| 729ef2c6-f85a-4bc1-a2c3-557d7731874c | available | None         | 1    | None        |             |
++--------------------------------------+-----------+--------------+------+-------------+-------------+
+$ cinder delete <id>
+</pre>
+
+==== 12.10 with nova-volume and cinder ====
+12.10 supports both nova-volume and cinder so you need to be able to go back and forth for testing. In general:
+# adjust nova.conf for the one you want
+# Sync the nova database:<pre>
+$ sudo nova-manage db sync
+</pre>
+ 0. Restart the nova services:<pre>
+$ for i in nova-api nova-scheduler nova-network nova-compute nova-objectstore ; do sudo service $i restart ; done
+</pre>
+ 0. recreate the keystone endpoint for the one you want to use:<pre>
+$ keystone service-list
+export NOVA_VOLUME_ID=62aa972d9ba0432c9f331708dc2bdfc9
+export CINDER_VOLUME_ID=95b02339c5a844f2a02ec8b26376475b
+$ keystone endpoint-create --region RegionOne --service_id $NOVA_VOLUME_ID --publicurl "http://localhost:8776/v1/\$(tenant_id)s" --adminurl "http://localhost:8776/v1/\$(tenant_id)s" --internalurl "http://localhost:8776/v1/\$(tenant_id)s"
+$ keystone endpoint-create --region RegionOne --service_id $CINDER_VOLUME_ID --publicurl "http://localhost:8776/v1/\$(tenant_id)s" --adminurl "http://localhost:8776/v1/\$(tenant_id)s" --internalurl "http://localhost:8776/v1/\$(tenant_id)s"
+</pre>
+ 0. stop and restart the desired service:<pre>
+$ for i in cinder-volume cinder-api cinder-scheduler ; do sudo service $i stop ; done
+$ sudo /etc/init.d/nova-volume start
+$ for i in nova-api nova-scheduler nova-network nova-compute nova-objectstore ; do sudo service $i restart ; done
+$ sudo /etc/init.d/nova-volume stop
+$ for i in cinder-volume cinder-api cinder-scheduler ; do sudo service $i restart ; done
+$ for i in nova-api nova-scheduler nova-network nova-compute nova-objectstore ; do sudo service $i restart ; done
+</pre>
+
+== Using OpenStack ==
+By this point, !OpenStack should be all setup and you can start adding credentioals to populating it with images and begin using your cloud. As such, you will need to generate your credentials and then save them somewhere safe on your client machine for now, the same machine as the !OpenStack. See below for how to make this available to the libvirt network !OpenStack is on).
+
+=== Credentials ===
+==== 11.10 ====
+11.10 uses nova instead of keystone for credentials management. Newer versions of !OpenStack Diablo can use keystone, but not what we have in the archive. To generate your credentials:
+ 0. create an admin user for use with nova:<pre>
+$ sudo nova-manage user admin novaadmin
+$ sudo nova-manage project create proj novaadmin
+$ sudo restart libvirt-bin; sudo restart nova-network; sudo restart nova-compute; sudo restart nova-api; sudo restart nova-objectstore; sudo restart nova-scheduler; sudo restart nova-volume; sudo restart glance-api; sudo restart glance-registry
+</pre>
+ 0. download the credentials:<pre>
+$ mkdir ~/creds
+$ sudo nova-manage project zipfile proj novaadmin ~/creds/novacreds.zip
+$ cd ~/creds
+$ unzip novacreds.zip
+$ sudo chown $USER:$USER ~/creds/ -R
+</pre>
+ 0. setup ~/.openstackrc (optional-- only here to be consistent with other releases):<pre>
+$ ln -s ~/creds/novarc ~/.openstackrc
+$ . ~/.openstackrc
+</pre>
+
+ 0. On the !OpenStack VM machine, install euca2ools:<pre>
+$ sudo apt-get install euca2ools
+</pre>
+ 0. Test the ec2 compatibility layer:<pre>
+$ . ./.openstackrc
+$ euca-describe-instances
+$ euca-describe-images
+</pre>
+ 0. Test openstack:<pre>
+$ nova list # will prompt for encrypted keyring password. Use your login password
++----+------+--------+----------+
+| ID | Name | Status | Networks |
++----+------+--------+----------+
++----+------+--------+----------+
+$ glance index
+$
+</pre>
+ 0. To login to instances via SSH directly from the !OpenStack host, generate a keypair:<pre>
+$ cd ~/creds
+$ euca-add-keypair mykey > mykey.priv
+$ chmod 600 mykey.priv
+$ euca-describe-keypairs
+KEYPAIR	mykey	bb:70:55:8e:12:2c:f3:ad:f2:7a:a0:b5:d6:0f:ad:a4
+</pre>
+ To delete a keypair:<pre>
+$ euca-delete-keypair mykey
+</pre>
+
+==== 12.04 LTS+ ====
+As mentioned, keystone handles all the authentication on Ubuntu 12.04 LTS and higher. To generate your credentials:
+ 0. On the !OpenStack VM, create ~/.openstackrc (can be named anything, but should be chmod 0600) with the following:<pre>
+export OS_USERNAME=admin
+export OS_PASSWORD=adminpasswd
+export OS_TENANT_NAME=admin
+export OS_AUTH_URL=http://localhost:5000/v2.0/
+</pre>
+ 0. Source ~/.openstackrc with:<pre>
+$ . ~/.openstackrc
+</pre>
+ 0. On the !OpenStack VM, create keystone credentials:<pre>
+$ keystone ec2-credentials-create
++-----------+----------------------------------+
+|  Property |              Value               |
++-----------+----------------------------------+
+| access    | 73c9a429d7fe42878d49423b6765f929 |
+| secret    | 5add6a981af04d048612aa09e27818d8 |
+| tenant_id | ec949719d82c442cb32729be66e2e8ae |
+| user_id   | 00869ca8093f4187a9188473a84d7fd1 |
++-----------+----------------------------------+
+</pre>
+ 0. On the !OpenStack VM, append to ~/.openstackrc with EC2_URL set to the public_url for 'keystone catalog --service ec2' (substituting the ip address or hostname of the !OpenStack VM for 'localhost'), the EC2_ACCESS_KEY set to the value of 'access' from 'keystone ec2-credentials-create' and EC2_SECRET_KEY set to the value of 'secret' from 'keystone ec2-credentials-create':<pre>
+export EC2_URL=http://localhost:8773/services/Cloud
+export EC2_ACCESS_KEY=73c9a429d7fe42878d49423b6765f929
+export EC2_SECRET_KEY=5add6a981af04d048612aa09e27818d8
+</pre>
+ 0. On the !OpenStack VM machine, install euca2ools:<pre>
+$ sudo apt-get install euca2ools
+</pre>
+ 0. Test the ec2 compatibility layer:<pre>
+$ . ./.openstackrc
+$ euca-describe-instances
+$ euca-describe-images
+</pre>
+ 0. Test openstack:<pre>
+$ nova list # will prompt for encrypted keyring password. Use your login password
++----+------+--------+----------+
+| ID | Name | Status | Networks |
++----+------+--------+----------+
++----+------+--------+----------+
+$ glance index
+$
+</pre>
+ 0. To login to instancles via SSH directly from the !OpenStack host, generate a keypair:<pre>
+$ ssh-keygen -t rsa -b 2048
+$ nova keypair-add mykey --pub_key ~/.ssh/id_rsa.pub
+$ nova keypair-list
++----------+-------------------------------------------------+
+|   Name   |                   Fingerprint                   |
++----------+-------------------------------------------------+
+| mykey    | 6a:bb:67:46:5a:19:9f:c7:a4:bc:25:97:90:7f:9e:d7 |
++----------+-------------------------------------------------+
+</pre>
+
+=== Adding an image via glance ===
+ 0. On the !OpenStack VM, download an image (again, for now, just onto the !OpenStack host):<pre>
+$ export img=ubuntu-12.04-beta1-server-cloudimg-amd64-disk1.img
+$ wget http://uec-images.ubuntu.com/releases/precise/beta-1/$img
+</pre>
+ 0. Add the image:
+** 12.04+:<pre>
+$ glance add name="my-glance/$img" is_public=true container_format=ami disk_format=ami < ./"$img"
+Uploading image 'my-glance/ubuntu-12.04-beta1-server-cloudimg-amd64-disk1.img'
+...
+Added new image with ID: a6cfb7db-b988-4ba5-9858-c3bd5747c428
+</pre>
+** 11.10:<pre>
+$ glance add name="my-glance/$img" is_public=true container_format=bare disk_format=qcow2 < ./"$img"
+Uploading image 'my-glance/ubuntu-12.04-beta1-server-cloudimg-amd64-disk1.img'
+...
+Added new image with ID: a6cfb7db-b988-4ba5-9858-c3bd5747c428
+</pre>
+ 0. See if it showed up:<pre>
+$ euca-describe-images
+IMAGE	ami-00000001	None (my-glance/ubuntu-12.04-beta1-server-cloudimg-amd64-disk1.img)		available	publicmachine	 	 	instance-store
+$ glance index
+ID                                   Name                           Disk Format          Container Format     Size
+------------------------------------ ------------------------------ -------------------- -------------------- --------------
+a6cfb7db-b988-4ba5-9858-c3bd5747c428 my-glance/ubuntu-12.04-beta1-s ami                  ami                       231211008
+</pre>
+** '''OPTIONAL''': on 12.10+, can specify the API version to use if you have different endpoints configured. Eg:<pre>
+$ glance --os-image-url=http://127.0.0.1:9292/ --os-image-api-version=1 index
+ID                                   Name                           Disk Format          Container Format     Size
+------------------------------------ ------------------------------ -------------------- -------------------- --------------
+a6cfb7db-b988-4ba5-9858-c3bd5747c428 my-glance/ubuntu-12.04-beta1-s ami                  ami                       231211008
+$ glance --os-image-url=http://127.0.0.1:9292/ --os-image-api-version=2 image-list
++--------------------------------------+--------------------------------------------------------------+
+| ID                                   | Name                                                         |
++--------------------------------------+--------------------------------------------------------------+
+| cdfed269-9c33-4661-ae76-49fefbbbf49e | my-glance/ubuntu-12.04-beta1-server-cloudimg-amd64-disk1.img |
++--------------------------------------+--------------------------------------------------------------+
+</pre>
+
+* 13.10+ sets the m1.tiny flavor disk with 1G by default, which is too small for the above image. Set the disk image size to '0' like in previous releases to let the disk size grow as needed:<pre>
+$ nova flavor-list
++----+-----------+-----------+------+-----------+------+-------+-------------+-----------+
+| ID | Name      | Memory_MB | Disk | Ephemeral | Swap | VCPUs | RXTX_Factor | Is_Public |
++----+-----------+-----------+------+-----------+------+-------+-------------+-----------+
+| 1  | m1.tiny   | 512       | 1    | 0         |      | 1     | 1.0         | True      |
+| 2  | m1.small  | 2048      | 20   | 0         |      | 1     | 1.0         | True      |
+| 3  | m1.medium | 4096      | 40   | 0         |      | 2     | 1.0         | True      |
+| 4  | m1.large  | 8192      | 80   | 0         |      | 4     | 1.0         | True      |
+| 5  | m1.xlarge | 16384     | 160  | 0         |      | 8     | 1.0         | True      |
++----+-----------+-----------+------+-----------+------+-------+-------------+-----------+
+
+$ nova flavor-delete m1.tiny
++----+---------+-----------+------+-----------+------+-------+-------------+-----------+
+| ID | Name    | Memory_MB | Disk | Ephemeral | Swap | VCPUs | RXTX_Factor | Is_Public |
++----+---------+-----------+------+-----------+------+-------+-------------+-----------+
+| 1  | m1.tiny | 512       | 1    | 0         |      | 1     | 1.0         | True      |
++----+---------+-----------+------+-----------+------+-------+-------------+-----------+
+
+$ nova flavor-create m1.tiny 1 512 0 1
++----+---------+-----------+------+-----------+------+-------+-------------+-----------+
+| ID | Name    | Memory_MB | Disk | Ephemeral | Swap | VCPUs | RXTX_Factor | Is_Public |
++----+---------+-----------+------+-----------+------+-------+-------------+-----------+
+| 1  | m1.tiny | 512       | 0    | 0         |      | 1     | 1.0         | True      |
++----+---------+-----------+------+-----------+------+-------+-------------+-----------+
+
+$ nova flavor-list
++----+-----------+-----------+------+-----------+------+-------+-------------+-----------+
+| ID | Name      | Memory_MB | Disk | Ephemeral | Swap | VCPUs | RXTX_Factor | Is_Public |
++----+-----------+-----------+------+-----------+------+-------+-------------+-----------+
+| 1  | m1.tiny   | 512       | 0    | 0         |      | 1     | 1.0         | True      |
+| 2  | m1.small  | 2048      | 20   | 0         |      | 1     | 1.0         | True      |
+| 3  | m1.medium | 4096      | 40   | 0         |      | 2     | 1.0         | True      |
+| 4  | m1.large  | 8192      | 80   | 0         |      | 4     | 1.0         | True      |
+| 5  | m1.xlarge | 16384     | 160  | 0         |      | 8     | 1.0         | True      |
++----+-----------+-----------+------+-----------+------+-------+-------------+-----------+
+</pre>
+
+'''NOTE:''' due to <nowiki>[[https://bugs.launchpad.net/ubuntu/+source/nova/+bug/959426|LP: #959426]]</nowiki>, nova-compute doesn't always start. Verify it is started and if not start it:<pre>
+$ ps auxww | grep [n]ova-compute
+$ sudo start nova-compute
+nova-compute start/running, process 1869
+$ ps auxww | grep [n]ova-compute
+nova      1869  0.0  0.0  37936  1272 ?        Ss   18:04   0:00 su -s /bin/sh -c exec nova-compute --flagfile=/etc/nova/nova.conf --flagfile=/etc/nova/nova-compute.conf nova
+nova      1870  8.4  2.7 270208 55932 ?        S    18:04   0:01 /usr/bin/python /usr/bin/nova-compute --flagfile=/etc/nova/nova.conf --flagfile=/etc/nova/nova-compute.conf
+</pre>
+
+=== Using nova ===
+==== Initial setup on 11.10 ====
+Use the same steps as for credentials on 11.10 (see above). TODO: verify
+
+==== Initial setup 12.04+ ====
+To use !OpenStack remotely, you must create an ssh keypair and keystone credentials.
+ 0. On any client machine, create a set of keys to use with this !OpenStack installation:<pre>
+$ ssh-keygen -t rsa -b 2048 -f $HOME/.ssh/openstack.id_rsa
+$ scp ~/.ssh/openstack.id_rsa.pub openstack-precise-server-amd64:/tmp
+</pre>
+# On the !OpenStack VM:
+## Add the ssh keypair:<pre>
+$ nova keypair-add mykey2 --pub_key /tmp/openstack.id_rsa.pub
+$ nova keypair-list
++--------+-------------------------------------------------+
+|  Name  |                   Fingerprint                   |
++--------+-------------------------------------------------+
+| mykey  | 6a:bb:67:46:5a:19:9f:c7:a4:bc:25:97:90:7f:9e:d7 |
+| mykey2 | a9:4c:a5:47:55:da:af:77:db:d3:19:84:d0:5e:fa:a3 |
++--------+-------------------------------------------------+
+</pre>
+  0. Create keystone credentials:<pre>
+$ keystone ec2-credentials-create
++-----------+----------------------------------+
+|  Property |              Value               |
++-----------+----------------------------------+
+| access    | 684d98881d1242f389fcaa6edeab0dfb |
+| secret    | 59e4153c6114455797852450966c52fb |
+| tenant_id | ec949719d82c442cb32729be66e2e8ae |
+| user_id   | 00869ca8093f4187a9188473a84d7fd1 |
++-----------+----------------------------------+
+</pre>
+ 0. On the client, create ~/.openstackrc with EC2_URL set to the public_url for 'keystone catalog --service ec2' (substituting the ip address or hostname of the !OpenStack VM for 'localhost'), the EC2_ACCESS_KEY set to the value of 'access' from 'keystone ec2-credentials-create' and EC2_SECRET_KEY set to the value of 'secret' from 'keystone ec2-credentials-create':<pre>
+export EC2_URL=http://192.168.122.3:8773/services/Cloud
+export EC2_ACCESS_KEY=684d98881d1242f389fcaa6edeab0dfb
+export EC2_SECRET_KEY=59e4153c6114455797852450966c52fb
+</pre>
+ 0. Verify you can connect to nova via the EC2 compatibility layer:<pre>
+$ euca-describe-images
+IMAGE	ami-00000001	None (my-glance/ubuntu-12.04-beta1-server-cloudimg-amd64-disk1.img)		available	public			machine		instance-store
+</pre>
+# [OPTIONAL] To use cloud-utils to bundle images via the EC2 compatibility layer:
+## create the certificates required to bundle images via the EC2 compatibility layer:<pre>
+$ mkdir ~/openstack-certs/
+$ chmod 700 ~/openstack-certs/
+$ nova x509-create-cert ~/openstack-certs/pk.pem ~/openstack-certs/cert.pem
+Wrote private key to /home/jamie/openstack-certs/pk.pem
+Wrote x509 certificate to /home/jamie/openstack-certs/cert.pem
+$ nova x509-get-root-cert ~/openstack-certs/cacert.pem
+Wrote x509 root cert to /home/jamie/openstack-certs/cacert.pem
+</pre>
+  0. Append to ~/.openstackrc:<pre>
+export EC2_CERT=~/openstack-certs/cert.pem
+export EC2_USER_ID=42 # nova does not use user id, but bundling requires it
+export EUCALYPTUS_CERT=~/openstack-certs/cacert.pem
+export S3_URL=http://localhost:8773/services/Cloud
+</pre>
+## Can now add images via cloud-utils (must source ~/.openstackrc). The basic idea is
+## you upload an image
+## nova automatically pulls it from that location
+## nova automatically uploads it to glance
+
+  Eg, to upload with cloud-utils (note, 'my-ubuntu-images' corresponds to an S3 bucket (ie, when using EC2 api) and does not correspond to anything in glance):
+** cloud-publish-image (NOTE: this fails right now because we don't have an s3 service (S3_URL)):<pre>
+$ cloud-publish-image -vv x86_64 ubuntu-12.04-beta1-server-cloudimg-amd64-disk1.img my-ubuntu-images
+</pre>
+** cloud-publish-tarball (may also fail if no S3):<pre>
+$ cloud-publish-tarball /tmp/ubuntu-11.10-server-cloudimg-amd64.tar.gz my-ubuntu-images
+</pre>
+** after doing on of the above, cloud-publish-* will add the image to glance, however you may need to make them public to see them as well as update the name for glance. Eg:<pre>
+$ euca-describe-images 
+IMAGE	ami-00000003	mybucket/oneiric-server-cloudimg-amd64.img.manifest.xml		available	private		x86_64	machine	aki-00000002	 	instance-store
+IMAGE	aki-00000002	mybucket/oneiric-server-cloudimg-amd64-vmlinuz-virtual.manifest.xml		available	private		x86_64	kernel	 	 	instance-store
+$ euca-modify-image-attribute -l -a all ami-00000003 # make image public
+$ euca-modify-image-attribute -l -a all aki-00000002 # make kernel public
+$ euca-describe-images 
+IMAGE	ami-00000003	mybucket/oneiric-server-cloudimg-amd64.img.manifest.xml		available	public		x86_64	machine	aki-00000002	 	instance-store
+IMAGE	aki-00000002	mybucket/oneiric-server-cloudimg-amd64-vmlinuz-virtual.manifest.xml		available	public		x86_64	kernel	 	 	instance-store
+$ glance index
+ID               Name                           Disk Format          Container Format     Size          
+---------------- ------------------------------ -------------------- -------------------- --------------
+3                None                           ami                  ami                      1476395008
+2                None                           aki                  aki                         4757712
+$ glance update 3 "name=my-glance/ubuntu-11.10-server-cloudimg-amd64-disk1.img" # set the name
+$ glance update 2 "name=my-glance/ubuntu-11.10-server-cloudimg-amd64-vmlinuz-virtual" # set the name
+$ glance index
+ID               Name                           Disk Format          Container Format     Size          
+---------------- ------------------------------ -------------------- -------------------- --------------
+3                my-glance/ubuntu-11.10-server- ami                  ami                      1476395008
+2                my-glance/ubuntu-11.10-server- aki                  aki                         4757712
+</pre>
+
+==== Starting and stopping instances ====
+ 0. Start an image (get in the habit of using m1.tiny since you have limited resources in the VM):
+** via EC2 api <pre>
+$ euca-run-instances -k mykey2 -t m1.tiny ami-00000001
+RESERVATION	r-7yderdto	ec949719d82c442cb32729be66e2e8ae	default
+INSTANCE	i-00000008	ami-00000001	server-8	server-8	pending	mykey2 (ec949719d82c442cb32729be66e2e8ae, None)	0		m1.tiny	2012-03-20T23:07:07Z	unknown zone				monitoring-disabled					instance-store
+</pre>
+** Start an image via nova api (if on 11.10 this fails with 'Cannot find requested image #: Kernel not found for image #. (HTTP 400)', re-add the image specifying 'container_format=bare disk_format=qcow2' to 'glance add'):<pre>
+$ nova image-list # need the ID to give to 'nova boot'
++--------------------------------------+--------------------------------------------------------------+--------+--------+
+| ID                                   | Name                                                         | Status | Server |
++--------------------------------------+--------------------------------------------------------------+--------+--------+
+| 9d43eb86-7868-44de-856f-c8c757eb81fc | my-glance/ubuntu-12.04-beta1-server-cloudimg-amd64-disk1.img | ACTIVE |        |
++--------------------------------------+--------------------------------------------------------------+--------+--------+
+$ nova flavor-list # use 'm1.tiny'
++----+-----------+-----------+------+-----------+------+-------+-------------+-----------+-------------+
+| ID | Name      | Memory_MB | Disk | Ephemeral | Swap | VCPUs | RXTX_Factor | Is_Public | extra_specs |
++----+-----------+-----------+------+-----------+------+-------+-------------+-----------+-------------+
+| 1  | m1.tiny   | 512       | 0    | 0         |      | 1     | 1.0         | True      | {}          |
+| 2  | m1.small  | 2048      | 10   | 20        |      | 1     | 1.0         | True      | {}          |
+| 3  | m1.medium | 4096      | 10   | 40        |      | 2     | 1.0         | True      | {}          |
+| 4  | m1.large  | 8192      | 10   | 80        |      | 4     | 1.0         | True      | {}          |
+| 5  | m1.xlarge | 16384     | 10   | 160       |      | 8     | 1.0         | True      | {}          |
++----+-----------+-----------+------+-----------+------+-------+-------------+-----------+-------------+
+$ nova boot --image 9d43eb86-7868-44de-856f-c8c757eb81fc --flavor m1.tiny --key_name mykey2 testme
++-------------------------------------+--------------------------------------------------------------+
+| Property                            | Value                                                        |
++-------------------------------------+--------------------------------------------------------------+
+| OS-DCF:diskConfig                   | MANUAL                                                       |
+| OS-EXT-SRV-ATTR:host                | None                                                         |
+| OS-EXT-SRV-ATTR:hypervisor_hostname | None                                                         |
+| OS-EXT-SRV-ATTR:instance_name       | instance-00000002                                            |
+| OS-EXT-STS:power_state              | 0                                                            |
+| OS-EXT-STS:task_state               | scheduling                                                   |
+| OS-EXT-STS:vm_state                 | building                                                     |
+| accessIPv4                          |                                                              |
+| accessIPv6                          |                                                              |
+| adminPass                           | j5G4yW2AjSUH                                                 |
+| config_drive                        |                                                              |
+| created                             | 2013-02-20T19:06:15Z                                         |
+| flavor                              | m1.tiny                                                      |
+| hostId                              |                                                              |
+| id                                  | 6cd89139-695d-45d0-98b7-255541008175                         |
+| image                               | my-glance/ubuntu-12.04-beta1-server-cloudimg-amd64-disk1.img |
+| key_name                            | mykey2                                                       |
+| metadata                            | {}                                                           |
+| name                                | testme                                                       |
+| progress                            | 0                                                            |
+| security_groups                     | [{u'name': u'default'}]                                      |
+| status                              | BUILD                                                        |
+| tenant_id                           | 2a352cc59c214648ac6a36f5814ccecf                             |
+| updated                             | 2013-02-20T19:06:15Z                                         |
+| user_id                             | 98810147222e474d9a654196eea90872                             |
++-------------------------------------+--------------------------------------------------------------+
+$
+</pre> 
+ 0. Verify it started:<pre>
+$ euca-describe-instances
+RESERVATION	r-7yderdto	ec949719d82c442cb32729be66e2e8ae	default
+INSTANCE	i-00000008	ami-00000001	server-8	server-8	running	mykey2 (ec949719d82c442cb32729be66e2e8ae, openstack-precise-server-amd64)	0m1.tiny	2012-03-20T23:07:07Z	nova				monitoring-disabled	10.0.0.4	10.0.0.4			instance-store
+$ nova list
++--------------------------------------+----------+--------+------------------+
+|                  ID                  |   Name   | Status |     Networks     |
++--------------------------------------+----------+--------+------------------+
+| e7a08f62-a57f-4b64-85bd-dcf8682e3fc7 | Server 8 | ACTIVE | private=10.0.0.4 |
++--------------------------------------+----------+--------+------------------+
+</pre>
+ You can also see in 'ps auxww' output if qemu started:<pre>
+$ ps auxww | grep [/]qemu
+108       2996 81.9 11.8 1814320 243608 ?      Sl   18:07   1:14 /usr/bin/kvm -S -M pc-1.0 -enable-kvm -m 512...
+</pre>
+ 0. Verify the image:<pre>
+$ euca-get-console-output i-00000008
+i-00000008
+2012-03-20T23:12:39Z
+[    0.000000] Initializing cgroup subsys cpuset
+[    0.000000] Initializing cgroup subsys cpu
+[    0.000000] Linux version 3.2.0-17-virtual (buildd@allspice) (gcc version 4.6.2 (Ubuntu/Linaro 4.6.2-16ubuntu1) ) #27-Ubuntu SMP Fri Feb 24 15:57:57 UTC 2012 (Ubuntu 3.2.0-17.27-virtual 3.2.6)
+[    0.000000] Command line: BOOT_IMAGE=/boot/vmlinuz-3.2.0-17-virtual root=LABEL=cloudimg-rootfs ro console=ttyS0
+...
+$ watch 'euca-get-console-output i-00000008|tail -25'
+...
+* Starting automatic crash report generation^[74G[ OK ]
+* Starting deferred execution scheduler^[74G[ OK ]
+* Starting regular background program processing daemon^[74G[ OK ]
+* Stopping crash report submission daemon^[74G[ OK ]]
+* Starting CPU interrupts balancing daemon^[74G[ OK ]
+* Stopping save kernel messages^[74G[ OK ]nf
+* Stopping System V runlevel compatibility^[74G[ OK ]
+Generation complete.
+ec2: a
+ec2: #############################################################
+ec2: -----BEGIN SSH HOST KEY FINGERPRINTS-----[
+...
+Ctrl-C
+$ ping -c 1 10.0.0.4
+PING 10.0.0.4 (10.0.0.4) 56(84) bytes of data.
+64 bytes from 10.0.0.4: icmp_req=1 ttl=64 time=0.852 ms
+...
+$ ssh ubuntu@10.0.0.4 # use '-i ~/creds/mykey.priv' on 11.10
+Welcome to Ubuntu precise (development branch) (GNU/Linux 3.2.0-17-virtual x86_64)
+...
+ubuntu@server-8:~$
+</pre>
+ Note that the console output can be found in /var/lib/nova/instances/<instance> (eg i-00000008)
+ 0. Terminate the instance
+** via EC2 API:<pre>
+$ euca-terminate-instances i-00000008
+$ euca-describe-instances
+$
+</pre>
+** via nova API:<pre>
+$ nova list
++--------------------------------------+--------+--------+-----------------------------------+
+| ID                                   | Name   | Status | Networks                          |
++--------------------------------------+--------+--------+-----------------------------------+
+| 6cd89139-695d-45d0-98b7-255541008175 | testme | ACTIVE | private=10.0.0.2, 192.168.122.225 |
++--------------------------------------+--------+--------+-----------------------------------+
+$ nova delete 6cd89139-695d-45d0-98b7-255541008175
+$ nova list
+$
+</pre>
+
+==== Networking with instances ====
+To make instances publicly available, you allocate an address, associate it with an instance, then optionally configure security groups (note that if configuring the non-'default' security group, the image must be started in this security group). If you used '--auto_assign_floating_ip' as instucted (see above, not available on 11.10), the allocation and association of IP addresses should happen automatically (though you still need to setup the security groups). If not, you can do it manually:
+ 0. First verify your network security groups are set up to allow pings and ssh: <pre>
+$ euca-describe-groups
+GROUP	ec949719d82c442cb32729be66e2e8ae	default	default
+PERMISSION	ec949719d82c442cb32729be66e2e8ae	default	ALLOWS	tcp	22	22	FROM	CIDR	0.0.0.0/0
+PERMISSION	ec949719d82c442cb32729be66e2e8ae	default	ALLOWS	icmp	-1	-1	FROM	CIDR	0.0.0.0/0
+</pre>
+ If not, add icmp and ssh to the default group (this must be done before any instances are started, see <nowiki>[[http://open.eucalyptus.com/wiki/Euca2oolsNetworking|Configure security groups]]</nowiki>):<pre>
+$ euca-authorize -P tcp -p 22 default
+GROUP	default
+PERMISSION	default	ALLOWS	tcp	22	22	FROM	CIDR	0.0.0.0/0
+$ euca-authorize -P icmp -t -1:-1 default
+GROUP	default
+PERMISSION	default	ALLOWS	icmp	-1	-1	FROM	CIDR	0.0.0.0/0
+</pre>
+ 0. Start in instance in the normal way:<pre>
+$ euca-run-instances -k mykey -t m1.tiny ami-00000001
+</pre>
+ 0. Allocate the addresss:<pre>
+$ euca-allocate-address
+ADDRESS	192.168.122.227
+</pre>
+ 0. Associate the address:<pre>
+$ euca-associate-address 192.168.122.227 -i i-00000008
+ADDRESS	192.168.122.227	i-00000008
+</pre>
+ 0. Verify the address:<pre>
+$ euca-describe-instances
+RESERVATION	r-7yderdto	ec949719d82c442cb32729be66e2e8ae	default
+INSTANCE	i-00000008	ami-00000001	server-8	server-8	running	mykey2 (ec949719d82c442cb32729be66e2e8ae, openstack-precise-server-amd64)	0m1.tiny	2012-03-20T23:07:07Z	nova				monitoring-disabled	192.168.122.227	10.0.0.4			instance-store
+$ nova list
++--------------------------------------+----------+--------+-----------------------------------+
+|                  ID                  |   Name   | Status |              Networks             |
++--------------------------------------+----------+--------+-----------------------------------+
+| e7a08f62-a57f-4b64-85bd-dcf8682e3fc7 | Server 8 | ACTIVE | private=10.0.0.4, 192.168.122.227 |
++--------------------------------------+----------+--------+-----------------------------------+
+</pre>
+ 0. Verify from the !OpenStack host:<pre>
+$ ping -c 1 192.168.122.227
+PING 192.168.122.227 (192.168.122.227) 56(84) bytes of data.
+64 bytes from 192.168.122.227: icmp_req=1 ttl=64 time=0.885 ms
+...
+ 0. Verify from another host on the libvirt network:{{{
+ubuntu@precise-amd64:~$ ping -c 1 192.168.122.227
+PING 192.168.122.227 (192.168.122.227) 56(84) bytes of data.
+64 bytes from 192.168.122.227: icmp_req=1 ttl=62 time=1.49 ms
+...
+</pre>
+ 0. Verify login via ssh to the external IP:<pre>
+$ ssh ubuntu@192.168.122.227 # use '-i ./creds/mykey.priv' if needed
+Welcome to Ubuntu precise (development branch) (GNU/Linux 3.2.0-17-virtual x86_64)
+...
+ubuntu@server-1:~$
+</pre>
+
+===== neutron security groups =====
+Can also add security groups with neutron. Eg:<pre>
+$ neutron security-group-rule-create --protocol icmp --direction ingress default
++-------------------+--------------------------------------+
+| Field             | Value                                |
++-------------------+--------------------------------------+
+| direction         | ingress                              |
+| ethertype         | IPv4                                 |
+| id                | 1b8d8a36-2040-48f1-bf2e-550e76a0049f |
+| port_range_max    |                                      |
+| port_range_min    |                                      |
+| protocol          | icmp                                 |
+| remote_group_id   |                                      |
+| remote_ip_prefix  |                                      |
+| security_group_id | 50e3ffe2-8b0a-47f1-8b6b-13fe953cb0a7 |
+| tenant_id         | 2578ec1b0e2e4a7097dcb4429798219e     |
++-------------------+--------------------------------------+
+
+$ neutron security-group-rule-create --protocol tcp --port-range-min 22 --port-range-max 22 --direction ingress default
++-------------------+--------------------------------------+
+| Field             | Value                                |
++-------------------+--------------------------------------+
+| direction         | ingress                              |
+| ethertype         | IPv4                                 |
+| id                | a14eb21b-7e08-4c6a-921b-f520df90c592 |
+| port_range_max    | 22                                   |
+| port_range_min    | 22                                   |
+| protocol          | tcp                                  |
+| remote_group_id   |                                      |
+| remote_ip_prefix  |                                      |
+| security_group_id | 50e3ffe2-8b0a-47f1-8b6b-13fe953cb0a7 |
+| tenant_id         | 2578ec1b0e2e4a7097dcb4429798219e     |
++-------------------+--------------------------------------+
+
+$ neutron security-group-list
++--------------------------------------+---------+-------------+
+| id                                   | name    | description |
++--------------------------------------+---------+-------------+
+| 50e3ffe2-8b0a-47f1-8b6b-13fe953cb0a7 | default | default     |
++--------------------------------------+---------+-------------+
+
+$ neutron security-group-rule-list
++--------------------------------------+----------------+-----------+----------+------------------+--------------+
+| id                                   | security_group | direction | protocol | remote_ip_prefix | remote_group |
++--------------------------------------+----------------+-----------+----------+------------------+--------------+
+| 1b8d8a36-2040-48f1-bf2e-550e76a0049f | default        | ingress   | icmp     |                  |              |
+| 344505a6-5043-48f9-8420-6e1415cd6465 | default        | ingress   |          |                  | default      |
+| 43ada8ef-7b6c-4312-887e-38fd5cdfb331 | default        | ingress   |          |                  | default      |
+| 6a91a953-0a25-4490-9453-b29944ef1f30 | default        | egress    |          |                  |              |
+| 7345ce94-666d-4d38-b1d2-420a55eb4980 | default        | egress    |          |                  |              |
+| a14eb21b-7e08-4c6a-921b-f520df90c592 | default        | ingress   | tcp      |                  |              |
++--------------------------------------+----------------+-----------+----------+------------------+--------------+
+
+</pre>
+
+==== juju with 12.04+ ====
+Using the values from 'Initial setup' (above), <nowiki>[[https://juju.ubuntu.com/docs/getting-started.html#configuring-your-environment|create ~/.juju/environments.yaml]]</nowiki> (this file should be chmod 0660; also note the <nowiki>[[https://juju.ubuntu.com/docs/provider-configuration-ec2.html|other options for the environment]]</nowiki>):<pre>
+environments:
+  openstack:
+    type: ec2
+    control-bucket: juju-openstack-bucket
+    admin-secret: foooooooooooo
+    ec2-uri: http://192.168.122.3:8773/services/Cloud
+    s3-uri: http://192.168.122.3:3333
+    ec2-key-name: mykey2
+    authorized-keys-path: <your home dir>/.ssh/openstack.id_rsa
+    access-key: 684d98881d1242f389fcaa6edeab0dfb
+    secret-key: 59e4153c6114455797852450966c52fb
+    default-image-id: ami-00000001
+    default-instance-type: m1.tiny
+    default-series: precise
+</pre>
+
+Then can use juju normally (will want to use ssh-agent) to setup up machines, etc. It should handle all the networking and security groups for you as well. Eg:<pre>
+$ juju bootstrap # this is pretty fast
+$ juju deploy --repository=~/charms local:precise/wordpress
+$ juju status
+...
+</pre>
+
+Keep in mind that 'juju bootstrap' starts a control node then 'apt-get update's it and installs juju, zookeeper, etc. Until this node is up, it will look like there is a problem. As such, it is convenient to use 'euca-describe-instances', then watch the console output. Eg:<pre>
+$ euca-describe-instances
+RESERVATION	r-c738ps8l	ec949719d82c442cb32729be66e2e8ae	juju-openstack, juju-openstack-0
+INSTANCE	i-00000007	ami-00000001	192.168.122.225	server-7	running	None (ec949719d82c442cb32729be66e2e8ae, openstack-precise-server-amd64)	0		m1.tiny	2012-03-22T02:07:04.000Z	nova				monitoring-disabled	192.168.122.225	10.0.0.2			instance-store
+$ watch 'euca-get-console-output i-07|tail -25'
+...
+</pre>
+
+You'll know the control node is ready when you see something like:<pre>
+-----END SSH HOST KEY KEYS-----
+cloud-init boot finished at Thu, 22 Mar 2012 02:20:08 +0000. Up 763.66 seconds
+</pre>
+
+=== Web frontend (OpenStack Dashboard, 12.04+) ===
+The !OpenStack dashboard is broken on 11.10 and it requires keystone, which is also broken.
+
+ 0. Install the required packages:<pre>
+$ sudo apt-get install python-memcache memcached openstack-dashboard
+</pre>
+ 0. Make sure `/etc/openstack-dashboard/local_settings.py` has:<pre>
+CACHE_BACKEND='memcached://127.0.0.1:11211/'
+</pre>
+ 0. In 13.10 and higher, make sure /usr/share/openstack-dashboard/openstack_dashboard/settings.py has:<pre>
+COMPRESS_ENABLED = False
+</pre>
+ 0. Restart apache:<pre>
+$ sudo /etc/init.d/apache2 restart
+</pre>
+ 0. Go to http://<openstack>/ (12.04 LTS) or http://<openstack>/horizon (12.10) and login with 'admin' and password 'adminpasswd' (assumes the above defaults)
+
+'''NOTE''': if running the dashboard on another host, then also adjust OPENSTACK_HOST in `/etc/openstack-dashboard/local_settings.py`
+
+'''NOTE''': the dashboard requires `nova-volume` on 12.10/Folsom and higher (<nowiki>[[https://launchpad.net/bugs/946874|946874]]</nowiki>)
+
+== Accessing the API with curl ==
+The !OpenStack tools themselves access the API and do a lot of input validation which may not be enough when testing. The API may be accessed via JSON or XML and requires that you authenticate first. You can refer to the <nowiki>[[http://docs.openstack.org/api/quick-start/content/|OpenStack API Quick start]]</nowiki> for API documentation, but you can also examine tcpdump output. Eg, if you want to see what 'nova image-list' does, in one terminal launch `sudo tcpdump -i lo -n -s 0 -X port 8774` then in another do `nova image-list`.
+
+=== JSON ===
+==== 12.04+ ====
+Example session using the API with JSON (can pipe all these into 'python -m json.tool' for nicer output):
+* First authenticate:<pre>
+$ curl -X 'POST' -v http://127.0.0.1:5000/v2.0/tokens -d '{"auth":{"passwordCredentials":{"username": "admin", "password":"adminpasswd"}, "tenantId": ""}}' -H 'Content-type: application/json'
+{"access": {"token": {"expires": "2013-02-21T19:31:55Z", "id": "31c8a1ba0be547fa8e37835895a3e311"}, ...
+$ curl -H "X-Auth-Token:31c8a1ba0be547fa8e37835895a3e311" http://127.0.0.1:5000/v2.0/tenants
+{"tenants_links": [], "tenants": [{"enabled": true, "description": "Admin tenant", "name": "admin", "id": "5c7aadef135d4921ae53509531369321"}]}
+$ curl -k -X 'POST' -v http://127.0.0.1:5000/v2.0/tokens -d '{"auth":{"passwordCredentials":{"username": "admin", "password":"adminpasswd"}, "tenantId": "5c7aadef135d4921ae53509531369321"}}' -H 'Content-type: application/json'
+...
+{"access": {"token": {"expires": "2013-02-21T19:26:02Z", "id": "917784fefc454817b6d66b5b11b08e75", ...
+</pre>
+* Next, use the API using the token (with tenantId in the URL):<pre>
+$ curl -v -H "X-Auth-Token:917784fefc454817b6d66b5b11b08e75" http://127.0.0.1:8774/v2/5c7aadef135d4921ae53509531369321/servers
+...
+$ curl -v -H "X-Auth-Token:917784fefc454817b6d66b5b11b08e75" http://127.0.0.1:8774/v2/5c7aadef135d4921ae53509531369321/images/detail
+...
+curl -v -H "X-Auth-Token:917784fefc454817b6d66b5b11b08e75" http://127.0.0.1:8774/v2/5c7aadef135d4921ae53509531369321/flavors/detail | python -m json.tool
+...
+</pre>
+
+curl also allows you to specify a file using '-d @<filename>' instead of '-d <your text>'. Eg, we can specify the JSON for booting a VM with: <pre>
+$ cat /tmp/boot.json
+{"server":
+ {"min_count": 1,
+  "flavorRef": 1,
+  "name": "testme4",
+  "imageRef": "ef8cda77-12cd-4081-b978-125e4c7daf51",
+  "max_count": 1
+ }
+}
+$ curl -v -H 'Content-Type: application/json' -H "X-Auth-Token:917784fefc454817b6d66b5b11b08e75" -X POST -d '@/tmp/boot.json' http://127.0.0.1:8774/v1.1/5c7aadef135d4921ae53509531369321/servers | python -m json.tool
+...
+{
+    "server": {
+        "OS-DCF:diskConfig": "MANUAL", 
+        "adminPass": "pXrQqE7RzFxu", 
+        "id": "8afa7638-ccfc-4096-95fe-a0f86ad3afb2", 
+        "links": [
+            {
+                "href": "http://127.0.0.1:8774/v1.1/5c7aadef135d4921ae53509531369321/servers/8afa7638-ccfc-4096-95fe-a0f86ad3afb2", 
+                "rel": "self"
+            }, 
+            {
+                "href": "http://127.0.0.1:8774/5c7aadef135d4921ae53509531369321/servers/8afa7638-ccfc-4096-95fe-a0f86ad3afb2", 
+                "rel": "bookmark"
+            }
+        ]
+    }
+}
+</pre>
+
+==== 11.10 ====
+11.10 doesn't use keystone (see above), so we talk to nova directly:<pre>
+$ . ~/.openstackrc
+$ curl -ik -H "X-Auth-User: $NOVA_USERNAME" -H "X-Auth-Key: $NOVA_API_KEY" -H "X-Auth-Project-Id: $NOVA_PROJECT" http://127.0.0.1:8774/v1.1/
+...
+X-Auth-Token: a1a8d9d78b96710d64100643ff55a6ad3df4deca
+X-Server-Management-Url: http://127.0.0.1:8774/v1.1/proj
+...
+$ curl -H "X-Auth-User: $NOVA_USERNAME" -H "X-Auth-Key: $NOVA_API_KEY" -H "X-Auth-Project-Id: $NOVA_PROJECT" -H 'X-Auth-Token: a1a8d0643ff55a6ad3df4deca' -H 'Content-type: application/json' http://127.0.0.1:8774/v1.1/proj/servers
+...
+$ curl -H "X-Auth-User: $NOVA_USERNAME" -H "X-Auth-Key: $NOVA_API_KEY" -H "X-Auth-Project-Id: $NOVA_PROJECT" -H 'X-Auth-Token: a1a8d9d78b96710d64100643ff55a6ad3df4deca' -H 'Content-type: application/json' http://127.0.0.1:8774/v1.1/proj/servers/detail | python -m json.tool
+...
+$ curl -H "X-Auth-User: $NOVA_USERNAME" -H "X-Auth-Key: $NOVA_API_KEY" -H "X-Auth-Project-Id: $NOVA_PROJECT" -H 'X-Auth-Token: a1a8d9d78b96710d64100643ff55a6ad3df4deca' -H 'Content-type: application/json' http://127.0.0.1:8774/v1.1/proj/images/detail | python -m json.tool
+...
+</pre>
+
+=== XML ===
+==== 12.04+ ====
+Example session using the API with XML (can pipe all these into  'xmllint --format -' for nicer output):
+* First, authenticate:<pre>
+$ curl -H 'Content-Type: application/xml' -H 'Accept: application/xml' -X 'POST' -v http://127.0.0.1:5000/v2.0/tokens -d '<auth><tenantName></tenantName><passwordCredentials><username>admin</username><password>adminpasswd</password></passwordCredentials></auth>' | xmllint --format -
+...
+  <token expires="2013-02-21T19:55:26Z" id="ed0b24b303c147da93627608f1f84d25"/>
+...
+$ curl -H 'Content-Type: application/xml' -H 'Accept: application/xml' -X 'POST' -H "X-Auth-Token:ed0b24b303c147da93627608f1f84d25" http://127.0.0.1:5000/v2.0/tenants | xmllint --format -
+...
+  <tenant id="5c7aadef135d4921ae53509531369321" enabled="true" name="admin">
+...
+$ curl -k -H 'Content-Type: application/xml' -H 'Accept: application/xml' -X 'POST' -v http://127.0.0.1:5000/v2.0/tokens -d '<auth><passwordCredentials><username>admin</username><password>adminpasswd</password></passwordCredentials><tenantId>5c7aadef135d4921ae53509531369321</tenantId></auth>' | xmllint --format -
+...
+  <token expires="2013-02-21T20:00:09Z" id="e437892c93c94699858441a13ad022ad">
+...
+</pre>
+* Next, use the API using the token (with tenantId in the URL):<pre>
+$ curl -v -H 'Content-Type: application/xml' -H 'Accept: application/xml' -H "X-Auth-Token:e437892c93c94699858441a13ad022ad" http://127.0.0.1:8774/v2/5c7aadef135d4921ae53509531369321/flavors/detail
+...
+</pre>
+
+curl also allows you to specify a file using '-d @<filename>' instead of '-d <your text>'. Eg, we can specify the XML for obtaining an X-Auth-Token to query for the tenantId in a file: <pre>
+$ cat /tmp/xml
+<auth>
+<passwordCredentials>
+<username>admin</username>
+<password>adminpasswd</password>
+</passwordCredentials>
+</auth>
+
+$ curl -H 'Content-Type: application/xml' -H 'Accept: application/xml' -X 'POST' -v http://127.0.0.1:5000/v2.0/tokens -d '@/tmp/xml' | xmllint --format -
+...
+  <token expires="2013-02-21T20:15:44Z" id="...
+...
+</pre>
+
+Or we can specify the XML for booting a VM with: <pre>
+$ cat /tmp/boot.xml
+<server name="testme9" imageRef="ef8cda77-12cd-4081-b978-125e4c7daf51" flavorRef="1" min_count="1" max_count="1">
+</server>
+$ curl -v -H 'Content-Type: application/xml' -H 'Accept: application/xml' -H "X-Auth-Token:917784fefc454817b6d66b5b11b08e75" -X POST -d '@/tmp/boot.xml' http://127.0.0.1:8774/v1.1/5c7aadef135d4921ae53509531369321/servers | xmllint --format -
+...
+<?xml version="1.0" encoding="UTF-8"?>
+<server xmlns:OS-DCF="http://docs.openstack.org/compute/ext/disk_config/api/v1.1" xmlns:atom="http://www.w3.org/2005/Atom" xmlns="http://docs.openstack.org/compute/api/v1.1" id="b1722771-401e-4e20-82ab-ca7032d500aa" adminPass="4NvWbjc693YQ" OS-DCF:diskConfig="MANUAL">
+  <metadata/>
+  <atom:link href="http://127.0.0.1:8774/v1.1/5c7aadef135d4921ae53509531369321/servers/b1722771-401e-4e20-82ab-ca7032d500aa" rel="self"/>
+  <atom:link href="http://127.0.0.1:8774/5c7aadef135d4921ae53509531369321/servers/b1722771-401e-4e20-82ab-ca7032d500aa" rel="bookmark"/>
+</server>
+</pre>
+
+==== 11.10 ====
+11.10 doesn't use keystone (see above), so we talk to nova directly:<pre>
+$ . ~/.openstackrc
+$ curl -ik -H "X-Auth-User: $NOVA_USERNAME" -H "X-Auth-Key: $NOVA_API_KEY" -H "X-Auth-Project-Id: $NOVA_PROJECT" -H 'Content-type: application/xml' -H 'Accept: application/xml' http://127.0.0.1:8774/v1.1/
+...
+X-Auth-Token: 6b8ced62e9e155f4a2ea8a4fe3a6f5e178b8388c
+X-Server-Management-Url: http://127.0.0.1:8774/v1.1/proj
+...
+curl  -H "X-Auth-User: $NOVA_USERNAME" -H "X-Auth-Key: $NOVA_API_KEY" -H "X-Auth-Project-Id: $NOVA_PROJECT" -H 'X-Auth-Token:6b8ced62e9e155f4a2ea8a4fe3a6f5e178b8388c' -H 'Content-type: application/xml' -H 'Accept: application/xml' http://127.0.0.1:8774/v1.1/proj/servers
+...
+curl  -H "X-Auth-User: $NOVA_USERNAME" -H "X-Auth-Key: $NOVA_API_KEY" -H "X-Auth-Project-Id: $NOVA_PROJECT" -H 'X-Auth-Token:6b8ced62e9e155f4a2ea8a4fe3a6f5e178b8388c' -H 'Content-type: application/xml' -H 'Accept: application/xml' http://127.0.0.1:8774/v1.1/proj/servers/detail
+...
+curl  -H "X-Auth-User: $NOVA_USERNAME" -H "X-Auth-Key: $NOVA_API_KEY" -H "X-Auth-Project-Id: $NOVA_PROJECT" -H 'X-Auth-Token:6b8ced62e9e155f4a2ea8a4fe3a6f5e178b8388c' -H 'Content-type: application/xml' -H 'Accept: application/xml' http://127.0.0.1:8774/v1.1/proj/images/detail
+...
+</pre>
+
+== Miscellaneous ==
+=== test-openstack.py setup-all ===
+<nowiki>[[http://bazaar.launchpad.net/~ubuntu-bugcontrol/qa-regression-testing/master/view/head:/scripts/test-openstack.py|QRT/scripts/test-openstack.py]]</nowiki> can help automate some of the above (ie, <nowiki>[[https://wiki.ubuntu.com/SecurityTeam/TestingOpenStack#Setup_OpenStack_packages|Setup OpenStack packages]]</nowiki> up to (but not including) <nowiki>[[https://wiki.ubuntu.com/SecurityTeam/TestingOpenStack#Using_OpenStack|Using OpenStack]]</nowiki>). The script is tested on Ubuntu 11.10 - 13.10.10, but currently does not setup Swift. In general, it is recommended that the above be done manually at least once to understand how all the pieces fit together. Eg, output from 13.10:<pre>
+$ cd /tmp/qrt-test-openstack
+$ sudo ./test-openstack.py setup-all
+Installing packages...
+TODO: preseed the mysql password so we can automate this step
+Install packages with the following (use 'pass' for mysql root
+password and type 'exit' when done):
+## sh /tmp/tmpI2szSy
+Reading package lists... Done
+Building dependency tree       
+Reading state information... Done
+lvm2 is already the newest version.
+The following extra packages will be installed: ...
+... installs a bunch of packages, prompting for mysql password (use 'pass') ...
+exit
+done
+Setting up networking... <network>
+  <name>default</name>
+  <uuid>ad0e1ea8-c7b8-42c3-a549-bfc3ca84f28b</uuid>
+  <forward mode='nat'/>
+  <bridge name='virbr0' stp='on' delay='0' />
+  <ip address='192.168.123.1' netmask='255.255.255.0'>
+    <dhcp>
+      <range start='192.168.123.2' end='192.168.123.254' />
+    </dhcp>
+  </ip>
+</network>
+
+WARN: virsh net-destroy failed. Continuing (non-fatal)
+Restarting libvirt
+done
+Setting up mysql... done
+Setting up rabbitmq... done
+Setting up nova... done
+Setting up glance...
+  /etc/glance/glance-registry.conf
+  /etc/glance/glance-api.conf
+done
+Setting up keystone...
+done
+Setting up tenants...
+  'admin' created
+  'users' created
+  'services' created
+done
+Setting up roles...
+  'Member' created
+  'admin' created
+done
+Setting up users...
+  'admin'
+    create user
+    add user '...' and tenant '...' to role '...'
+  done
+  'glance'
+    create user
+    add user '...' and tenant '...' to role '...'
+  done
+  'nova'
+    create user
+    add user '...' and tenant '...' to role '...'
+  done
+  'cinder'
+    create user
+    add user '...' and tenant '...' to role '...'
+  done
+done
+Setting up services...
+  'glance' created
+  'nova' created
+  'ec2' created
+  'keystone' created
+  'cinder' created
+done
+Setting up endpoints...
+  'http://localhost:9292/v1' created
+  'http://localhost:8773/services/Cloud' created
+  'http://localhost:5000/v2.0' created
+  'http://localhost:8774/v1.1/$(tenant_id)s' created
+  'http://localhost:8776/v1/$(tenant_id)s' created
+done
+Setting up nova and glance to use keystone
+  /etc/nova/api-paste.ini
+  /etc/glance/glance-api-paste.ini
+  /etc/glance/glance-registry-paste.ini
+  verifying cinder-volumes VG
+  /etc/cinder/api-paste.ini
+  /etc/cinder/cinder.conf
+  restarting cinder
+done
+done
+Setting up nova networking
+  eth1 already up
+  nova-manage network create private 10.0.0.0/24 1 256 --bridge=br100 --bridge_interface=eth1 --multi_host=True
+  nova-manage floating create 192.168.122.224/27
+  adjusting /etc/nova/nova.conf
+  adjusting /etc/rc.local for iptables rule
+done
+Setting up horizon
+keystone token-get (post package setup)
+Setting up flavors
+keystone token-get (verify_setup)
+  ...
+sudo nova-manage service list
+Binary           Host                                 Zone             Status     State Updated_At
+nova-scheduler   openstack-saucy-amd64                internal         enabled    :-)   2013-11-25 15:51:42
+nova-conductor   openstack-saucy-amd64                internal         enabled    :-)   2013-11-25 15:51:47
+nova-network     openstack-saucy-amd64                internal         enabled    :-)   2013-11-25 15:51:25
+nova-compute     openstack-saucy-amd64                nova             enabled    :-)   2013-11-25 15:51:49
+
+nova flavor-list
++----+-----------+-----------+------+-----------+------+-------+-------------+-----------+
+| ID | Name      | Memory_MB | Disk | Ephemeral | Swap | VCPUs | RXTX_Factor | Is_Public |
++----+-----------+-----------+------+-----------+------+-------+-------------+-----------+
+| 1  | m1.tiny   | 512       | 0    | 0         |      | 1     | 1.0         | True      |
+| 2  | m1.small  | 2048      | 20   | 0         |      | 1     | 1.0         | True      |
+| 3  | m1.medium | 4096      | 40   | 0         |      | 2     | 1.0         | True      |
+| 4  | m1.large  | 8192      | 80   | 0         |      | 4     | 1.0         | True      |
+| 5  | m1.xlarge | 16384     | 160  | 0         |      | 8     | 1.0         | True      |
++----+-----------+-----------+------+-----------+------+-------+-------------+-----------+
+
+keystone catalog
+Service: volume
++-------------+-----------------------------------------------------------+
+|   Property  |                           Value                           |
++-------------+-----------------------------------------------------------+
+|   adminURL  | http://localhost:8776/v1/2578ec1b0e2e4a7097dcb4429798219e |
+|      id     |              985d892a971c44109933254deca7e695             |
+| internalURL | http://localhost:8776/v1/2578ec1b0e2e4a7097dcb4429798219e |
+|  publicURL  | http://localhost:8776/v1/2578ec1b0e2e4a7097dcb4429798219e |
+|    region   |                         RegionOne                         |
++-------------+-----------------------------------------------------------+
+Service: image
++-------------+----------------------------------+
+|   Property  |              Value               |
++-------------+----------------------------------+
+|   adminURL  |     http://localhost:9292/v1     |
+|      id     | 3d13772644d34ba7b25a1a28ee2ee03a |
+| internalURL |     http://localhost:9292/v1     |
+|  publicURL  |     http://localhost:9292/v1     |
+|    region   |            RegionOne             |
++-------------+----------------------------------+
+Service: compute
++-------------+-------------------------------------------------------------+
+|   Property  |                            Value                            |
++-------------+-------------------------------------------------------------+
+|   adminURL  | http://localhost:8774/v1.1/2578ec1b0e2e4a7097dcb4429798219e |
+|      id     |               2e5ca5ef0d544174b30b1d48b6639999              |
+| internalURL | http://localhost:8774/v1.1/2578ec1b0e2e4a7097dcb4429798219e |
+|  publicURL  | http://localhost:8774/v1.1/2578ec1b0e2e4a7097dcb4429798219e |
+|    region   |                          RegionOne                          |
++-------------+-------------------------------------------------------------+
+Service: ec2
++-------------+--------------------------------------+
+|   Property  |                Value                 |
++-------------+--------------------------------------+
+|   adminURL  | http://localhost:8773/services/Cloud |
+|      id     |   4f0bbcf7a7d546c6a5046fcb926a343e   |
+| internalURL | http://localhost:8773/services/Cloud |
+|  publicURL  | http://localhost:8773/services/Cloud |
+|    region   |              RegionOne               |
++-------------+--------------------------------------+
+Service: identity
++-------------+----------------------------------+
+|   Property  |              Value               |
++-------------+----------------------------------+
+|   adminURL  |   http://localhost:35357/v2.0    |
+|      id     | 2b4f11cafb81425cafa9d4fcec1b3042 |
+| internalURL |    http://localhost:5000/v2.0    |
+|  publicURL  |    http://localhost:5000/v2.0    |
+|    region   |            RegionOne             |
++-------------+----------------------------------+
+
+keystone service-list
++----------------------------------+----------+----------+---------------------------+
+|                id                |   name   |   type   |        description        |
++----------------------------------+----------+----------+---------------------------+
+| b46b88f2dc774c129ba0e0e619efeadd |  cinder  |  volume  |   Cinder volume service   |
+| 6b9b30002e84427c8f41553e67080131 |   ec2    |   ec2    |  EC2 compatibility layer  |
+| 420c6ec4c7be44b4b5f4f226bb52b4d5 |  glance  |  image   |    Glance Image service   |
+| 4abbe1459c1b4143959551a867e00108 | keystone | identity | Keystone Identity service |
+| bd565dbfa0904b4982918a671dfa69c7 |   nova   | compute  |    Nova Compute service   |
++----------------------------------+----------+----------+---------------------------+
+
+keystone catalog --service ec2
+Service: ec2
++-------------+--------------------------------------+
+|   Property  |                Value                 |
++-------------+--------------------------------------+
+|   adminURL  | http://localhost:8773/services/Cloud |
+|      id     |   4f0bbcf7a7d546c6a5046fcb926a343e   |
+| internalURL | http://localhost:8773/services/Cloud |
+|  publicURL  | http://localhost:8773/services/Cloud |
+|    region   |              RegionOne               |
++-------------+--------------------------------------+
+
+Setup complete
+If everything looks ok, you can start using OpenStack by going
+to https://wiki.ubuntu.com/SecurityTeam/TestingOpenStack#Using_OpenStack
+...
+
+$ sudo reboot
+</pre>
+Now you can start <nowiki>[[https://wiki.ubuntu.com/SecurityTeam/TestingOpenStack#Using_OpenStack|using OpenStack]]</nowiki>
+
+=== keystone PKI ===
+Keystone supports PKI in Folsom and higher (Ubuntu 12.10) and it is on by default in Grizzly (Ubuntu 13.04) and higher. To test:
+ 0. Adjust /etc/keystone/keystone.conf to have (default on 13.04 and higher):<pre>
+[signing]
+certfile = /etc/keystone/ssl/certs/signing_cert.pem
+keyfile = /etc/keystone/ssl/private/signing_key.pem
+ca_certs = /etc/keystone/ssl/certs/ca.pem
+key_size = 1024
+valid_days = 3650
+ca_password = None
+token_format = PKI
+</pre>
+ 0. Setup some self-signed keys (already done on 13.04 and higher):<pre>
+$ sudo keystone-manage pki_setup
+$ sudo chown -R keystone:keystone /etc/keystone/ssl
+</pre>
+ 0. Restart keystone:<pre>
+ $ sudo /etc/init.d/keystone restart
+</pre>
+
+Now the services will use <nowiki>[[https://wiki.openstack.org/wiki/PKI|PKI]]</nowiki> with keystone. Eg:<pre>
+$ glance index
+$ sudo ls -l /var/lib/glance/keystone-signing
+total 12
+-rw-r----- 1 glance glance 1070 Mar 20 14:38 cacert.pem
+-rw-r----- 1 glance glance   15 Mar 20 15:08 revoked.pem
+-rw-r----- 1 glance glance 2415 Mar 20 14:38 signing_cert.pem
+$ nova list
+$ sudo ls -l /tmp/keystone-signing-nova/ # 12.10 and early 13.04; configurable in /etc/nova/api-paste.ini
+total 12
+-rw-rw-r-- 1 nova nova 1070 Mar 20 15:13 cacert.pem
+-rw-rw-r-- 1 nova nova   15 Mar 20 15:13 revoked.pem
+-rw-rw-r-- 1 nova nova 2415 Mar 20 15:13 signing_cert.pem
+$ sudo ls -l /var/lib/nova/keystone-signing # up-to-date 13.04+; configurable in /etc/nova/api-paste.ini
+-rw-r--r-- 1 nova nova 1070 Jun 13 21:08 cacert.pem
+-rw-r--r-- 1 nova nova   15 Jun 13 21:08 revoked.pem
+-rw-r--r-- 1 nova nova 2415 Jun 13 21:08 signing_cert.pem
+</pre>
+
+=== Swift ===
+Much of swift can be tested via horizon under Project/Object store. It can also be tested <nowiki>[[http://docs.openstack.org/essex/openstack-compute/starter/content/Swift_storage_operations--d1e2125.html|using the CLI]]</nowiki>. When using the CLI, use the following:<pre>
+* `swift -v -V 2.0 -A http://127.0.0.1:5000/v2.0/ -U <tenant>:<user> -K <pass>`
+</pre>
+Ie, for the above configuration:
+* `swift -v -V 2.0 -A http://127.0.0.1:5000/v2.0/ -U services:swift -K swift ... # non-admin user`
+* `swift -v -V 2.0 -A http://127.0.0.1:5000/v2.0/ -U admin -K adminpasswd ...    # admin user`
+Eg, if you already created the 'mycontainer' container in horizon by logging in as the swift user:<pre>
+$ swift -v -V 2.0 -A http://127.0.0.1:5000/v2.0/ -U services:swift -K swift list
+mycontainer
+$ swift -v -V 2.0 -A http://127.0.0.1:5000/v2.0/ -U services:swift -K swift stat mycontainer
+  Account: AUTH_27b5af4a40ec44d6af28d7b04715d4a3
+Container: mycontainer
+  Objects: 0
+    Bytes: 0
+ Read ACL:
+Write ACL:
+  Sync To:
+ Sync Key:
+Accept-Ranges: bytes
+X-Trans-Id: tx463d06f3834a4b4bb98a0a50d5dcb115
+</pre>
+
+If you already created the 'testme' container in horizon by logging in as the admin user:<pre>
+$ swift -v -V 2.0 -A http://127.0.0.1:5000/v2.0/ -U admin -K adminpasswd list
+testme
+$ swift -v -V 2.0 -A http://127.0.0.1:5000/v2.0/ -U admin -K adminpasswd stat
+StorageURL: http://localhost:8080/v1/AUTH_5c7aadef135d4921ae53509531369321
+Auth Token: ea1b4735ece7490495d2e8ebc8a4b974
+   Account: AUTH_5c7aadef135d4921ae53509531369321
+Containers: 1
+   Objects: 0
+     Bytes: 0
+Accept-Ranges: bytes
+X-Trans-Id: tx51a2920fda814d9093e11469e4707200
+$ swift -v -V 2.0 -A http://127.0.0.1:5000/v2.0/ -U admin -K adminpasswd stat testme
+  Account: AUTH_5c7aadef135d4921ae53509531369321
+Container: testme
+  Objects: 0
+    Bytes: 0
+ Read ACL:
+Write ACL:
+  Sync To:
+ Sync Key:
+Accept-Ranges: bytes
+X-Trans-Id: txbb3a44f025e14b55988ef6979a2a1968
+</pre>
+
+Upload/download/delete and list with some user:<pre>
+$ swift upload mycontainer /etc/passwd
+etc/passwd
+
+$ swift stat mycontainer
+  Account: AUTH_5c7aadef135d4921ae53509531369321
+Container: mycontainer
+  Objects: 1
+    Bytes: 1567
+ Read ACL:
+Write ACL:
+  Sync To:
+ Sync Key:
+Accept-Ranges: bytes
+X-Trans-Id: tx64bc1f78a40c47a98dd0e54d8bdbf3f2
+
+$ swift list mycontainer
+etc/passwd
+
+$ ls ./etc/passwd
+ls: cannot access ./etc/passwd: No such file or directory
+$ swift download mycontainer etc/passwd
+etc/passwd
+$ ls -l ./etc/passwd
+-rw-rw-r-- 1 jamie jamie 1567 Jun 18  2013 ./etc/passwd
+
+$ swift delete mycontainer etc/passwd
+etc/passwd
+$ swift list mycontainer
+$
+</pre>
+
+==== 13.04+ ====
+On 13.04 (Grizzly) and higher, non-admin users must belong to one of the operator_roles as defined in the `[filter:keystone]` section of /etc/swift/proxy-server.conf. If a user doesn't, can create the `swiftoperator` role and then add a user to it. Eg:<pre>
+$ keystone role-create --name swiftoperator
++----------+----------------------------------+
+| Property |              Value               |
++----------+----------------------------------+
+|    id    | 948c3af9867345dda382a74297e14b8f |
+|   name   |          swiftoperator           |
++----------+----------------------------------+
+$ export SWIFTOPERATOR_ROLE_ID=948c3af9867345dda382a74297e14b8f
+$ keystone user-role-add --user_id $DEMO_USER_ID --tenant_id $DEMO_TENANT_ID --role_id $SWIFTOPERATOR_ROLE_ID
+</pre>
+
+== Troubleshooting ==
+Here are some commands and files that are useful with debugging:
+* euca-describe-images
+* euca-describe-instances
+* euca-describe-availability-zones verbose
+* sudo nova-manage service list
+* euca-describe-addresses
+* euca-describe-groups
+* euca-associate-address/euca-disassociate-address
+* euca-allocate-address/euca-release-address
+* euca-run-instances/euca-terminate-instances
+* euca-get-console-output (/var/lib/nova/instances/*)
+* nova list
+* nova show <id from nova list>
+* /var/log/nova/nova-api.log
+* /var/log/nova/nova-compute.log
+* /var/log/nova/nova-network.log
+* /var/log/upstart/nova-*.log
+* Restarting all of !OpenStack:<pre>
+$ for i in nova-api nova-scheduler nova-network nova-compute nova-objectstore nova-volume glance-api glance-registry keystone; do sudo service $i restart ; done
+</pre>
+
+Also, when specifying an ami or an instance, you don't have to specify all the zeros. Eg:<pre>
+$ euca-run-instances ami-01
+$ euca-terminate-instances i-02
+</pre>
+
+== Caveats ==
+* Due to <nowiki>[[http://lists.rabbitmq.com/pipermail/rabbitmq-discuss/2011-April/012407.html|how rabbitmq works]]</nowiki>, it does not seem possible to change the host's IP address and hostname (eg, via cloning the VM), regardless of changes to /etc/hosts.
+* Be very careful to have enough RAM on the !OpenStack host, otherwise starting a VM will simply result in an error and 'nova show <id>' won't tell you it is because of too little RAM (/var/log/nova/nova-scheduler.log may have it though). <nowiki>[[https://bugs.launchpad.net/nova/+bug/1019017|LP: #1019017]]</nowiki>
+* If 'nova' continues to prompt for a keyring password, pass '--no-cache' to nova. Eg: `nova --no-cache list`. (<nowiki>[[https://bugs.launchpad.net/python-novaclient/+bug/1020238|LP: #1020238]]</nowiki>)
+* On 12.10, for some reason nova doesn't read in the environment when deleting volumes. You have to use something like this instead:<pre>
+$ sudo nova --os-username admin --os-password adminpasswd --os-tenant-name admin \
+            --os-auth-url http://localhost:5000/v2.0/ \
+            volume-delete <uuid>
+</pre>
+* Note that m1.tiny is probably the only image type that is launchable with the above configuration
+
+== Credits ==
+While this page was primarily written by Jamie Strandboge (jdstrand), the following people contributed greatly to the information in this page:
+* Adam Gandelman (adam_g)
+* Scott Moser (smoser)
+* http://docs.openstack.org/diablo/openstack-compute/starter/content/ was consulted for Diablo
+
+== References ==
+* Swift:
+** http://docs.openstack.org/diablo/openstack-compute/starter/content/Swift_install.html
+** http://docs.openstack.org/essex/openstack-compute/starter/content/OpenStack_Storage_Infrastructure_Swift_-d1e271.html
+** https://fedoraproject.org/wiki/Getting_started_with_OpenStack_on_Fedora_18
+** https://swiftstack.com/docs/integration/python-swiftclient.html
+* API
+** http://docs.openstack.org/api/quick-start/content/
+** https://github.com/openstack/keystone/blob/master/doc/source/api_curl_examples.rst
+* False negatives in the testsuite: http://status.openstack.org/rechecks/
+* Keystone helper script is in <nowiki>[[http://bazaar.launchpad.net/~ubuntu-bugcontrol/qa-regression-testing/master/view/head:/notes_testing/keystone/ks|QRT]]</nowiki>. Example usage can be found in bug:1179955
+* Quantum (grizzly)
+** http://docs.openstack.org/grizzly/openstack-network/admin/content/
+* Neutron (havana)
+** http://docs.openstack.org/trunk/install-guide/install/apt/content/neutron-install-network-node.html
+** http://docs.openstack.org/trunk/install-guide/install/apt/content/section_neutron-single-flat.html
+** http://docs.openstack.org/training-guides/content/module002-ch000-openstack-networking.html
+** http://docs.openstack.org/admin-guide-cloud/content/ch_networking.html
+** http://docs.openstack.org/trunk/openstack-ops/content/network_troubleshooting.html
+** http://fosskb.wordpress.com/2014/03/11/openstack-havana-on-ubuntu-12-04-lts-single-machine-setup/
+** http://openstack.redhat.com/PackStack_All-in-One_DIY_Configuration
+* Heat (havana)
+** http://docs.openstack.org/havana/install-guide/install/apt/content/heat-install.html
+** Example templates: https://github.com/openstack/heat-templates:
+** hot/hello_world.yaml
+** hot/swift.yaml
+** cfn/deb/MultiNode_DevStack.yaml

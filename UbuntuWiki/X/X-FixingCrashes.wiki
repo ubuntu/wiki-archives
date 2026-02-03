@@ -1,0 +1,153 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+To fix an X crash is technically challenging, but once you've mastered it can be a very time efficient way to bring lots of benefit to Ubuntu.  X crashes are particularly troublesome to users, so your fix will kill a lot of people's angst about Linux.
+
+In this tutorial, I'll walk you though how to understand backtraces, common kinds of pointer failures that cause crashes, and where to locate the crashing code in the X codebase.  I'll go through how to code up a fix, and how to prepare and submit patches to ubuntu and upstream, and how to put your patch into a PPA for others to test.
+
+=== What you need to know ===
+
+* Working knowledge of C (particularly about how pointers work).
+* Creating patches using diff
+
+=== Anatomy of a backtrace ===
+
+The meat and potatoes of crash fixing is backtraces, so lets take a look at a typical one:
+
+<pre>
+.
+Thread 1 (process 2152):
+    at ../../mi/misprite.c:1061
+	y = 544
+	pCursorInfo = (miCursorInfoPtr) 0x8e84a80
+    at ../../mi/misprite.c:971
+	pScreenPriv = (miSpriteScreenPtr) 0x8cde438
+	pCursorInfo = <value optimized out>
+    pTimeout=0xbf858dac, pReadmask=0x81f7440) at ../../mi/misprite.c:511
+	pScreen = (ScreenPtr) 0x8cfe428
+	pDev = (DeviceIntPtr) 0x8e83f60
+	pCursorInfo = <value optimized out>
+    pReadmask=0x81f7440) at ../../src/i810_video.c:1163
+	pScreen = <value optimized out>
+	pI810 = (I810Ptr) 0x8cda588
+	pPriv = (I810PortPrivPtr) 0x8d41544
+    pTimeout=0xbf858dac, pReadmask=0x81f7440) at ../../render/animcur.c:222
+	pScreen = (ScreenPtr) 0x8cfe428
+	as = (AnimCurScreenPtr) 0x8d47428
+	dev = (DeviceIntPtr) 0x0
+	now = 0
+	soonest = 4294967295
+    pReadmask=0x81f7440) at ../../composite/compinit.c:158
+	pScreen = (ScreenPtr) 0x8cfe428
+	cs = (CompScreenPtr) 0x8d48c30
+    at ../../dix/dixutils.c:384
+	i = 1
+</pre>
+<nowiki>[[http://launchpadlibrarian.net/35862406/ThreadStacktrace.txt|more backtrace]]</nowiki> for <nowiki>[[https://bugs.edge.launchpad.net/ubuntu/+source/xorg-server/+bug/485460|bug 485460]]</nowiki>.
+
+A backtrace is essentially a snapshot made at the point of crash which shows the function that the crash occurred in at (or near) the top, then the function that called that function, and then the function that called *that* function, and so on up to the top of the stack.  Usually the main() routine is the top of the stack, but not always.
+
+In this example stacktrace, taken from <nowiki>[[https://bugs.edge.launchpad.net/ubuntu/+source/xorg-server/+bug/485460|bug 485460]]</nowiki>, the crash happens in the first function listed, #0 miSpriteComputeSaved.
+
+We often refer to the function names as "symbols".  In some backtraces the function names aren't provided, and are shown as just question marks.  For example:
+
+<pre>
+StacktraceTop:
+ ?? ()
+ ?? ()
+ ?? ()
+ ?? () from /usr/lib/xorg/modules/drivers//intel_drv.so
+ ?? ()
+</pre>
+
+When that is all you see, it means we have to ask the user to obtain a <nowiki>[[https://wiki.ubuntu.com/X/Backtracing|full backtrace]]</nowiki>.
+
+Fortunately that's not the case with our example.  So let's take a closer look at the first symbol:
+
+<pre>
+    at ../../mi/misprite.c:1061
+	y = 544
+	pCursorInfo = (miCursorInfoPtr) 0x8e84a80
+</pre>
+
+TODO
+
+Many times a crash handler will kick in, so the first few symbols in the stack trace relate to that.  Basically, if you see symbols with "raise", "abort", "assert", "SigHandler", or "backtrace" in their names, those are typically calls related to the crash handler.  Look up the stack for the symbol prior to these calls.  For example,
+
+<pre>
+StacktraceTop:__kernel_vsyscall ()
+* __GI_raise (sig=6)
+* __GI_abort () at abort.c:92
+* __GI___assert_fail (
+drm_mmInit () from /usr/lib/libdrm_intel.so.1
+</pre>
+
+We would ignore the first four symbols and start by examining drm_mmInit().
+
+=== Where to find crash bugs ===
+
+=== Types of X crashes ===
+
+For sake of our understanding, let's split all the different types of X crashes into three broad categories:
+
+ 1. Naughty pointers
+ 2. Bad/hard software configurations
+ 3. Bad/hard hardware configurations
+ 4. Corrupted X logic or other issue
+
+That's roughly the order of "easiness to fix" too.  We'll be mostly focusing on #1 in this guide, since those are the kind of bugs that can be fixed with hardly any X.org experience.  But let's discuss the others briefly so you know what to avoid.
+
+Bad software configuration crashes typically happen because the user has either some weird combination of software package versions.  For instance, maybe they are running newish xserver with an ancient kernel.  A really common case is where they are running virtualbox and have installed video drivers compiled against the wrong version of X.  Another common case is where they have previously installed the -nvidia or -fglrx driver, perhaps uninstalling the driver but not completely purging it; this can result in really weird crashes since they still have some proprietary bits floating around trying to handle function calls they aren't able to handle.  In fact, if you see any evidence in the backtrace or bug report of the user having installed a proprietary driver, just move on to another bug report - even in a best case situation where you could find the cause of the crash, since the proprietary drivers are closed source you wouldn't be able to make a patch to fix it.
+
+Bad hardware configurations include running on extremely old hardware, extremely new hardware, or hardware being operated in extreme conditions like overheating.  Often the work to solve these is beyond just a simple X patch.  Generally if they describe something so old or so new that neither you nor google recognizes it, it's probably going to be challenging to work on.
+
+Some X crashes are caused by other unrelated problems in X, that then propagate for a while with X in an sickly state, until eventually the gears lock up and a crash occurs.  These types of problems are unfortunately quite intricate to sort out, usually requiring more info than just a crash dump.  Often you also need to be able to reproduce the issue yourself, so you can walk through it in gdm and see what's gone wrong - so you need to be experienced with gdb.
+
+Here's a checklist of things to watch out for:
+
+* Description indicates proprietary kernel module?  (-fglrx, -nvidia, -psb video drivers)
+* Description shows old kernel version, or a non-standard kernel like the -rt, -pae, server kernel, etc.
+* Description shows VirtualBox or VMWare in use
+* XorgConf.txt shows any driver in use other than {intel, radeon, ati, nv, nouveau} or any "weird" settings
+* Extremely old or new hardware you don't recognize and can't find via google
+* Evidence of hardware issues (overheating, bad memory, etc.)
+
+While bugs that match the above conditions are certainly legitimate issues, they're going to need some understanding of X.org beyond the scope of this tutorial, so just skip these bugs.
+
+=== Understanding the crash ===
+
+* Null pointer dereference
+* Stack overflow
+* Assertion failed
+* 
+
+Some issues to be aware of or look for
+
+* Were there changes to the code recently?  Maybe they introduced a corner case that can lead to a crash
+* Are there any fixes to this section of code upstream but not included in the version of the package the user is on?
+* Looking through the function, does it appear that there are any sections of code which are using pointers before verifying they are not NULL?
+
+=== Coding a fix ===
+
+=== Preparing the patch ===
+
+* Creating the patch
+* Packaging the patch
+* Creating a PPA
+
+=== Soliciting testing ===
+
+* Requesting user test PPA
+* Sending upstream for comment
+* 
+
+=== Appendix A: Apport crash hooks ===
+
+== 

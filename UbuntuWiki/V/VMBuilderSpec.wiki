@@ -1,0 +1,151 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+=== Summary ===
+
+Hardy saw the first iteration of ubuntu-vm-builder, and it turned out to be quite popular.
+This specification retroactively describes the design and implementation of ubuntu-vm-builder, and also adds some new requirements.
+
+=== Release Note ===
+
+Ubuntu now features ubuntu-vm-builder which can be used to provision new virtual machines very quickly. For people not yet running Ubuntu, there's a downloadable virtual machine image, which can produce new virtual machines via a web interface.
+
+=== Rationale ===
+
+ubuntu-vm-builder is a much faster approach to creating virtual machines than d-i.
+
+=== Use Cases ===
+* John manages a lot of virtual machines. He has automated configuration deployment systems in place, so he just needs a really quick way to generate and deploy virtual machines.
+* Mathias is a developer. He often needs to be able to reproduce bugs in a clean environment.
+* Michael is interested in upgrade testing, so he needs a way to automatically create virtual machines, fire them up, and execute privileged commands inside of them.
+
+=== Assumptions ===
+
+=== Design ===
+
+ubuntu-vm-builder has three (and a half) stages:
+
+* Storage setup
+* (Je)OS installation
+* Target VM conversion (and target vm deployment)
+
+==== Storage setup ====
+ubuntu-vm-builder either creates raw images or accepts existing block devices. It then partitions them, and loop mounts the partitions, so that the entire filesystem is ready to be filled.
+
+==== (Je)OS installation ====
+In this stage, the operating system is intalled into the filesystem created in the storage setup stage. For Ubuntu, this means using debootstrap to seed the filesystem, and then installing additional packages (boot loader, kernel, and user-specified extras) into the chroot, creating users, network configuration, configuring apt sources, etc.
+
+==== Target VM conversion ====
+In this final stage, the raw images are converted to the disk image format for the target virtualisation solution and the vm is "deployed".  Deployment in this situation is loosely defined as "whatever will make it easier for the user to start using the virtual machine". 
+
+=== Implementation ===
+
+==== Storage setup ====
+If not using pre-existing block devices for storage, ubuntu-vm-builder calls upon qemu-img to create a raw image of an appropriate size. parted is called to generate the the partition table, after which kpartx is invoked to expose the partitions as loopback block devices, after which they are mounted, so that the entire target disk layout is ready to be filled.
+
+==== (Je)OS installation ====
+
+* debootstrap installs the base system into a chroot.
+* /etc/fstab is created according to the disk layout specified on the command line.
+* Steps are taken to avoid daemons starting while were installing them into the chroot. (policy-rc.d style)
+* Locale settings from the host are injected into the guest.
+* The initial user is created.
+* Networking is setup according to command line options.
+* An appropriate kernel is installed.
+* grub is installed.
+* Extra packages are installed and unwanted packages are removed (package removal only present for completeness. I can't imagine anyone would want to remove anything).
+* Optionally, an ssh public key will be installed into root's authorized_keys. This allows for certain types of automated testing (upgrade testing in particular)
+* Optionally, a user specified script is executed inside the chroot.
+* Optionally, a firstboot script can be installed into the guest.
+* The steps to avoid starting daemons are reverted.
+* The volatile tmpfs from the restricted-modules packages is unmounted.
+* The chroot is copied into the target filesystem (as mounted in the Storage Setup stage). (This way, we completely work around the problem of temporary files not being completely cleaned up and needlessly bloating the disk images).
+* grub is installed into the disk image.
+* Everything is unmounted.
+
+==== VM conversion and "deployment" ====
+
+At this stage, we convert the raw disk images to the target vm format. For kvm or qemu this is currently qcow2 files, for vmware, it's vmdk's, etc., etc. 
+
+* For vmware, a .vmx file is created, which can afterwards be imported into vmware.
+* For plain kvm/qemu, a script is created that would start kvm with the proper command line options. 
+* For kvm/qemu with the --libvirt option, the virtual machine is added to the hypervisor, ready to be started up.
+
+Truth be told, the seperation between each stage is not quite as clear cut as this description makes it appear. We will want to fix this, since that will make it easier to extend ubuntu-vm-builder to generate vm's of other distributions.
+
+==== UI ====
+
+ubuntu-vm-builder is currently invoked as a command line utility, has a number of dependencies, and is distributed as a package in Ubuntu's repositories. 
+
+To make ubuntu-vm-builder of any use to other distributions, we'll create virtual machine capable of creating more virtual images. People will be able to download the virtual machine, access it via a web interface, and generate ubuntu based virtual machines this way.
+
+This will be done by adding a new ubuntu-vm-builder-web package to the ubuntu-vm-builder source package.It will include a CGI script which presents the user with a form for creating new virtual machines. The CGI will call ubuntu-vm-builder to build the vm which will land in an http reachable location for the user to download. There should be a mechanism for removing virtual machines from the machine again. The CGI will by default be reachable via http://ip.address.of.the.machine/ubuntu-vm-builder, but in the vm-builder virtual machines we'll be shipping, it will be reachable via the web root, too. A helpful text will be added to the boot sequence too, so that it's clear what to do if you just fire up the vm.
+
+=== Test/Demo Plan ===
+
+It's important that we are able to test new features, and demonstrate them to users.  Use this section to describe a short plan that anybody can follow that demonstrates the feature is working.  This can then be used during testing, and to show off after release.
+
+This need not be added or completed until the specification is nearing beta.
+
+=== Outstanding Issues ===
+
+This should highlight any issues that should be addressed in further specifications, and not problems with the specification itself; since any specification with problems cannot be approved.
+
+=== BoF agenda and discussion ===
+
+==== ubuntu-vm-builder Intrepid Features (already developed) ====
+* Error Handling.
+** Now running with set -e -u?
+* Create directly on a RAW device (such as iSCSI).
+* Specify first boot scripts.
+** Before first login. (non-interactive)
+** After first login. (interactive)
+* Specify an ISO file to get packages.
+* timezone + keymap setting
+** fixed in a u-v-b SRU (copy host settings)
+  
+==== u-vm-b wanted Features / Bugs ====
+* running as non-root ?
+** really difficult, losetup mount/unmount being really unfriendly
+** With policyKit this would be trivial -JeffSchroeder
+* should modprobe loop
+* Ability to specify MAC addresss of guest at creation time Bug:261702
+
+* Default --dest: from ubuntu-vm-$SUITE-$ARCH to $HOSTNAME-$SUITE-$ARCH-vm '''(done)'''
+* should allow for overwriting the dest directory '''(done)'''
+
+* add virtualbox output format - .vbox
+ 
+* name used with --libvirt should be ubuntu_hostname or similar (to avoid ubuntu, ubtuntu_, ubuntu__, ...) '''(done)'''
+
+* a Gtk frontend would be nice as an alternative to the web frontend for users who create VMs on the local machine but don't want to use the command line
+** this could also provide a feature to save VM profiles so that one could reuse the profiles of VMs created previously
+
+* Creating VMs with vmbuilder raises the question of providing a more high level approach to VM creation which allows to create VMs for predefined use cases like development servers with version control, bug tracking etc. or a CRM server for example. This could be done by providing appropriate task packages and listing those as options in vmbuilder.
+ 
+* Name change ?
+** Why
+** u-v-b is good : says what it does
+** may discourage porting or retargeting
+** too long and boring
+** If vmbuilder should be used by other distributions it would be helpful to have a neutral name
+** UVE - Ubuntu Virtually Everywhere
+** Soren Virtually Everywhere
+** UBERVM UBuntu ...EverywheRe VM
+** Cool abstract name for aggressive blogging
+** Juicer
+** JEOSer
+** SFGS: Soren's famous golf swing
+** Mustek Vystup (or Smer)
+* Posibility to install on LVM - Guest OS can grow in future
+
+----
+CategorySpec

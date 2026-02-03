@@ -1,0 +1,98 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+{| class="wikitable"
+|-
+| <tablestyle="float:right; width:40%; background:#F1F1ED; margin: 0 0 1em 1em;" style="padding:0.5em;">'''Table of Contents'''<<BR>>
+|}
+
+== SecureBoot-compatible UEFI netboot over IPv4 and IPv6 ==
+
+<nowiki>[[UEFI-PXE-netboot-install]]</nowiki> describes a method for preparing a self-contained netboot image for use with UEFI-based systems.  However, with the introduction of UEFI Secure``Boot, it is not possible to boot self-built netboot images on all UEFI systems without either disabling Secure``Boot on the target system, or updating the Secure``Boot key configuration in the firmware and signing your netboot images.  This page therefore describes an alternate method for netbooting Ubuntu using a pre-prepared UEFI grub image.
+
+This method also has two additional key features:
+* it allows booting to a grub menu providing a selection of boot options
+* changes can be made to the boot configuration by dropping in stock Ubuntu netboot images and/or updating the grub.cfg, with no requirement to regenerate special grub images.
+
+It is expected that future versions of MAAS will use the described method for hardware provisioning.
+
+=== TFTP server configuration ===
+==== Downloading the standard boot files ====
+As of 23.04, Ubuntu provides a <nowiki>[[https://releases.ubuntu.com/23.04/ubuntu-23.04-netboot-amd64.tar.gz|downloadable tarball]]</nowiki> suitable for unpacking and being served by a tftp or http server.  This checksum of this tarball is listed in the signed SHA256SUMS file for verification.
+
+This netboot tarball includes a grub.cfg which will automatically netboot the server ISO directly from https://releases.ubuntu.com/.  You can edit your grub.cfg locally to point at another image, or to a local server instead.
+
+The netboot tarball is also exposed as an unpacked directory at https://releases.ubuntu.com/23.04/netboot.  It is therefore possible to netboot https://releases.ubuntu.com/23.04/netboot/amd64/bootx64.efi directly.
+
+=== DHCP server configuration ===
+Once the tftp server has been configured, you will also need to configure your DHCP server to point at it.  While it's easy to set up your tftp server to point all machines at a single tftp resource for PXE booting, chances are you will want to configure your network so that it can boot both BIOS and UEFI systems.  The below sample configurations can be used to direct machines of each type to the right tftp payload for booting.
+
+Each of these samples assumes that you already have your dhcp server configured.  If you need assistance in setting up your dhcp server, please consult the documentation for the respective packages.
+
+==== DHCPv4 (dnsmasq) ====
+
+DNSmasq functions as an all-in-one DHCP, DNS, and TFTP server.  Setting up dnsmasq to serve BIOS and UEFI PXE clients is as simple as adding the following three lines to your `/etc/dnsmasq.conf`:
+<pre>
+dhcp-boot=pxelinux.0
+dhcp-match=set:efi-x86_64,option:client-arch,7
+dhcp-boot=tag:efi-x86_64,bootx64.efi
+</pre>
+
+==== DHCPv4 (isc-dhcp-server) ====
+The configuration for isc-dhcp-server is slightly more involved than for dnsmasq.  Assuming that your tftp server is on ip address `192.168.19.1`, you can add the following lines to `/etc/dhcp/dhcpd.conf`:
+
+<pre>
+option arch code 93 = unsigned integer 16;
+
+if option arch = 00:07 {
+      filename "bootx64.efi";
+} else {
+      filename "pxelinux.0";
+}
+next-server 192.168.19.1;
+
+</pre>
+
+Note that unlike dnsmasq, isc-dhcp-server does not include a built-in tftp server, so you will need to run one separately.  It's recommended that you use `tftpd-hpa` for this.
+
+==== DHCPv6 (isc-dhcp-server) ====
+If you wish to support netboot over IPv6, you will need to use isc-dhcp-server; at present, dnsmasq does not support the DHCPv6 extensions for tftp booting.
+
+Configuring isc-dhcp-server for DHCPv6 requires running a separate server, even if you already have isc-dhcp-server running for DHCPv4.  The DHCPv4 and DHCPv6 servers can run on the same machine, and the Ubuntu isc-dhcp-server supports this with separate `isc-dhcp-server` and `isc-dhcp-server6` upstart jobs.
+
+Note that whereas normally DHCPv6 is only used for supplemental information such as DNS servers, with addresses handled via autoconfiguration in response to router advertisements, when netbooting you must configure your DHCPv6 server to allocate addresses; UEFI firmware will generally not netboot without this.
+
+To enable temporary address assignments and configure UEFI netbooting over IPv6, add lines like the following to `/etc/dhcp/dhcpd6.conf`.  This example assumes a network of 2001:db8:f00f:cafe::/64 with your DHCP/DNS/tftp server using the address of 2001:db8:f00f:cafe::1; you should adjust to match your own IPv6 network configuration.
+
+<pre>
+option dhcp6.bootfile-url code 59 = string;
+option dhcp6.client-arch-type code 61 = array of unsigned integer 16;
+
+option dhcp6.name-servers 2001:db8:f00f:cafe::1;
+
+if option dhcp6.client-arch-type = 00:07 {
+        option dhcp6.bootfile-url "tftp://[2001:db8:f00f:cafe::1]/bootx64.efi";
+} else {
+##### Support a hypothetical BIOS system that can PXE boot over IPv6
+        option dhcp6.bootfile-url "tftp://[[2001:db8:f00f:cafe::1]/pxelinux.0";
+}
+
+subnet6 2001:db8:f00f:cafe::/64 {
+        range6 2001:db8:f00f:cafe::42:10 2001:db8:f00f:cafe::42:99;
+        range6 2001:db8:f00f:cafe:: temporary;
+}
+</pre>
+
+Once configured, you can start the DHCPv6 server with `sudo service isc-dhcp-server6 start`.
+
+Note that prior to Ubuntu 13.10, the tftpd-hpa package is configured to listen on 0.0.0.0:69 by default, which causes it to bind to IPv4-only.  To support IPv6 netboot you will need to change this in `/etc/default/tftpd-hpa` to read `TFTP_ADDRESS=[::]:69`.
+
+=== Support for other architectures ===
+The IETF maintains a <nowiki>[[http://www.ietf.org/assignments/dhcpv6-parameters/dhcpv6-parameters.txt|list of known client architectures for DHCP/DHCPv6]]</nowiki>.  You can extend your DHCP configuration to permit netbooting of other client architectures by matching on the corresponding DHCP option value instead of 00:07 (== x86_64 UEFI).  For instance, x86_32 UEFI can be supported by matching on an architecture value of 00:06 ('6' if using dnsmasq), and ARMv8 can be supported by matching 00:0b ('11' using dnsmasq).  For other architectures, you would not use shim for the payload, and instead boot to grub, or directly to a kernel that has an EFI boot stub.

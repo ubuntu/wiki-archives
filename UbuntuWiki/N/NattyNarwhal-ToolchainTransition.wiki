@@ -1,0 +1,204 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+* '''Launchpad Entry''': UbuntuSpec:packageselection-foundations-n-python-versions, UbuntuSpec:packageselection-linaro-n-toolchain-selection
+* '''See Also''': <nowiki>[[http://wiki.debian.org/ToolChain/DSOLinking|Debian DSO Linking]]</nowiki>
+* '''Created''': AllisonRandal
+* '''Contributors''': AllisonRandal, MatthiasKlose
+* '''Packages affected''': gcc, python
+
+=== Summary ===
+
+A few changes to Ubuntu's development toolchain for the 11.04 release have an impact on packages in the archive and projects and teams that develop on Ubuntu and for Ubuntu. This document is a guide for developers and packagers that may be affected by the changes.
+
+=== Indirect Linking for Shared Libraries ===
+
+Ubuntu is changing the way it handles shared library linking for the Natty release. (Similar changes are being discussed for Debian.) Previously, the linker (`ld`) would allow indirect linking of shared library symbols. For example, if you had a function `spin` in the library `libwheel`, and the library `libcar` used `libwheel`, then a program that used `libcar` would have the ability to call `spin` even though it never directly used `libwheel`. This kind of indirect linking leads to fragile code--when the dependency chain of a shared library changes, it can break the program that used it.
+
+Now for Natty, `ld` now runs with the `--no-copy-dt-needed-entries` option enabled by default. (This option is also sometimes called `--no-add-needed`.) This means that, in the example above, the `spin` function would only be available when `libwheel` was directly linked by adding `-lwheel` to the command-line compiler flags, and not available indirectly through `libcar`.
+
+Also in Natty, `ld` runs with the `--as-needed` option enabled by default. This means that, in the example above, if no symbols from `libwheel` were needed by `racetrack`, then `libwheel` would not be linked even if it was explicitly included in the command-line compiler flags. NOTE: The `ld --as-needed` default was reverted for the final natty release, and will be re-enabled in the o-series.
+
+See the Debian documentation on <nowiki>[[http://wiki.debian.org/ToolChain/DSOLinking| DSO Linking]]</nowiki> for more technical details on this toolchain transition.
+
+The timeline for the transition is earlier on Ubuntu than on Debian, but the goal is to contribute the changes made for Ubuntu packages back into the Debian packages, to benefit both distros.
+
+==== What to Look For ====
+
+These changes will cause build errors for some packages, if they relied on indirect linking. Look for errors like the following, which indicate that symbols that were available under the old linking strategy are no longer available under the new restrictions:
+
+<pre>
+/usr/bin/ld: libtruck.o: in function drive(VEHICLE*, int):racetrack.cpp:583: error: undefined reference to 'spin'
+</pre>
+
+or
+
+<pre>
+racetrack 0.4-0ubuntu1 Failed [LD_ERROR] libtruck.so.6: could not read symbols: Invalid operation
+</pre>
+
+or
+
+<pre>
+dpkg-shlibdeps: warning: symbol spin used by debian/racetrack/usr/lib/libtruck found in none of the libraries. 
+</pre>
+
+==== How to Fix a Problem ====
+
+The solution to a build error caused by indirect linking, is to directly link all needed libraries in the compiler flags on the command-line. For example, if you were previously linking with `-lcar -ltruck`, you would now need to explicitly add `-lwheel`. For example:
+
+<pre>
+gcc -Wall racetrack.c -lcar -ltruck -lwheel -o racetrack
+</pre>
+
+The `--as-needed` option also makes the linker sensitive to the ordering of libraries on the command-line. You may need to move some libraries later in the command-line, so they come after other libraries or files that require symbols from them. For example, the following link line is wrong, and needs to be changed so that libraries come after objects that use them:
+
+<pre>
+gcc -Wall -lwheel -lcar -ltruck -o racetrack racetrack.c
+</pre>
+
+When problems result from the `--no-copy-dt-needed-entries` option, the linker will always give you a hint at the right fix in the error message, for example "try adding it to the linker command line". As a real example taken from bug <nowiki>[[http://bugs.debian.org/cgi-bin/bugreport.cgi?bug=605887|#605887]]</nowiki>:
+
+<pre>
+libtool: link: gcc -pthread -Wsign-compare -Wno-long-long -g -O2 -I../../src/
+-Wall -g -O2 -Wl,-Bsymbolic-functions -o .libs/pcp pcommon.o pcp.o
+../src/.libs/librapi.so -pthread
+/usr/bin/ld: pcommon.o: undefined reference to symbol 'wstr_from_current'
+/usr/bin/ld: note: 'wstr_from_current' is defined in DSO /usr/lib/libsynce.so.0
+so try adding it to the linker command line
+/usr/lib/libsynce.so.0: could not read symbols: Invalid operation
+collect2: ld returned 1 exit status 
+</pre>
+
+With this information, you can first find out which package contains the suggested library by running:
+
+<pre>
+dpkg -S /usr/lib/libsynce.so.0
+</pre>
+
+Next, you'll need to find out if the indirectly-linked library needs to be added to the current command-line, or if cause of the failure is actually in a different library. In this example, the `pcommon.o` object is trying to reference the problematic symbol, as you can see from the error message line:
+
+<pre>
+/usr/bin/ld: pcommon.o: undefined reference to symbol 'wstr_from_current'
+</pre>
+
+Because the `pcommon.o` object is one of the files being compiled into the `pcp` executable on the current command-line, you'll need to add `-lsynce` directly to this command.
+
+But, if that error message had pointed to a shared library file:
+
+<pre>
+/usr/bin/ld: ../src/.libs/librapi.so: undefined reference to symbol 'wstr_from_current'
+</pre>
+
+Then you would know the linking problem is actually in librapi, so you would need to find where that shared library file is compiled, and add `-lsynce` there instead.
+
+'''Caution:''' Reading the documentation, you may be tempted to try the `--no-as-needed` option as a "quick fix" workaround, but it's generally the not the right fix. If you aren't able to get a package working with the `--as-needed` and `--no-copy-dt-needed-entries` options enabled, it's best to submit a bug report and get expert attention. (It may be a sign of deeper flaws in the code or linking strategy of the package.)
+
+==== How to Report a Problem ====
+
+The bug reports relating to this transition are in the Debian bug tracker.
+
+If you're submitting a patch for a package that already has a bug report, add it to the existing report. If you're reporting a bug in a package that hasn't been reported already, please submit it to the Debian bug tracker, and use the same tags as the other reports.
+
+Issues related to the `--no-copy-dt-needed-entries` option are tracked at
+<nowiki>[[http://bugs.debian.org/cgi-bin/pkgreport.cgi?tag=no-add-needed;users=peter.fritzsche@gmx.de]]</nowiki> and should be tagged with:
+
+<pre>
+User: peter.fritzsche@gmx.de
+Usertags: no-add-needed
+</pre>
+
+Issues related to the `--as-needed` option are tracked at
+<nowiki>[[http://bugs.debian.org/cgi-bin/pkgreport.cgi?tag=ld-as-needed;users=debian-gcc@lists.debian.org]]</nowiki> and should be tagged with:
+
+<pre>
+User: debian-gcc@lists.debian.org
+Usertags: ld-as-needed 
+</pre>
+
+Issues related to the other unresolved symbols in shared libraries are tracked at
+<nowiki>[[http://bugs.debian.org/cgi-bin/pkgreport.cgi?tag=unresolved-symbols-so;users=peter.fritzsche@gmx.de]]</nowiki> and should be tagged with:
+
+<pre>
+User: peter.fritzsche@gmx.de
+Usertags: unresolved-symbols-so 
+</pre>
+
+=== GCC 4.5 Upgrade ===
+
+In addition to the change in default linking options, Ubuntu is also upgrading to GCC 4.5 for Natty, which will cause some additional build failures.
+
+==== What to Look For ====
+
+If a package builds just fine with gcc-4.4/g++-4.4 but fails to build with gcc-4.5/g++-4.5, and the errors don't appear to be related to the linker options (nothing about symbols not found or undefined references), it's likely you are affected by the version change.
+
+The most common errors look something like:
+
+<pre>
+pxlib/Callback.cc:87:1: error: 'pyxine::PythonContext::PythonContext' names the constructor, not the type 
+</pre>
+
+==== How to Fix a Problem ====
+
+The changes required for supporting GCC 4.5 are mostly small, mechanical patches to the source code. See the list of <nowiki>[[http://gcc.gnu.org/gcc-4.5/changes.html|changes in the GCC 4.5 release]]</nowiki> for more guidance.
+
+You may find it helpful to call `set -x;` from within `debian/rules`, to enable a debugging option that echos each shell command to standard error before it's executed.
+
+==== How to Report a Problem ====
+
+The bug reports relating to the GCC 4.5 version upgrade are in the Debian bug tracker at <nowiki>[[http://bugs.debian.org/cgi-bin/pkgreport.cgi?tag=ftbfs-gcc-4.5;users=debian-gcc@lists.debian.org ]]</nowiki>.
+
+If you're submitting a patch for a package that already has a bug report, add it to the existing report. If you're reporting a bug in a package that hasn't been reported already, please submit it to the Debian bug tracker, tagged with:
+
+<pre>
+User: debian-gcc@lists.debian.org
+Usertags: ftbfs-gcc-4.5
+</pre>
+
+=== Python 2.7 Upgrade ===
+
+The default Python version in Natty is 2.7. This is a change from the default 2.6 version shipped in Maverick. The change will cause some build failures, as there are syntax and semantic changes between the 2.6 and 2.7 releases.
+
+==== What to Look For ====
+
+If a Python package has no problems on Python 2.6, but has build, install, or runtime failures on Python 2.7, it's likely you're affected by the change in default version. See the documentation on <nowiki>[[http://docs.python.org/dev/whatsnew/2.7.html|What's New in Python 2.7]]</nowiki> for an overview of the changes. You will also find the <nowiki>[[http://docs.pythonsprints.com/python3_porting/py-porting.html|Python 3 Porting]]</nowiki> guide useful, both for specific changes in 2.7, and for an explanation of the broader motivations for the changes over several releases from 2.5 to the 3.x versions.
+
+Also see the Launchpad list of <nowiki>[[https://launchpad.net/ubuntu/+bugs?field.tag=python27 | known failures related to the Python 2.7 transition]]</nowiki> for examples of problems and solutions in progress.
+
+==== How to Fix a Problem ====
+
+The error messages provide critical clues, and may be enough to lead you to the right solution. For a build error message such as:
+
+<pre>
+SyntaxError: invalid syntax
+</pre>
+
+You know to look closely into the syntax changes between 2.6 and 2.7.
+
+Build errors like:
+
+<pre>
+ImportError: No module named foo
+</pre>
+
+Indicate a problem in the path to a module in the package. Most Python libraries are installed with the version number included in the path (e.g. `/usr/lib/python2.6/site-packages/...`). When a module is installed in a Python 2.6 path, code running in Python 2.7 won't be able to find it.
+
+Runtime errors such as:
+
+<pre>
+AttributeError: 'tree' object has no attribute 'bark'
+</pre>
+
+May indicate that you've hit one of the semantic changes in 2.7. The syntax is still valid, so the code compiles, but the behavior is different than in 2.6. It may also indicate a conflict between two versions of Python installed at the same time, attempting to load the wrong version of a module.
+
+==== How to Report a Problem ====
+
+If you run into trouble or need an expert eye, submit a bug report to Launchpad with the tag "python27". It's also welcome to ping users 'barry' and 'doko' in #ubuntu-devel on irc.freenode.net.

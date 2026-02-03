@@ -1,0 +1,166 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+== Introduction ==
+
+<nowiki>[[http://nginx.localdomain.pl/wiki/FcgiWrap|fcgiwrap]]</nowiki> is a simple server for running CGI applications over FastCGI. It hopes to provide clean CGI support to Nginx (and other web servers that may need it). 
+
+fcgiwrap can be used together with <nowiki>[[Nginx]]</nowiki> to serve CGI or Perl scripts (.cgi).
+
+=== Installation ===
+
+Install the <nowiki>[[apt:fcgiwrap|fcgiwrap]]</nowiki> package from the Universe repository.
+
+=== Configuration ===
+
+To be able to spawn a fcgi socket, we are going to write a script for it and than add a init script to <code>/etc/init.d/</code> to automatize this process.
+
+Here is the <code>spawn-fcgi</code> script which will create a socket to pass .cgi to it:
+<pre>
+cat > /usr/bin/spawn-fcgi
+
+use strict;
+use warnings FATAL => qw( all );
+
+use IO::Socket::UNIX;
+
+my $bin_path = '/usr/bin/fcgiwrap';
+my $socket_path = $ARGV[0] || '/tmp/cgi.sock';
+my $num_children = $ARGV[1] || 1;
+
+close STDIN;
+
+unlink $socket_path;
+my $socket = IO::Socket::UNIX->new(
+    Local => $socket_path,
+    Listen => 100,
+);
+
+die "Cannot create socket at $socket_path: $!\n" unless $socket;
+
+for (1 .. $num_children) {
+    my $pid = fork;
+    die "Cannot fork: $!" unless defined $pid;
+    next if $pid;
+
+    exec $bin_path;
+    die "Failed to exec $bin_path: $!\n";
+}
+</pre>
+
+Don't forget to make it executable:
+<pre>
+chmod +x /usr/bin/spawn-fcgi
+</pre>
+
+The above script will be used to automatize the re-spawning of the FastCGI socket:
+<pre>
+cat > /etc/init.d/spawn-fcgi
+C_SCRIPT=/usr/bin/spawn-fcgi
+USER=www-data
+GROUP=www-data
+RETVAL=0
+case "$1" in
+        start)
+                echo "Starting fastcgi"
+                sudo -u $USER $C_SCRIPT
+                chown $USER:$GROUP /tmp/cgi.sock
+                RETVAL=$?
+  ;;
+        stop)
+                echo "Stopping fastcgi"
+                killall -9 fcgiwrap
+                RETVAL=$?
+  ;;
+        restart)
+                echo "Restarting fastcgi"
+                killall -9 fcgiwrap
+                $sudo -u $USER $C_SCRIPT
+                RETVAL=$?
+  ;;
+***** )
+                echo "Usage: $0 {start|stop|restart}"
+                exit 1
+  ;;
+esac
+exit $RETVAL
+</pre>
+
+Set the permissions to make the script executable and install the init script:
+<pre>
+chmod +x /etc/init.d/spawn-fcgi
+update-rc.d spawn-fcgi defaults
+</pre>
+
+Now we can start and stop the script using <code>invoke-rc.d</code>:
+<pre>
+invoke-rc.d spawn-fcgi start
+invoke-rc.d spawn-fcgi stop
+</pre>
+
+After you start the <code>spawn-fcgi</code> you should see a new file in <code>/tmp</code> folder with the name <code>cgi.sock</code>. That file is our socket to pass .cgi scripts to.
+
+=== Configuring nGinx ===
+
+Create the configuration file for nGinx to use fastCGI:
+<pre>
+cat > /etc/nginx/fastcgi_params
+fastcgi_param  QUERY_STRING       $query_string;
+fastcgi_param  REQUEST_METHOD     $request_method;
+fastcgi_param  CONTENT_TYPE       $content_type;
+fastcgi_param  CONTENT_LENGTH     $content_length;
+fastcgi_param  SCRIPT_NAME        $fastcgi_script_name;
+fastcgi_param  REQUEST_URI        $request_uri;
+fastcgi_param  DOCUMENT_URI       $document_uri;
+fastcgi_param  DOCUMENT_ROOT      $document_root;
+fastcgi_param  SERVER_PROTOCOL    $server_protocol;
+fastcgi_param  GATEWAY_INTERFACE  CGI/1.1;
+fastcgi_param  SERVER_SOFTWARE    nginx;
+fastcgi_param  REMOTE_ADDR        $remote_addr;
+fastcgi_param  REMOTE_PORT        $remote_port;
+fastcgi_param  SERVER_ADDR        $server_addr;
+fastcgi_param  SERVER_PORT        $server_port;
+fastcgi_param  SERVER_NAME        $server_name;
+fastcgi_param  REMOTE_USER        $remote_user;
+</pre>
+
+The created above file now can be added to nGinx vhosts to allow them using <code>fcgiwrap</code>.
+Here's an example of such a vhost file configured to work for <nowiki>[[Namazu]]</nowiki>:
+<pre>
+server {
+        listen   80;
+        server_name  localhost;
+        access_log  /var/log/nginx/access.log;
+
+        location / {
+                root   /storage/archive;
+                autoindex on;
+                index  index.html index.htm;
+        }
+
+        location ~ \.cgi$ {
+                root    /storage/archive/cgi-bin;
+                rewrite ^/cgi-bin/(.*)\.cgi /$1.cgi break;
+ 
+                include /etc/nginx/fastcgi_params;
+ 
+                fastcgi_pass   unix:/tmp/cgi.sock;
+                fastcgi_param  SCRIPT_FILENAME  /storage/archive/cgi-bin$fastcgi_script_name;
+        }
+
+}
+</pre>
+
+== See Also ==
+
+* <nowiki>[[https://en.wikipedia.org/wiki/FastCGI|FastCGI on Wikipedia]]</nowiki>
+* <nowiki>[[https://www.nginx.com/resources/wiki/start/topics/examples/fcgiwrap/|fcgiwrap on the Nginx wiki]]</nowiki>
+* <nowiki>[[https://wiki.debian.org/nginx/FastCGI|FastCGI on the Debian wiki]]</nowiki>

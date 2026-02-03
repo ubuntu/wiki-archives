@@ -1,0 +1,101 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+* '''Launchpad Entry''': UbuntuSpec:mobile-lucid-imx51-debian-cd-to-uboot
+* '''Created''': 2009-12-02
+* '''Contributors''':  OliverGrawert
+* '''Packages affected''': uboot-imx, flash-kernel, partman-auto
+
+=== Rationale ===
+
+Over the last two releases we used redboot-tools to create images for imx51. Freescale moves the imx51 architecture to the uboot bootloader by default now.
+
+=== Design ===
+
+uboot-imx will be packaged and promoted to main; also, image build scripts, user space maintenance tools as well as the installer need to be moved to uboot to comply with this change.
+
+=== Implementation ===
+
+==== General changes ====
+
+To support uboot on imx51 images we will need to package uboot-imx and promote it to main; in turn, reboot-imx will be demoted to universe. To support upgraded installs, we need to keep reboot-tools supported in main - similar to grub-1. At some later point we will revisit the potential to provide better tool support for migrating existing installs to uboot.
+
+==== Live Image ====
+
+Change the tools/boot/lucid/post-boot-armel+imx51 script in debian-cd to create a uboot boot partition instead of a redboot one and make use of a vfat /boot partition for kernel and initramfs.
+
+==== Installer changes ====
+
+Currently (with karmic) there is no way to access the flash devices on a babbage board from a running system (no mtdblock driver). Hope is that with the next Freescale BSP release of 2.6.31 patches a working mtd driver will be provided and enable write access to the builtin flash device, this will enable us to write uboot to flash in an automated way during the install process.
+
+The default partition layout for the imx51 sub architecture will be modified in partman-auto to create a vfat /boot partition. Code for this already exists for the dove sub architecture and will be re-used.
+
+The flash-kernel script will be adapted to properly configure and set up uboot instead of redboot. Partially this work will be based on the already existing implementation used for the dove sub architecture.
+
+==== Documentation ====
+
+Until the vendor ships a pre-installed uboot in flash we need to provide documentation to replace reboot in flash manually with uboot. Optionally it is possible to keep the old behavior of abusing the SD card as a boot floppy. Both of these ways will be documented under the ARM/Babbage namespace in the wiki.
+
+Additionally we will provide wiki documentation to set up uboot manually through a serial console. It is not clear yet if it is possible to replace the pre-installed redboot with uboot when at the redboot serial prompt, this will be researched as part of the implementation.
+
+==== Unification ====
+
+Since there appears to be a lot overlap with the already existing dove sub architecture, scripts installer and partitioner work will be based on the existing dove work and code will be unified as much as possible so if later SoCs show up making use of uboot these will be able to easily hook into the existing uboot design. UbuntuSpec:mobile-lucid-arm-debian-cd-cleanup covers this effort.
+
+==== Proof of concept script for image creation ====
+
+<pre>
+
+log() {
+    echo "$*" >&2
+}
+
+hex2dec() {
+    printf "%d\n" "$1"
+}
+
+IMAGE=$1
+BOOT_SIZE="$((16 * 1024 * 1024))"
+
+log "initializing disk label (MBR and partition table)..."
+parted -s "$IMAGE" mklabel msdos
+
+log "creating uboot partition..."
+UBOOT_SIZE=$(wc -c uboot-imx51_to2.bin|cut -d ' ' -f1)
+parted -s "$IMAGE" mkpart primary fat32 "512B" "$(($UBOOT_SIZE - 1))B"
+
+PART1_ID_OFFSET="$(hex2dec 0x1c2)"
+printf '\xda' | dd conv=notrunc bs="$PART1_ID_OFFSET" of="$IMAGE" seek=1 2>/dev/null
+
+get_part_data() {
+    local n="$1"
+
+    LANG=C parted -s "$IMAGE" unit B print | awk "/^ $n / { print \$2 \" \" \$3 \" \" \$4 }"
+
+### safer version using parted -m; needs newer parted
+### LANG=C parted -m -s "$IMAGE" unit B print | grep "^$n:" | cut -d: -f 2,3,4 --output-delimiter=" "
+}
+
+PART1_END_B="`(set -- $(get_part_data 1); echo "$2")`"
+
+log "writing uboot to disk..."
+dd conv=notrunc bs=1024 if=uboot-imx51_to2.bin of="$IMAGE" seek=1 skip=1
+
+parted -s "$IMAGE" mkpart primary fat32 "$((${PART1_END_B%B} + 1))B" "${BOOT_SIZE}B"
+
+PART2_START_B="`(set -- $(get_part_data 2); echo "$1")`"
+dd if=/dev/zero of=./boot.img bs=1024 count=$(($BOOT_SIZE / 1024))
+mkdosfs ./boot.img
+
+mcopy -i ./boot.img /boot/vmlinuz-2.6.31-14-generic-pae ::vmlinuz
+
+dd conv=notrunc bs=${PART2_START_B%B} if=./boot.img of="$IMAGE" seek=1
+rm ./boot.img
+</pre>

@@ -1,0 +1,644 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+Please note that this page contains documentation for unity-5.0, but should be considered in progress right now, once the API is completely finished, the page will be copied to <nowiki>[[Unity]]</nowiki> > <nowiki>[[Lenses]]</nowiki>
+
+== Overview ==
+
+To minimise confusion and to get you used to the terms used in the rest of this page, it’s worth having a quick overview of the Dash, and the terms used to describe it:
+
+<nowiki>[[File:unity-lenses-overview.png]]</nowiki>
+
+== Introduction ==
+
+One of Unity's main features is the Dash. The Dash allows the user to quickly search for information both locally (installed applications, recent files, bookmarks, etc) and remotely (Twitter, Google Docs, etc).
+
+The Dash achieves this by having one or more '''Lenses''' that each are responsible for providing one category of search results for the Dash. The user may search the Lens either through the Dash home screen (called ''global search'') or through the Lens' own page in the Dash by clicking on the Lens' icon on the ''Lens Bar''.
+
+On its own, a Lens is not very useful. It can guarantee an icon on the Lens Bar and a page in a the Dash but nothing will happen when the user searches it. This is because '''a Lens does not actually perform any searches itself'''. Instead, a Lens will have one or more '''''Scopes''''' which are the actual engines that do the searching for it.
+
+This means that it is possible for new Scopes to supplement results of existing Lenses i.e. a Google Docs Scope can supplement the results of the default Zeitgeist Scope in the Files Lens, with results appearing side-by-side. Also, this means it is now possible for one Lens to have many Scopes i.e. the Music Lens can have a Banshee, UPNP and Spotify Scopes providing results to it.
+
+== Architecture ==
+
+If you consider a Lens with two Scopes (e.g. Music Lens, a Banshee Scope and a Spotify Scope) this will generally mean that there will be four processes involved in searching the category of content that the Lens provides:
+
+ 1. The Dash itself (i.e Unity)
+ 2. The Lens daemon
+ 3. The first Scope daemon (Banshee Scope)
+ 4. The second Scope daemon (Spotify Scope)
+
+It is then the job of the Lens to keep all these processes synchronised with each other. Luckily this happens behind the scenes and, as a Lens or Scope author, you will not have to get involved. However, it is nevertheless worth noting the complexity:
+
+<nowiki>[[File:unity-lenses-architecture.png]]</nowiki>
+
+== Creating a Lens ==
+
+Creating a Lens requires:
+
+ 1. A .lens file so Unity can find and load the Lens
+ 2. A daemon that uses a well-known name on D-Bus
+ 3. A D-Bus .service file that lets Unity auto-activate the Lens when it’s ready to (this is optional if your Lens is long-running anyway, but is probably required for 99% of the Lenses that will be written).
+
+=== Responsibilities of a Lens ===
+
+A Lens is responsible for providing the following information to Unity:
+
+* Which Categories it supports
+* Which Filters it supports
+* What to display in the search entry as the search hint
+* Whether the Lens should show in the Lens Bar
+* Whether then Lens should participate in searches from the Dash Home view (global search).
+
+=== Your Lens ID ===
+
+Due to do the way Unity and libunity export Lenses and find Scopes, it is essential to choose a ID for your Lens. This ID is used in various places and should be specific enough to avoid conflicts with other lenses. The id can be made up of alphanumeric characters and, additionally, dashes.
+
+Some examples:
+
+{| class="wikitable"
+|-
+| Lens
+| Lens ID
+|-
+| Files
+| files
+|-
+| Applications
+| applications
+|-
+| Google Docs
+| gdocs
+|}
+
+Through this document, we will refer to the Lens ID either as ''Lens ID'' or ''$lens_id'', please substitute the real Lens ID for those.
+
+=== A .lens file ===
+
+The .lens file is critical for Unity as it allows Unity to load some information about the Lens before loading it (great for optimising startup) and, essentially, it tells Unity how to activate/find your daemon on D-Bus.
+
+Here is an example of a .lens file:
+{{{#!highlight ini
+[Lens]
+DBusName=net.launchpad.Lens.MyLens
+DBusPath=/net/launchpad/lens/mylens
+Name=My Lens
+Icon=/path/to/mylens.svg
+Description=A Lens to search my stuff
+SearchHint=Search your stuff
+Shortcut=m
+
+[Desktop Entry]
+X-Ubuntu-Gettext-Domain=my-lens
+}}}
+
+* '''DBusName:''' A well known D-Bus name for finding your Lens.
+* '''DBusPath:''' The D-Bus path that the Lens is exported on.
+* '''Name:''' The name of your Lens.
+* '''Icon:''' The icon that should show on the Lens Bar and/or the Launcher. SVG is preferable.
+* '''Description:''' A single-line description of your Lens. This isn't used visually but could be used for accessibility.
+* '''SearchHint:''' The search hint that shows in the Dash search entry when your Lens is focused.
+* '''Shortcut:''' The preferred shortcut to be used to call up your Lens (i.e. =m would translate to <Super>+m). '''''This is not guarenteed if the user has other shortcuts already set for your key combination'''''
+* '''X-Ubuntu-Gettext-Domain:''' This tells Unity which is the right translation domain for your Lens to find the translatable strings in this Lens file.
+
+The .lens file should be installed into the same prefix as Unity itself in this format: `/prefix/where/unity/was/installed/share/unity/lenses/$lens_id/$lens_id.lens`
+
+So, if Unity was installed in /usr and your Lens ID was ''mylens'', then the .lens file would be installed in
+`/usr/share/unity/lenses/mylens/mylens.lens`
+
+=== A D-Bus service file ===
+
+{{{#!highlight ini
+[D-BUS Service]
+Name=net.launchpad.Lens.MyLens
+Exec=/my/daemon/install/prefix/lib/mylens/my-lens-daemon
+}}}
+
+* '''Name:''' A well known D-Bus name for finding your Lens (should be same as DBusName above).
+* '''Exec:''' The executable for your daemon that will load and register this name on D-Bus.
+
+D-Bus .service files should be installed into `/usr/share/dbus-1/services`.
+
+=== Using the Lens Object ===
+
+Once you have registered your daemon on D-Bus and named the connection, the next thing to do is create and initialise your Lens object. This is done through the Lens object in <nowiki>[[https://launchpad.net/libunity]]</nowiki>.
+
+==== Creating the Lens and setting default properties ====
+
+{{{#!highlight csharp
+{
+  // When creating a Lens object, you must tell it the DBusPath you
+  // used in the .lens file, and the Lens ID you have chosen.
+  this.lens = new Unity.Lens("/net/launchpad/lens/mylens", "mylens");
+
+  // Translatable search hint.
+  lens.search_hint = _("Search your stuff");
+
+  // Does it appear in the Lens Bar?
+  lens.visible = true;
+
+  // Should Unity include the Lens in global search results?
+  lens.search_in_global = true;
+
+  // Add the default categories (see below)
+  populate_categories();
+
+  // Add the default filters (see below)
+  populate_filters();
+
+  // Now that all the default properties are set, export the Lens
+  // so Unity can find it.
+  lens.export();
+}
+}}}
+
+==== Adding Categories ====
+
+You should add at least one Category to your Lens. Categories allow you to create distinct partitions between different types of data in your Lens (i.e. Music Lens has Songs, Albums and Available to Purchase). When Scopes add results, they indicate which Category the result belongs in by sending an integer referencing the order the Category was added to the Lens. '''''Note''''': This will be made easier for Scopes to reference with a tool that is under development.
+
+For example, a Scope for the Music Lens would add a song with the third column (the category column) to 0, a album would have 1 and a purchasable song would have 2.
+
+When adding a Category, you can choose its icon, its name and, finally, how you would like Unity to render the results within that Category. For 11.10, Unity supports two renderers: Vertical Tile and Horizontal Tile:
+
+<nowiki>[[File:unity-lenses-categories.png]]</nowiki>
+
+{{{#!highlight csharp
+private void populate_categories ()
+{
+  GLib.List<Unity.Category> categories = new GLib.List<Unity.Category> ();
+  File icon_dir = File.new_for_path (ICON_PATH);
+
+  var cat = new Unity.Category (_("Songs"),
+                                new FileIcon (icon_dir.get_child ("group-mostused.svg")),
+                                VERTICAL_TILE);
+  categories.append (cat);
+
+  cat = new Unity.Category (_("Albums"),
+                            new FileIcon (icon_dir.get_child ("group-installed.svg")),
+                            HORIZONTAL_TILE);
+  categories.append (cat);
+
+  cat = new Unity.Category (_("Available to Purchase"),
+                            new FileIcon (icon_dir.get_child ("group-available.svg")),
+                            VERTICAL_TILE);
+  categories.append (cat);
+
+  lens.categories = categories;
+}
+
+}}}
+
+==== Adding Filters ====
+
+While a Lens is not required to have any Filters, it is thought that most Lenses will benefit from an easy way for the user to be able to refine their search criteria.
+
+It is up to the Lens to create the Filters for Unity to renderer, and the Scopes to query their state while searching to effect the results.
+
+In 11.10, there are four different types of Filters:
+
+===== CheckOption =====
+
+A CheckOption Filter allows the user to select one or more options from the provided list. In practice, this means that they could search for Folders and PDFs in the example below.
+
+<nowiki>[[File:unity-lenses-checkoption.png]]</nowiki>
+
+{{{#!highlight csharp
+{
+  // The first parameter should be a unique name for this filter
+  // it is used by Scopes to lookup the filter and its state
+  // so don't have two filters with the same name!
+  // The second argument is what the user will see in Unity
+  var filter = new CheckOptionFilter("type", _("Type"));
+
+  // CheckOption, RadioOption, MultiRange are all OptionFilter
+  // subclasses. The OptionFilter subclass abstracts the concept
+  // of "adding options" to a Filter. For example, every check
+  // button or "option" in the CheckOptionFilter is added in the
+  // same way as it is for the RadioOptionFilter or the Multi-
+  // OptionFilter.
+  //
+  // The add_option takes an unique id for this option as its
+  // first argument (which allows a Scope to check its state
+  // easily), and the user-visible name as its second.
+  // There is a third, optional, argument of a GIcon, but it
+  // is unused in 11.10.
+  filter.add_option ("document", _("Document"));
+  filter.add_option ("folder", _("Folder"));
+  filter.add_option ("pdf", _("PDF"));
+
+  // etc
+}
+}}}
+
+===== RadioOption =====
+
+The RadioOption Filter allows the user to select only one out of the given options, like a radio group behaves in a widget toolkit. So, with the example below, the user could choose Today or Last Week, but not both.
+
+<nowiki>[[File:unity-lenses-radiooption.png]]</nowiki>
+
+{{{#!highlight csharp
+{
+  var filter = new RadioOptionsFilter ("last-modified", _("Type"));
+  filter.add_option ("today", _("Today"));
+  filter.add_option ("yesterday", _("yesterday"));
+  filter.add_option ("last-week", _("Last Week"));
+}
+}}}
+
+===== MultiRange =====
+
+The MultiRange Filter allows the user to choose a range from within the provided options. So, in the example below, if the user clicked on 1MB and 100 MB, 1MB, 10MB and 100MB would be active. If the user then clicked on 10MB, one 1MB and 10MB would be active.
+
+<nowiki>[[File:unity-lenses-multirange.png]]</nowiki>
+
+{{{#!highlight csharp
+{
+  var filter = new MultiRangeFilter ("size", _("Size"));
+  filter.add_option ("<1MB", _("<1MB"));
+  filter.add_option ("1MB", _("1MB"));
+  filter.add_option ("10MB", _("10MB"));
+  filter.add_option ("100MB", _("100MB"));
+  filter.add_option ("1GB", _("1GB"));
+}
+}}}
+
+===== Ratings =====
+
+The Ratings Filter is the simplest of the bunch, allowing the user to choose an up-to-five star rating to refine the search. This works well for content where rating information is available, like Applications in the software centre, or songs in Banshee.
+
+<nowiki>[[File:unity-lenses-ratings.png]]</nowiki>
+
+{{{#!highlight csharp
+{
+  var filter = new RatingsFilter("rating", _("Rating"));
+}
+}}}
+
+===== Complete Example =====
+
+{{{#!highlight csharp
+{
+  GLib.List<Unity.Filter> filters = new GLib.List<Unity.Filter> ();
+
+  var filter = new CheckOptionFilter("type", _("Type"));
+  filter.add_option ("document", _("Document"));
+  filter.add_option ("folder", _("Folder"));
+  filter.add_option ("pdf", _("PDF"));
+  filters.append (filter);
+
+  filter = new RadioOptionsFilter ("last-modified", _("Type"));
+  filter.add_option ("today", _("Today"));
+  filter.add_option ("yesterday", _("yesterday"));
+  filter.add_option ("last-week", _("Last Week"));
+  filters.append (filter);
+
+  filter = new MultiRangeFilter ("size", _("Size"));
+  filter.add_option ("<1MB", _("<1MB"));
+  filter.add_option ("1MB", _("1MB"));
+  filter.add_option ("10MB", _("10MB"));
+  filter.add_option ("100MB", _("100MB"));
+  filter.add_option ("1GB", _("1GB"));
+  filters.append (filter);
+
+  filter = new RatingsFilter("rating", _("Rating"));
+  filters.append (filter);
+
+  lens.filters = filters;
+}
+}}}
+
+=== What else? ===
+
+Nothing much, really. A Lens, once it’s been exported, just needs to hang-around for some Scopes to join in the fun and for Unity to start searching it. The synchronization between the processes is handled internally by libunity.
+
+In the future we want to allow the Lens to have a greater say in the results it presents (i.e. being able to de-dupe results across different Scopes, etc), however for 11.10, as a Lens author, your job is done at this point!
+
+== Creating a Scope ==
+
+=== Responsibilities of a Scope ===
+
+The Scope is responsible for the following:
+
+* Providing search results to its parent Lens taking into account the state of the Filters at the time of the search.
+* Providing global search results that ignore the state of the filters.
+* Indicating to its parent Lens that it has finished its normal or global search.
+* Taking responsibility for activating any result it owns when the user clicks on it.
+
+=== Registration ===
+
+There are two types of Scope that only differ in how they are registered with their parent Lens (the Lens they provide search data for).
+
+A Local Scope is a scope that is created inside the same process as the Lens. Normally this would be done to ensure the Lens is useful without installing additional software or, if the Lens was very specialised, then to just simplify writing it by only needing to create and install on daemon. An example would be someone writing a Google Docs Lens that also included the Scope that interfaces with the Google Docs API.
+
+A Remote Scope is a scope that plugs into an existing Lens from a separate process. This type of Scope would run in its own daemon. An example is if someone were to write a Last.fm Scope for the Music Lens.
+
+==== Local Scope ====
+
+As the Scope has been created and is running in the same process as the parent Lens, it does not need to go through the same registration as a Remote Scope, instead you simply need to do:
+
+{{{#!highlight csharp
+{
+  // lens was setup before this point
+  lens.add_local_scope (the_local_scope);
+
+  lens.export();
+}
+}}}
+
+This tells the Lens that you want to use a Scope that is running the same process as itself, and the Lens will do what is necessary to let that happen.
+
+==== Remote Scope ====
+
+For a Remote Scope to be found by its Lens, it needs to install a .scope file to give the Lens enough details to launch/connect to it.
+
+An example .scope file:
+
+{{{#!highlight ini
+[Scope]
+DBusName=net.launchpad.Scope.lastfm
+DBusPath=/net/launchpad/scope/lastfm
+}}}
+
+This is simply telling which well-know D-Bus name it can find the Scope on, and the path to the Scope object at that address.
+
+The .scope file should be installed in the folder of the Scope's parent Lens. So, if this Scope was for the Music Lens, it would be installed into `/usr/share/unity/lenses/music/lastfm.scope`.
+
+It is worth mentioning that the name of the scope file is not as important as a .lens file, but it is useful to use a specific enough name to avoid conflicts with other scopes.
+
+'''''Note:''''' A Remote Scope should install a D-Bus .service file much like a Lens does. This allows auto-activation if it is not already running when the Lens starts.
+
+=== Using the Scope Object ===
+
+The Scope object is your conduit to the current state of Unity. The Scopes parent Lens will keep the Scope updated with the current state, and it is the owner of the Scope's job to keep both the results models (normal and global) updates to reflect this state.
+
+==== Creating & Initialising the Scope ====
+
+{{{#!highlight csharp
+{
+  // When creating a Scope object, only the dbus path that you
+  // would like it exported at is required. This should match
+  // the DBusPath property in the .scope file if this a remote
+  // scope. Otherwise any, valid, D-Bus path will do.
+  this.scope = new Unity.Scope("/net/launchpad/scope/lastfm");
+
+  // You can choose at a per-scope level if you want to be
+  // involved in global searches. This means you can opt-out
+  // of global searches even if your parent Lens has opted-in.
+  scope.search_in_global = true;
+
+  // The key thing that you are doing with the Scope object is
+  // listening for, and reacting to, any state changes.
+  // Therefore it is essential to connect up to all the important
+  // signals and property-change events.
+  // NOTE: The handlers are explained in the specific sections below.
+
+  // And we want to be notified whenever the user changes the search
+  // string in our Lens in the Dash or in the Dash's home screen
+  scope.search_changed.connect (on_search_changed);
+
+  // If the user twiddles any of the filters, we want to update our
+  // search to reflect the change
+  scope.filters_changed.connect (on_filters_changed);
+
+  // Finally, we want the user to be able to actually click on a
+  // result and have something happen, so we connect to the
+  // activate-uri signal, allowing us to react to the click and
+  // inform Unity of the result.
+  scope.activate_uri.connect (on_uri_activated);
+
+  // If this is a remote Scope, we'll export it, otherwise for a Local
+  // Scope, this is where we would use the lens.add_local_scope to let
+  // the Lens know it exists.
+  scope.export ();
+}
+}}}
+
+==== The magic "" search term (the Default View) ====
+
+In the world of the Dash, receiving a search term that equals "" means that you should populate your results model with default results. These are the results that the user sees when they switch to a Lens in the Dash but do not search for anything.
+
+For example, the Applications Lens, when given a search term of "", will populate its three Categories with the most recently used applications, all installed applications, and a selection of available, highly rated, applications.
+
+You should always strive to have something useful in the default view.
+
+==== Reacting to the search-changed signal ====
+
+When the search-changed signal is fired, you'll get a LensSearch instance and from that object, you can query the current search term and use it to refresh your search results:
+
+{{{#!highlight csharp
+private void on_search_changed (Scope scope, LensSearch search,
+                                SearchType search_type, Cancellable cancellable)
+{
+  debug ("The current search term is: %s", search.search_string);
+  if (search_type == SearchType.DEFAULT)
+  {
+    update_lens_search (search, cancellable);
+  }
+  else
+  {
+    update_home_search (search, cancellable);
+  }
+
+  // Once the search finishes, you need to inform the lens that your result set is complete,
+  // otherwise it'll assume that you are still going to provide more results in your result
+  // set (and the Dash might indicate to the user that the search is still in progress).
+  search.finished ();
+}
+}}}
+
+==== Adding results to a model ====
+
+A Scope has two <nowiki>[[https://launchpad.net/dee | DeeModels]]</nowiki> that you can use to hold your results in. `Unity.Scope.results_model` refers to the model used to display results when your Lens is active. `Unity.Scope.global_results_model` is the model used when the user performs a global search.
+
+A LensSearch instance has always a reference to the model which you should update, so you can use `lens_search.results_model` to change the correct model.
+Internally the results_model vs global_results_model is selected based on the `SearchType` enumeration.
+
+===== Schema =====
+
+The Schema is, simply, the column layout of the models. Both models have the same schema, best explained if you think of the results as a table:
+
+{| class="wikitable"
+|-
+| '''uri'''<<BR>>string
+| '''icon-hint'''<<BR>>string
+| '''category-index'''<<BR>>uint
+| '''mimetype'''<<BR>>string
+| '''name'''<<BR>>string
+| '''comment '''<<BR>>string
+| '''dnd-uri'''<<BR>>string
+|-
+| application://firefox.desktop
+| firefox
+| 0
+| application-x-desktop
+| Firefox
+| Browse the<<BR>>World Wide Web
+| file:///usr/share<<BR>>/applications/firefox.desktop
+|}
+
+* '''''Uri''''': A URI that can identify this result well enough for you to be able to activate it.
+* '''''Icon Hint''''': An icon-name, a file path to a icon, or GIcon in string format (GLib.Icon.to_string()).
+* '''''Category Index''''': The category this result belongs to, referenced by the Categories index.
+* '''''MimeType''''': The mimetype of the result.
+* '''''Name''''': The display name of the result (translated if needed).
+* '''''Comment''''': A one-line comment/description of the result. This can be used for tooltip or the horizontal Category renderer.
+* '''''DND URI''''': This should be the simplest URI to the result; a URI that other applications could understand if the result were to be drag-and-dropped from the Dash, for instance.
+
+===== Using DeeModel =====
+
+The two main methods you'll mostly use on the results models are: `Dee.Model.clear()` and `Dee.Model.append()`:
+
+{{{#!highlight csharp
+private void update_model(Unity.LensSearch search)
+{
+  // Create a temp reference to make reading the code easier
+  var model = search.results_model;
+
+  // First we clear the existing results in the model
+  model.clear();
+
+  // Then we'd load the new results
+  string uri = "myface.com/search?q=" + search.search_term.encode();
+  add_filter_state_to_search_uri(uri);
+  var results = get_results_as_list(uri);
+
+  // Add the new results to the model
+  for (MyResult result in results)
+  {
+    model.append(result.uri,
+                 icon_as_gicon_string(result.icon_uri),
+                 result.category_index,
+                 result.mimetype,
+                 result.name,
+                 result.comment,
+                 result.link_uri);
+  }
+}
+}}}
+
+==== Reacting to the filters-changed signal ====
+
+Depending on how the content you are searching takes into account Filters, which could be that you need to update a setting on a library in direct response to the filters changing or, in the opposite case, you just need to take them into account when you perform the search (i.e. add them to the end of a URL), how you react to the filters changing will differ.
+
+For the latter, and more general, case, you can call `scope.queue_search_changed()` method which will emit the search-changed signal again as soon as possible, so you can perform another search (as it will take into account the current filter state).
+
+In the second case you might have an extra step in between to set the options on your datastore before updating the search.
+
+'''''NOTE:''''' Although you might feel it’s better to react to the filters-changed signal by analysing your current result set and just removing results that don't fit, unless the checking is very simple, it might just be better to do a new query.
+
+==== Querying Filter State ====
+
+A Scope is expected to respect the Filters of its parent Lens. This means that the Scope should know the ids of the Filters and their options so it can understand the state ('''''Note:''''' There is no easy way to do this outside of reading the Lens' source currently, a tool is in the works to simplify the process).
+
+Although you can iterate through the list of Filters the Scope has, it’s often easier/makes more sense to query the filter directly and then query its state:
+
+''All examples reference those used in the Lens "Adding Filters" section above ''
+
+===== Querying CheckOption State =====
+
+{{{#!highlight csharp
+{
+  // Get the type CheckOption Filter from the Scope
+  var filter = scope.get_filter("type") as CheckOptionFilter;
+ 
+  // As we can have none, one or many options enabled, we need to iterate
+  // through and see which ones are
+  foreach (Unity.FilterOption option in filter.options)
+  {
+    if (option.active)
+    {
+      // We are pretending that our websource uses exactly the same naming as
+      // the ids our Lens uses. Ahh, to write pretend software...
+      if (url == "")
+        url="&type=" + option.id;
+      else
+        url+="+" + option.id;
+    }
+  }
+}
+}}}
+
+===== Querying RadioOption State =====
+
+{{{#!highlight csharp
+{
+  // Get the last-modified RadioOption Filter from the Scope
+  var filter = scope.get_filter("last-modified") as RadioOptionFilter;
+
+  // Radio option is way simpler, we just need to query the active option
+  // (if one exists) and do something for that
+  if (filter.get_active_option())
+    url += "&modified=" + filter.get_active_option().id;
+}
+}}}
+
+===== Querying MultiRange State =====
+
+{{{#!highlight csharp
+{
+  // Get the size MultiRange Filter from the Scope
+  var filter = scope.get_filter("size") as MultiRangeFilter;
+
+  // As MultiRange works by having an option at the first and last positions,
+  // we just need to make sure it has a valid FilterOption for both the first
+  //  and last positions and use that info to sent the range we want.
+  if (filter.get_first_active() && filter.get_last_active())
+  {
+    url += "&min-size=" + filter.get_first_active().id + "&max-size=" + filter.get_last_active().id;
+  }
+}
+}}}
+
+===== Querying Ratings State =====
+
+{{{#!highlight csharp
+{
+  // Get the ratings Ratings Filter from the Scope
+  var filter = scope.get_filter("ratings") as RatingsFilter;
+  url += "&min-rating=" + "%f".printf(filter.rating);
+}
+}}}
+
+==== Handling Activation ====
+
+A Scope is responsible for handling activation of any result that belongs to it. Connecting to the "activate-uri" signal on the Scope object allows you to be notified when a result is activated (clicked) in the Dash. In the signal handler, you can instruct Unity to hide the Dash, leave the Dash showing, or let it handle the activation itself in fall-back mode.
+
+{{{#!highlight csharp
+{
+private Unity.ActivationResponse on_uri_activated(string uri)
+{
+  if (uri_should_hide_dash(uri))
+  {
+    launch_uri(uri);
+
+    // You've successfully handled the activation and Unity should hide
+    // the Dash
+    return new Unity.ActivationResponse(Unity.HandledType.HIDE_DASH);
+  }
+  else if (uri_should_keep_dash_open(uri))
+  {
+    launch_uri(uri);
+
+    // You've successfully handled the activation and Unity should keep
+    // the Dash showing
+    return new Unity.ActivationResponse(Unity.HandledType.SHOW_DASH);
+  }
+  else
+  {
+    warning("Cannot handled URI: %s", uri);
+
+    // You were not able to handle the activation and Unity should try
+    // and use one of its fall-back handlers instead.
+    return new Unity.ActivationResponse(Unity.HandledType.NOT_HANDLED);  
+  }
+}
+}}}
+
+==== Full example ====

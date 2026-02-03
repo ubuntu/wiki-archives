@@ -1,0 +1,211 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+I've been experimenting with building kernels on instances in the Amazon EC2 cloud. In most cases this isn't going to give better performance than building locally on a fast build server, it's an option if you don't have any fast hardware available.
+
+This work was done during the Jaunty alpha releases. Note that a lot of these steps are documented as part of the regular kernel build procedure on the KernelMaintenanceStarter page.
+
+Here's the basic recipe for how to do it:
+
+== Set up your Amazon account and sign up for the Ubuntu Beta ==
+
+You'll need to set up an Amazon account and sign up for the Ubuntu beta testing, in order to get access to ubuntu images on EC2.
+
+To do that, follow the instruction here:
+
+https://help.ubuntu.com/community/EC2StartersGuide
+
+Once you've done that make sure you can start, stop, and access instances as described.
+
+== About the EC2 Instances ==
+
+The EC2 instance is started with storage mounted on /mnt. Since there isn't much storage space on the instance otehr than on this mount point, some of the steps below are done in order to link the 'normal' directories used for kernel builds to that mount point.
+
+Since the instance storage is non-persistent, this example shows how to recreate the chroots used for building and the kernel git trees every time. For actual production use, these should be stored on Amazon persistent storage and mounted on the instance. Since I was only testing kernel build speed, I didn't bother.
+
+== How to build a kernel on the EC2 Instance ==
+
+=== Create an Instance ===
+
+The instance type I tested with is one of Amazon's "High-CPU" instances. It is described here
+
+<nowiki>[[http://aws.amazon.com/ec2/,on this Amazon page]]</nowiki>
+
+as "High-CPU Extra Large Instance 7 GB of memory, 20 EC2 Compute Units (8 virtual cores with 2.5 EC2 Compute Units each), 1690 GB of instance storage, 64-bit platform".
+
+This instance currently costs $0.80/hour.
+
+<pre>
+sconklin@XPS-1:~$ ec2-run-instances ami-a84aaec1 -k ec2-keypair -t c1.xlarge
+RESERVATION	r-a0cb75c9	581779666099	default
+INSTANCE	i-599c0b30	ami-a84aaec1			pending	ec2-keypair	0		c1.xlarge	2009-02-20T18:21:27+0000	us-east-1c	aki-d314f0ba	ari-d014f0b9	
+
+sconklin@XPS-1:~$ ec2-describe-instances
+RESERVATION	r-a0cb75c9	581779666099	default
+INSTANCE	i-599c0b30	ami-a84aaec1	ec2-67-202-42-150.compute-1.amazonaws.com	domU-12-31-39-00-70-91.compute-1.internal	running	ec2-keypair	0		c1.xlarge	2009-02-20T18:21:27+0000	us-east-1c	aki-d314f0ba	ari-d014f0b9	
+
+ec2-describe-instances shows that the instance is started - the instance identifier is i-599c0b30 and the name used to access it is ec2-67-202-42-150.compute-1.amazonaws.com
+
+ec2-authorize default -p 22 # This only has to be done once
+</pre>
+
+=== Log in once as root and select the default configuration ===
+
+<pre>
+sconklin@XPS-1:~$ ssh -i ./ec2-keypair.pem root@ec2-67-202-42-150.compute-1.amazonaws.com
+Linux ubuntu 2.6.27-13-xen #1 SMP Sat Nov 8 23:30:17 UTC 2008 x86_64
+
+The programs included with the Ubuntu system are free software;
+the exact distribution terms for each program are described in the
+individual files in /usr/share/doc/*/copyright.
+
+Ubuntu comes with ABSOLUTELY NO WARRANTY, to the extent permitted by
+applicable law.
+
+To access official Ubuntu documentation, please visit:
+http://help.ubuntu.com/
+
+======================================================  ==
+CONFIGURATION OF YOUR UBUNTU EC2 IMAGE
+======================================================  ==
+Your EC2 image is about to be finished to be set up.
+
+------------------------------------------------------
+New password for ubuntu account: abcd1234
+Password changed.
+Setting up ssh public keys for the ubuntu account.
+
+------------------------------------------------------
+Please select software that you wish to install:
+
+------------------------------------------------------
+
+We are now going to log you out of the root account.
+To perform administrative tasks please use the ubuntu account
+in combination with sudo using the password: abcd1234
+
+======================================================  ==
+
+Connection to ec2-67-202-42-150.compute-1.amazonaws.com closed.
+</pre>
+
+Make a note of the password supplied for the 'ubuntu' account. You'll need
+it for using sudo later.
+
+=== Log in to the EC2 Instance ===
+<pre>
+sconklin@XPS-1:~$ ssh -i ./ec2-keypair.pem ubuntu@ec2-67-202-42-150.compute-1.amazonaws.com
+</pre>
+
+On the instance, perform the following:
+
+<pre>
+ubuntu@ubuntu:~$ sudo mkdir -m 775 /mnt/chroots 
+ubuntu@ubuntu:~$ sudo mkdir -m 755 /mnt/src
+ubuntu@ubuntu:~$ sudo ln -s /mnt/chroots /var/chroots
+ubuntu@ubuntu:~$ sudo mkdir /home/ubuntu/src
+ubuntu@ubuntu:~$ sudo chown ubuntu:ubuntu /home/src
+ubuntu@ubuntu:~$ sudo ln -s /mnt/src /home/ubuntu/src
+
+ubuntu@ubuntu:~$ sudo apt-get install debootstrap schroot git-core
+
+ubuntu@ubuntu:~$ cd src
+ubuntu@ubuntu:~$ git clone git://kernel.ubuntu.com/ubuntu/kteam-tools.git
+</pre>
+
+Next, edit one of the chroot scripts - find the 'binds=' line and add 'mnt' to the list
+
+<pre>
+ubuntu@ubuntu:~$ vim kteam-tools/setup-chroots
+</pre>
+
+This is an intrepid instance and we want to build jaunty,
+so we have to duplicate a tools directory:
+
+<pre>
+ubuntu@ubuntu:~$ sudo cp /usr/share/debootstrap/scripts/intrepid /usr/share/debootstrap/scripts/jaunty
+</pre>
+
+Now create the chroot to be used for building the jaunty kernel:
+When postfix asks you to pick a configuration you can just choose "no configuration".
+
+<pre>
+ubuntu@ubuntu:~$ sudo kteam-tools/build-mkschroot --arch=i386 jaunty /var/chroots/jaunty-chroot  http://archive.ubuntu.com/ubuntu 
+</pre>
+
+Now fetch the kernel source for jaunty
+
+<pre>
+ubuntu@ubuntu:~$ git clone git://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux-2.6.git
+ubuntu@ubuntu:~$ git clone --reference linux-2.6/ git://kernel.ubuntu.com/ubuntu/ubuntu-jaunty.git ubuntu-jaunty
+</pre>
+
+Now change to the chroot and perform the build:
+
+<pre>
+ubuntu@ubuntu:~$ schroot -c jaunty-i386
+I: [jaunty-i386-88efd646-47f1-48a6-a0e3-0dbad5591aee chroot] Running login shell: ‘/bin/bash’
+(jaunty-i386)ubuntu@ubuntu:~/src$ cd ubuntu-jaunty
+(jaunty-i386)ubuntu@ubuntu:~/src$ export CONCURRENCY_LEVEL=8 # make sure the build uses eight compile threads
+(jaunty-i386)ubuntu@ubuntu:~/src/ubuntu-jaunty$ fakeroot debian/rules binary-generic
+</pre>
+
+And away you go!
+
+When you are done, log out twice (once from the chroot, and once from the instance)
+
+== Terminate Your Instance When You Are Finished ==
+
+When you are done, be sure to terminate you instance - you are being charged for it when it is running, whether you are using it or not.
+
+When you terminate the image, everything you installed on it is lost.
+
+<pre>
+sconklin@XPS-1:~$ ec2-describe-instances
+RESERVATION	r-a0cb75c9	581779666099	default
+INSTANCE	i-599c0b30	ami-a84aaec1	ec2-67-202-42-150.compute-1.amazonaws.com	domU-12-31-39-00-70-91.compute-1.internal	running	ec2-keypair	0		c1.xlarge	2009-02-20T18:21:27+0000	us-east-1c	aki-d314f0ba	ari-d014f0b9	
+sconklin@XPS-1:~$ ec2-terminate-instances i-599c0b30
+INSTANCE	i-599c0b30	running	shutting-down
+sconklin@XPS-1:~$ ec2-terminate-instances i-599c0b30
+INSTANCE	i-599c0b30	terminated	terminated
+sconklin@XPS-1:~$ 
+</pre>
+
+== Results - build time comparison ==
+{| class="wikitable"
+|-
+| Host
+| Number of cores
+| CONCURRENCY_LEVEL
+| Real
+| User
+| Sys
+|-
+| Dell XPS M1330
+| 2
+| 2
+| 45m16
+| 66m17
+| 7m58
+|-
+| Amazon EC2
+| 8
+| 8
+| 20m47
+| 51m8
+| 7m58
+|-
+| Amazon EC2
+| 8
+| 2
+| 38m6
+| 54m56
+| 9m24
+|}

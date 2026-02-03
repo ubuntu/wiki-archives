@@ -1,0 +1,618 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== GPG key migration and application compatibility testing ==
+
+This page documents the results of the investigations performed for the <nowiki>[[UbuntuSpec:security-m-gpg-migration | GPG migration blueprint]]</nowiki>.
+
+=== Migration Checklist ===
+This list is based on the excellent <nowiki>[[http://www.debian-administration.org/users/dkg/weblog/48|instructions]]</nowiki> from Debian.
+
+* Set defaults in `~/.gnupg/gpg.conf` and `~/.caff/gnupghome/gpg.conf` (only if you will use <nowiki>[[https://wiki.debian.org/caff|caff]]</nowiki>):
+ <pre>
+personal-digest-preferences SHA512
+cert-digest-algo SHA512
+default-preference-list SHA512 SHA384 SHA256 SHA224 AES256 AES192 AES CAST5 ZLIB BZIP2 ZIP Uncompressed
+</pre>
+* Generate a RSA/RSA key with 4096 bits. (`gpg --gen-key --default-new-key-algo rsa4096`)
+* Edit the newly created key (`gpg --edit-key NEWID`):
+** Validate that the preferences list the stronger ciphers first (`showpref`):
+  <pre>
+     Cipher: AES256, AES192, AES, CAST5, 3DES
+     Digest: SHA512, SHA384, SHA256, SHA224, SHA1
+     Compression: ZLIB, BZIP2, ZIP, Uncompressed
+     Features: MDC, Keyserver no-modify
+</pre>
+** Add all the needed email addresses (`adduid`)
+** Set primary uid (`uid` and `primary`)
+** Save changes (`save`)
+* Generate revocation cert and save somewhere safe (`gpg --gen-revoke NEWID > NEWID-revoke.asc`)
+* Sign the new key with the old key (`gpg --sign-key NEWID`)
+* Publish new key (`gpg --keyserver pgp.mit.edu --send-key NEWID`, `gpg --keyserver keyserver.ubuntu.com --send-key NEWID`)
+** The operation may imply a delay, but its completeness can be verified with `gpg --keyserver hkp://keyserver.ubuntu.com --search-key YOUREMAILADDRESS`.
+* Write up transition statement (see <nowiki>[[http://www.debian-administration.org/users/dkg/weblog/48|here]]</nowiki> for examples)
+* Sign transition statement with both keys (`gpg -u OLDID -u NEWID --clearsign transition.txt`)
+* Publish transition (blog, twitter, etc)
+* Collect signatures
+* Add to Launchpad: [https://launchpad.net/people/+me/+editpgpkeys]
+* Sign things that are still active with your new key and send to their owners.
+** You can validate signatures are using non-SHA1 by using `gpg --list-packets < SIGFILE`, and checking that '''digest algo''' (aka hash algorithm) is not "2" (SHA1). For SHA512, you'd want "10" (see <nowiki>[[http://www.ietf.org/rfc/rfc4880.txt|RFC4880]]</nowiki> section 9.4 for details):
+  <pre>
+:signature packet: algo 1, keyid xxxxxxxxxxxxxxxx
+        version 4, created 1285621931, md5len 0, sigclass 0x10
+        digest algo 10, begin of digest e3 3f
+</pre>
+** You can validate the cipher (symmetric key) algorithm of an encrypted message is AES256 by using `gpg -o /dev/null --show-session-key < ENCFILE`, and checking that the algorithm is "9" (AES256, see <nowiki>[[http://www.ietf.org/rfc/rfc4880.txt|RFC4880]]</nowiki> section 9.2 for details). The cipher is listed as an integer before the colon. Eg:
+  <pre>
+gpg: session key: `9:5E73B30F5A8F35D8282C9F3B9EE5C4943E06D59A0E65D9AFADD5998525F792CA'
+</pre>
+** You can validate the public key algorithm of an encrypted message is RSA by using `gpg --list-packets < ENCFILE`, and checking that the algorithm is "1" (RSA (Encrypt or Sign) [HAC], see <nowiki>[[http://www.ietf.org/rfc/rfc4880.txt|RFC4880]]</nowiki> section 9.1 for details). Eg:
+  <pre>
+:pubkey enc packet: version 3, algo 1, keyid 8CB1FAB0888C8DEC
+	data: [4096 bits]
+</pre>
+** For messages both encrypted and signed, you should be able to use `gpg -d -o /dev/null -v < ENCFILE` to verify the public key algorithm, the digest/hash algorithm and the cipher/symmetric-key algorithm. Eg:
+  <pre>
+gpg: encrypted with 4096-bit RSA key...
+gpg: AES256 encrypted data
+gpg: using PGP trust model
+gpg: binary signature, digest algorithm SHA512
+</pre>
+
+  If that doesn't work:
+## validate the public key algorithm as above
+## decrypt the message
+## validate the digest algorithm of the decrypted message (which should contain the signature) as above.
+* Make new key your default ( `~/.gnupg/gpg.conf`, `~/.caffrc`, `~/.devscripts`, `~/.muttrc`, your MUA, etc)
+** '''NOTE:''' Be careful if your new key uses the same email address, name and comment as your old key, because GnuPG will use the first key it finds in your secret keyring for signing and encrypting when not specifying a numerical ID (eg, ```debsign```), and therefore your old key will continue to be used. You know that you will have this problem if the ```gpg --list-keys YOUREMAILADDRESS``` lists your old key first. This can be fixed in one of a few ways:
+** For each application that uses gnupg, specify the numerical KEYID of your new key (eg, 'AAAABBBB') instead of the email address. This is the safest method, but takes more work. Eg, for devscripts, create/modify ~/.devscripts to have something like:
+   <pre>
+DEBSIGN_KEYID="AAAABBBB"
+</pre>
+** You can also change the order of your keyring. Eg:
+### make a backup of ~/.gnupg with ```cp -a  ~/.gnupg ~/.gnupg.bak```
+### create a safe directory with ```mkdir -m0700 ~/gpg && cd ~/gpg```
+### export your public key with ```gpg --export OLDID > ~/gpg/oldpub.gpg```
+### export your secret key with ```gpg --export-secret-keys OLDID > ~/gpg/oldsec.gpg```
+### delete your old public and secret key with ```gpg --delete-secret-and-public-key OLDID```
+### import your old public key with ```gpg --import ~/gpg/oldpub.gpg```
+### import your old secret key with ```gpg --import ~/gpg/oldsec.gpg```
+### verify it worked with ```gpg --list-keys YOUREMAILADDRESS```. Your new key should now be listed first. Compare it to your backup with ```gpg --no-default-keyring --keyring ~/.gnupg.bak/pubring.gpg --secret-keyring ~/.gnupg.bak/secring.gpg --list-keys YOUREMAILADDRESS```
+### if all went well, clean up the exported keys with ```rm -f ~/gpg/oldpub.gpg ~/gpg/oldsec.gpg && rmdir ~/gpg```
+### sign, trust and enable the old key with ```gpg --edit-key OLDID```
+** Lastly, you can export your old public and secret key into another keyring, then delete the old keys from your default keyring (again, make backups!). This way for normal every day work your new key can be used. The main problem with this is that your mailer won't be able to decrypt email encrypted with your old key. You can access your old key with gpg by using the ```--keyring``` and ```--secret-keyring``` options, which adds these keyring to the list of available keyrings. Eg ```gpg --keyring pubring_OLDID.gpg --secret-keyring secring_OLDID.gpg --list-keys```.
+* When ready (e.g. 90 days), publish revocation cert for the old key.
+
+=== Results of testing with SHA2 GPG keys ===
+
+==== gmail/firegpg ====
+
+* Investigated by <nowiki>[[LaunchpadHome:sbeattie]]</nowiki>
+
+GMail has no built in gpg support, though it's a <nowiki>[[http://www.google.com/support/forum/p/gmail/thread?tid=7949040785db2e35 | requested feature]]</nowiki>. 
+
+The Firefox plugin <nowiki>[[http://getfiregpg.org| FireGPG]]</nowiki> at one time supported GMail; however, it frequently broke and so the author decided to <nowiki>[[http://blog.getfiregpg.org/2010/06/07/firegpg-discontinued/|discontinue support]]</nowiki> for the plugin, due to frequent breakage by GMail. Experiments done in the past confirmed this breakage, though when FireGPG could identify a gpg-signed message, it did not seem to have any trouble verifying messages using SHA512 HMAC.
+
+==== mutt ====
+
+* Investigated by <nowiki>[[LaunchpadHome:sbeattie]]</nowiki>
+
+The MUA <nowiki>[[http://www.mutt.org|mutt]]</nowiki> makes direct use of gpg to perform its signatures, encryption, and verification, so as long as the version of gpg that mutt invokes supports SHA2, then it works within mutt. Experimentally, after I <nowiki>[[http://www.nxnw.org/~steve/key-transition-2010-06-08-sbeattie.txt| migrated my key]]</nowiki>, I continued to have no difficulty verifying, signing and encrypting emails with mutt, which is my default day-to-day email client.
+
+==== KMail ====
+
+* Investigated by <nowiki>[[LaunchpadHome:jdstrand]]</nowiki>
+
+===== Maverick (4:4.4.6-0ubuntu1) =====
+{| class="wikitable"
+|-
+| 
+| sha1 inline
+| sha512 inline
+| sha1 PGP/MIME w/ header
+| sha512 PGP/MIME w/ header
+|-
+| validates good signed-only
+| ok
+| ok
+| ok
+| ok
+|-
+| alerts on bad signed-only
+| ok
+| ok
+| ok
+| ok
+|-
+| generates signed-only
+| ok
+| ok
+| ok
+| ok
+|-
+| decrypts/validates AES256 with signature
+| ok
+| ok
+| ok
+| ok
+|-
+| encrypts/generates AES256 with signature
+| ok
+| ok
+| ok
+| ok
+|}
+
+{| class="wikitable"
+|-
+| 
+| inline
+| PGP/MIME
+|-
+| decrypts AES256 without signature
+| ok
+| ok
+|-
+| encrypts AES256 without signature
+| ok
+| ok
+|}
+
+===== Lucid (4:4.4.2-0ubuntu5) =====
+{| class="wikitable"
+|-
+| 
+| sha1 inline
+| sha512 inline
+| sha1 PGP/MIME w/ header
+| sha512 PGP/MIME w/ header
+|-
+| validates good signed-only
+| ok
+| ok
+| ok
+| ok
+|-
+| alerts on bad signed-only
+| ok
+| ok
+| ok
+| ok
+|-
+| generates signed-only
+| ok
+| ok
+| ok
+| ok
+|-
+| decrypts/validates AES256 with signature
+| ok
+| ok
+| ok
+| ok
+|-
+| encrypts/generates AES256 with signature
+| ok
+| ok
+| ok
+| ok
+|}
+
+{| class="wikitable"
+|-
+| 
+| inline
+| PGP/MIME
+|-
+| decrypts AES256 without signature
+| ok
+| ok
+|-
+| encrypts AES256 without signature
+| ok
+| ok
+|}
+
+KMail 4.4 (in Lucid and Maverick) is known to work with GnuPG2 and uses Kleopatra and the libkleo4 libraries to perform its signatures, encryption, and verification. KMail is confirmed to work with the strong defaults as recommended by Debian^2^.
+
+# http://lists.gnupg.org/pipermail/gnupg-announce/2009q3/000294.html
+# http://www.debian-administration.org/users/dkg/weblog/48
+
+===== Kmail Setup =====
+Since running Kmail on a non-Kubuntu install is not necessarily straightforward, here are the steps to test:
+# `sudo apt-get install kmail kleopatra`
+# start kmail, but skip creating an account
+# stop kmail
+# [maverick] at this point kmail will fail to start. Need to disable the Nepomuk desktop:
+** left click on the Akonadi icon in the tray
+** Configure it to disable the desktop and file indexing
+ 0. create a new gpg key with the above. Eg:
+** mkdir -m 0700 ~/.gnupg
+** create ~/.gnupg/gpg.conf (as above), adding ```use-agent``` to the bottom
+** generate a 4096 bit RSA/RSA key (gpg --gen-key)
+** verify the strong preferences with 'gpg --edit-key <NEWID>' and 'showpref'
+ 0. import any keys needed for verification. Eg:<pre>
+$ gpg --keyserver keyserver.ubuntu.com --recv-keys 0xDC6DC026 # kees' test email (new key)
+$ gpg --keyserver keyserver.ubuntu.com --recv-keys 0x17063E6D # kees' test email (old key)
+$ gpg --keyserver keyserver.ubuntu.com --recv-keys 0x005E81F4 # sbeattie's USN (new key)
+$ gpg --keyserver keyserver.ubuntu.com --recv-keys 0x174BF01A # jdstrand's USN (old key)
+</pre>
+# restart your session (to make sure `gpg-agent` starts)
+# start kmail (if it dies, just try again), and update the Identity. Under the Cryptography tab:
+** set the OpenPGP signing and encrypting key to your new key
+** start the Certificate Manager (kleopatra)
+** verify the new key is listed in 'Trusted Certificates'. If not, right click on it and select 'Certify this certificate'.
+** verify the imported keys are listed in 'Other Certificates'. Right click on each and 'Change Owner Trust' to be 'marginal'
+** right click on each imported key and 'Certify Certificate' for all email addresses, being sure to 'Certify only for myself' 
+ 0. add a new email account for whatever is appropriate for your environment
+** when KWallet comes up, use 'Basic settings' but leave 'Yes, I wish to use KDE wallet to store my personal information' unchecked. Then click, 'Do not store password'.
+
+==== PGP8 compatibility ====
+
+* Investigated by <nowiki>[[LaunchpadHome:jdstrand]]</nowiki>
+
+PGP 8 compatibility is likely desirable for interacting with users of PGP8 or GnuPG users who use the ```--pgp8``` flag. From the ```gpg``` man page:<pre>
+       --pgp8 Set up all options to be as PGP 8 compliant as possible. PGP 8
+              is a lot closer to the OpenPGP standard than previous versions
+              of PGP, so all this does is disable --throw-keyids and set
+              --escape-from-lines. All algorithms are allowed except for the
+              SHA224, SHA384, and SHA512 digests.
+</pre>
+
+Therefore using the recommended options^1^ should be fine since SHA256 is listed as one of our allowed digests:<pre>
+Command> setpref SHA512 SHA384 SHA256 SHA224 AES256 AES192 AES CAST5 ZLIB BZIP2 ZIP Uncompressed
+Set preference list to:
+     Cipher: AES256, AES192, AES, CAST5, 3DES
+     Digest: SHA512, SHA384, SHA256, SHA224, SHA1
+     Compression: ZLIB, BZIP2, ZIP, Uncompressed
+     Features: MDC, Keyserver no-modify
+Really update the preferences? (y/N) y
+</pre>
+
+ 0. http://www.debian-administration.org/users/dkg/weblog/48
+
+==== Evolution ====
+
+* Investigated by <nowiki>[[LaunchpadHome:mdeslaur]]</nowiki>
+
+===== Maverick =====
+{| class="wikitable"
+|-
+| 
+| sha1 inline
+| sha512 inline
+| sha1 PGP/MIME w/ header
+| sha512 PGP/MIME w/ header
+|-
+| validates good signed-only
+| yes
+| yes
+| yes
+| yes
+|-
+| alerts on bad signed-only
+| yes
+| yes
+| yes
+| yes
+|-
+| generates signed-only
+| N/A
+| N/A
+| yes
+| broken^1^
+|-
+| decrypts/validates AES256 with signature
+| TBD
+| TBD
+| yes
+| yes
+|-
+| encrypts/generates AES256 with signature
+| N/A
+| N/A
+| yes
+| yes
+|}
+
+{| class="wikitable"
+|-
+| 
+| inline
+| PGP/MIME
+|-
+| decrypts AES256 without signature
+| TBD
+| yes
+|-
+| encrypts AES256 without signature
+| N/A
+| yes
+|}
+
+===== Lucid =====
+{| class="wikitable"
+|-
+| 
+| sha1 inline
+| sha512 inline
+| sha1 PGP/MIME w/ header
+| sha512 PGP/MIME w/ header
+|-
+| validates good signed-only
+| yes
+| yes
+| yes
+| yes
+|-
+| alerts on bad signed-only
+| yes
+| yes
+| yes
+| yes
+|-
+| generates signed-only
+| N/A
+| N/A
+| yes
+| broken^1^
+|-
+| decrypts/validates AES256 with signature
+| TBD
+| TBD
+| yes
+| yes
+|-
+| encrypts/generates AES256 with signature
+| N/A
+| N/A
+| yes
+| yes
+|}
+
+{| class="wikitable"
+|-
+| 
+| inline
+| PGP/MIME
+|-
+| decrypts AES256 without signature
+| TBD
+| yes
+|-
+| encrypts AES256 without signature
+| N/A
+| yes
+|}
+
+===== Bugs =====
+
+ 0. Signing a new message will use SHA1, with no possibility of changing the default algorithm. This has been fixed in the upstream 2.31 branch, but there are no plans to backport to 2.30, as it will change API.
+
+** https://bugzilla.gnome.org/show_bug.cgi?id=304415
+
+==== Thunderbird/Enigmail ====
+
+* Investigated by <nowiki>[[LaunchpadHome:kees]]</nowiki>
+
+===== Maverick (thunderbird 3.1.4+build2+nobinonly-0ubuntu3, enigmail 2:1.1.2-0ubuntu1) =====
+{| class="wikitable"
+|-
+| 
+| sha1 inline
+| sha512 inline
+| sha1 PGP/MIME w/ header
+| sha512 PGP/MIME w/ header
+|-
+| validates good signed-only
+| ok
+| ok
+| ok
+| ok
+|-
+| alerts on bad signed-only
+| ok
+| ok
+| ok
+| ok
+|-
+| generates signed-only
+| ok
+| ok
+| ok
+| ok
+|-
+| decrypts/validates AES256 with signature
+| ok
+| ok
+| ok
+| ok
+|-
+| encrypts/generates AES256 with signature
+| ok
+| ok
+| ok
+| ok
+|}
+
+{| class="wikitable"
+|-
+| 
+| inline
+| PGP/MIME
+|-
+| decrypts AES256 without signature
+| ok
+| ok
+|-
+| encrypts AES256 without signature
+| ok
+| ok
+|}
+
+===== Lucid (thunderbird 3.0.8+build2+nobinonly-0ubuntu0.10.04.1, enigmail 2:1.0.1-0ubuntu1) =====
+{| class="wikitable"
+|-
+| 
+| sha1 inline
+| sha512 inline
+| sha1 PGP/MIME w/ header
+| sha512 PGP/MIME w/ header
+|-
+| validates good signed-only
+| ok
+| ok
+| FAIL: ignores sig
+| FAIL: ignores sig
+|-
+| alerts on bad signed-only
+| ok
+| ok
+| FAIL: ignores sig
+| FAIL: ignores sig
+|-
+| decrypts/validates AES256 with signature
+| ok
+| ok
+| ok
+| ok
+|-
+| encrypts/generates AES256 with signature
+| ok
+| ok
+| ok
+| ok
+|}
+
+{| class="wikitable"
+|-
+| 
+| inline
+| PGP/MIME
+|-
+| decrypts AES256 without signature
+| ok
+| ok
+|-
+| encrypts AES256 without signature
+| ok
+| ok
+|}
+
+==== Application Review Template ====
+For sig checking, see <nowiki>[[http://people.canonical.com/~kees/test-openpgp.mbox|this test mbox]]</nowiki>.
+
+* Investigate by <nowiki>[[LaunchpadHome:your-lp-id-here]]</nowiki>
+
+===== Maverick (VERSION) =====
+{| class="wikitable"
+|-
+| 
+| sha1 inline
+| sha512 inline
+| sha1 PGP/MIME w/ header
+| sha512 PGP/MIME w/ header
+|-
+| validates good signed-only
+| 
+| 
+| 
+| 
+|-
+| alerts on bad signed-only
+| 
+| 
+| 
+| 
+|-
+| generates signed-only
+| 
+| 
+| 
+| 
+|-
+| decrypts/validates AES256 with signature
+| 
+| 
+| 
+| 
+|-
+| encrypts/generates AES256 with signature
+| 
+| 
+| 
+| 
+|}
+
+{| class="wikitable"
+|-
+| 
+| inline
+| PGP/MIME
+|-
+| decrypts AES256 without signature
+| 
+| 
+|-
+| encrypts AES256 without signature
+| 
+| 
+|}
+
+===== Lucid (VERSION) =====
+{| class="wikitable"
+|-
+| 
+| sha1 inline
+| sha512 inline
+| sha1 PGP/MIME w/ header
+| sha512 PGP/MIME w/ header
+|-
+| validates good signed-only
+| 
+| 
+| 
+| 
+|-
+| alerts on bad signed-only
+| 
+| 
+| 
+| 
+|-
+| decrypts/validates AES256 with signature
+| 
+| 
+| 
+| 
+|-
+| encrypts/generates AES256 with signature
+| 
+| 
+| 
+| 
+|}
+
+{| class="wikitable"
+|-
+| 
+| inline
+| PGP/MIME
+|-
+| decrypts AES256 without signature
+| 
+| 
+|-
+| encrypts AES256 without signature
+| 
+| 
+|}
+
+* listed here

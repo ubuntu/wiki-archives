@@ -1,0 +1,157 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+----
+
+{{{#!irc
+16:16:45 <crimsun> (sorry, waylaid by travel wifi)
+16:17:23 <crimsun> Welcome to this $timeofday's impromptu session on triaging ALSA bugs in Ubuntu and submitting fixes upstream
+16:17:56 <crimsun> A couple things to note: you'll need ubuntu-dev-tools, patchutils, git-core installed
+16:18:28 <crimsun> you'll also need some familiarity with C, though it doesn't need to be deep magic guru stuff
+16:19:09 <crimsun> Agendum: 1. Low-hanging fruit: bugs with known-working quirks commented in the bug reports
+16:19:27 <crimsun> 2. Not really fruit: Powerdown bugs
+16:19:44 <crimsun> 3. Submitting patches upstream
+16:21:19 <crimsun> Some required reading: https://wiki.ubuntu.com/DebuggingSoundProblems, in particular https://wiki.ubuntu.com/DebuggingSoundProblems/KarmicCaveats
+16:22:46 <crimsun> Next, free space requirements: you'll need about 300 MB free for git trees
+16:24:05 <crimsun> We'll be checking out three git trees: upstream linux-2.6 (Linus's tree), sound-2.6 (upstream ALSA kernel tree), ubuntu-lucid
+16:24:49 <crimsun> After ensuring that you have the prerequisites above installed, you'll do:
+16:24:57 <crimsun> git clone git://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux-2.6.git linux-2.6.git
+16:25:18 <crimsun> then:
+16:25:36 <crimsun> git clone --referenc linux-2.6.git/ git://git.kernel.org/pub/scm/linux/kernel/git/tiwai/sound-2.6.git
+16:25:44 <crimsun> sorry, that's --reference
+16:26:24 <crimsun> then: git clone --reference linux-2.6.git/ git://kernel.ubuntu.com/ubuntu/ubuntu-lucid.git
+16:27:30 <crimsun> Let's look at examples in the meantime (if you're waiting for them to complete)
+16:28:49 <apparle> crimsun: can I interrupt
+16:28:50 <crimsun> https://bugs.launchpad.net/bugs/487884
+16:28:51 <ubot2> Launchpad bug 487884 in linux "No sound driver for Gateway 4525GZ" [Low,Fix committed]
+16:28:53 <ubot2> Ubuntu bug 487884 in linux "No sound driver for Gateway 4525GZ" [Low,Fix committed] https://launchpad.net/bugs/487884
+16:28:55 <ubot2> Launchpad bug 487884 in linux "No sound driver for Gateway 4525GZ" [Low,Fix committed] https://launchpad.net/bugs/487884
+16:29:20 <crimsun> apparle: can it wait for about 10 minutes?
+16:29:45 <apparle> crimsun: no problem...
+16:30:19 <crimsun> apparle: thanks
+16:30:23 <crimsun> So, some background:
+16:30:37 <crimsun> there are a lot of AC'97 codecs that need some sort of quirk applied
+16:31:19 <crimsun> About four to five years ago, I spent a good long while getting the most common ones applied
+16:32:06 <crimsun> Those were mostly binding of 'Master' and 'Headphone' mixer controls and binding 'Headphone' to an indicator LED (for mute status)
+16:32:52 <crimsun> These days, for AC'97, we'll see a few stragglers that need inverted external amplifier power down (EAPD) applied
+16:33:30 <crimsun> This symptom most frequently manifests itself in needing 'External Amplifier' to be muted for sound to be audible
+16:33:57 <crimsun> There's an existing quirk for this called inv_eapd
+16:34:28 <crimsun> If you were to pass this option on the command line or in /etc/modprobe.d/alsa-base.conf, it would look similar to:
+16:34:36 <crimsun> ac97_quirk=inv_eapd
+16:34:54 <crimsun> e.g., modprobe snd-intel8x0 ac97_quirk=inv_eapd
+16:35:31 <crimsun> [after which point you could use 'External Amplifier' being unmuted for sound to be audible, which is the accepted norm]
+16:36:04 <crimsun> most AC'97 quirks live in their respective drivers
+16:37:20 <crimsun> the three most common ones are sound/pci/intel8x0.c, sound/pci/atiixp.c, and sound/pci/via82xx.c [though there are numerous others in sound/pci/]
+16:37:54 <crimsun> so, for bug 487884, we're looking specifically at applying this quirk
+16:37:54 <ubot2> Launchpad bug 487884 in linux "No sound driver for Gateway 4525GZ" [Low,Fix committed] https://launchpad.net/bugs/487884
+16:37:55 <ubot2> Launchpad bug 487884 in linux "No sound driver for Gateway 4525GZ" [Low,Fix committed] https://launchpad.net/bugs/487884
+16:37:56 <ubot2> Launchpad bug 487884 in linux "No sound driver for Gateway 4525GZ" [Low,Fix committed]
+16:37:57 <ubot2> Ubuntu bug 487884 in linux "No sound driver for Gateway 4525GZ" [Low,Fix committed] https://launchpad.net/bugs/487884
+16:38:30 <crimsun> http://launchpadlibrarian.net/36040747/Card0.Codecs.codec97.0.ac97.0.0.txt has the important information
+16:39:03 <crimsun> Namely, we need the PCI SSID, which in this case is 0x161f203a
+16:39:31 <crimsun> we next look at the source file that needs to be modified, which is sound/pci/intel8x0.c
+16:40:09 <crimsun> at this point, we should change working directories to wherever we cloned ubuntu-lucid.git
+16:40:43 <crimsun> next, we'll create a separate branch (some people use topic namespace)
+16:40:59 <crimsun> $ git checkout -b lp487884
+16:41:09 <crimsun> then, we'll edit the source file
+16:41:17 <crimsun> $ $EDITOR sound/pci/intel8x0.c
+16:41:50 <crimsun> AC'97 quirks live in the ac97_quirks[] struct, and they should be ordered by subvendor ID
+16:42:34 <crimsun> From this point the addition should be fairly straightforward. Add another stanza, fill in the human-friendly model name, add the quirk type
+16:42:54 <crimsun> $ git commit -a -e -s
+16:43:14 <crimsun> The first line of your commit message should briefly describe the change
+16:43:24 <crimsun> ALSA: intel8x0: Mute External Amplifier by default for Gateway 4525GZ
+16:44:23 <crimsun> the next line (delimited by a blank line) should be the BugLink id, which is something that is Ubuntu syntax-specific for the kernel team
+16:44:29 <crimsun> BugLink: https://bugs.launchpad.net/bugs/487884
+16:44:30 <ubot2> Launchpad bug 487884 in linux "No sound driver for Gateway 4525GZ" [Low,Fix committed]
+16:44:31 <ubot2> Ubuntu bug 487884 in linux "No sound driver for Gateway 4525GZ" [Low,Fix committed] https://launchpad.net/bugs/487884
+16:44:32 <ubot2> Launchpad bug 487884 in linux "No sound driver for Gateway 4525GZ" [Low,Fix committed] https://launchpad.net/bugs/487884
+16:44:39 <crimsun> Next, describe the change:
+16:44:50 <crimsun> This Gateway model needs External Amplifier muted for audible playback,
+16:44:55 <crimsun> so set the inv_eapd quirk for it.
+16:45:05 <crimsun> .
+16:45:27 <crimsun> Make sure that you keep lines wrapped at 80 characters; many maintainers prefer 72 characters.
+16:46:15 <crimsun> Finally, if the change is very simple (like this one), then you should submit it to the stable tree so that it ends up in Ubuntu
+16:46:28 <crimsun> Above your Signed-off-by line you should have:
+16:46:32 <crimsun> CC: stable@kernel.org
+16:47:04 <crimsun> .
+16:47:26 <crimsun> After saving your commit message, the change will be committed, and you can generate a patch to send upstream.
+16:47:56 <crimsun> There are several ways of doing this, but upstream ALSA likes separate patches.
+16:48:04 <crimsun> So, we'll use:
+16:48:21 <crimsun> git format-patch -o ~ master
+16:48:44 <crimsun> You'll end up with ~/0001-ALSA-...
+16:50:18 <crimsun> This is the patch that you'll attach to your e-mail message. The e-mail should be sent to alsa-devel@alsa-project.org, with Takashi Iwai and myself CCed
+16:50:58 <crimsun> And that's pretty much the process for bite-sized fixes.
+16:51:19 <crimsun> apparle: you're up
+16:51:33 <apparle> got it clear
+16:51:40 <apparle> but I am having a problem
+16:51:59 <apparle> what to do abt this
+16:52:00 <apparle> git.kernel.org[0: 149.20.20.136]: errno=Connection refused git.kernel.org[0: 199.6.1.166]: errno=Connection refused git.kernel.org[0: 204.152.191.40]: errno=Connection refused git.kernel.org[0: 130.239.17.7]: errno=Connection refused fatal: unable to connect a socket (Connection refused)
+16:52:32 <apparle> I am behing a stringent firewall(university)
+16:52:47 <crimsun> apparle: you'll need to use another protocol, then, like http
+16:53:21 <crimsun> (which is unfortunate, because it's less optimized, but it's one of the few ways to continue if you're behind a firewall)
+16:54:18apparleInitialized empty Git repository in /home/apparle/linux-2.6.git/.git/ fatal: http://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux-2.6.git/info/refs download error - Failed connect to git.kernel.org:80; Operation now in progress
+16:54:31 <apparle> what to do?
+16:55:24 <crimsun> apparle: firewalls are a bit beyond the scope of this discussion
+16:55:44 <crimsun> in brief, see git-clone(1)'s "GIT URLS" section for a description
+16:56:10 <apparle> crimsun: you mean in the man page?
+16:56:15 <crimsun> apparle: yes
+16:56:55 <crimsun> Okay, continuing.
+16:57:27 <crimsun> The next bug we'll consider is no more difficult, but it moves into problematic areas of HDA.
+16:58:10 <crimsun> In bug 461062, we need to ensure that the reporter's hardware doesn't suffer from distortion when the PCM volume is set to max.
+16:58:11 <ubot2> Launchpad bug 461062 in linux "0x11d41981 on 0x103c30d8 misreports dB information, needs PCM capped at 0 dB" [Undecided,Fix committed] https://launchpad.net/bugs/461062
+16:58:13 <ubot2> Launchpad bug 461062 in linux "0x11d41981 on 0x103c30d8 misreports dB information, needs PCM capped at 0 dB" [Undecided,Fix committed]
+16:58:15 <ubot2> Launchpad bug 461062 in linux "0x11d41981 on 0x103c30d8 misreports dB information, needs PCM capped at 0 dB" [Undecided,Fix committed] https://launchpad.net/bugs/461062
+16:58:16 <ubot2> Ubuntu bug 461062 in linux "0x11d41981 on 0x103c30d8 misreports dB information, needs PCM capped at 0 dB" [Undecided,Fix committed] https://launchpad.net/bugs/461062
+16:59:32 <crimsun> To do this, we need to inspect the reporter's HDA codec, which is attached at http://launchpadlibrarian.net/34413094/Card0.Codecs.codec.0.txt
+17:00:22 <crimsun> So, I'll walk through doing this from the top.
+17:00:58 <crimsun> Firstly, we need to know which codec patch to modify. That information is given at the beginning of the codec information, so, Analog Devices AD1981
+17:01:33 <crimsun> When you've triaged enough bugs, you no longer look at the ^Codec line but at the ^Vendor Id line
+17:01:58 <crimsun> So, knowing that it's an Analog Devices HDA codec, we'll need to look at sound/pci/hda/patch_analog.
+17:03:26 <crimsun> Next, we look at the ^Vendor Id line and match it with the entry in the snd_hda_preset_analog[] struct
+17:03:35 <crimsun> (which is located toward the end of the file)
+17:03:43 <crimsun> { .id = 0x11d41981, .name = "AD1981", .patch = patch_ad1981 },
+17:04:13 <crimsun> so, now we know which function to inspect (patch_ad1981())
+17:04:47 <crimsun> We need one more piece of information: whether the reporter's hardware is using a specific model quirk.
+17:05:11 <crimsun> To do that, we look at the ^Subsystem Id in the codec output
+17:05:45 <crimsun> In this case, it's 0x103c30d8
+17:06:17 <crimsun> Now, in patch_ad1981(), ad1981_cfg_tbl[] is used to see if any quirks are necessary
+17:07:02 <crimsun> So we scroll up in the source file to it, and we see that there's a vendor mask already applied:
+17:07:05 <crimsun> SND_PCI_QUIRK_VENDOR(0x103c, "HP nx", AD1981_HP),
+17:07:24 <crimsun> This tells us that we need to look at the AD1981_HP model quirk in patch_ad1981()
+17:07:43 <crimsun> So we return to patch_ad1981() and look at the section for that model.
+17:08:18 <crimsun> Sure enough, there's no existing cap being set for that model.
+17:08:31 <crimsun> Next, we verify our finding again by looking at the codec output
+17:10:38 <crimsun> To do this, we need to look a bit more closely at the pin routing. So, back to the source file, where we look for the mixer setup for the AD1981_HP model quirk
+17:10:54 <crimsun> mixer setups are of type struct snd_kcontrol_new
+17:11:03 <crimsun> so we're looking at ad1981_hp_mixers[]
+17:11:17 <crimsun> Next, find the PCM Playback elements
+17:11:42 <crimsun> The brief version, without referring to the AD1981 data sheet, is that we're looking at the 0x11 node id
+17:12:14 <crimsun> So, go back to the codec output and look at Node 0x11
+17:13:19 <crimsun> The critical piece of information is in:
+17:13:20 <crimsun> Amp-Out caps: ofs=0x17, nsteps=0x1f,
+17:13:40 <crimsun> so, we need to override the amp setup by using snd_hda_override_amp_caps()
+17:14:25 <crimsun> note that 0x1f will give distortion over and beyond 0x17
+17:14:47 <crimsun> so we need to cap the nsteps at the offset value
+17:14:54 <crimsun> (the offset value is known as 0 dB)
+17:15:10 <crimsun> so, this function ends up looking like:
+17:15:15 <crimsun>                 snd_hda_override_amp_caps(codec, 0x11, HDA_INPUT,
+17:15:15 <crimsun>                                           (0x17 << AC_AMPCAP_OFFSET_SHIFT) |
+17:15:18 <crimsun>                                           (0x17 << AC_AMPCAP_NUM_STEPS_SHIFT) |
+17:15:21 <crimsun>                                           (0x05 << AC_AMPCAP_STEP_SIZE_SHIFT) |
+17:15:24 <crimsun>                                           (1 << AC_AMPCAP_MUTE_SHIFT));
+17:16:03 <crimsun> so we take this addition, put it in the AD1981_HP case of patch_ad1981(), commit the change, and so on.
+17:16:30 <crimsun> (to complicate things, you can also do this from alsactl init, but that's a story for another day)
+17:17:34 <crimsun> For the sake of time, I'm going to skip the powerdown stuff and just send an e-mail to ubuntu-devel@ .
+17:17:45 <crimsun> Anyhow, that's it.
+17:18:18<-- <crimsun>  (i= <crimsun> @ubuntu/member/pdpc.supporter.bronze. <crimsun> ) has left #ubuntu-classroom ()
+}}}
+
+----
+CategoryPackaging CategoryDebugging

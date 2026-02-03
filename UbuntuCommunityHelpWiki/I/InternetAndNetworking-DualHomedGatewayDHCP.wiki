@@ -1,0 +1,180 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+
+This page describes how you can set up more than one Internet connection on the same machine with dynamic IP address connections.
+
+In many situations, is desirable to have more than one connection to the Internet:
+
+* for backup purposes.
+* to redirect bulk traffic through a less expensive link.
+* to split traffic between many links.
+
+If all your Internet connections have fixed IP address, perhaps your questions are already answered by the <nowiki>[[http://lartc.org/howto/|"Linux Advanced Routing HowTo"]]</nowiki>.
+
+This guide aims to help you setup your network to use more than one Internet connection when one or more links use dynamic IP address.
+
+== Prerequisites ==
+
+For this to work you should install:
+
+* iproute2, a collection of utilities for controlling TCP / IP networking and traffic control.
+* iptables, a command line program used to configure the IPv4 packet filtering ruleset. 
+* ipcalc, a parameter calculator for IPV4 addresses.
+* dhcp3-client, the client from version 3 of the Internet Software Consortium's implementation of DHCP.
+
+== Advanced routing ==
+
+Linux advanced routing features allow you to use more than one ISP, so you can route bulk or less important traffic through a cheaper link, sometimes meaning big cost savings and more reliable networking.
+
+The secret is to use hooks provided by dhclient-script to setup advanced routing for you. You can modify the standard behavior adding your own custom scripts to the folders /etc/dhcp3/dhclient-enter-hooks.d and /etc/dhcp3/dhclient-exit-hooks.d (''man dhclient-script'').
+
+There are a debug script which is very useful to show the information that is available to your scripts. Just edit the script ''debug'' at these folders and change the option RUN="no" to RUN="yes". You will have useful debug information logged at /tmp/dhclient-script.debug. Debug output will look like:
+<pre>
+Tue Oct 16 15:35:27 BRT 2007: entering dhclient-enter-hooks.d, dumping variables.
+reason='BOUND'
+interface='eth2'
+medium=''
+alias_ip_address=''
+new_ip_address='201.52.236.6'
+new_subnet_mask='255.255.240.0'
+new_domain_name=''
+new_domain_name_servers=''
+new_routers='201.52.224.1'
+new_static_routes=''
+old_ip_address='201.52.236.6'
+old_subnet_mask='255.255.240.0'
+old_domain_name=''
+old_domain_name_servers=''
+old_routers='201.52.224.1'
+old_static_routes=''
+--------------------------
+Tue Oct 16 15:35:27 BRT 2007: entering dhclient-exit-hooks.d, dumping variables.
+reason='BOUND'
+interface='eth2'
+medium=''
+alias_ip_address=''
+new_ip_address='201.52.236.6'
+new_subnet_mask='255.255.240.0'
+new_domain_name=''
+new_domain_name_servers=''
+new_routers=''
+new_static_routes=''
+old_ip_address='201.52.236.6'
+old_subnet_mask='255.255.240.0'
+old_domain_name=''
+old_domain_name_servers=''
+old_routers='201.52.224.1'
+old_static_routes=''
+--------------------------
+</pre>
+
+== Example: fixed-address connection + DHCP connection ==
+
+I have an expensive premium Internet connection at the office, but want to have also a cheap broadband cable connection for backup and download acceleration. Just plugging a second NIC and connecting it to cable modem will not work: DHCP will add a second default route and ruin my day because the ISP #1 will not route packets with ISP #2 source address and vice-versa (a detailed explanation on why this will not work is away beyond this document goals). For the unexperienced network administrator this is hard to diagnose because sometimes it seems to work, sometimes not. 
+
+Linux with iproute2 has up to 255 distinct routing tables. We are going to create a new routing table with default route pointing to the second ISP and use iproute2 rules to conditionally select between routing tables.
+
+Supposing we have three NICs:
+
+** eth0: fixed IP addres connected to main Internet link with 200.123.123.106/255.255.255.240 address
+** eth1: connected to our internal network with 10.1.0.254/255.255.255.0 address
+** eth2: connected to the broadband backup link with dynamic address
+
+ 1. Edit ''/etc/iproute2/rt_tables'' to add a line naming your routing table. You can call it anything, I prefer the ISP name. We will end up with something like:
+
+{{{#
+255     local
+254     main
+253     default
+0       unspec
+2     ISP2}}}
+
+ 2.#2 We don't want dhclient messing with our nameserver setup at ''/etc/resolv.conf''. To prevent this, edit ''/etc/dhcp3/dhclient.conf'' and change the request setting removing or commenting out ''domain-name'', ''domain-name-servers'', ''host-name'', ''netbios-name-servers'' and ''netbios-scope''.
+
+ 3. Create a file at /etc/dhcp3/dhclient-enter-hooks.d, call it ''dualhomed'':
+
+<pre>
+if [ x$reason == 'xBOUND' ]; then
+##### Lets flush our new routing table
+        /sbin/ip route flush table ISP2
+##### Stop marking packets
+        /sbin/iptables -F PREROUTING -t mangle
+##### Flush routing rules
+        /usr/local/sbin/flush_rules.pl
+
+##### Cable modem will give us a private IP
+##### when link is down.
+        prefixo=`echo $teste | cut -d . -f 1-2`
+        if [ x$prefixo == 'x192.168' ]; then
+                exit
+        fi
+
+##### Copy NIC routes at main routing table:
+        /sbin/ip route add 200.123.123.104/29 dev eth0 table ISP2
+        /sbin/ip route add 10.1.0.0/24 dev eth1 table ISP2
+
+##### Advanced rules
+        /sbin/ip rule add from $new_ip_address table ISP2
+        /sbin/ip rule add fwmark 0x2 table ISP2
+
+##### Mark HTTP packets we want to send through ISP2
+        /sbin/iptables -I PREROUTING -t mangle -s 10.1.0.0/24 -i eth1 -p tcp --dport 443 -j MARK --set-mark 2
+        /sbin/iptables -I PREROUTING -t mangle -s 10.1.0.0/24 -i eth1 -p tcp --dport 80  -j MARK --set-mark 2
+fi
+
+isp2_gateway=$new_routers
+new_routers=""
+</pre>
+
+ 4.#4 Create a file at /etc/dhcp3/dhclient-exit-hooks.d, call it ''dualhomed'':
+
+<pre>
+if [ x$reason == 'xBOUND' ]; then
+##### Cant be done at dhclient-enter-hooks time
+        my_new_network=`ipcalc -n $new_ip_address/$new_subnet_mask | grep Network | cut -b 12-32`
+        /sbin/ip route add $my_new_network dev $interface table ISP2
+        /sbin/ip route add default via $isp2_gateway table ISP2
+
+##### Should we restart squid to bind to the new interface?
+        /etc/init.d/squid restart
+fi
+</pre>
+
+ 5.#5 At shell prompt, issue ''ifdown eth2'' command
+
+ 6. Edit ''/etc/network/interfaces'' to make eth2 address dynamic:
+
+<pre>
+auto eth2
+iface eth2 inet dhcp
+</pre>
+
+ 7.#7 At shell prompt, issue ''ifup eth2'' command
+
+That is it. If you did everything right, ip routing rules will look like:
+<pre>
+admin@firewall:~$ sudo ip rule show
+0:      from all lookup 255
+32764:  from all fwmark 0x2 lookup ISP2
+32765:  from 201.252.136.6 lookup ISP2
+32766:  from all lookup main
+32767:  from all lookup default
+</pre>
+
+ISP2 routing table will look like:
+<pre>
+admin@firewall:~$ sudo ip route show table ISP2
+200.123.123.104/29 dev eth0  scope link
+10.1.0.0/24 dev eth1  scope link
+201.252.224.0/20 dev eth2  scope link
+default via 201.252.224.1 dev eth2
+</pre>

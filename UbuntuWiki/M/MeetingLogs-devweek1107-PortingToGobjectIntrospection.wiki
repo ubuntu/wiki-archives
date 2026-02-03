@@ -1,0 +1,221 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+=== Dev Week -- Porting from pygtk to gobject introspection -- pitti -- Tue, Jul 12th, 2011 ===
+{{{#!irc
+[17:01] <pitti> Hello everyone! I am Martin Pitt from the Canonical Ubuntu Desktop Team.
+[17:02] <pitti> just a note, if you were in this talk at the last UDW half a year ago, it'll be pretty much the same
+[17:02] <pitti> just to get an impression of how many folks are listening, can you raise hands (o/) or say hello in #chat?
+[17:03] <pitti> nice :)
+[17:03] <pitti> so, let's python!
+[17:03] <pitti> Python is a very important and popular language in Ubuntu, we have a lot of applications written in Python for GTK and Qt/KDE. Most prominent examples are our installer Ubiquity, Software Center, our driver installer "Jockey", and our bug/crash reporting system "Apport" (shameless plug!).
+[17:04] <pitti> By way of Quickly we also encourage application developers to use Python and GTK, as these allow you to write GUI applications both conveniently, fast, and still rather robust.
+[17:04] <pitti> Until recently, the package of choice for that has been PyGTK, a manually maintained Python binding for GTK, ATK, Pango, Glade, and a few other things. However, a few months ago, with the advent of GTK3, PyGTK was declared dead, so it's time to bring the banner of the great new world of its successor -- gobject-introspection -- to the world!
+[17:04] <pitti> I'll concentrate on the app developer side, i. e. how to use GI typelibs in Python, but will nevertheless give a quick overview of gobject-introspection.
+[17:05] <pitti> Porting existing PyGTK2 code is a topic that has kept, and will still keep many of us busy for some months, so I'll explain the process and common pitfalls with that.
+[17:05] <pitti> Finally I'll give some pointers to documentation, and will be available for some Q&A.
+[17:05] <pitti> Everyone ready to dive in? Please let me know (here or in #-chat) when I become too fast. If I am being totally unclear, please yell and I'll handle that immediately. If you just have a followup question, let's handle these at the end.
+[17:06] <pitti> == Quick recap: What is GI? ==
+[17:06] <pitti> So far a lot of energy was spent to write so-called "bindings", i. e. glue code which exposes an existing API such as GTK for a target language: PyGTK, libnotify-cil, or Vala's .vapi files.
+[17:06] <pitti> This both leads to a combinatorial explosion (libraries times languages), as well as many bindings which don't exist at all, or being of low quality. In addition it is also an almost insurmountable barrier for introducing new languages, as they would need a lot of bindings before they become useful.
+[17:07] <pitti> GI is a set of tools to generate a machine parseable and complete API/ABI description of a library, and a library (libgirepository) which can then be used by a language compiler/interpreter to automatically provide a binding for this library.
+[17:07] <pitti> With GI you can then use every library which ships a typelib in every language which has GI support.
+[17:07] <pitti> GI ABI/API descriptions come in two forms:
+[17:07] <pitti>  * An XML file, called the "GIR" (GI repository). These are mainly interesting for developers if they need to look up a particular detail of e. g. a method argument or an enum value. These are not actually used at runtime (as XML would be too costly to interpret every time), and thus they are shipped in the library's -dev package in Ubuntu and Debian. For example, libgtk2.0-dev ships
+[17:07] <pitti> /usr/share/gir-1.0/Gdk-2.0.gir.
+[17:07] <pitti>  * A compiled binary form for efficient access, called the "typelib". These are the files that language bindings actually use. Ubuntu/Debian ship them in separate packages named gir<GI_ABI_version>-<libraryname>-<library_ABI_version>, for example, gir1.2-gtk-2.0 ships /usr/lib/girepository-1.0/Gdk-2.0.typelib.
+[17:08] <pitti> (Yes, it's confusing that the gir1.2-* package does _not_ actually ship the .gir file; don't ask me why they were named "gir-", not "typelib-").
+[17:08] <pitti> == How does it work in Python? ==
+[17:08] <pitti> pygobject is the piece of software which provides Python access to GI (amongst other things, like providing the glib and GObject bindings). The package name in Ubuntu/Debian is "python-gobject", and it should already be installed on all but the most manually trimmed down installations.
+[17:09] <pitti> Initial GI support was added to pygobject in version 2.19.0 (August 2009), but the entire GI/pygobject/annotations stack really only stabilized in the last couple of months, so that in practice you will need at least pygobject 2.28 and the corresponding latest upstream releases of GTK and other libraries you want to use.
+[17:09] <pitti> This means that you can only really use this with the latest release of distros, i. e. Ubuntu 11.04 (Natty) or Debian testing.
+[17:10] <pitti> (some time to catch up, will slow down a bit as per #chat)
+[17:11] <pitti> pygobject provides a "gi.repository" module namespace which generates virtual Python modules from installed typelibs on the fly.
+[17:11] <pitti> For example, if you install gir1.2-gtk-2.0 (it's already installed by default in Ubuntu 11.04), you can do:
+[17:12] <pitti> $ python -c 'from gi.repository import Gtk; print Gtk'
+[17:12] <pitti> <gi.module.DynamicModule 'Gtk' from '/usr/lib/girepository-1.0/Gtk-2.0.typelib'>
+[17:12] <pitti> and use it just like any other Python module.
+[17:12] <pitti> I bet that this first example comes as an absolutely unexpected surprise to you:
+[17:12] <pitti> $ python -c 'from gi.repository import Gtk; Gtk.MessageDialog(None, 0, Gtk.MessageType.INFO, Gtk.ButtonsType.CLOSE, "Hello World").run()'
+[17:12]  * pitti gives everyone a couple of seconds to copy&paste&run that and be shocked in awe
+[17:14] <pitti> working?
+[17:14] <pitti> Let's look at the corresponding C code:
+[17:14] <pitti>   GtkWidget* gtk_message_dialog_new (GtkWindow *parent, GtkDialogFlags flags, GtkMessageType type, GtkButtonsType buttons, const gchar *message_format, ...);
+[17:15] <pitti> and the C call:
+[17:15] <pitti>   GtkMessageDialog* msg = gtk_message_dialog_new (NULL, 0, GTK_MESSAGE_INFO, GTK_BUTTONS_CLOSE, "Hello World");
+[17:15] <pitti>   msg.run()
+[17:15] <pitti> So what do we see here?
+[17:15] <pitti> (1) The C API by and large remains valid in Python (and other languages using the GI bindings), in particular the structure, order, and data types of arguments. There are a few exceptions which are mostly due to the different way Python works, and in some cases to make it easier to write code in Python.
+[17:15] <pitti> I'll speak about details below. But this means that you can (and should) use the normal API documentation for the C API of the library. devhelp is your friend!
+[17:16] <pitti> (2) As Python is a proper object oriented language, pygobject (and in fact the GI typelib already) expose a GObject API as proper classes, objects, methods, and attributes. I. e. in Python you write
+[17:16] <pitti>   b = Gtk.Button(...)
+[17:16] <pitti>   b.set_label("foo")
+[17:16] <pitti> instead of the C gobject syntax
+[17:16] <pitti>   GtkWidget* b = gtk_button_new(...);
+[17:16] <pitti>   gtk_button_set_label(b, "foo");
+[17:17] <pitti> The class names in the typelib (and thus in Python) are derived from the actual class names stated in the C library (like "GtkButton"), except that the common namespace prefix ("Gtk" here) is stripped, as it becomes the name of the module.
+[17:17] <pitti> (3) Global constants would be a heavy namespace clutter in Python, and thus pygobject exposes them in a namespaced fashion as well.
+[17:17] <pitti> I. e. if the MessageDialog constructor expects a constant of type "GtkMessageType", then by above namespace split this becomes a Python class "Gtk.MessageType" with the individual constants as attributes, e. g. Gtk.MessageType.INFO.
+[17:18] <pitti> (4) Data types are converted in a rather obvious fashion. E. g. when the C API expects an int* array pointer, you can supply a normal Python array [0, 1, 2]. A Python string "foo" will match a gchar*, Pythons None matches NULL, etc.
+[17:18] <pitti> So the GObject API actually translates quite naturally into a real OO language like Python, and after some time of getting used to above transformation rules, you should have no trouble translating the C API documentation into their Python equivalents.
+[17:18] <pitti> When in doubt, you can always look for the precise names, data types, etc. in the .gir instead, which shows the API broken by class, method, enum, etc, with the exact names and namespaces as they are exposed in Python.
+[17:19] <pitti> There is also some effort of turning .girs into actual HTML documentation/devhelp, which will make development a lot nicer
+[17:19] <pitti> but I'm afraid it's not there yet, so for now you need to use the C API documentation and the .gir files
+[17:20] <pitti> As I mentioned above, this is in no way restricted to GTK, GNOME, or UI. For example, if you handle any kind of hardware and hotplugging, you almost certainly want to query udev, which provides a nice glib integration (with signals) through the gudev library.
+[17:20] <pitti> This example lists all block devices (i. e. hard drives, USB sticks, etc.):
+[17:21] <pitti> (You need to install the gir1.2-gudev-1.0 package for this)
+[17:21] <pitti> $ python
+[17:21] <pitti> >>> from gi.repository import GUdev
+[17:21] <pitti> >>> c = GUdev.Client()
+[17:21] <pitti> >>> for dev in c.query_by_subsystem("block"):
+[17:21] <pitti> ...     print dev.get_device_file()
+[17:21] <pitti> ...
+[17:21] <pitti> /dev/sda
+[17:21] <pitti> /dev/sda1
+[17:21] <pitti> /dev/sda2
+[17:21] <pitti> [...]
+[17:21] <pitti> See http://www.kernel.org/pub/linux/utils/kernel/hotplug/gudev/GUdevClient.html#g-udev-client-query-by-subsystem for the corresponding C API.
+[17:21] <pitti> or /usr/share/gir-1.0/GUdev-1.0.gir for the proper class/method OO API
+[17:22] <pitti> GI is not even restricted to GObject, you can annotate any non-OO function based API with it. E. g. there is already a /usr/share/gir-1.0/xlib-2.0.gir (although it's horribly incomplete). These will behave as normal functions in Python (or other languages) as well.
+[17:22] <pitti> == Other API differences ==
+[17:22] <pitti> I said above in (1) that the structure of method arguments is by and large the same in C and in GI/Python. There are some notable exceptions which you must be aware of.
+[17:23] <pitti> === Constructors ===
+[17:23] <pitti> The biggest one is constructors. There is actually two ways of calling one:
+[17:23] <pitti>  * Use the real constructor implementation from the library. Unlike in normal Python you need to explicitly specify the constructor name:
+[17:23] <pitti>    Gtk.Button.new()
+[17:23] <pitti>    Gtk.Button.new_with_label("foo")
+[17:23] <pitti>  * Use the standard GObject constructor and pass in the initial property values as named arguments:
+[17:23] <pitti>    Gtk.Button(label="foo", use_underline=True)
+[17:23] <pitti> The second is actually the recommended one, as it makes the meaning of the arguments more explicit, and also underlines the GObject best practice that a constructor should do nothing more than to initialize properties. But otherwise it's pretty much a matter of taste which one you use.
+[17:24] <pitti> === Passing arrays ===
+[17:24] <pitti> Unlike C, higher level languages know how long an array is, while in the C API you need to specify that explicitly, either by terminating them with NULL or explicitly giving the length of the array in a separate argument.
+[17:25] <pitti> Which one is used is already specified in the annotations and thus in the typelib, so Python can automatically provide the right format without the developer needing to append an extra "None" or a separate len(my_array) argument.
+[17:25] <pitti> For example, in C you have
+[17:25] <pitti>    gtk_icon_theme_set_search_path (GtkIconTheme *icon_theme, const gchar *path[], gint n_elements)
+[17:25] <pitti> (where you pass an array and an explicit length)
+[17:25] <pitti> In Python you can just call this as
+[17:25] <pitti>    my_icon_theme.set_search_path(['/foo', '/bar'])
+[17:26] <pitti> and don't need to worry about the array size.
+[17:26] <pitti> === Output arguments ===
+[17:26] <pitti> C functions can't return more than one argument, so they often use pointers which the function then fills out.
+[17:26] <pitti> Conversely, Python doesn't know about pointers, but can easily return more than one value as a tuple.
+[17:27] <pitti> The annotations already describe which arguments are "out" arguments, so in Python they become part of the return tuple:
+[17:27] <pitti> first one is the "real" return value, and then all out arguments in the same order as they appear in the declaration.
+[17:27] <pitti> For example:
+[17:27] <pitti>   GdkWindow* gdk_window_get_pointer (GdkWindow *window, gint *x, gint *y, GdkModifierType *mask)
+[17:27] <pitti> In C you declare variables for x, y, mask, and pass pointers to them as arguments
+[17:27] <pitti> In Python you would call this like
+[17:28] <pitti>   (ptr_window, x, y, mask) = mywindow.get_pointer()
+[17:28] <pitti> === Non-introspectable functions/methods ===
+[17:28] <pitti> When you work with PyGI for a longer time, you'll inevitably stumble over a method that simply doesn't exist in the bindings.
+[17:28] <pitti> These usually are marked with introspectable="0" in the GIR.
+[17:29] <pitti> In the best case this is because there are some missing annotations in the library which don't have a safe default, so GI disables these to prevent crashes. They usually come along with a corresponding warning message from g-ir-scanner, and it's usually quite easy to fix these.
+[17:29] <pitti> in popular libraries like GTK 3, pretty much all of them are fixed now, but in less common libraries there's probably still a ton of them
+[17:30] <pitti> Another common case are functions which take a variable number of arguments, such as gtk_cell_area_add_with_properties().
+[17:30] <pitti> Varargs cannot be handled safely by libgirepository.
+[17:31] <pitti> In these cases there are often alternatives available (such as gtk_cell_area_cell_set_property()). For other cases libraries now often have a ..._v() counterpart which takes a list instead of variable arguments.
+[17:31] <pitti> == Migrating pygtk2 code ==
+[17:32] <pitti> (there are two more common differences: overrides and GDestroyNotify, but they are documented on a wiki page, no need to bore you with them right now)
+[17:32] <pitti> A big task that we in Ubuntu already started in the Natty cycle, and which will continue to keep us and all other PyGTK app developers busy for a while is to port PyGTK2 applications to GTK3 and PyGI.
+[17:33] <pitti> Note that this is really two migrations in one step, but is recommended as GTK2 still has a lot of breakage with PyGI, although I did a fair amount of work to backport fixes from GTK3 (the six applications that we ported in Natty run with PyGI and GTK2, after all).
+[17:33] <pitti> The GTK2 â†’ GTK3 specifics are documented at http://developer.gnome.org/gtk3/stable/gtk-migrating-2-to-3.html and I don't want to cover them here.
+[17:33] <pitti> === Step 1: The Great Renaming ===
+[17:34] <pitti> The biggest part in terms of volume of code changed is basically just a renaming exercise.
+[17:34] <pitti> E. g. "gtk.*" now becomes "Gtk.*", and "gtk.MESSAGE_INFO" becomes "Gtk.MessageType.INFO".
+[17:34] <pitti> Likewise, the imports need to be updated: "import gtk" becomes "from gi.repository import Gtk".
+[17:34] <pitti> Fortunately this is is a mechanical task which can be automated.
+[17:34] <pitti> The pygobject git tree has a script "pygi-conver.sh" which is a long list of perl -pe 's/old/new/' string replacements. You can get it from http://git.gnome.org/browse/pygobject/tree/pygi-convert.sh.
+[17:35] <pitti> It's really blunt, but surprisingly effective, and for small applications chances are that it will already produce something which actually runs.
+[17:35] <pitti> Note that this script is in no way finished, and should be considered a collaborative effort amongst porters. So if you have something which should be added there, please don't hesitate to open a bug or ping me or someone else on IRC (see below). We pygobject devs will be happy to improve the script.
+[17:35] <pitti> When you just run pygi-convert.sh in your project tree, it will work on all *.py files. If you have other Python code there which is named differently (such as bin/myprogram), you should run it once more with all these file names as argument.
+[17:36] <pitti> === Step 2: Wash, rinse, repeat ===
+[17:36] <pitti> Once the mechanical renamings are out of the way, the tedious and laborious part starts.
+[17:36] <pitti> As Python does not have a concept of "compile-time check" and can't even check that called methods exist or that you pass the right number of parameters, you now have to enter a loop of "start your program", "click around until it breaks", "fix it", "goto 1".
+[17:36] <pitti> he necessary changes here are really hard to generalize, as they highly depend on what your program actually does, and this will also involve the GTK 2 â†’ 3 parts.
+[17:37] <pitti> (just imagine a 'T' at the start of the last sentence)
+[17:37] <pitti> One thing that comes up a lot are pack_start()/pack_end() calls. In PyGTK they have default values for "expand", "start", and "padding", but as GTK does not have them, you won't have them in PyGI either.
+[17:37] <pitti> There even was a patch once for providing an override for them, but it was rejected as it would cement the API incompatibility.
+[17:38] <pitti> and upstream decided (righfully IMHO) that staying close to the original API is better than staying compatible with pygtk's quirks
+[17:38] <pitti> One thing you need to be aware of is that you can't do a migration halfway:
+[17:38] <pitti> If you try to import both "gtk" and "gi.repository.GTK", hell will break lose and you'll get nothing but program hangs and crashes, as you are trying to work with the same library in two different ways.
+[17:38] <pitti> you have to be especially careful if you import other libraries which import gtk by themselves, so it might not actually be immediately obvious that this happens
+[17:39] <pitti> You can mix static and GI bindings of _different_ libraries, such as using dbus-python and GTI-GI.
+[17:39] <pitti> sorry, GTK-GI
+[17:40] <pitti> === Step 3: Packaging changes ===
+[17:40] <pitti> After you have your code running with PyGI and committed it to your branch and released it, you need to update the dependencies of your distro package for PyGI.
+[17:40] <pitti> You should grep your code for "gi.repository" and collect a list of all imported typelibs, and then translate them into the appropriate package name.
+[17:40] <pitti> For example, if you import "Gtk, Notify, Gudev" you need to add package dependencies to gir1.2-gtk-3.0, gir1.2-notify-0.7, and gir1.2-gudev-1.0 on Debian/Ubuntu
+[17:40] <pitti> I have no idea about other distros, so the package names will differ, but the concept is the same
+[17:41] <pitti> At the same time you should drop dependencies to the old static bindings, like python-gtk2, python-notify, etc.
+[17:41] <pitti> Finally you should also bump the version of the python-gobject dependency to (>= 2.28) to ensure that you run with a reasonably bug free PyGI.
+[17:41] <pitti> == RTFM & Links ==
+[17:41] <pitti> I'd like to give a list of useful links for this topic here.
+[17:41] <pitti> This has a good general overview about GI's architecture, annotations, etc:
+[17:41] <pitti>     https://live.gnome.org/GObjectIntrospection
+[17:42] <pitti> By and large the contents of this talk from previous UDW, massaged to be a proper wiki page:
+[17:42] <pitti>     https://live.gnome.org/PyGObject/IntrospectionPorting
+[17:42] <pitti> The interview with Jon Palmieri and Tomeu Vizoso is also an interesting read about its state:
+[17:42] <pitti>     http://www.gnomejournal.org/article/118/pygtk-gobject-and-gnome-3
+[17:42] <pitti> The GI/PyGI developers hang out on IRC here:
+[17:42] <pitti>     #introspection / #python on irc.gnome.org
+[17:42] <pitti> pygobject's git tree has a very comprehensive demo showing off pretty much all available GTK widgets in PyGI:
+[17:42] <pitti>     http://git.gnome.org/browse/pygobject/tree/demos/gtk-demo
+[17:42] <pitti> Description of the Python overrides for much easier GVariant and GDBus support
+[17:42] <pitti>     http://www.piware.de/2011/01/na-zdravi-pygi/
+[17:42] <pitti> Examples of previously done pygtk â†’ pyGI ports:
+[17:42] <pitti>   Apport: http://bazaar.launchpad.net/~apport-hackers/apport/trunk/revision/1801
+[17:42] <pitti>    Jockey: http://bazaar.launchpad.net/~jockey-hackers/jockey/trunk/revision/679
+[17:42] <pitti>    gtimelog: http://bazaar.launchpad.net/~pitti/gtimelog/pygi/revision/181
+[17:42] <pitti>    system-config-printer (work in progress): http://git.fedorahosted.org/git/?p=system-config-printer.git;a=shortlog;h=refs/heads/pygi
+[17:43] <pitti>    The gtimelog one is interesting because it makes the code work with *both* PyGTK and PyGI, whichever is available.
+[17:43] <pitti> == Q & A ==
+[17:43] <pitti> Thanks everyone for your attention! I'm happy to answer questions now.
+[17:44] <ClassBot> num asked: Im sorry if I missed something but what are those gir files?
+[17:44] <pitti> num: so, the .gir file is an XML text format which describes the API of a library
+[17:45] <pitti> it contains everything which a C header (*.h) file contains, but goes way beyond that
+[17:45] <pitti> for example, it also documents the lifetime, parameter direction, the position of array length parameters, or who owns the object that a method returns
+[17:45] <pitti> this (well, in its binary typelib incarnation) is what the language bindings use to use the library
+[17:46] <pitti> just open usr/share/gir-1.0/Gtk-2.0.gir and have a look
+[17:46] <ClassBot> john_g asked: Can you say more about the window sizing changes?
+[17:47] <pitti> this is actually on the side of gtk 2 -> 3, which indeed changed this
+[17:47] <pitti> there is no difference at all if you move from pygtk2 to PyGI with GTK2
+[17:48] <pitti> most prominent change here is the different expand/fill default, which often makes GTK3 apps look very huge until they get fixed
+[17:48] <pitti> http://developer.gnome.org/gtk3/stable/gtk-migrating-2-to-3.html has more details about this
+[17:48] <ClassBot> bj0 asked: is there an example or howto for adding GI/PyGI support to a relatively simple library?  Is writing a .gir all that is needed?
+[17:48] <pitti> ah, I didn't cover that part, only from the POV of the "user" (python developer)
+[17:48] <pitti> it's actually easier
+[17:49] <pitti> you don't write the .gir, it's generated from the GI tools
+[17:49] <pitti> it scans the header and .C files and gets all the classes, methods, docstrings, parameter names etc. from it
+[17:49] <pitti> what you need to do in addition is to add extra magic docstring comments to do the "annotations"
+[17:49] <pitti> i. e. if you have a method
+[17:50] <pitti> GtkButton* foo(GtkWindow *window)
+[17:50] <pitti> you need to say who will own the returned button -- the caller (you) or the foo method
+[17:50] <pitti> this will tell Python whether it needs to free the object, etc.
+[17:50] <pitti> https://live.gnome.org/GObjectIntrospection/Annotations explains that
+[17:50] <pitti> let me dig out gudev, as this is much smaller than gir
+[17:51] <pitti> than GTK, I mean
+[17:51] <pitti> but the nice thing is that most of these are already defined in gtk-doc, too
+[17:52] <pitti> i. e. the things that python needs to know are also things you as a programmer need to know :)
+[17:53] <pitti> http://git.kernel.org/?p=linux/hotplug/udev.git;a=blob;f=extras/gudev/gudevclient.c;h=97b951adcd421e559c4a2d7b3b822eb95dd01f1d;hb=HEAD#l336
+[17:53] <pitti> check this out
+[17:53] <pitti> /**
+[17:53] <pitti>  * g_udev_client_query_by_subsystem:
+[17:53] <pitti> standard docstring
+[17:53] <pitti>  * @subsystem: (allow-none): The subsystem to get devices for or %NULL to get all devices.
+[17:53] <pitti> the "(allow-none)" is an annotation
+[17:54] <pitti> and tells python (or you) that you can pass "NULL" for this
+[17:54] <pitti>  * Returns: (element-type GUdevDevice) (transfer full): A list of #GUdevDevice objects. The caller should free the result by using g_object_unref() on each element in the list and then g_list_free() on the list.
+[17:54] <pitti> the element-type tells the bindings about the type of the elements in teh returned GList*
+[17:54] <pitti> and the (transfer full) says that the object will be owned by the caller
+[17:54] <pitti> and so on
+[17:55] <pitti> so in summary, all you need to do is to annotate parameters properly, then the GI tools will produce a working gir/typelib
+[17:55] <pitti> time for one more question
+[17:55] <pitti> seems not; then thanks again everyone!
+}}}

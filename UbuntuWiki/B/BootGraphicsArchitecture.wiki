@@ -1,0 +1,57 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+As of 11.10, Ubuntu includes graphics handling in its x86 boot sequence that is intended to provide an optimal, flicker-free graphical boot experience across a range of hardware and drivers.  This page documents the components of this graphical boot architecture.
+
+=== Boot loader ===
+From Ubuntu 9.10 on, the Ubuntu desktop uses GRUB 2 as the default bootloader.  GRUB 2 includes support, enabled by default, for displaying a graphical boot screen using the VESA BIOS extensions ("<code>insmod vbe</code>", "<code>insmod gfxterm</code>").  As of Ubuntu 11.04, Ubuntu will use the preferred resolution as returned by VBE ("<code>set gfxmode=auto</code>").
+
+GRUB 2 also supports passing this graphical boot screen through to the kernel at boot time as a pre-initialized linear framebuffer ("<code>set gfxpayload=keep</code>").  This enables the Linux kernel to start up in the preferred graphics video mode, instead of the traditional behavior of starting up in text mode and modesetting the video output afterwards.  This is used by default as of Ubuntu 11.04, unless the graphics hardware is blacklisted or the previous boot failed.  In Ubuntu 11.10, this is also disabled in recovery mode.
+
+These settings can all be configured via the <code>/etc/default/grub</code> configuration file.
+
+GRUB 2 is also configured to pass <code>vt.handoff=7</code> to the kernel on the commandline, telling the kernel to start with this graphical display on VT7 instead of the default of VT1.
+
+==== Live CD ====
+Ubuntu live CDs still boot using SYSLINUX, which does not include support for starting the kernel in graphics mode.  This means that live CDs display a graphical boot menu, then switch back to text mode to start the kernel, and will then normally switch back to graphics mode later.  As a result, live CDs will currently flicker more than normal installed systems at boot time.
+
+=== Kernel video initialization ===
+Ubuntu relies on udev to detect video drivers for the hardware.  For most cases a driver will be found and loaded by udev that provides a framebuffer interface to the kernel (<code>/dev/fb0</code>).  In some cases however, such as when binary video drivers are configured (nvidia, fglrx) or when no native driver is available for a video device, it is necessary to fall back to the <code>vesafb</code> driver which uses the same linear framebuffer that GRUB does.
+
+The fallback to <code>vesafb</code> is racy, because it is only loaded when no other more appropriate driver is detected, and there's never a good way to know when the kernel has finished notifying udev about a particular bus.  In practice, the video system is among the first devices detected by the kernel, so there is very little risk of vesafb being loaded incorrectly because the video interface was found too slowly.  If vesafb were probed before the correct driver, a suboptimal framebuffer interface would be used until the next reboot.  In some cases, corrupted video output may also result due to the kernel console and the X server using different framebuffers.
+
+Although loading multiple framebuffer drivers for the same video card would be problematic, and loading the <code>nouveau</code> and <code>nvidia</code> drivers at the same time, or the <code>radeon</code> and <code>fglrx</code> drivers at the same time, would not work correctly, it is expected that the <code>vesafb</code> driver will be loaded together with either of the <code>nvidia</code> or <code>fglrx</code> binary drivers and that <code>vesafb</code> will provide the framebuffer console interface while the binary driver is used exclusively for X.
+
+Some users have reported that using the <code>uvesafb</code> driver instead of <code>vesafb</code> gives better results.  This should not be necessary with the current bootloader framebuffer hand-off.
+
+In some cases, the resolution chosen by the kernel may not be the same as that chosen by GRUB; for example, this happens when the BIOS manufacturer has not properly set the native panel resolution as the preferred resolution in VBE.  Because of this, we deliberately hand off from GRUB to the kernel with a plain background colour rather than with a logo on the screen, on the grounds that a plain background looks much the same at any resolution.  The Ubuntu logo appears on screen once Plymouth starts.
+
+==== Initramfs ====
+In the default case, there is no video handling in the initramfs.  Video drivers are not included in the initramfs, nor is plymouth; the splash screen initialization is deferred until the switch to the root filesystem, for optimal boot speed.
+
+This lack of video handling also means that <code>break=</code> boot options to interrupt the initramfs do not work correctly when <code>gfxpayload=keep</code> is set, as nothing is able to reset the console to text mode and as a result the command prompt is not visible (Bug:864466).
+
+If cryptsetup is installed, however, as is the case whenever ecryptfs-encrypted home directories are selected at install time, framebuffer handling '''is''' included in the initramfs.  This is done to support using plymouth to prompt for the passphrase for an encrypted root filesystem, but currently cryptsetup is included in the initramfs unconditionally whenever it's installed (Bug:444704).  This results in the framebuffer always being initialized for plymouth's use in the initramfs.
+
+==== Post-initramfs ====
+When video initialization is not handled in the initramfs, it will instead be handled by udev when started from the root filesystem.  This uses the same fallback to <code>vesafb</code> as in the initramfs case, via <code>/etc/init/udev-fallback-graphics.conf</code>.  Binary video drivers, if configured, are always loaded from the rootfs and not from the initramfs.  It is therefore assumed that binary drivers will interoperate with <code>vesafb</code> regardless of whether they are loaded before or after the framebuffer.
+
+=== Plymouth ===
+<nowiki>[[Plymouth]]</nowiki> is always started as early as possible in the boot sequence in order to capture any messages (including questions and prompts) which should be displayed to the user; however, the splash screen is not displayed until the kernel has had a chance to initialize the framebuffer interface.  On systems with sufficiently fast disks when there are no prompts requiring user interaction, this means that the plymouth splash screen may appear only briefly before X starts, or may not appear at all.  This is a deliberate tradeoff between boot speed and visibility of the splash screen, because the only way to ensure the splash screen is shown is to start it from the initramfs, where the system would block waiting for the video to be initialized. (Bug:540801)  The lack of splash screen is expected to be less of a concern going forward, now that GRUB brings the console up in graphics mode by default.
+
+If no framebuffer console is available when <code>plymouth show-splash</code> is called, plymouth will fall back to a terminal-oriented text splash screen, included in the package <code>plymouth-theme-ubuntu-text</code>.
+
+Booting without the <code>splash</code> option will cause plymouth to pass all boot-time output through to the console rather than displaying a splash screen.  This is the configured behavior with Ubuntu Server.
+
+Note that when running in terminal-oriented text mode, Plymouth is the primary tool used to interact with the user both at boot and shutdown (displaying messages and handling user input). It is therefore considered to '''own''' the system console (<code>/dev/console</code>). As such, no process run as part of the boot or shutdown sequence (''even'' the <nowiki>[[Upstart]]</nowiki> init daemon) should ever attempt to modify the console attributes whilst running as this could result in undesirable or unpredictable behaviour.
+
+=== Recovery mode ===
+The kernel console is always started in text mode when booting the "recovery mode" option.  This is mostly an accident due to bug Bug:864466, though it also serves the goal of maximizing the debuggability of booting in recovery mode since the full kernel output will be shown from the beginning.  However, since the usual reason for booting into recovery mode is that a normal boot does not succeed, for most users the GRUB 2 "<code>recordfail</code>" handling (which switches the console to text mode automatically after a failed boot) would be sufficient; so the recovery mode may be switched to use <code>gfxpayload=keep</code> at a later date once bug Bug:864466 is fixed.

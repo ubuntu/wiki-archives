@@ -1,0 +1,161 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+
+'''This page is based on the <nowiki>[[MOTU-School-IntrepretingApportRetraces]]</nowiki> session presented by EmmetHikory on 26/6/2008.'''
+
+=== What is Apport ===
+
+<nowiki>[[Apport]]</nowiki> is a useful tool installed on Ubuntu machines that collects information when applications crash, and automatically prompts the user to submit a crash report as a bug to Launchpad.  This document is a description of how to interpret, triage, and work with such bug reports.
+
+When a program crashes, apport notices, and prepares a crash report.  When so enabled, it prompts the user to submit this crash report to launchpad as a new bug.
+
+=== Apport-created Bug Reports ===
+
+<nowiki>[[Apport]]</nowiki> bug reports typically explain the type of crash in the title, have some information in the description, along with basic information about the package version, installed [Ubuntu] version, and user environment.  This is followed by a single comment with a number of attachments, representing further information <nowiki>[[Apport]]</nowiki> collected from the user system.
+
+A crash bug report will automatically be tagged with `need-`''architecture''`-retrace` (ex: ''need-amd64-retrace''), and is private (only accessible to reporter and apport). The apport-retracer system will automatically review those bugs, possibly determine it to be duplicate, and help with additional information (e.g. retraced stacktrace with symbols for stripped binaries), and afterwards remove the retracing tag and make the bug accessible for the Ubuntu bug triaging teams.
+
+If the retracer fails to create an usable stack trace, and discovered that the user has some obsolete package versions installed, it will mark the bug as invalid with an appropriate explanation.
+
+=== Apport attached files ===
+
+Some commonly-seen files attached to apport-generated bug reports are:
+
+* `Dependencies.txt`
+* `ProcMaps.txt`
+* `ProcStatus.txt`
+* `Traceback.txt`
+
+The above set of four files is common for Python-crash bugs.  Some other reports may also include:
+
+* `CoreDump.gz`
+* `ProcEnviron.txt`
+* `Registers.txt`
+* `Stacktrace.txt`
+* `ThreadStacktrace.txt`
+
+==== Dependencies.txt ====
+
+Dependencies.txt shows the entire tree of recursive dependencies for the crashing package.  This can be useful to determine if someone has upgraded to the latest version, or if the bug appears to also be in a dependency, which version of the code one should inspect.
+
+==== ProcMaps.txt ====
+
+`ProcMaps.txt` shows the local address space for associated objects (libraries, data) used by the application.  It may provide insight in cases of library symbol contention and the like.
+
+==== ProcStatus.txt ====
+
+`ProcStatus.txt` provides information about the process itself, including the pid access permissions, memory allocations, and permissions/capabilities.  One useful thing to check from this file is to make sure the memory allocations (Vm* are not overly large  (100s of GB), which may indicate a runaway memory leak.
+
+==== Traceback.txt ====
+
+Traceback.txt can be very useful indeed.  It explains the call stack at the time of the crash, and will guide the investigation of the code towards determining the problem exactly.
+
+==== CoreDump.gz ====
+
+`CoreDump.gz` is the snapshot of the process memory when it crashed.  Most of the time, you won't need to use this.
+
+==== ProcEnviron.txt ====
+
+`ProcEnviron.txt` provides some of the environment variables that are set
+
+==== Registers.txt ====
+
+`Registers.txt` contains the state of the processor registers at the time of the crash (which is typically only meaningful for very low-level crashes).
+
+==== Stacktrace.txt ====
+
+`Stacktrace.txt` is similar to Traceback.txt, except that it's a C-style stacktrace, rather than a python-style traceback.
+
+==== ThreadStacktrace.txt ====
+
+`ThreadStacktrace.txt` is a stacktrace of all the currently running threads in the application, which can be interesting if there is thread contention.
+
+=== Apport and Bug Triage ===
+
+When triaging an <nowiki>[[Apport]]</nowiki> crash bug, it's important to make sure it's complete.  If there isn't a trace, or it is unreadable, it may need to be retraced, or if the bug is old, it may be worth asking the submitter to submit an updated crash report.
+
+For triage, there is often mostly sufficient information provided by <nowiki>[[Apport]]</nowiki> itself.  If the information in the report complete (no ?? in the traces, see <nowiki>[[https://launchpad.net/bugs/239842|bug #239842]]</nowiki> for an example of this issue), one can likely understand the issue.
+
+It is good practice to put a short summary of the issue in a comment before setting "Triaged", explaining where or why it crashed, as a result of the code investigation.  Often, the code investigation is sufficient to produce a small patch, which makes a welcome attachment.
+
+=== Analysis of an Apport-created bug ===
+
+As an example, consider <nowiki>[[https://launchpad.net/bugs/180363|Bug #180363]]</nowiki> for package ''nicotine''.
+
+The first thing to note is that the version of nicotine has changed between the time the bug was reported, and our current source.  This means that the line numbers will not be reliable.  This is very frequently true when investigating <nowiki>[[Apport]]</nowiki> crashes.
+
+Often, the best solution is to search the file for the relevant section.  So, when reviewing a traceback, start at the top, and process downwards.  Each step represents another layer of nested function, and leads to the crash.
+
+In this example traceback, the first error is in `/usr/bin/nicotine`.  Looking at the source, there is a Python script at the top level also named nicotine.  Generally, this will be the same file.  In those cases where the file being sought is not immediately available, a construction like
+ 
+<pre>
+find . -$(filename) -print
+</pre>
+
+is useful to locate the file in the source code.
+
+The traceback says line 152, which is supposed to be "result = checkenv()".
+
+In the newer source, line 152 is "import locale", which is clearly not the issue.  Scrolling down from here a bit, one can find "result = checkenv()" at line 191.
+
+Although sometimes source will have multiple lines with roughly the same content, this is the very likely to be correct line because it is still in the root source, rather than being in a specific function (and the traceback reports "in <module>"
+
+At this point, it would be useful to get some idea as to the expected result.  Scrolling down a bit first it becomes clear that no result will continue the program, and any result will print the result and exit.
+
+Next, look for the definition of checkenv()  This is up at line 49, and now a gettext call in checkenv() must be found.  gettext is exceedingly commonly used, with the shorthand _(), which makes it a little hard to read the message.
+
+One approach is to guess that there are about 40 extra lines added, given the difference between lines 152 and 191 from our previous search, so look for something somewhere between lines 90 and 130 (although this is inexact).
+
+As an additional check, look further down the traceback.  While sometimes the error is in the library (gettext in this example), first search the code.
+
+Reading the traceback, it calls gettext, which calls dgettext, which calls translation, which calls _init_ , which calls _parse, which crashes.  The final error message tells us that the list index is out of range.
+
+This looks like an attempt to translate a plural word that couldn't find the right information in the translation file.  Now, reading 40 lines of code to determine which might have a poor plural translation would be an exercise in frustration.  Luckily, launchpad keeps a copy of every source package ever uploaded, so one can look back to see which line is really wanted.  Going back to the main bug page, and clicking "nicotine", takes one to the nicotine package page.  On this page, scroll down through the versions looking for 1.8.2+dfsg-1ubuntu1.  Clicking on this headline leads to the summary page for this version, where we can examine it.
+
+In this case, line 90 is close to the string "You do not have Python Vorbis bindings installed.  Others will not be able to see the lengths and the bitrates> of Ogg Vorbis files that you share. You can get the from http://www.andrewchatham.com/pyogg/.  If you're using Debian, install the python-pyvorbis package."
+
+Returning to the current example source, that string starts at line 111
+
+The issue is with the Hungarian translation, because the example bug page says "LANG=hu_HU.UTF-8".
+The nicotine source package has a languages/hu directory, containing nicotine.po, which holds the translations.
+Here, clearly there is a translation available, from around line 4469
+
+Without a good grasp of Hungarian, about all one can do is to trust that the translation is likely correct (although it may not be).  However, in order to check for the crash, it is clear that testing must be done with a Hungarian locale, and tried with the python-pyvorbis package uninstalled.
+
+Uninstalling python-pyvorbis, and executing
+ 
+<pre>
+LANG=hu_HU.UTF-8 nicotine
+</pre>
+
+is, therefore, a useful way to try to reproduce the crash. If it breaks, the problem can now be described in detail (or, with skills in any of Hungarian, Python, or gettext maybe track it down).  Conversely, if it works properly, that fact can be documented, and the submitter can be asked to verify it works for them, suggesting to install the python-pyvorbis package as a workaround.
+
+This example <nowiki>[[Apport]]</nowiki> bug report would greatly benefit from someone adding a comment about the cause of the problem, and testing to see if it can be replicated locally.  If anyone knows Hungarian, Python, or gettext, they may be able to provide more insight.
+
+=== Triaging crash dump bug reports not processed by Apport ===
+
+Sometimes bugs are submitted with a single crash report file attached, not processed by <nowiki>[[Apport]]</nowiki>.  In general, it is best to close these as invalid, asking the submitter to open a new bug by either double clicking on the crash file in Nautilus or by executing
+<pre>
+apport-cli -c "/var/crash/..."
+</pre>
+so that apport can do it's thing.
+
+It is important to explain that you are only closing it as the above procedure will open a new bug report, you are not rejecting their bug.
+
+In cases where the retracer cannot find the symbols (?? in the trace), it usually means that no ddeb exists for the version the submitter is using.  In these cases, verify that there are ddebs for all dependencies available for the release the submitter is using, and then ask them to replicate, opening a new bug.
+
+=== Failed Apport retraces ===
+
+<nowiki>[[Apport]]</nowiki> can get confused if the package doesn't call dh_strip somewhere in debian/rules: manual stripping or failure to strip binaries are the most common cause of failed retraces.
+
+----
+<nowiki>[[CategoryBugSquad]]</nowiki>

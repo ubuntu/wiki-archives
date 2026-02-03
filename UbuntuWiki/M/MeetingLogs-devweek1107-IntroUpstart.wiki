@@ -1,0 +1,165 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+=== Introduction to Upstart ===
+{{{#!irc
+[20:01] <marrusl> Hi folks!
+[20:01] <marrusl> I have a secret to admit.
+[20:01] <marrusl> I'm not actually an Ubuntu Developer.
+[20:01] <marrusl> Quick introduction:
+[20:02] <marrusl> I work for Canonical as a system support engineer helping customers with implementing and supporting Ubuntu, UEC, Landscape, etc.
+[20:02] <marrusl> On a scale from dev to ops, I'm pretty firmly ops.
+[20:02] <marrusl> However, for that very reason, I have a keen interest in what is managing the processes on my systems and how those systems boot and shutdown.
+[20:03] <marrusl> Last thing before I really start...
+[20:03] <marrusl> if you're not very familiar with Upstart, this might be a bit dense with new concepts.
+[20:03] <marrusl> But to paraphrase Upstart's author, Scott James Remnant:  thankfully this is being recorded, so if it doesn't make complete sense now, you can read it again later!
+[20:04] <marrusl> The best way to start is probably to define what Upstart is.  If you visit http://upstart.ubuntu.com, you'll find this description:
+[20:04] <marrusl> vices during boot, stopping them during shutdown and supervising them while the system is running.â€
+[20:04] <marrusl> let me try that again
+[20:04] <marrusl> â€œUpstart is an event-based replacement for the /sbin/init daemon which handles starting of tasks and services during boot, stopping them during shutdown and supervising them while the system is running.â€
+[20:05] <marrusl> Most of that definition applies to any init system, be it classic System V init scripts, SMF on Solaris, launchd on Mac OS X, or systemd.
+[20:05] <marrusl> What sets Upstart apart from the others is that it is "event-based" and not "dependency-based".
+[20:06] <marrusl> (note: launchd is not dependency-based, but it's also not event-based like Upstart.  I could explain why, but we're all here to talk about Linux, right? :)
+[20:06] <marrusl> So let's unpack those terms:
+[20:07] <marrusl> A dependency-based system works a lot like a package manager.
+[20:07] <marrusl> If you want to install a package, you tell the package manager to install your "goal package".
+[20:07] <marrusl> From there, your package manager determines the required dependencies (and the dependencies of those dependencies and so on) and then installs everything required for your package.
+[20:08] <marrusl> Likewise, in a dependency-based init system, you define a target service and when the system wishes to start that service, it first determine and starts all the dependent services and completes dependent tasks.
+[20:09] <marrusl> For example, depending on configuration, a mysql installation might depend on the existence of a remote file system.
+[20:09] <marrusl> The remote filesystem in turn would require networking to be up.
+[20:09] <marrusl> Networking requires the local filesystems to be mounted, which is carried out by the mountall task.
+[20:10] <marrusl> This works fairly well with a static set of services and tasks, but it has trouble with dynamic events, such as hot-plugging hardware.
+[20:11] <marrusl> To steal an example from the Upstart Cookbook (http://upstart.ubuntu.com/cookbook) let's say you want to start a configuration dialog box whenever an external monitor is plugged in.
+[20:11] <marrusl> In a dependency-based system you would need to have an additional daemon that polls for hardware being plugged.
+[20:12] <marrusl> Whereas Upstart is already listening to udev events and you can create a job for your configuration app to start when that event occurs.
+[20:12] <marrusl> Certainly this requires udev to be running, but there's no need to define that dependency.
+[20:13] <marrusl> Sometimes we refer to this as "booting forward".  A dependency-based system defines the end goals and works backwards.
+[20:13] <marrusl> It meets all of the goal service's dependencies before running the goal service.
+[20:14] <marrusl> Upstart starts a service when its required conditions are met.
+[20:14] <marrusl> It's a subtle distinction, hopefully it will become clearer as we go.
+[20:15] <marrusl> A nice result of this type of thinking is that when you want to know why "awesome" is running (or not running) you can look at /etc/init/awesome.conf and inspect its start and stop criteria (or on Natty+ run `initctl show-config -e awesome`).
+[20:15] <marrusl> There's no need to grep around and figure out what other other service called for it to start.
+[20:16] <marrusl> But enough about init models...  let's get to the real reason I suspect you're here:  how to understand, modify, and write Upstart jobs.
+[20:16] <marrusl> Upstart jobs come in two main forms: tasks and services.
+[20:16] <marrusl> A task is a job that runs a finite process, complete it, and ends.
+[20:17] <marrusl> Cron jobs are like tasks, whereas crond (the cron daemon itself) is a service.
+[20:17] <marrusl> So like other service jobs, it's a long running process that typically is not expected to stop itself.
+[20:17] <marrusl> ssh, apache, avahi, and network-manager are all good examples.
+[20:18] <marrusl> Now events...
+[20:18] <marrusl> An event is a notification sent by Upstart to any job that is interested in that event.
+[20:19] <marrusl> Before Natty, there were for main types of events: init events, mountall events, udev events and what I'll call "service events".
+[20:19] <marrusl> In Natty that was expanded to socket events  (UNIX or TCP/IP) and D-Bus events.
+[20:20] <marrusl> Eventually this will include time-based events (for cron/atd functionality) and filesystem events (e.g. when this file appears, do stuff!).
+[20:20] <marrusl> You an type `man upstart-events` on natty or oneiric to see a tabular summary of all "well-known events" along with information about each.
+[20:21] <marrusl> We're going to mostly focus on the service events, of which there are four.  These are the events that start and stop jobs.
+[20:21] <marrusl> 1. Starting.  This event is emitted by Upstart when a job is *about* to start.
+[20:22] <marrusl> It's the equivalent of Upstart saying "Hey! In case anyone cares, I'm going to start cron now, if you need to do something before con starts, you'd better do it now!"
+[20:22] <marrusl> 2. Started. This event is emitted by Upstart when a job is now running.
+[20:22] <marrusl> "Hey!  If anyone was waiting for ssh to be up, it is!"
+[20:23] <marrusl> 3. Stopping.  Like the starting even, this event is emitted when Upstart is *about* to stop a job.
+[20:23] <marrusl> 4. Stopped.  "DONE!"
+[20:24] <marrusl> Note that "stopping" and "stopped" are also emitted when a job fails.  It is possible to establish the manner in which they fail to.  See the man pages for more details.
+[20:24] <marrusl> (and yes, Upstart shouts everything)
+[20:24] <marrusl> These events allow other Upstart jobs to coordinate with the life cycle of another job.
+[20:25] <marrusl> It's probably time to look at an Upstart job to see how this works.
+[20:25] <marrusl> Since I couldn't find a real job that takes advantage of each phase of the cycle, I've created a fake one to walk through.
+[20:25] <marrusl> Please `bzr branch lp:~marrusl/+junk/UDW` and open the file "awesome.conf"
+[20:26] <marrusl> If you don't have access to bzr at the moment, you can find the files here:
+[20:26] <marrusl> http://ubuntuone.com/p/14JL/
+[20:26] <marrusl> While we look at awesome.conf, it might also help to open the file "UpstartUDW.pdf" and take a look at the second page.
+[20:26] <marrusl> Hopefully this will make the life cycle more clear.
+[20:27] <marrusl> Awesome is a made-up system daemon named in honor of our awesome and rocking and jamming Community Manager (please see:  http://mdzlog.alcor.net/2010/03/19/introducing-the-jonometer/)
+[20:28] <marrusl> I mentioned start and stop criteria earlier... well those are the first important lines of the job.
+[20:28] <marrusl> What we are saying here is "if either the jamming or rocking daemons signal that they are ready to start, awesome should start first".
+[20:29] <marrusl> If I want to make sure that awesome runs *after* those services, I would have used "start on started" instead of "starting".
+[20:29] <marrusl> So let's say Upstart emits "starting jamming", this will trigger awesome to start.
+[20:29] <marrusl> Upstart will emit "starting awesome" and now the pre-start stanza will run.
+[20:30] <marrusl> Some common tasks you might consider putting into "pre-start" are things like loading a settings file into the environment or cleaning up any files or directories that might have been left if the service dies abnormally.
+[20:31] <marrusl> One more key use of the pre-start is if you want some sanity checks to see if you should even run (are the required files in place?)
+[20:31] <marrusl> After pre-start, now we are ready to eithe exec a binary or run a script.  Here we are executing the daemon.
+[20:31] <marrusl> In most cases, this is when Upstart would emit the "started" event.  In this example, we have one more thing to do: the post-start stanza.
+[20:32] <marrusl> You might want to use the post-start stanza when waiting for the PID to exist isn't enough to say that the service is truly ready to respond.
+[20:32] <marrusl> For example, you start up mysql, the process is running, but it might be another moment or two before mysql has finished loading your databases and is ready to respond to queries.
+[20:33] <marrusl> In my example, I essentially ripped something out of the CUPS upstart job because it illustrates the point well enough.
+[20:33] <marrusl> This post-start stanza waits for the /tmp/awesome/ directory to exist.  But it doesn't wait forever, it checks every half second for 5 seconds.
+[20:34] <marrusl> If awesome isn't ready to go by the, something is very wrong and I want it to exit.
+[20:34] <marrusl> Since that script exits with a non-zero status, Upstart will stop the service.
+[20:34] <marrusl> This might be a good place to mention that all shell fragments run with `sh -e` which means two things...
+[20:35] <marrusl> Your scripts will run with the default system shell, and unless you've changed it, this is by default linked to /bin/dash.
+[20:36] <marrusl> So do remember to avoid "bashisms" (though you can use "here files" to use any interpreter, please ask later if you'd like to know how, but it's really better form to use only POSIX-complaint sh, imo).
+[20:36] <marrusl> The other thing it means, is that if any command fails in the script it will exit.  You really can't be too careful running scripts as root.
+[20:37] <marrusl> Stopping a service is essentially the reverse... Upstart emits "stopping awesome", exexutes the pre-stop stanza (notice I used an exec in place of a script, you can do this in any of the other stanzas as well).
+[20:37] <marrusl> Now it tires to SIGTERM the process, if that takes longer than the "kill timeout", it will then send a SIGKILL.
+[20:38] <marrusl> I should point out that a well-written daemon probably doesn't need pre-stop.  It should handle SIGTERM gracefully and if it needs to flush something to disk it does so itself.
+[20:38] <marrusl> If 5 seconds (the default) isn't enough, specify a longer setting in the job as I did here.  In a real job you wouldn't likely be upping the kill timeout _and_ using a â€œpre-stopâ€ action, I just wanted to illustrate both methods.
+[20:39] <marrusl> Once post-stop has run (if present), Upstart emits "stopped awesome".
+[20:39] <marrusl> And the cycle is complete!
+[20:39] <marrusl> Now, I've covered the major sections of a job, but there are some important additional keywords I'd like to introduce (this is not an exhaustive list):  task, respawn, expect [fork or daemon], and manual.
+[20:39] <marrusl> â€œtaskâ€.  This keyword, as you might suspect, should be present in task jobs.  There's no argument to it, just put it on a line by itself.
+[20:40] <marrusl> This keyword lets Upstart know that this process will run its main script/exec and then should be stopped.  Some good examples of task jobs on a standard Ubuntu system are:  procps, hwclock, and control-alt-delete.
+[20:40] <marrusl> â€œrespawnâ€.  There are a number of system services that you want to make sure are running constantly, even if they crash or otherwise exit.  The classic examples are ssh, rsyslog, cron, and atd.
+[20:40] <marrusl> â€œexpect [fork|daemon]â€.  Classic UNIX daemons, well, daemonize... that is they fork off new processes and detach from the terminal they started from.  â€œexpect forkâ€ is for daemons that fork *once*, â€œexpect daemonâ€ will expect the process to fork exactly *twice*.
+[20:41] <marrusl> In many cases, if your service has a â€œdon't daemonizeâ€ or â€œrun in foregroundâ€ mode, it's simpler to create an Upstart job without â€œexpectâ€ entirely.  You may just have to try both approaches to find out which works best for your service.
+[20:41] <marrusl> Well, unless you are the author, in that case, you probably already know. :)
+[20:41] <marrusl> â€œmanualâ€.  The essence of manual is that it disables the job from starting or stopping automatically.  Another way of putting that (and more precise) is that if the word â€œmanualâ€ appears by itself on a line, anywhere in a job, Upstart will *ignore* any previously specified â€œstart onâ€ condition.  So, assuming â€œmanualâ€ appears after the â€œstart onâ€ condition, the service will only run if the
+[20:41] <marrusl> administrator manually starts it.
+[20:41] <marrusl> Note that were an administrator to start the job by running, â€œstart myjobâ€, Upstart will still emit the same set of 4 events automatically. So, starting a job manually may cause other jobs to start.
+[20:42] <marrusl> Note too that it is good practise to specify a â€œstop onâ€ condition since if you do not, the only reasonable manner to stop the job is to kill it at some unspecified time/ordering when the system is shut down.
+[20:42] <marrusl> By specifying a â€œstop onâ€, you provide information to Upstart to enable it to stop the job in an appropriate fashion and at an appropriate time.
+[20:42] <marrusl> adding â€œmanualâ€ seems like a clunky way to disable jobs, doesn't it?  I'd rather not have to hack conf files to disable a job.
+[20:43] <marrusl> And what happens to my modified job if there is a new version of the package released and I update?
+[20:43] <marrusl> I'll tell you, your changes will be clobbered.
+[20:43] <marrusl> (ok, actually you'll be prompted by dpkg to confirm or deny the changes, but that is still pretty annoying and can be confusing for new administrators).
+[20:43] <marrusl> Which is a nice segue into â€œoverrideâ€ files, which first appear in Natty.  Override files allow you to change an Upstart job without needing to modify the original job.
+[20:44] <marrusl> What override files really accomplish is...  if you put the word â€œmanualâ€ all by itself into a file called /etc/init/awesome.override, it will have the same effect as adding â€œmanualâ€ to awesome.conf.
+[20:44] <marrusl> So now you can disable a job from starting with a single command:
+[20:44] <marrusl> echo manual >> /etc/init/awesome.override
+[20:45] <marrusl> note: this is as root only.  Shell redirection doesn't really play nice with sudo.
+[20:45] <marrusl> o disable a job as an admin user:
+[20:45] <marrusl> echo manual | sudo tee -a /etc/init/awesome.override
+[20:45] <marrusl> Since the override file won't be owned the awesome package, dpkg won't object and you can cleanly update it without having to worry about your customizations.  Yay!
+[20:45] <marrusl> I don't really know, but I suspect the original purpose of override files was just to make disabling jobs cleaner.  But then a lightbulb went off somewhere...  why not let administrators override any stanza in the original job?
+[20:45] <marrusl> Let's change awesome's start criteria to make it start *after* rocking or jamming.
+[20:46] <marrusl> Simply create /etc/init/awesome.override and have it contain only this:
+[20:46] <marrusl> â€œstart on (started rocking or started jamming)â€
+[20:46] <marrusl> Now Upstart will use all of the original job file with only this one stanza changed.  This works for any other stanza or keyword.  Want to tweak the kill timeout?  Customize the pre-start?  Add a post-stop?
+[20:46] <marrusl> Override files can do that.
+[20:46] <marrusl> On to the last topic of this presentation:  an example of converting a Sys V script to Upstart.
+[20:46] <marrusl> (looks like it will have to be fast!)
+[20:46] <marrusl> In the files you branched or downloaded, I've included the Sys V script for landscape-client and my first attempt at an Upstart job to do the same thing (landscape-client.conf).
+[20:47] <marrusl> First, some disclaimers... this is *not* any sort of official script, I'm not suggesting anyone use it.  I haven't gotten feedback from the landscape team yet, or properly tested it myself.
+[20:47] <marrusl> But so far, it seems to be working for me fine. :)
+[20:47] <marrusl> And yet, I'm pretty sure I've overlooked something.  I mentioned I wasn't a developer, right?
+[20:47] <marrusl> Not knowing the internals of how landscape-client behaves, I started by trying â€œexpect forkâ€ and â€œexpect daemonâ€.
+[20:47] <marrusl> Both allowed me to start the client fine, but failed to stop them cleanly (actually the stop command never returned!).
+[20:48] <marrusl> Clearly I picked the wrong approach.  In the end, running it in the foreground (no expect) allowed me to start and stop cleanly.
+[20:48] <marrusl> Now, if you compare the two scripts side-by-side, the most obvious difference is the length. The Upstart job is about 65% fewer lines.
+[20:48] <marrusl> This is because Upstart does a lot of things for you that had to be manually coded in Sys V scripts.
+[20:48] <marrusl> In particular it eliminates the need for PID file management and writing case statements for stop, start, and restart.
+[20:48] <marrusl> Well, depending on your previous experience with upstart, that was probably quite a bit of information and new concepts.  I know it took me ages to grok Upstart, and Ubuntu is my full-time job!
+[20:49] <marrusl> So let me wrap up the formal part of this session with suggestions on the best ways to learn more about Upstart.  They are:
+[20:49] <marrusl> â€œman 5 initâ€
+[20:49] <marrusl> â€œman upstart-eventsâ€
+[20:49] <marrusl> The Upstart Cookbook (http://upstart.ubuntu.com/cookbook)
+[20:49] <marrusl> The Upstart Development blog (http://upstart.at)
+[20:49] <marrusl> Your /etc/init directory.
+[20:49] <marrusl> (Looking through the existing jobs on Ubuntu is incredibly helpful.)
+[20:50] <marrusl> And of course.... #upstart on freenode.
+[20:50] <marrusl> wait... jcastro will kill me if I don't mention http://askubuntu.com/questions/tagged/upstart
+[20:50] <marrusl> With that...  questions?
+[20:52] <marrusl> I'd also like to encourage people to open questions on askubuntu... for the sheer knowledgebase win.
+[20:52] <marrusl> this link will open a new question and tag it "upstart" for you:
+[20:52] <marrusl> http://askubuntu.com/questions/ask?tags=upstart
+[20:53] <marrusl> Thanks for your time and attention, folks.  HTH.  :)  I'll be around on freenode for a while if something pops up.
+[20:58] <marrusl> lborda asks...  first of all, Thank you for the presentation! second, what about debugging upstart services?
+[20:59] <marrusl> There are a couple levels... debugging upstart itself with  job events, and debugging individual jobs.
+[20:59] <marrusl> The best techniques are in the Cookbook.  Please see: http://upstart.ubuntu.com/cookbook/#debugging
+[21:00] <marrusl> I guess that's a full wrap.  Take care.
+}}}

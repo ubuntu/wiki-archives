@@ -1,0 +1,880 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+-----
+
+* '''Launchpad Entry''': UbuntuSpec:foundations-q-upstart-stateful-re-exec
+* '''Created''': 12 November 2012
+* '''Contributors''': JamesHunt (`jodh`), <nowiki>[[stgraber|Stéphane Graber]]</nowiki> (`stgraber`), Dmitrijs Ledkovs (`xnox`), SteveLangasek (`vorlon`).
+* '''Packages affected''': upstart
+* '''Related blueprints''': UbuntuSpec:foundations-r-upstart-user-session-enhancements
+* '''Code''': <nowiki>[[https://code.launchpad.net/~upstart-devel/upstart/trunk|lp:upstart]]</nowiki>
+
+== Summary ==
+
+This specification describes the plan to implement Enhanced User Session support in Upstart.
+
+== Release Note ==
+
+{| class="wikitable"
+|-
+| <#00FF00> TODO:
+|}
+
+=== User Job Migration ===
+
+Any users who ran Upstart User Jobs automatically (without actually having a user login to the system in the conventional fashion), will now have to first start the Session Init manually by invoking "init --user".
+
+== Rationale ==
+
+=== Existing User Sessions ===
+
+Currently, user sessions are extremely simple, allowing a non-privileged
+user to create and manage jobs.
+
+==== Limitations ====
+
+Existing User sessions suffer from some limitations:
+
+* user jobs cannot share the same name as system jobs.
+
+* `initctl` aggregates both system jobs and user jobs, but does not distinguish between the two types.
+
+* User jobs output cannot be logged (`console log`).
+
+=== Existing Ubuntu Desktop Session ===
+
+The current desktop startup sequence is quite time consuming and
+crucially starts a number of services that run as the user which do not
+necessarily need to be started at user login time.
+
+There is thus an opportunity to enhance the desktop experience for both
+standard users and those running in resource-constrained environments
+to:
+
+* defer starting certain desktop services (potentially indefinitely).
+
+* dynamically start certain desktop services when appropriate conditions are met.
+
+This fits perfectly into Upstart's event-based model and will allow the
+desktop startup and shutdown sequence to be made more efficient.
+
+Using Upstart to manage the desktop session has the following additional
+benefits:
+
+* Provides an attractive side-effect of reducing CPU and memory pressure, thus minimising power consumption and thus maximising battery life.
+
+* Makes entire session flow less opaque.
+
+* Provides a good opportunity to document this aspect of the system.
+
+* Allows users to enhance their own desktop experience using simple Upstart jobs.
+
+* Provides a flexible framework to allow for more fine-grained user job control such as providing a well-known event indicating the user (or the system) wishes the system to move into a low-power state (akin to some sort of "flight-mode" or "minimal-mode").
+
+== Terminology ==
+
+ "Upstart"::
+ :: Unless qualified, this refers to the "`/sbin/init`" binary.
+
+ "User Job"::
+ :: Job created by a non-privileged user (in `$HOME/.init/`) that is managed by PID 1 but also controllable by the user via `initctl`.
+
+ "Setuid Job"::
+ :: Job created by a privileged user (in `/etc/init/`) that runs as a non-privileged user. Can only be managed by PID 1 and the superuser.
+
+ "Session Init"::
+ :: Supplementary instance of "`/sbin/init`" (a "sub-init") invoked by a non-privileged user and running as that user for the duration of a login session.
+
+ "Session Init Instance"::
+ :: Since instance of a Session Init process. Note that multiple Session Init processes may be running on a system, potentially multiple per individual user.
+
+ "Session Job"::
+ :: Upstart job (`$HOME/.init/`) managed by the users Session Init and controllable by the user via `initctl`. This is the new name for a "User Job".
+
+ "System Event"::
+ :: Event emitted by PID 1 or a process running as `root`.
+
+ "User Event"::
+ :: Event emitted directly by a Session Init or non-privileged user process.
+
+ "System Directory"::
+ :: Directory containing Job Configuration Files and Override files that is not a sub-directory of the users home directory (`$HOME`).
+
+ "System Files"::
+ :: Job Configuration Files and Override Files that live in a System Directory.
+
+ "User Directory"::
+ :: Directory containing Job Configuration Files and Override files that is a sub-directory of the users home directory (`$HOME`).
+
+ "User Files"::
+ :: Job Configuration Files and Override Files that live in a User Directory.
+
+== Use Cases ==
+
+* Han is running Ubuntu on his battered old laptop which has a slow disk and wants to be able to login to his desktop session as quickly as possible.
+
+* Whilst living on Tatooine, Luke likes to use his Ubuntu powered macrobinoculars to read eBooks. Since these are battery powered, and since hotspots in his home area are rare, has no need of networking services when the network is not "up", so doesn't want his eBook experience to be slowed by having to wait for geo-ip services and other networking services to start.
+
+* Yoda wants to minimise the number of processes running as his user and wants services to auto-start on demand.
+
+* Leia wants to start a custom service as herself once a particular file is created.
+
+* Darth is running Ubuntu on his Nexus 7 tablet and wants to be able to maximise battery life to allow him to play games for as long as possible.
+
+* R2D2, after being upgraded to Ubuntu by C3PO, wants to be able to run his holographic projection unit for as long as possible, but wants to disable all other non-essential services such as all networking (including wifi, bluetooth, avahi) and network services (sshd, ntpd, NFS, DropBox, firefox, gwibber, geo-ip, ''et cetera'').
+
+== Requirements ==
+
+=== Core ===
+
+* General
+
+** Minimise changes to existing behaviour.
+
+** Allow user jobs to 'listen' for system events.
+
+** Allow Upstart to be started as a non-privileged user and receive events from the system Upstart (PID 1).
+
+** Utilise design compatible with existing Upstart "user sessions", where possible.
+
+** Ensure Session Inits restart when PID 1 restarted.
+
+     This can be achieved by having the Session Init respond to the PID 1 "`Restarted`" D-Bus signal, but it may also be necessary for the Session Init to also auto-restart should their D-Bus connection to PID 1 be severed (although note that PID 1 should not sever its clients D-Bus connection once upstream D-Bus provides "`dbus_connection_open_from_fd()`".
+
+* Job Configuration Files
+
+** Allow Upstart to search for Job Configuration Files in multiple directories.
+     (for example "`~/.init`" ''and'' "`/etc/xdg/upstart`" by specifying "`init --confdir ~/.init --confdir /etc/xdg/upstart`").
+
+** Allow override files to apply to any directory that has been specified as potentially containing Job Configuration Files.
+
+* Extra watches/bridges
+
+** "`upstart-file-bridge`"
+
+*** Write an inotify bridge.
+
+**** Emit "`file`" event.
+
+**** Handle create, modify and delete for both files and directories.
+
+*** Document limitations caused by the inability of `inotify` to handle recursive-watches in a truly race-free manner.
+
+*** By default, run 1 instance connected to PID 1.
+
+** "`upstart-dconf-bridge`"
+
+*** Write a dconf bridge.
+
+**** Emit "`dconf-changed`" event with the key that changed and the values.
+
+*** This bridge should only run connected to a Session Init. In fact, it appears there may need to be 1 instance per unique Session Init.
+
+* Jobs
+
+** Allow user jobs to have same name as system job.
+
+** Allow user jobs to be distinguished from system jobs.
+
+** Fully implement job namespacing inside Upstart.
+
+* Events
+
+** Fully implement event namespacing inside Upstart.
+
+** Allow system events to be visible to the Session Init.
+
+** Disallow user events from one Session Init from being visible to another users Session Init.
+
+* Re-exec
+
+** Allow Session Inits to perform stateful re-exec (requires assertion changes).
+
+* D-Bus
+
+** Add "`EventEmitted`" D-Bus signal (specifically for PID 1) to allow Session Inits to proxy system-level events to user jobs.
+
+** Add "`Restarted`" D-Bus signal to allow Session Inits to detect that PID 1 has re-execed.
+
+* Commands
+
+** Add new "`initctl set-env <name>[=<value>]`" command to allow a user to inject an environment variable into a Session Init.
+
+     This will be applied to all subsequently started user jobs.
+
+** Add new "`initctl get-env <name>`" command to allow a user to query the specified environment variables in a Session Init.
+
+** Add new "`initctl list-env`" command to allow a user to query all environment variables in a Session Init.
+
+** Add new "`initctl unset-env <name>`" command to allow the specified environment to be removed from within a Session Init.
+
+** Add new "`initctl reset-env`" command to allow the environment within a Session Init to be reset to sensible defaults.
+
+* Desktop
+
+** Provide an event-based user login experience.
+*** Allow for deferred startup of desktop services based on existence of files.
+
+** Offer a way to change the environment of future children of the Session Init by adding a "`SetEnv`" or similar D-Bus method.
+
+** Maintain compatibility with existing !FreeDesktop facilities where
+     possible (for example <nowiki>[[http://standards.freedesktop.org/desktop-entry-spec/latest/|Desktop Entry Specification]]</nowiki> (or ".desktop") files).
+
+=== Additional (to be considered in the future but not planned for 13.04) ===
+
+* Ability for user jobs to detect and react to a "low-power" / minimal
+   / "flight-mode" request from the user via a well-named Upstart event.
+** Needs update to `upstart-events(7)`.
+
+* Ability for system-level jobs to detect and react to "low-power" mode request.
+
+* Allow Session init events to be visible to PID 1 and therefore system jobs.
+
+* Console
+
+** Allow jobs initiated from a console login to be managed by a users Session Init process (Discuss A11Y aspects with Luke Yelavich).
+
+*** Spawn a Session Init on console login.
+
+== Design ==
+
+=== Session Init ===
+
+==== Invocation ====
+
+To start Upstart as a Session Init daemon:
+
+<pre>
+  /sbin/init --user
+</pre>
+
+When invoked with the "`--user`" option, Upstart will run as the user in question, emit the "`desktop-session-start`" event for the user (see `upstart-events(7)`) and also listen for events coming from PID 1.
+
+==== Shell ====
+
+All jobs run as the user will be run using "`/bin/sh -e`", as they are for Upstart running as PID 1. To be clear, the users shell as specified in the password database, will ''not'' be used.
+
+=== D-Bus ===
+
+Each Session Init daemon will register a D-Bus address of:
+
+"`unix:abstract=/com/ubuntu/upstart-session/$USER/$PID`"
+
+Where "`$USER`" corresponds to the username and "`$PID`" corresponds to the `PID` of the Session Init.
+
+The path will be exported as `UPSTART_SESSION` in the environment of all child processes of the users Session Init and `initctl` will use that variable when the Session Init can't be found on the session bus. All child processes will also contain a variable specifying the `PID` of the Session Init they are being managed by: `$UPSTART_SESSION_PID`.
+
+The Session Init will store the address of the session in `$HOME/.cache/upstart/sessions/$PID.log` using familiar shell syntax:
+
+<pre>
+UPSTART_SESSION=$UPSTART_SESSION
+</pre>
+
+The `$PID.log` file will be removed on successful Session shutdown.
+
+=== Bridging Events ===
+
+==== System to User ====
+
+Since user jobs will now run as a child of the Session Init process, it is
+necessary for a new bridge (``upstart-event-bridge``) to be written which will be started from the Session Init as an Upstart job. This bridge will connect to the D-Bus System Bus and bridge all system-level events to the Session Init jobs.
+
+This will also necessitate a new D-Bus API for an `EventEmitted` signal which
+clients can listen for.
+
+==== User to System ====
+
+Not currently a requirement.
+
+=== Communication with PID 1 ===
+
+PID 1 won't have any explicit knowledge of the Session Init.
+Session inits will just be acting like a standard process on the system, listening for events coming from the system Upstart on the D-Bus system bus.
+
+=== Respawning user jobs and PID tracking ===
+
+The plan is to use the new PR_SET_CHILD_SUBREAPER option of `prctl(2)`.
+
+If Upstart makes use of the new process control option
+`PR_SET_CHILD_SUBREAPER`, the Session Init will remain the
+parent of any double-forking daemons run as the user and to receive
+appropriate SIGCHLD signals. This simplifies the design significantly such that there ''are'' no process state change notifications between PID 1 and the Session Init required, but there are issues associated with using this facility.
+
+==== Advantages ====
+
+* Simplicity - it minimises custom-logic to handle user jobs.
+
+* Much more resilient to any possible denial-of-service vectors since only a minimal amount of communication between the Session Init and PID 1 is required.
+
+==== Disadvantages ====
+
+* By making use of a Linux-specific `prctl(2)` call, we effectively tie Upstart to systems running with a Linux kernel. This is a major restriction, but porting to other systems is already complicated by the fact that even the BSDs do not provide a full POSIX environment (missing "`waitid(2)`" for example).
+
+* This feature may confuse some services which could legitimately check their parent PID and act differently when `getppid()` shows their parent is PID 1. By using PR_SET_CHILD_SUBREAPER, their parent PID will ''never'' be PID 1 so they may fail to work as designed.
+
+* Even though this feature is available in the Linux kernel as of version 3.4, this means it would not work on Precise, the latest Ubuntu LTS release. This may be an issue in the following circumstances:
+
+** Upgrade issue if a user were to:
+
+### Upgrade from Precise (which does not have the `PR_SET_CHILD_SUBREAPER` facility) to Raring.
+### Logout.
+### Attempt to log back in to a desktop session before rebooting, as is recommended immediately after upgrade.
+   
+     The outcome would be a running desktop session, but where the Session Init would not be able to track any started jobs. Ideally, there would be a pop-up presented to the user explaining the issue and strongly recommending they reboot ASAP. To simplify this, a "secret" option should be added to `/sbin/init` to check if the prctl is available allowing a script to call the following and check the return code (`0` meaning the prctl is available, `1` if not):
+
+     <pre>
+       /sbin/init --user --test
+     }}}
+
+** Some chroot environments may be running for example Ubuntu Raring, but the "host" environment outside the chroot may be Ubuntu Precise, meaning jobs respawn '''will not''' work.
+
+** Some virtualised environments don't allow users to change kernel version, meaning jobs respawn '''will not''' work.
+
+==== Mechanics ====
+
+* Have Upstart call `prctl(PR_SET_CHILD_SUBREAPER)` when running as a non-root user.
+* In the event where the kernel doesn't support PR_SET_CHILD_SUBREAPER, Upstart will print a warning and simply ignore any "respawn" statement.
+
+=== Proposed Changes to Events ===
+
+Upstart allows event names to take any form but to provide full namespacing at the user level (allowing user jobs to distinguish between "system events" and "user events"), an extended syntax is required.
+
+The proposal is to consider colon (':') special iff it appears as the
+''first'' byte of the event name. This is a behavioural change.
+
+If the first byte of an event name is a colon, the event is treated as below, else the event is treated as it is currently.
+
+==== New Event Format ====
+
+{{{
+Event Format:
+
+    :<optional_type>:<event_name>
+
+Where,
+
+  - <optional_type> is one of:
+
+    - 'sys' for system events.
+    - 'user' for user events.
+    - the nul string ('').
+
+  - '<event_name>' can be of any format.
+</pre>
+
+When used by PID 1, the event type is a facility to optionally route events to either only System Jobs or only Session Inits (and thus only to User Jobs).
+
+When used by User Jobs, the event type is a way for User Jobs to discriminate between System Events and User Events.
+
+* When running as PID 1, a nul string `<type>` is an alias for `sys`.
+
+* When not running as PID 1, a nul string `<type>` is an alias for `user`.
+
+==== System Events ====
+
+===== Emitting =====
+
+<pre>
+$ sudo initctl emit       foo   # emits system event 'foo' (*1)
+$ sudo initctl emit     ::foo   # emits system event 'foo' (*2, *B)
+$ sudo initctl emit  :sys:foo   # emits system event 'foo' (*2, *B)
+$ sudo initctl emit :user:foo   # emits user event 'foo' only
+
+(*B) - Behavioural change.
+(*1) - System Event still visible to Session Inits and thus Session Jobs.
+(*2) - System Event NOT visible to Session Inits.
+
+</pre>
+
+===== Reacting =====
+
+<pre>
+start on       foo   # reference system event only (*3) implicitly
+start on     ::foo   # reference system event only semi-explicitly (*B)
+start on  :sys:foo   # reference system event only explicitly (*B)
+start on :user:foo   # reference user event only explicitly - INVALID (*3, *B)
+
+(*B) - Behavioural change.
+(*3) - Since system jobs have no access to user events.
+</pre>
+
+===== Restrictions =====
+
+* If a System Event is emitted that does not specify a `type`, it is potentially available to both System Jobs and User Jobs assuming a Session Init is running.
+
+* If a System Event is emitted that specifies a `type` of `sys`, the event is only visible to System Jobs.
+
+* If a System Event is emitted that specifies a `type` of `user`, the event is only visible to User Jobs.
+
+==== User Events ====
+
+===== Emitting =====
+
+<pre>
+$ initctl emit       foo   # emits user event 'foo'
+$ initctl emit     ::foo   # emits user event 'foo' (*B)
+$ initctl emit :user:foo   # emits user event 'foo' (*B)
+$ initctl emit  :sys:foo   # ERROR: User cannot emit a System Event (*3).
+
+(*B) - Behavioural change.
+(*3) - FIXME: alternatively, this could emit ':sys:foo' user event.
+</pre>
+
+===== Reacting =====
+
+<pre>
+start on       foo   # reference system or user event implicitly
+start on     ::foo   # reference user *or* system event semi-explicitly (*B)
+start on  :sys:foo   # reference system event only explicitly (*B)
+start on :user:foo   # reference user event only explicitly (*B)
+
+(*B) - Behavioural change.
+</pre>
+
+===== Restrictions =====
+
+* If a User Event is emitted that does not specify a `type`, it is potentially available to any jobs managed by the Session Init.
+
+* It is an error for a User Event to be emitted with a `type` of `sys`.
+
+==== Internal Changes ====
+
+* `init/event_operator.c:event_operator_match()`:
+** PID == 1:
+*** Expand event with no prefix, or '`::`' prefix to '`:sys:`' prefix.
+*** Ignore events already prefixed by '`:user:`'.
+** PID > 1 (Session Init):
+*** Expand event with no prefix, or '`::`' prefix to '`:user:`' prefix.
+*** Ignore events already prefixed by '`:sys:`' (should not be possible
+       since system events are not propagaged to Session Inits.
+* `init/control.c:control_emit_event_with_file()`:
+** PID > 1: Disallow event to be emitted with '`:sys:`' prefix.
+* `upstart-event-bridge`: ignore events already prefixed by '`:sys:`'.
+
+=== Initctl ===
+
+==== Effect of UPSTART_SESSION ====
+
+As previously mentioned, `initctl` will become Session Init-aware such that its behaviour will be modified if the `UPSTART_SESSION` environment variable is set. The table below summarises the behaviour:
+
+<pre>
+|---------------------+----------+------------------+-------------+-------------+---------------|
+| UPSTART_SESSION set | user     | command prefix   | list        | status      | job cmds (*J) |
+|---------------------+----------+------------------+-------------+-------------+---------------|
+| yes                 | non-root | initctl          | user        | user        | user          |
+| yes                 | non-root | initctl --user   | user        | user        | user          |
+| yes                 | non-root | initctl --system | system      | system      | ERROR ! (*2)  |
+|---------------------+----------+------------------+-------------+-------------+---------------|
+| no                  | non-root | initctl          | system (*B) | system (*B) | ERROR ! (*2)  |
+| no                  | non-root | initctl --user   | ERROR ! (*4)| ERROR ! (*4)| ERROR ! (*4)  |
+| no                  | non-root | initctl --system | system      | system      | ERROR ! (*2)  |
+|---------------------+----------+------------------+-------------+-------------+---------------|
+| yes                 | root     | initctl          | user (*1)   | user (*1)   | user (*1)     |
+| yes                 | root     | initctl --user   | user (*1)   | user (*1)   | user (*1)     |
+| yes                 | root     | initctl --system | system      | system      | system        |
+|---------------------+----------+------------------+-------------+-------------+---------------|
+| no                  | root     | initctl          | system      | system      | system        |
+| no                  | root     | initctl --user   | ERROR ! (*4)| ERROR ! (*4)| ERROR ! (*4)  |
+| no                  | root     | initctl --system | system      | system      | system        |
+|---------------------+----------+------------------+-------------+-------------+---------------|
+
+Key:
+
+(*B) - Behavioural change: currently shows system+user if user jobs exist and user jobs enabled.
+(*J) - job commands being start, stop, restart, reload.
+(*1) - Shows 'user' jobs owned by the root user, which itself will have a Session Init running with PID != 1.
+       Required to handle possibility of user logging into desktop session as root. Ahem...
+(*2) - Normal users cannot manipulate system jobs.
+(*3) - Not valid to attempt to start a user job and a system job at the same time.
+(*4) - No way to identify current session to know which user jobs to consider.
+
+</pre>
+
+==== initctl list ====
+
+* If "`initctl --user --verbose list`" is specified, jobs will be prefixed with "`:user`".
+* If "`initctl --system --verbose list`" is specified, jobs will be prefixed with "`:sys`".
+
+==== New Commands ====
+
+===== List Sessions =====
+
+A new command "`initctl list-sessions`" will be added to list all sessions owned by a user.
+
+This will simply iterate through all files in
+`$HOME/.cache/upstart/sessions/$PID.log`, and list all running `PIDs`
+which correspond to the `$PID` element of the file and whose name is `session-init` or whose path is `/sbin/init`.
+
+===== Environment Commands =====
+
+The new environment commands (`set-env`, `get-env`, `unset-env`, `list-env` and `reset-env`) allow the environment to be manipulated for all jobs that will run in the future.
+
+The primary reason for introducing these commands is to allow variables to be added to the Session Init to allow for a usable desktop experience. For example, since `dbus-daemon` will be started as an Upstart job, it is vital that there be a way to ensure the "`DBUS_SESSION_BUS`" variable be set correctly for all subsequent jobs.
+
+However, there is scope for abusing these commands. As such, it will '''NOT''' be possible to use a destructive environment command (`set-env`, `unset-env`, `reset-env`) for PID 1. Further, since these commands can be used to provide a form of IPC between different job processes (such as between the `pre-start` and the main stanzas), it may well lead to inadvertent abuse where job processes (or even different jobs) communicate by setting variables within the Session Init, but then forget to "clean up" when they finish.
+As such, if a destructive environment command is used from within a job, unless overridden with an appropriate command-line option (`--global`), the impact will be to modify '''ONLY''' the environment table ''for that job''. This provides the IPC mechanism, but has the attractive benefit of automatically cleaning up after the job has finished. In other words, the Session Init environment table is not polluted.
+
+=== Existing User Jobs ===
+
+Enhanced Upstart User Sessions replace the legacy Upstart User Jobs facility entirely. There are no chroot implications to this since it is not possible to run User Jobs from within a chroot environment (since user lookup cannot be performed by Upstart for a user within a chroot as the uids may not match).
+
+The original Upstart "User Jobs" that were supervised by PID 1 created a Session object internally ''the first time the user ran an'' "``initctl``" ''command''. The new architecture does not work this way:
+a Session object is no longer required since all Session Jobs are managed by the users Session Init process.
+
+This implies that any users who ran User Jobs automatically (without actually having a user login to the system in the conventional fashion), will now have to first start the Session Init manually by invoking
+"`init --user`".
+
+=== init-checkconf ===
+
+Update such that it will run something like "`init --user --list-jobs`"
+which will not run a Session Init, but which will print:
+
+* Each directory it is searching.
+* Each Job Configuration file and Override file it finds.
+* Whether the file will be considered or not based on either implicit search paths, or explicit `--confdir` ones.
+
+This will allow a user/admin to make sense of the Collision Resolution rules (see below).
+
+=== Configuration Files for User Jobs ===
+
+When invoked as a Session Init the following search path will be used:
+
+* `--confdir DIR` option on the command line
+* `${XDG_CONFIG_HOME:${HOME}/.config}/upstart`
+* `${HOME}/.init`
+* `${XDG_CONFIG_DIRS:/etc/xdg/}/upstart`
+* `/usr/share/upstart/session/`
+
+This is the order job configuration (foo.conf) and override files (foo.override) will be searched in.
+
+The first found job configuration file (foo.conf) will be loaded.
+
+Job files with the same name in subsequent search path directories will be ignored.
+
+An override file (foo.override) is searched in the same order as job configuration file (foo.conf).
+
+The first found override file (foo.override) will be applied against the job configuration file (foo.conf).
+
+Override files with the same name in subsequent search path directories will be ignored.
+
+Exception: override files (foo.override) in the search path directories after the one that has the matching job configuration file (foo.conf) are also ignored.
+
+The job name (foo) will be derived from the job configuration file name (foo.conf)
+
+See upstart cookbook for information about <nowiki>[[http://upstart.ubuntu.com/cookbook/#override-files|override files]]</nowiki>.
+
+=== User Job Logging ===
+
+The above also simplifies the handling of user job logging since now,
+the Session Init can handle all logging for jobs started as the user.
+
+Jobs output will be logged to separate files in `$XDG_CACHE_HOME` (or `$HOME/.cache/upstart/logs/` if not set).
+
+Note that the initial implementation will not write to `~/.xsession-errors` as has traditionally happened. However, it would be possible to provide this facility in addition to the standard Upstart logging if we introduce the ability to specify multiple keywords to the <nowiki>[[http://upstart.ubuntu.com/cookbook/#console|console stanza]]</nowiki> (for example, something like, "`console log, syslog, xsession`").
+
+=== Stateful re-exec ===
+
+When the Session Init detects that PID 1 has re-execed itself (by virtue of
+the fact that the Session Init D-Bus connection to PID 1 is severed or by receiveing the `Restarted` D-Bus signal, it must also re-exec itself to ensure that all running inits are running at
+the same version.
+
+Note that if Upstart is downgraded to a version that does not support
+"--user", the Session Init will end immediately (since it is not possible
+to run Upstart as a Session Init, and it is also not possible to detect in
+a race-free manner that the "new" version of Upstart (having a lower
+version number than the currently running Session Init) does not support
+full user sessions.
+
+==== Design Impact ====
+
+The main impact of allowing Session Inits to <nowiki>[[FoundationsTeam-Specs-QuantalUpstartStatefulReexec|re-exec]]</nowiki> themselves relates to the new "`initctl set-env`" command. This ephemeral data must be serialised as part of a re-exec to ensure expected behaviour.
+
+Note that no upgrade test is required for this scenario since there is no previous version of Upstart that supports Enhanced User Sessions so there can never be a scenario where the re-exec'ed Upstart is unable to read the ``set-env`` environment variables set by the original instance of Upstart.
+
+Note that allowing Upstart to read job configuration files from multiple directories does not have an impact since the stateful re-exec facility will honour ``/sbin/init`` command-line variables and will simply re-load those jobs as needed on re-exec. Note that there would be a subtle impact if the user were to change ``XDG_CONFIG_DIRS`` ''and'' "`initctl set-env`" were implemented such that the command actually changed Upstarts environment.
+
+=== Desktop Mechanics ===
+
+==== Desktop Session Startup ====
+
+The Session Init will be initiated by:
+
+* Modifying `/etc/X11/Xsession.d/99x11-common_start` to exec "<code>init --user</code>" rather than exec "`$STARTUP`". This will possibly be limited to only the Unity session, at least initially.
+
+* The Session Init will emit the "`desktop-session-start`" event.
+
+* A D-Bus job depending on "`desktop-session-start`" will trigger and spawn the session bus. The job will also use the new "`initctl setenv`" command to push `DBUS_SESSION_BUS_ADDRESS` into the environment of all subsequent children.
+
+* The Session Init Instance will then connect to the new D-Bus session bus and start listening for calls there (on top of the private `UPSTART_SESSION` bus).
+
+* A gnome-session job will be "`start on started dbus`" and will spawn the gnome session with the proper `DBUS_SESSION_BUS_ADDRESS` set.
+
+* Any number of other user jobs will then start.
+
+==== Desktop Session Shutdown ====
+
+===== Current Ubuntu Architecture =====
+
+In Ubuntu up to 12.10, exiting the session through the indicator or the power button will do the following:
+* The indicator, or the power button dialog call gnome-session's ``Logout``, ``Reboot``, or ``Shutdown`` session D-BUS method.
+* `gnome-session` will stop clients that support XSMP / D-Bus session management by giving them up to 10 seconds to shutdown.
+* If applications have requested a session-end delay in order to ask the user to save documents or do other cleanup action, `gnome-session` will wait. Applications can request such a delay using the gnome `org.gnome.SessionManager.Inhibit()` D-Bus API call.
+
+* On shutdown/reboot:
+** `gnome-session` calls the corresponding method of ConsoleKit or systemd.
+** ConsoleKit ultimately calls `/usr/lib/ConsoleKit/scripts/ck-system-stop`, which in turn calls `shutdown(8)`.
+** `shutdown(8)` emits the "`runlevel`" Upstart event (which blocks).
+** Since `lightdm` specifies "`stop on runlevel [016]`", it will send `SIGTERM` to all clients (`gnome-session` processes).
+** All `gnome-session` processes exit.
+** `lightdm` exits.
+** Runlevel event will eventually be unblocked and the remainder of the system shutdown sequence will result.
+* On logout
+** `gnome-session` merely exits
+** `gnome-session` exiting causes the wrapping `dbus-launch` to quit as well, tearing down the session D-BUS.
+** This in turn should cause all services on the session bus to terminate.
+** As the session D-bus is the "main process" from lightdm's/startx' point of view, the X server ends, and control is returned back to the display manager (`lightdm`).
+
+===== Session Init Ubuntu Architecture =====
+
+With Upstart sessions, the Session Init will be terminated by:
+
+* The desktop session sending an `initctl` command request to shutdown the session (in other words the Session Init).
+* The Session Init Instance will react to this, stop all the jobs and then exit itself, closing the session in the process.
+
+In detail:
+
+# User selects "Logout", "Restart" or "Shut Down" in the Unity menu.
+# The following command is run:
+    <pre>
+      $ initctl shutdown [ --type=$TYPE ] [--wait=$WAIT ]
+
+      Where,
+        
+        TYPE=[logout|reboot|shutdown]
+        WAIT=[<seconds>|forever|-1]
+
+      And,
+        '-1' is equivalent to 'forever'.
+
+      Notes:
+
+        - TYPE is not used by Upstart; it is exposed to all jobs
+          via the "`session-end`" event though.
+    }}}
+
+# The Session Init performs the following actions:
+### Set `shutdown` variable.
+### Disable "`respawn`" (Bug Bug:750113)
+### Calculate maximum "`kill timeout`" value (`max_kill_timeout_running`) for all currently ''running'' job instances.
+### Generate list of currently-running jobs (`running-jobs`).
+### Send appropriate kill signal to all jobs in `running-jobs`.
+### Arrange for kill handler to display message if shutdown variable set and SIGKILL required: "`Job $job ($instance) being forcibly killed`".
+       This will help identify slow-to-kill / problematic jobs.
+### Emit the event "`session-end WAIT=$WAIT TYPE=$TYPE`"
+### Calculate `max_initial_delay = max(WAIT, max_kill_timeout_running)`
+### Register periodic timer to fire every second. Each time timer callback is called, iterate running jobs:
+#### If quiescent mode variable set, enter quiescent mode.
+#### If there are no running jobs, enter quiescent mode.
+#### If jobs from `running-jobs` are still running after `max_kill_timeout_running` seconds and no other jobs are running, set variable denoting quiescent mode should be entered on ''next'' call to timer (to allow `SIGKILL`s to be sent to all running-jobs).
+#### If after `WAIT` seconds any jobs not in `running-jobs` are running:
+###### Calculate `max_kill_timeout_new`.
+###### Send kill signal to all running jobs not in `running-jobs` list.
+#### If jobs are still running after `max(max_initial_delay, max_kill_timeout_new)`, set quiescent mode variable.
+### "quiescent" mode:
+###### Display a message "`Entering quiescent mode`".
+###### Stop any ''new'' jobs from starting.
+###### Send `SIGKILL` to any remaining job processes.
+###### Emit the "`session-exiting`" event.
+###### Re-enable new jobs, to allow a globally available "`session-exiting`" job to run. This job is expected to make the appropriate ConsoleKit call depending on the value of `$TYPE`.
+###### Perform internal cleanup.
+###### Call `exit (0)`.
+
+====== Advice ======
+
+* Existing jobs should generally "`stop on session-end`".
+* New jobs '''may''' "`start on session-end`", but these jobs are considered to be rare.
+* No new job except the "`shutdown`" job should "`start on session-exiting`".
+
+====== Implications ======
+
+======= Session =======
+
+Session ending could take at worst:
+
+{{{
+  ( max_initial_delay + max_kill_timeout_new )
+</pre>
+
+* If `WAIT` is forever, the session will never end.
+* Under normal circumstances:
+** Worst case scenario will likely be a wait of <code>(5 + 5)</code> seconds.
+** Average case scenario is expected to be approximately <code>(0 + 1)</code> seconds
+     Since,
+
+*** No standard provided Session Job will start on "`session-end`" meaning `max_kill_timeout_new` and `WAIT` will effectively be `0`.
+*** All standard provided Session Jobs will react to the default kill signal and end quickly.
+
+Note that the algorithm above is very simple and ignores some of the pathological scenarios such as handling jobs which start when other jobs end where the latter only start when jobs in `running-jobs` end.
+
+======= PID 1 =======
+
+The session shutdown code paves the way for a "pure" Upstart shutdown sequence for PID 1. Due to handling complexities between Upstart and SystemV though, this work will likely be deferred until the next cycle.
+
+==== Desktop Session Lifecycle ====
+
+An approximation of a system booting and logging in would then be:
+# System starting
+# Lightdm started
+# User enters credentials
+# PAM authentication and session creation
+# Xsession scripts spawned as the user
+# Upstart Session Init Instance started
+## desktop-session-start emitted
+## D-Bus job spawned
+## Upstart starts listening on session bus
+## gnome-session spawned
+### legacy jobs are started by gnome-session
+## user exits the session
+## Session Init Instance stops all the jobs
+## Session Init Instance exits
+# User gets back to Lightdm
+
+=== Process Overview ===
+
+==== Existing Desktop ====
+
+<pre>
+init
+ |- lightdm
+ |   |- Xorg
+ |   |- lightdm ---session-child
+ |        |- gnome-session --session=ubuntu
+ |             |- compiz
+ |             |- gwibber
+ |             |- nautilus
+ |             |- nm-applet
+ |             :
+ |             :
+ |
+ |- dbus-daemon --session
+ |
+ :
+ :
+</pre>
+
+==== New Desktop ====
+
+<pre>
+init
+ |- lightdm
+ |   |- Xorg
+ |   |- lightdm ---session-child
+ |        |- session-init # <-- upstart running as normal user
+ |             |- dbus-daemon --session
+ |             |- gnome-session --session=ubuntu
+ |             |- compiz
+ |             |- gwibber
+ |             |- nautilus
+ |             |- nm-applet
+ |             :
+ |             :
+ :
+ :
+</pre>
+
+== Default System-Provided Session Init Jobs ==
+
+To be useful, the system should provide a set of default jobs that Session Inits will have access to.
+
+Such jobs should include:
+
+* `gnome-session`: Job to start the desktop environment.
+* `upstart-event-bridge`: Job to start the bridge forwarding system events to the Session Init.
+* `upstart-log-logrotate`: Job that will rotate log files in "`~/.cache/upstart/logs/`", to limit the overall job logfile footprint.
+* `upstart-dconf-bridge`: Job to start the session-specific dconf bridge daemon.
+* `shutdown` : Job that will call appropriate ConsoleKit D-Bus method to shutdown/reboot the system depending on TYPE variable provided in environment of `shutdown` event.
+* `re-exec`: Job that calls `telinit u` when `:sys:restarted:` emitted (requires bug Bug:1087903).
+
+== Security ==
+
+* It must not be possible for a User Event to modify the behaviour of
+   System Jobs.
+* It must not be possible for a User Job to react to a job supervised
+   by another Session Init.
+
+== Performance ==
+
+The impact of introducing an `EventEmitted` D-Bus signal needs to be measured.
+
+== Testing ==
+
+Auto-package testing (see bug Bug:1075976) needs to be introduced to allow:
+
+* The `/sbin/init` binary, as built and packaged for production, to be tested.
+* Complex scenarios involving PID 1 and Session Inits to be tested (See Security section).
+
+== Outstanding Issues ==
+
+* Is performance impact of adding `EventEmitted` D-Bus signal acceptable?
+
+* Is there anything that should be done when switching users? (Possibly have a consolekit/logind bridge running against the system Upstart so system and user jobs can react to a user switch)
+
+* Session Init access to expired events (bug Bug:1065965)
+
+  A Session Init cannot run before the user has logged in. This poses a challenge in that the user may wish to have a job start "when their USB headset is plugged in". If they plug their USB headset in after logging in via lightdm, all will work, but if the headset is already plugged at boot, the Session Init will not see the udev event which gets emitted on boot.
+
+== Additional Information ==
+
+* User jobs within a chroot won't be supported (the current design does not support them either).
+
+* A user can have multiple Upstart sessions running, the DBUS path for those is based on the PID of Upstart so can't possibly conflict.
+
+* Console logins won't start Upstart, at least not initially.
+
+* The existing user sessions code will be removed and replaced by the new implementation.
+
+* Since the Session Init processes will legitimately call `exit(3)`, it will be possible to profile the code and audit for memory leaks in ways not possible previously.
+
+=== Alternative to PR_SET_CHILD_SUBREAPER ===
+
+If `PR_SET_CHILD_SUBREAPER` is not used, it will be necessary for the Session Init to pass a PID tuple to PID 1 via D-Bus for every job the Session Init started, the tuple comprising "`(self, child)`" with "`self`" being the PID of the Session Init, and "`child`" being the primary PID of the process forked from "`self`". This would allow PID 1 to detect any state changes for processes nominally managed by a Session Init, and communicate those state changes back to the Session Init in question (there may of course be many running on a single system.
+
+==== Advantages ====
+
+* Would work on any Unix system capable of running D-Bus.
+
+==== Disadvantages ====
+
+* Not as elegant as the `PR_SET_CHILD_SUBREAPER` option.
+
+* Would result in potentially a lot of traffic between PID 1 and the Session Inits, which could hurt performance (in fact, it could result in a DoS scenario if a user were to spawn a huge number of jobs within their Session Init).
+
+==== Mechanics ====
+
+* Have Session Init pass a PID tuple "`(self, child)`" with "`self`" being the PID of the Session Init, and "`child`" being the primary PID of the process forked from "`self`" for every process forked from "`self`" if the Session Init is running as a non-root user.
+
+* Make PID 1 store each PID tuple
+* Modify `job_process_handler()` to check the PID tuples to see if any PIDs refer to those nominally managed by Session Inits and if so send the "`child`" PID to the appropriate Session Init along with the `NihChildEvent` and `status`.
+
+* Register a new main loop function when run as a non-root user to check for the PID status change messages from PID 1 and deal with them as appropriate.
+
+=== References ===
+
+* <nowiki>[[FoundationsTeam-Specs-QuantalUpstartStatefulReexec]]</nowiki>
+* https://code.launchpad.net/~jamesodhunt/dbus/create-connection-from-fd
+* http://standards.freedesktop.org/basedir-spec/basedir-spec-latest.html
+* http://standards.freedesktop.org/desktop-entry-spec/latest/
+* http://upstart.ubuntu.com/cookbook/#console
+* http://upstart.ubuntu.com/cookbook/#job-configuration-file
+* http://upstart.ubuntu.com/cookbook/#override-files
+* http://upstart.ubuntu.com/cookbook/#ubuntu-well-known-events-ubuntu-specific
+* https://live.gnome.org/SessionManagement/GnomeSession

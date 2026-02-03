@@ -1,0 +1,622 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+{| class="wikitable"
+|-
+| <tablestyle="float:right; font-size: 0.9em; width:40%; background:#F1F1ED; margin: 0 0 1em 1em;" style="padding:0.5em;"><<BR>>
+|}
+
+=== Introduction ===
+
+This article describes how to set up a Windows domain using Samba with OpenLDAP as the primary domain controller that stores Windows account information.  This provides a central authentication point for Windows users on the network, thus avoiding the need to manage local user accounts on every Windows PC.  It can also allow the use of roaming profiles, where a user can log onto any Windows PC on the network and have the same personal settings in each session.
+
+By using LDAP as the Samba database instead of one of the alternatives, though, much more can be achieved.  The LDAP database can also hold other classes of information on each user that can be used for other authentication systems, or for general information as in the case of e-mail contact lists.  In this article, the LDAP classes 'person', 'organizationalPerson' and 'inetOrgPerson' store general information about users including e-mail addresses, phone numbers and physical addresses.  This information can be utilized by e-mail clients such as Evolution and Thunderbird.  The LDAP class 'posixAccount' stores Linux user account information.  Similarly to Windows PCs, Linux PCs can be set up to use the OpenLDAP database as a central authentication point.  Thus, we have an LDAP server that provides authentication for both Windows and Linux PCs.  In addition to this, the LDAP server can potentially be used for controlling access to web systems - please see the very helpful article <nowiki>[[OpenLDAPServer]]</nowiki>.
+
+Even if you only want to set up a Samba PDC at this point, you may still want to follow this article.  LDAP is a good backend to use.  Just skip the posix section.
+
+Once the LDAP database is established, it is good to have a nice GUI or web-based tool to make minor changes and check information in the database.  I have checked a few GUIs out and Luma looks good.  I refer to this in the article.
+
+Note that to limit the scope of this article, I have removed references to setting up Samba print-serving and file-serving.  This is covered in other Samba articles.
+
+Throughout this article, substitute ''dc=collins'' with a value appropriate for your organisation - eg. ''dc=myorganisation,dc=org''.  Likewise, choose a suitable name for your domain. 
+
+=== Tested Systems ===
+
+This has been tested on Hardy Xubuntu 8.04, installing everything from the Ubuntu repositories - ie. samba 3.0.28a, slapd 2.4.9, smbldap-tools 0.9.4-1.  Windows XP SP2 was used as the Windows client.
+
+Please add any other versions tested here.
+
+Items Tested:
+* Windows PC could join the domain
+* Windows domain user could log onto the PC
+* Windows domain user could change their password, by pressing Ctrl-Alt-Delete, etc.
+* H: drive appeared and access was correct
+* Roaming profile was automatically created when the domain user logged off at the end of their first session
+* Xubuntu server was set up successfully to use combined LDAP and files as posix authentication mechanism
+
+=== Initialise OpenLDAP Database ===
+
+Install OpenLDAP ..
+<pre>
+sudo apt-get --yes install slapd ldap-utils db4.2-util
+</pre>
+
+Install Samba documentation containing the Samba schema.  Extract ''samba.schema'' and copy to the required system area for OpenLDAP.
+<pre>
+sudo apt-get --yes install samba-doc
+sudo gunzip /usr/share/doc/samba-doc/examples/LDAP/samba.schema.gz
+sudo cp -v /usr/share/doc/samba-doc/examples/LDAP/samba.schema /etc/ldap/schema
+</pre>
+
+Decide on an LDAP admin password and generate a SSHA hash key for it.
+<pre>
+slappasswd
+</pre>
+
+Create an init.ldif file.  Name the 4 OUs Users, Groups, Computers and Idmap for use with smbldap-tools.
+<pre>
+dn: dc=collins
+objectClass: dcObject
+objectClass: organizationalUnit
+dc: collins
+ou: Collins
+
+dn: cn=admin,dc=collins
+objectClass: simpleSecurityObject
+objectClass: organizationalRole
+cn: admin
+description: LDAP administrator
+userPassword: {SSHA}...  - insert result from running slappasswd above
+
+dn: ou=Users,dc=collins
+objectClass: organizationalUnit
+ou: Users
+
+dn: ou=Groups,dc=collins
+objectClass: organizationalUnit
+ou: Groups
+
+dn: ou=Computers,dc=collins
+objectClass: organizationalUnit
+ou: Computers
+
+dn: ou=Idmap,dc=collins
+objectClass: organizationalUnit
+ou: Idmap
+</pre>
+
+Modify /etc/ldap/slapd.conf for this site, add/modify these lines ..
+<pre>
+suffix          "dc=collins"
+rootdn          "cn=admin,dc=collins"
+rootpw {SSHA}...	- insert result from running slappasswd above
+</pre>
+
+Check through all of slapd.conf and replace distinguished name references with cn=admin,dc=collins, etc.  Also add a line 'include /etc/ldap/schema/samba.schema' under the other include lines.
+<pre>
+include         /etc/ldap/schema/core.schema
+include         /etc/ldap/schema/cosine.schema
+include         /etc/ldap/schema/nis.schema
+include         /etc/ldap/schema/inetorgperson.schema
+include         /etc/ldap/schema/samba.schema
+</pre>
+
+Modify /etc/ldap/ldap.conf - un-comment #BASE and modify  ..
+<pre>
+BASE "dc=collins"
+</pre>
+
+Initialise OpenLDAP database ..
+<pre>
+sudo /etc/init.d/slapd stop
+sudo rm -rf /var/lib/ldap/*
+sudo slapadd -v -l init.ldif
+  /etc/ldap/slapd.conf: line 109: rootdn is always granted unlimited privileges.
+  /etc/ldap/slapd.conf: line 126: rootdn is always granted unlimited privileges.
+  added: "dc=collins" (00000001)
+  added: "cn=admin,dc=collins" (00000002)
+  added: "ou=Users,dc=collins" (00000003)
+    :  :  :
+sudo chown -R openldap:openldap /var/lib/ldap
+sudo /etc/init.d/slapd start
+</pre>
+
+Confirm all is OK with a Search ..
+<pre>
+ldapsearch -xLLL -b "dc=collins"
+  dn: dc=collins
+  objectClass: dcObject
+  objectClass: organizationalUnit
+    :  :  :
+</pre>
+
+=== Install Luma GUI Admin Tool ===
+
+Luma is a very nice GUI tool for viewing and editing LDAP entries.  See <nowiki>[[http://luma.sourceforge.net/]]</nowiki>.  It appears that no manual exists for Luma.  Maybe because it is so easy to use?
+
+Install and run Luma ..
+<pre>
+sudo apt-get --yes install luma
+luma &
+</pre>
+
+From the main menu, choose Settings/Edit Server List.  Enter ''localhost'' as the name for a new server.  Click on ''Authentication'' in the left pane, and un-tick ''Anonymous bind'', choose ''Simple'' as the mechanism, and bind using your LDAP admin account (eg. cn=admin,dc=collins) and enter the LDAP admin password. 
+
+<nowiki>[[File:luma-server-settings.png]]</nowiki>
+
+Now click on the ''Choose Plugin'' button and click ''Browser''.  Click on the '''+''' symbols in the left pane.  You should now see something like this ..
+
+<nowiki>[[File:luma-save-button2.png]]</nowiki>
+
+Click on the pen to the right of ''LDAP Administrator'' and change the text to ''LDAP Admin''.  The ''Save'' button is no longer greyed out.  If you wish to save this, press the ''Save'' button.  The ''Save'' button will now be greyed out again.
+
+=== Install and Configure Samba ===
+
+Install Samba ..
+<pre>
+INSTALL="sudo apt-get install"
+$INSTALL libtalloc1
+$INSTALL smbclient
+$INSTALL samba
+$INSTALL libpam-smbpass
+</pre>
+
+Create Samba folders that have not been automatically created ..
+<pre>
+sudo mkdir -v    /var/lib/samba/profiles
+sudo chmod 777   /var/lib/samba/profiles
+sudo mkdir -v -p /var/lib/samba/netlogon
+</pre>
+
+Edit /etc/samba/smb.conf - so it looks like this ..
+(Do NOT use ''valid users = ..'' or ''invalid users = root'' - need to enable ''root'' and all machine$ accounts.)
+<pre>
+
+[global]
+# Domain name ..
+	workgroup = COLLINS
+# Server name - as seen by Windows PCs ..
+	netbios name = LINUXPC
+# Be a PDC ..
+	domain logons = Yes
+	domain master = Yes
+# Be a WINS server ..
+	wins support = true
+
+	obey pam restrictions = Yes
+	dns proxy = No
+	os level = 35
+	log file = /var/log/samba/log.%m
+	max log size = 1000
+	syslog = 0
+	panic action = /usr/share/samba/panic-action %d
+	pam password change = Yes
+
+# Allows users on WinXP PCs to change their password when they press Ctrl-Alt-Del
+	unix password sync = no
+	ldap passwd sync = yes
+
+# Printing from PCs will go via CUPS ..
+	load printers = yes
+	printing = cups
+	printcap name = cups
+
+# Use LDAP for Samba user accounts and groups ..
+	passdb backend = ldapsam:ldap://localhost
+
+# This must match init.ldif ..
+	ldap suffix = dc=collins
+# The password for cn=admin MUST be stored in /etc/samba/secrets.tdb
+# This is done by running 'sudo smbpasswd -w'.
+	ldap admin dn = cn=admin,dc=collins
+
+# 4 OUs that Samba uses when creating user accounts, computer accounts, etc.
+# (Because we are using smbldap-tools, call them 'Users', 'Computers', etc.)
+	ldap machine suffix = ou=Computers
+	ldap user suffix = ou=Users
+	ldap group suffix = ou=Groups
+	ldap idmap suffix = ou=Idmap
+# Samba and LDAP server are on the same server in this example.
+	ldap ssl = no
+
+# Scripts for Samba to use if it creates users, groups, etc.
+	add user script = /usr/sbin/smbldap-useradd -m '%u'
+	delete user script = /usr/sbin/smbldap-userdel %u
+	add group script = /usr/sbin/smbldap-groupadd -p '%g'
+	delete group script = /usr/sbin/smbldap-groupdel '%g'
+	add user to group script = /usr/sbin/smbldap-groupmod -m '%u' '%g'
+	delete user from group script = /usr/sbin/smbldap-groupmod -x '%u' '%g'
+	set primary group script = /usr/sbin/smbldap-usermod -g '%g' '%u'
+
+# Script that Samba users when a PC joins the domain ..
+# (when changing 'Computer Properties' on the PC)
+	add machine script = /usr/sbin/smbldap-useradd -w '%u'
+
+# Values used when a new user is created ..
+# (Note: '%L' does not work properly with smbldap-tools 0.9.4-1)
+	logon drive = H:
+	logon home = \\linuxpc\%U
+	logon path = \\linuxpc\Profiles\%U
+	logon script = logon.bat
+
+# This is required for Windows XP client ..
+	server signing = auto
+	server schannel = Auto
+
+[homes]
+	comment = Home Directories
+	valid users = %S
+	read only = No
+	browseable = No
+
+[netlogon]
+	comment = Network Logon Service
+	path = /var/lib/samba/netlogon
+	admin users = root
+	guest ok = Yes
+	browseable = No
+
+[Profiles]
+	comment = Roaming Profile Share
+# would probably change this to elsewhere in a production system ..
+	path = /var/lib/samba/profiles
+	read only = No
+	profile acls = Yes
+	browsable = No
+
+[printers]
+	comment = All Printers
+	path = /var/spool/samba
+	use client driver = Yes
+	create mask = 0600
+	guest ok = Yes
+	printable = Yes
+	browseable = No
+        public = yes
+        writable = yes
+        admin users = root
+        write list = root
+
+[print$]
+	comment = Printer Drivers Share
+	path = /var/lib/samba/printers
+	write list = root
+        create mask = 0664
+        directory mask = 0775
+        admin users = root
+</pre>
+
+Write password for the LDAP admin account (eg. cn=admin,dc=collins) into /etc/samba/secrets.tdb - ESSENTIAL!
+<pre>
+sudo smbpasswd -W
+  Setting stored password for "cn=admin,dc=collins" in secrets.tdb
+  New SMB password:
+  Retype new SMB password:
+</pre>
+
+Restart Samba ..
+<pre>
+sudo /etc/init.d/samba restart
+</pre>
+
+Use the SMB client to check that the Samba server is responding correctly.
+<pre>
+smbclient -L linuxpc -U anonymous%
+  Anonymous login successful
+  Domain=[COLLINS] OS=[Unix] Server=[Samba 3.0.28a]
+
+	Sharename       Type      Comment
+	---------       ----      -------
+	print$          Disk      Printer Drivers Share
+	share           Disk      General share
+	IPC$            IPC       IPC Service (Samba 3.0.28a)
+	CLP-300         Printer   Samsung CLP-300
+  Anonymous login successful
+  Domain=[COLLINS] OS=[Unix] Server=[Samba 3.0.28a]
+
+	Server               Comment
+	---------            -------
+	LINUXPC              Samba 3.0.28a
+
+	Workgroup            Master
+	---------            -------
+	BERKELEY             FOXGLOVE
+	COLLINS              LINUXPC
+</pre>
+
+=== Populate OpenLDAP Database ===
+
+As the name implies, ''smbldap-tools'' provide the link between Samba and the LDAP database.  The tools also put ''posix'' and ''inetOrgPerson'' entries into the database.
+
+Smbldap-tools provides the following commands ..
+* smbldap-groupadd - add a new group
+* smbldap-groupdel - delete a group
+* smbldap-groupmod - modify a group, including adding or removing members
+* smbldap-groupshow - show the properties of a group, including members
+* smbldap-passwd - change a user password
+* smbldap-populate - populate LDAP database, provide stucture necessary for Samba - see below
+* smbldap-useradd - add a new user account
+* smbldap-userdel - delete a user account
+* smbldap-userlist - list users or machines with some info
+* smbldap-usershow - show information for one user account
+* smbldap-usermod - modify the Unix and Samba properties of a user account (many properties)
+* smbldap-userinfo - modify gecos information in a user account (only a few properties)
+
+==== Set Up Windows Domain Stucture ====
+
+Install smbldap-tools and extract the configure.pl script.
+<pre>
+sudo apt-get install smbldap-tools
+sudo gunzip /usr/share/doc/smbldap-tools/configure.pl.gz
+sudo chmod +x /usr/share/doc/smbldap-tools/configure.pl
+</pre>
+
+Before configuring smbldap-tools, check that Samba is running and the Windows domain SID can be retrieved.
+<pre>
+ps -e | grep -i "smb"
+  4956 ?        00:00:00 smbd
+  5096 ?        00:00:00 smbd
+sudo net getlocalsid
+  SID for domain LINUXPC is: S-1-5-21-2899629268-4176875250-2352135513
+</pre>
+
+You may get an error message from running sudo net getlocalsid such as
+
+<pre>
+[2008/12/23 10:35:05,  0] lib/smbldap_util.c:smbldap_search_domain_info(310)
+  smbldap_search_domain_info: Adding domain info for MYDOMAIN failed with NT_STATUS_UNSUCCESSFUL
+SID for domain MYDOMAIN is: S-1-5-21-1153465165-1443174390-2997034973
+</pre>
+but continue with the installation.  You need to finish running and configuring the smbldap-tools in order for the domain info fields to be available.
+
+Now, configure smbldap-tools.  The script prompts you to confirm many attribute values that are used when creating new accounts.  Simply accept all the values, '''except''' with the 2 prompts for passwords, enter the LDAP admin password.  ''You can change any of these values later by editing /etc/smbldap-tools/smbldap.conf.''
+<pre>
+sudo /usr/share/doc/smbldap-tools/configure.pl
+</pre>
+
+Populate the LDAP database with essential Samba entries.  This includes the creation of standard groups, such as ''Administrators'' and ''Domain Users''.
+<pre>
+sudo smbldap-populate
+  Populating LDAP directory for domain COLLINS (S-1-5-21-2899629268-4176875250-2352135513)
+  (using builtin directory structure)
+  entry dc=collins already exist. 
+  entry ou=Users,dc=collins already exist. 
+  entry ou=Groups,dc=collins already exist. 
+  entry ou=Computers,dc=collins already exist. 
+  entry ou=Idmap,dc=collins already exist. 
+  adding new entry: uid=root,ou=Users,dc=collins
+  adding new entry: uid=nobody,ou=Users,dc=collins
+  adding new entry: cn=Domain Admins,ou=Groups,dc=collins
+  adding new entry: cn=Domain Users,ou=Groups,dc=collins
+  adding new entry: cn=Domain Guests,ou=Groups,dc=collins
+  adding new entry: cn=Domain Computers,ou=Groups,dc=collins
+  adding new entry: cn=Administrators,ou=Groups,dc=collins
+  adding new entry: cn=Account Operators,ou=Groups,dc=collins
+  adding new entry: cn=Print Operators,ou=Groups,dc=collins
+  adding new entry: cn=Backup Operators,ou=Groups,dc=collins
+  adding new entry: cn=Replicators,ou=Groups,dc=collins
+  entry sambaDomainName=COLLINS,dc=collins already exist. Updating it...
+  Please provide a password for the domain root: 
+  Changing UNIX and samba passwords for root
+  New password: 
+  Retype new password:
+</pre>
+
+Luma will now show the additional information ..
+<nowiki>[[File:luma-populate.png]]</nowiki>
+
+==== Index the LDAP Database for Speed ====
+
+Although, the LDAP system will function without indexes defined in ''/etc/ldap/slapd.conf'', performance will decrease as the number of users increases and warnings will be reported to ''/var/log/syslog'' like shown below.
+<pre>
+Sep  9 19:34:24 Thich slapd[4929]: <= bdb_equality_candidates: (uidNumber) not indexed 
+Sep  9 19:34:24 Thich slapd[4929]: <= bdb_equality_candidates: (uniqueMember) not indexed 
+Sep  9 19:34:25 Thich slapd[4929]: <= bdb_equality_candidates: (gidNumber) not indexed 
+Sep  9 19:34:25 Thich slapd[4929]: <= bdb_equality_candidates: (memberUid) not indexed 
+Sep  9 19:34:25 Thich slapd[4929]: <= bdb_equality_candidates: (uid) not indexed 
+Sep  9 17:39:12 Thich slapd[4929]: <= bdb_equality_candidates: (sambaGroupType) not indexed 
+Sep  9 17:39:12 Thich slapd[4929]: <= bdb_equality_candidates: (sambaSIDList) not indexed 
+Sep  9 17:39:12 Thich slapd[4929]: <= bdb_equality_candidates: (sambaSID) not indexed 
+</pre>
+
+The following index definitions have been copied from ''/usr/share/doc/smbldap-tools/examples/slapd.conf.gz'', but I have removed indexes to attributes that don't exist in my database (eg. nisMapName).  This text should be pasted into '''/etc/ldap/slapd.conf''' in the ''database'' definitions section (ie. after the first ''database'' directive).
+<pre>
+index objectClass                       eq,pres
+index ou,cn,sn,mail,givenname   	eq,pres,sub
+index uidNumber,gidNumber,memberUid     eq,pres
+index loginShell			eq,pres
+index uniqueMember			eq,pres
+index uid                     		pres,sub,eq
+index displayName             		pres,sub,eq
+index sambaSID              		eq
+index sambaPrimaryGroupSID 		eq
+index sambaDomainName       		eq
+index default              		sub
+</pre>
+Following this, stop the LDAP server, run ''slapindex'', and restart the LDAP server.
+<pre>
+sudo /etc/init.d/slapd stop
+  Stopping OpenLDAP: slapd.
+sudo slapindex 
+  WARNING!
+  Runnig as root!
+  There's a fair chance slapd will fail to start.
+  Check file permissions!
+  /etc/ldap/slapd.conf: line 128: rootdn is always granted unlimited privileges.
+  /etc/ldap/slapd.conf: line 145: rootdn is always granted unlimited privileges.
+sudo chown openldap:openldap /var/lib/ldap/*
+sudo /etc/init.d/slapd start
+  Starting OpenLDAP: slapd
+</pre>
+
+==== Add Test Account ====
+
+Create a new user in LDAP.  This command creates the classes - ''person'', ''organizationalPerson'', ''inetOrgPerson'',
+''posixAccount'', ''shadowAccount'' and ''sambaSamAccount'' for this user.
+<pre>
+sudo smbldap-useradd -a -m -P david
+</pre>
+
+Add root and david to the Windows ''Administrators'' group and confirm ..
+<pre>
+sudo /usr/sbin/smbldap-groupmod -m 'root' 'Administrators'
+sudo /usr/sbin/smbldap-groupmod -m 'david' 'Administrators'
+smbldap-groupshow Administrators
+</pre>
+
+You can also see this added information if you refresh the display in Luma, and click on ''Administrators'' and ''david''.
+
+{| class="wikitable"
+|-
+| <style="border: none;"><nowiki>[[File:IconsPage/note.png]]</nowiki>
+| <style="border: none;">A member of the Administrators group has all administration rights in the domain. You can also give a user or group a limited number of rights in the domain - eg. the right to add a computer to the domain, the right to administer printers.  See <nowiki>[[http://www.samba.org/samba/docs/man/Samba-HOWTO-Collection/rights.html]]</nowiki> for information on assigning individual rights.
+|}
+
+{| class="wikitable"
+|-
+| <style="border: none;"><nowiki>[[File:IconsPage/note.png]]</nowiki>
+| <style="border: none;">In a Microsoft environment the ''Domain Admins'' group is ordinarily a member of the ''Administrators'' group in the domain.  With this Samba set up, this is not possible but a similar result is acheived by assigning all rights to ''Domain Admins'' with the ''net rpc rights'' command - read the How-To mentioned above.
+|}
+
+=== Join Windows XP PC to the Domain ===
+
+Note that you cannot join Windows XP ''Home'' to a domain - this version of XP does not have full Windows networking functionality.  You must have a PC running Windows XP ''Professional''.
+
+Log onto the Windows XP PC with an account that has 'Full Access' to the PC - ie. is an Administrator of the PC.  Run ''Control Panel'', then the ''System'' applet.  (If you want to get there quickly, run sysdm.cpl from ''Start/Run''.) Click on the ''Computer Name'' tab, then click ''Change'', click ''Domain'', then enter the name of the domain, and click ''OK''.  You will then be prompted for a domain account that has access to join a PC to the domain.  Any account in Collins\Administrators will suffice.  If you have followed the steps above, root or david will do.  If you are denied access, re-check the member list of Administrators using Luma.
+
+<nowiki>[[File:winxp-joindomain2.png]]</nowiki>
+
+You will be prompted to reboot the PC.  After you have done this the Windows logon dialog box will contain 3 fields - username, password and domain.  Choose your domain from the drop down list, and log on as root.  Once logged on check that you have an H: drive and explore \\sambaserver\profiles - you should see an empty ''root'' folder.  This will contain your profile, the next time you logon.  Press Ctr-Alt-Del and check that you can change your password.
+
+{| class="wikitable"
+|-
+| <style="border: none;"><nowiki>[[File:IconsPage/note.png]]</nowiki>
+| <style="border: none;"> When a Windows PC is added to a domain, it adds the global ''Domain Admins'' group into the local ''Administrator'' group.  Therefore, if you add a domain account to ''Domain Admins'' it will automatically have administrator access to all Windows PCs that join the domain.
+|}
+
+=== Option: Edit Address Book Information ===
+
+In Luma, click ''Choose Plugin'' and click ''Address Book''.  Choose ''localhost'' as the server.  Click on ''david'' in the left pane, and give this entry a full name, title and e-mail address.  Then click the ''Save'' button.
+
+<nowiki>[[File:luma-addressbook.png]]</nowiki>
+
+Now click ''Choose Plugin'' and click ''Browser''.  Click ''david'' on the left.  (You may need to click somewhere else first to refresh the display.)  Note how there is a new ''mail'' and ''title'' attribute.
+
+This information can be used as a contact list within e-mail clients.  See the community document <nowiki>[[Evolution]]</nowiki> for a brief explanation on how to set up Evolution to use the LDAP database for its Contact list.  The article <nowiki>[[http://kb.wisc.edu/helpdesk/page.php?id=3462]]</nowiki> shows how to set up the Thunderbird address book to use LDAP.
+
+=== Option: LDAP Authentication on Clients ===
+This procedure is only available for computers with Ubuntu 7.10 and later. 
+<pre>
+sudo apt-get --yes install ldap-auth-client
+  LDAP server Uniform Resource Identifier: ldap://xxxx  - enter the name of the LDAPServer here
+  Distinguished name of the search base: dc=collins
+  LDAP version to use: 3
+  Make local root Database admin: Yes
+  Does the LDAP database require login? No
+  LDAP account for root: cn=admin,dc=collins
+  LDAP root account password: <enter the LDAP admin password>
+sudo auth-client-config -a -p lac_ldap
+</pre>
+
+Test - see if the list of groups and users includes those users and groups in LDAP.
+<pre>
+getent group
+    :   :
+  - output will include Windows groups held in LDAP ..
+  Domain Admins:*:512:root
+  Domain Users:*:513:
+  Domain Guests:*:514:
+  Domain Computers:*:515:
+  Administrators:*:544:root,david
+  Account Operators:*:548:
+  Print Operators:*:550:
+  Backup Operators:*:551:
+  Replicators:*:552:
+    :   :
+getent passwd
+  - output will include user accounts that only exist in LDAP (eg. david)
+</pre>
+If there is a problem, the first places to look are ''/var/log/auth.log'' and ''/etc/ldap.conf''.  Also, try stopping apparmor ''/etc/init.d/apparmor stop''.  
+
+<nowiki>[[File:IconsPage/important.png]]</nowiki>There is a problem with libnss-ldap where, even for system users listed in ''/etc/passwd'', LDAP is contacted to find out if the user is in any LDAP groups.  This can cause the system to come to a virtual stand-still if the LDAP server is unavailable.  To get around this problem, there is a directive called nss_initgroups_ignoreusers.  List all your local system accounts after this directive.  The article <nowiki>[[http://www.nabble.com/nsswitch.conf-issues-with-LDAP-Auth--td6259466.html]]</nowiki> suggests the following options in '''/etc/ldap.conf'''.
+<pre>
+  timelimit 15
+  bind_timelimit 15
+  bind_policy soft
+  nss_initgroups_ignoreusers root,sys,... and all your other local system accounts in /etc/passwd ...
+</pre>
+
+<nowiki>[[File:IconsPage/important.png]]</nowiki>If you get an error "Cannot set your user group.." at the Ubuntu login screen, reboot the computer. This should fix the problem.
+
+View ''/etc/nsswitch.conf'' to see the combination and order of systems that are being used for authentication. Run ''man nsswitch.conf'' for a detailed explanation.
+
+{| class="wikitable"
+|-
+| <style="border: none;"><nowiki>[[File:IconsPage/note.png]]</nowiki>
+| <style="border: none;">The LDAP server itself can be set up similarly to use this OpenLDAP database for logon authentication. The URI will be specified as ldap://''localhost''.
+|}
+
+{| class="wikitable"
+|-
+| <style="border: none;"><nowiki>[[File:IconsPage/note.png]]</nowiki>
+| <style="border: none;">On laptops or on a home network where the LDAP server is not always running, it may be important to cache credentials on the user's PC so that they can always logon to the PC, even when the LDAP server is not available.  This can be done using ''libpam-ccreds'' - refer to the Community Document <nowiki>[[PamCcredsHowto]]</nowiki>.
+|}
+
+{| class="wikitable"
+|-
+| <style="border: none;"><nowiki>[[File:IconsPage/note.png]]</nowiki>
+| <style="border: none;">With the basic LDAP connection used in this article, passwords and other LDAP information are sent across the network as clear text. This may not be a problem in a home network or a small one-office business, but beyond that is is good practice to encrypt the LDAP information going over the network - refer to the Community Document <nowiki>[[SecuringOpenLDAPConnections]]</nowiki>.
+|}
+
+=== Option: Migrate Linux Accounts into LDAP ===
+
+This section is included to complete the describing of smbldap-tools.  You might not have any existing Linux accounts or groups that you want to migrate into LDAP.  You might prefer just to create new users and groups, using smbldap-useradd, etc.  If you do want to migrate some posix accounts, though, this is how you can do it using smbldap-tools.
+
+Extract Migration Scripts Supplied by smbldap-tools ..
+<pre>
+sudo gunzip /usr/share/doc/smbldap-tools/examples/migration_scripts/smbldap-migrate-unix-accounts.gz
+sudo gunzip /usr/share/doc/smbldap-tools/examples/migration_scripts/smbldap-migrate-unix-groups.gz
+sudo chmod +x /usr/share/doc/smbldap-tools/examples/migration_scripts/smbldap-migrate-unix-groups
+sudo chmod +x /usr/share/doc/smbldap-tools/examples/migration_scripts/smbldap-migrate-unix-accounts 
+cp -v /usr/share/doc/smbldap-tools/examples/migration_scripts/smbldap-migrate-unix-groups .
+cp -v /usr/share/doc/smbldap-tools/examples/migration_scripts/smbldap-migrate-unix-accounts .
+</pre>
+
+Make copies of /etc/passwd and /etc/group and open the copies in an editor.  Remove all system groups (eg. scanner, syslog) and system accounts (eg. mail, uucp), leaving only user logon accounts (eg. david, fred) and groups that are used for managing user logon accounts (eg. engineers, accountants).  Only the latter will be transferred into LDAP.  Be sure to remove ''root'' and ''nobody'' - there are already entries for these in the LDAP database.
+<pre>
+cp -v /etc/group .
+cp -v /etc/passwd .
+mousepad passwd &
+mousepad group &
+</pre>
+
+Preview the migration of the selected groups (remove ''-n'' from the command line when you want it to run for real). Note: Add '''-a''' to the command line if you want the groups to also appear in the Samba domain.
+<pre>
+sudo ./smbldap-migrate-unix-groups -G group -v -n
+</pre>
+
+Preview the migration of selected user accounts (remove ''-n'' from the command line when you want it to run for real).  Note: Add '''-a''' to the command line if you want the user accounts to appear in the Samba domain.
+<pre>
+sudo ./smbldap-migrate-unix-accounts -P passwd -S /etc/shadow -v -n
+</pre>
+
+=== See also ===
+
+* <nowiki>[[OpenLDAPServer]]</nowiki> - setting up OpenLDAP, replicating the database, and using it with a variety of systems
+* <nowiki>[[LDAPClientAuthentication]]</nowiki> - setting up a Linux PC to use LDAP for authentication
+* <nowiki>[[PamCcredsHowto]]</nowiki> - setting up cached credentials for LDAP authentication
+* <nowiki>[[SecuringOpenLDAPConnections]]</nowiki> - encrypting LDAP connections
+
+=== External links ===
+
+* <nowiki>[[http://www.openldap.org/doc/admin24/]]</nowiki> - OpenLDAP Software 2.4 Administrator's Guide
+* <nowiki>[[http://us1.samba.org/samba/docs/man/Samba-HOWTO-Collection/]]</nowiki> - essential reading for understanding Samba.  It is not up-to-date in areas, so be cautious about following it for detailed set up.
+* <nowiki>[[http://aput.net/~jheiss/samba/ldap.shtml]]</nowiki> - Samba and LDAP by Jason Heiss
+* <nowiki>[[file:///usr/share/doc/smbldap-tools/html/index.html]]</nowiki> - after you have installed smbldap-tools, browse through this.

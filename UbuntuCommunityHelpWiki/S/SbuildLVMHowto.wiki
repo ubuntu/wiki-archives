@@ -1,0 +1,321 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== Introduction ==
+
+This document describes the steps to setup a chroot with schroot on an LVM LV, so that you can build packages on an LVM LV snapshot. It tries to provide an alternative to <nowiki>[[http://wiki.ubuntu.com/PbuilderHowto|PbuilderHowto]]</nowiki>.  It assumes a passing understanding of LVM, and having an available VG to work with.
+
+The script mk-sbuild is used to initialize each schroot.  It was written based on the original implementation of this How-To, and incorporates additional recommendations from sbuild-setup(7). It is part of the ubuntu-dev-tools package.
+
+The following assume you want to install ''hardy''. If you need a ''dapper'', ''edgy'', ''feisty'' or ''gutsy'' chroot, then exchange ''hardy'' with the appropriate distribution.
+
+== LVM requirements ==
+
+For the schroots to be useful, you will need a good bit of free space in your VG.  By default, each schroot takes 5G, and each time you run an sbuild, it will temporarily allocate 4G for filesystem change in the LVM snapshot until the sbuild finishes.  To see available VG space:
+
+<pre>
+sudo vgs
+</pre>
+
+== Getting started ==
+
+The first time you run <code>mk-sbuild</code>, it will attempt to get everything set up for first-time use:
+<pre>
+mk-sbuild
+</pre>
+
+It performs the following steps:
+* installs the required packages (you will be prompted for your password for the sudo)
+* starts an editor on your ~/.sbuildrc (you need to fill in $mailto and $maintainer_name)
+* adds your current user id to the "sbuild" group (so you can run sbuild/schroot correctly)
+
+After this finishes, you must re-log-in!
+
+== Adding a schroot ==
+
+To create a schroot, run the script with two arguments, the VG you want to allocate the LV into, and the release to install:
+
+<pre>
+$ mk-sbuild --vg=storagevg hardy
+</pre>
+
+Alternatively, without passing --vg, aufs support will be used creating the chroot in /var/lib/schroot/chroots.
+<pre>
+$ mk-sbuild hardy
+</pre>
+
+If you have an amd64 host and you want to have i386 schroots, you can add the optional <code>--arch</code> and <code>--personality</code> options:
+
+<pre>
+mk-sbuild --arch i386 --personality=linux32 --vg=storagevg hardy
+</pre>
+
+This will do the following steps:
+* allocates a LV named "$RELEASE_chroot" (with "-$ARCH" appended if not the native arch)
+* makes an ext3 on the LV
+* runs <code>debootstrap</code> on the LV for the specified release
+* installs a default source.lists
+* installs a default schroot.conf entry
+* updates packages, installs build-essential and keyring, drops debconf to Noninteractive, and builds some needed symlinks
+
+There are other options available:
+<pre>
+man mk-sbuild
+</pre>
+
+=== Alternate sources.list ===
+
+If you want to use a different sources.list, you can create <code>~/.mk-sbuild-lv.sources</code> where ''RELEASE'' will be automatically replaced by the release being installed:
+
+<pre>
+deb http://archive.ubuntu.com/ubuntu RELEASE main restricted universe multiverse
+deb-src http://archive.ubuntu.com/ubuntu RELEASE main restricted universe multiverse
+deb http://archive.ubuntu.com/ubuntu RELEASE-updates main restricted universe multiverse
+deb-src http://archive.ubuntu.com/ubuntu RELEASE-updates main restricted universe multiverse
+deb http://security.ubuntu.com/ubuntu RELEASE-security main restricted universe multiverse
+deb-src http://security.ubuntu.com/ubuntu RELEASE-security main restricted universe multiverse
+</pre>
+
+This can be combined with an apt proxy (such as apt-cacher, apt-proxy, apt-cacher-ng) or even a local ubuntu mirror (managed with debmirror or apt-mirror, but requires a lot of disk space). It will greatly speed up the build process as packages will only be fetched once from the network and then served from the local cache.
+
+The alternate sources.list file can also be specified on the command line using <code>--source-template</code>.
+
+Another useful option is <code>--debootstrap-mirror</code>: it can be used to specify which mirror debootstrap should use when creating the initial chroot.
+
+=== Alternate schroot.conf entry ===
+
+If you want to use a different schroot.conf entry template, you can create <code>~/.mk-sbuild-lv.schroot.conf</code> where ''CHROOT_NAME'', ''CHROOT_PATH'' will be automatically replaced by the configured items:
+
+<pre>
+[CHROOT_NAME]
+type=lvm-snapshot
+description=CHROOT_NAME
+priority=3
+groups=sbuild,root,admin
+root-groups=root,sbuild,admin
+source-groups=sbuild,root,admin
+source-root-groups=root,sbuild,admin
+device=CHROOT_PATH
+mount-options=-o noatime
+lvm-snapshot-options=--size 4G
+run-setup-scripts=true
+run-exec-scripts=true
+</pre>
+
+More information about the available options can be found in the schroot.conf man page:
+
+<pre>
+man schroot.conf
+</pre>
+
+== Using sbuild ==
+
+Once the schroot is built, you can enter a snapshot with:
+
+<pre>
+schroot -c hardy -u root
+</pre>
+
+To make modifications to the snapshot origin LV you can use the "source:" prefix with the name of the schroot.  Any changes made will appear in all subsequence schroot snapshots:
+
+<pre>
+schroot -c source:hardy -u root
+</pre>
+
+To build a package in your schroot, use sbuild:
+
+<pre>
+sbuild -d hardy PACKAGE_*.dsc
+</pre>
+
+== Keeping your chroots up-to-date ==
+
+You can use the following shell script to update all your chroots:
+
+<pre>
+for d in `schroot -l --all-source-chroots`
+do
+        schroot -q -c $d -u root --directory=/root  -- sh -c \
+           'apt-get -qq update && apt-get -qy dist-upgrade && apt-get clean'
+done
+</pre>
+
+Drop it in <code>/etc/cron.daily/</code> and you'll always have up-to-date chroots !
+
+== Managing build log files ==
+
+sbuild keeps a log of each package build. The directory where the logs are stored is defined in sbuild configuration file (<code>.sbuildrc</code>). sbuild will also email the logs to a specified address.
+
+If sending an email is not necessary, a local alias can be setup in <code>/etc/aliases</code> on the build machine that points to /dev/null:
+<pre>
+buildlogs: /dev/null
+</pre>
+
+Don't forget to run newaliases to update the database:
+<pre>
+sudo newaliases
+</pre>
+
+sbuild can then be modified to send build logs to the alias in <code>.sbuildrc</code>:
+<pre>
+$mailto = 'buildlogs';
+</pre>
+
+Managing old build log files is also advisable. The following script will compress log files older than 2 days, move them into an <code>archive/</code> sub-directory and delete compressed log files older than 90 days:
+<pre>
+SBUILD_LOG_DIR="${HOME}/sbuild/logs"
+SBUILD_LOG_ARCHIVE=${SBUILD_LOG_DIR}/archive/
+
+find ${SBUILD_LOG_DIR} -atime +2 -a -type f -exec gzip '-q' '{}' ';'
+if ls  ${SBUILD_LOG_DIR} | grep -q gz$
+then
+        mv ${SBUILD_LOG_DIR}/*gz ${SBUILD_LOG_ARCHIVE}
+fi
+find  ${SBUILD_LOG_ARCHIVE} -atime +90 -exec rm -f '{}' ';'
+</pre>
+
+Adjust the location of the build log directory and drop it in <code>/etc/cron.daily</code>.
+
+== Instructions for Dapper ==
+
+=== Installing required packages on dapper ===
+
+You need a very recent version of schroot. I used version 0.2.8-1ubuntu1 for this Howto.
+
+Just install the following packages on a dapper system:
+
+<pre>
+apt-get install schroot sbuild
+</pre>
+
+=== creating lvm volumes ===
+
+in order to create an lvm volume, you first need to prepare one or more partitions (or other block devices) for use as physical volume:
+
+<pre>
+pvcreate /dev/md1
+</pre>
+
+Then you add these physical volumes to a new volume group:
+
+<pre>
+vgcreate data00 /dev/md1
+</pre>
+
+Once this is done, you can now create a new logical volume. The following commands creates a new logical volume 'dapper_chroot' with the size of 5GB in a volumegroup called 'data00':
+
+<pre>
+lvcreate -n dapper_chroot -L 5g data00
+</pre>
+
+you can now create a filesystem on it and mount it:
+
+<pre>
+mkfs -t ext3 /dev/data00/dapper_chroot
+mount /dev/data00/dapper_chroot /mnt
+</pre>
+
+=== bootstrapping a base system ===
+
+Now you can bootstrap your favorite distribution on that:
+
+<pre>
+debootstrap dapper /mnt http://archive.ubuntu.com/ubuntu
+</pre>
+
+Perhaps you want your /etc/sudoers and sources.list copied into that chroot, so that you can easily become root inside:
+
+<pre>
+sudo cp /etc/sudoers /mnt/etc
+sudo cp /etc/apt/sources.list /mnt/etc/apt
+</pre>
+
+Unmount this temporary mountpoint now, schroot will mount it itself:
+
+<pre>
+umount /mnt
+</pre>
+
+=== configuring schroot ===
+
+edit '/etc/schroot/schroot.conf' to contain this stanza:
+
+<pre>
+[dapper]
+type=lvm-snapshot
+description=Ubuntu Dapper
+priority=3
+groups=sbuild,root,admin
+root-groups=root,sbuild,admin
+source-groups=sbuild,root,admin
+source-root-groups=root,sbuild,admin
+device=/dev/data00/dapper_chroot
+mount-options=-o noatime
+lvm-snapshot-options=--size 1G
+run-setup-scripts=true
+run-exec-scripts=true
+</pre>
+
+=== Entering the chroot ===
+
+If you want to change the 'original' chroot, you can chroot into that with the following command:
+
+<pre>
+schroot -c source:dapper
+</pre>
+
+All changes you make there are persistent. So if you want to upgrade that chroot, use the following commands:
+
+<pre>
+schroot -c source:dapper -u root -- apt-get update
+schroot -c source:dapper -u root -- apt-get -y dist-upgrade
+schroot -c source:dapper -u root -- apt-get install build-essential ubuntu-minimal fakeroot devscripts
+</pre>
+
+To enter the chroot on an lvm snapshot, use this command:
+
+<pre>
+schroot -c dapper
+</pre>
+
+Thanks to the session scripts, some directories, like /home, /proc, /sys and /tmp are mounted for you. You can modify/add session scripts in /etc/schroot/setup.d/*
+
+=== sbuild ===
+
+For proper support for schroot, make sure you are in the system group 'sbuild'.
+
+Create a file called '~/.sbuildrc' with the following contents:
+
+<pre>
+
+$mailto = "root";
+
+$maintainer_name='Reinhard Tartler <siretart@tauware.de>';
+
+$chroot_mode = "schroot";
+
+1;
+
+</pre>
+
+=== building packages ===
+
+You can build now packages with the following command on lvm snapshots:
+
+<pre>
+sbuild -d dapper package_1.2.3-4.dsc
+</pre>
+
+If anything goes wrong, use parameters '-v -D' to debug.
+
+Good Luck!
+
+=== Questions ===
+Is it possible to have something like "when the build fails drop to a shell", allowing you to inspect the build (failure)? PBuilder supports this via hooks, for example.

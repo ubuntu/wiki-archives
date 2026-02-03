@@ -1,0 +1,289 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+
+== Introduction ==
+This documentation is intended to give someone a jump start on learning the art of firewall configuration via standard shorewall tools. Shorewall is a perl based wrapper for IPTables. IPTables and Shorewall can probably do the same things, but shorewall makes it easier. 
+
+This guide will make the following assumptions:
+* You are comfortable with some basics on the command line and know how to edit text files
+* You are familiar with basic network concepts involving IP Addresses and routers
+* You are responsible for your own actions, including following this documentation
+
+== Goals ==
+* To configure an enterprise level firewall using Linux
+* To share an Internet connection via custom router
+
+== Advantages ==
+* Massive monitoring options for all Internet traffic by using iptraf, tcpdump, and other similar tools
+* Custom port blocking for all members of the LAN
+* Flexibility for future Internet filtering via centralized configuration
+* Increased options and ease of configuration for VPN connections, including site to site links
+
+== Requirements ==
+* Linux with kernel 2.4 or 2.6 (Ubuntu, Debian, OpenWRT, and loads more)
+* Two network cards installed and functional
+* Shorewall 3.4.4 or similar installed: <code>sudo apt-get install shorewall</code>
+* Physical access to your soon-to-be router is nearly a requirement. Try these directions remotely at your own risk.
+
+== Network Configuration ==
+To start, get a Linux box with two network cards that can be used in a test environment. Run <code>ip addr</code> and you should get something like this:
+
+<pre>
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 16436 qdisc noqueue state UNKNOWN 
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+    inet 127.0.0.1/8 brd 127.255.255.255 scope host lo
+    inet6 ::1/128 scope host 
+       valid_lft forever preferred_lft forever
+2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast state UP qlen 1000
+    link/ether 00:11:22:d0:13:53 brd ff:ff:ff:ff:ff:ff
+    inet 10.10.10.2/24 scope global eth0
+    inet6 fe80::240:f4ff:fed0:1e53/64 scope link
+3: eth1: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast state UP qlen 1000
+    link/ether 00:33:44:92:75:66 brd ff:ff:ff:ff:ff:ff
+    inet 192.168.1.1/24 scope global eth0
+    inet6 fe80::250:bfff:fe92:7566/64 scope link
+</pre>
+
+=== Network Interfaces - Notes on trust levels ===
+Note: A standard convention for network interface trust levels is shown below
+ eth0 -- external network interface
+       - internet -- 0.001% trusted
+ eth1 -- internal network interface
+       - lan      -- 70% trusted
+
+If additional interfaces are added or listed, it is best to keep the same order. The least trusted interface should be first, most trusted last. This is only a convention, not required, but highly recommended.
+
+If you see any interface that starts with tun, ppp, or ham, it probably is a vpn connection.
+
+=== Functionality Requirement: Network cards ===
+'''If you do not have at least eth0 and eth1, try your hardware again or check
+for module issues.''' If there are more than two eth interfaces that is fine, they can be ignored for now.
+
+If you have eth0 and eth1, then set their IP address information as needed. This can be done via GUI Network Manager, or on command line by editing your /etc/network/interfaces file as listed below. If you aren't sure whether to use DHCP or set static, start with DHCP and see if the router box can get to the Internet.
+<pre>
+auto lo
+iface lo inet loopback
+
+auto eth0
+iface eth0 inet dhcp
+
+auto eth1
+iface eth1 inet static
+       address 192.168.1.1
+       netmask 255.255.255.0
+       broadcast 192.168.1.255
+</pre>
+
+OR
+
+<pre>
+auto lo
+iface lo inet loopback
+
+auto eth0
+iface eth0 inet static
+       address 10.10.10.2
+       netmask 255.255.255.0
+       broadcast 10.2.2.255
+       gateway 10.10.10.1
+
+auto eth1
+iface eth1 inet static
+       address 192.168.1.1
+       netmask 255.255.255.0
+       broadcast 192.168.1.255
+</pre>
+
+Once your settings are the way you want, run this command '''on one line''' or from the physical console:
+<pre>
+ ifdown -a;ifup -a
+</pre>
+
+'''Verify that you can ping something on your outside network, the
+Internet, and your inside network.'''
+
+== Shorewall Beginnings ==
+* If you haven't done so already, install shorewall: <code>sudo apt-get install shorewall</code>
+* Edit /etc/shorewall/shorewall.conf and verify 'IP_FORWARDING=On'
+* Edit /etc/default/shorewall and set 'startup=1'
+
+=== Shorewall Configuration Files ===
+Within /etc/shorewall, these files are of importance for a basic router:
+<pre>
+ interfaces  masq  modules  policy  rules  shorewall.conf  zones
+</pre>
+
+All other files can be ignored or deleted. The samples are duplicated
+in /usr/share/doc/shorewall/default-config/. Each of these files can
+be used for advanced concepts later, and are simply not required now.
+
+Also note that each config file has extra documentation right in the
+config file.
+
+==== /etc/shorewall/interfaces ====
+----
+This config file should be strait forward. We are simply naming each network interface for use later.
+
+From now on, we refer to eth0 as "net" or Internet.
+Eth1 is now referred to as "lan".
+Names can be nearly anything you want, granted that it is alphanumeric, and 5 characters or less.
+
+'''Every config file from here on refers to these names.'''
+<pre>
+net      eth0           detect          tcpflags,nosmurfs
+lan      eth1           detect
+</pre>
+
+==== /etc/shorewall/zones ====
+----
+The basic function of zones is to set ipv4 or ipv6. Also note we now
+have a new concept referred to as 'fw'.
+
+'''The fw entry simply means "me". It always refers to the Linux box
+shorewall is running on, and is completely independent of interfaces,
+ip addresses, or other network settings.''' Notice that fw's type is
+'firewall', not ipv4.
+
+<pre>
+fw      firewall
+net     ipv4
+lan     ipv4
+</pre>
+
+==== /etc/shorewall/policy ====
+----
+The policy sets the overall layout for who is allowed to go where. It
+makes broad sweeps and big changes. Start here for designing security.
+
+Each line is processed from top to bottom for every packet that goes
+to or through the router. If a packet matches the source and the
+destination, then the policy type determines the fate of the packet.
+
+'''Each line can be read as <code>"if a packet is sent from the ____ to the ____ then ______ it."</code>
+ Ex: If a packet is sent from the 'lan' to the 'net' then 'ACCEPT' it.'''
+
+Ex:
+* A device connected to the LAN tries to ping our firewall.
+** Rule #1 does not match, the destination is not the Internet.
+** Rule #2 does match, source and destination are the same as our packet. The packet is sent on to its destination (which just happens to be the firewall itself).
+
+* A device somewhere on the 'net' tries to ping our firewall.
+** Rules #1-4 do nothing, the source is not the Internet.
+** Rule #5 does match. It is coming from the net. The destination does not matter. The packet is dropped, the person pinging us gets no response, as if our router is not turned on.
+
+* A device connected to the LAN tries to ping google.com
+** Rule #1 matches, the firewall accepts it, and then passes it on. ''Note: The "passing on" function usually needs to be configured in another file.''
+** The ping should then make it out to google.com via our ISP and other routers, then come back to us.
+** When the packet comes back, it technically matches 'net to all DROP', but it is a response to a conversation we started. It is considered an ESTABLISHED connection, and therefore is automatically sent through to the LAN regardless of any policy in this example.
+
+The last line of ''all all REJECT info'' simply means "if we forgot a
+policy variation, reject the packet". It should always be the last
+rule, nothing after it will be processed. The REJECT option sends a
+message back to the source explicitly saying "I'm not available". The
+REJECT option is not a good idea if you are trying to make your router
+invisible.
+
+<pre>
+lan             net             ACCEPT
+lan             fw              ACCEPT
+
+fw              net             ACCEPT
+fw              lan             ACCEPT
+
+net             all             DROP
+
+all             all             REJECT          info
+</pre>
+
+==== /etc/shorewall/rules ====
+----
+The rules file is for making exceptions to the policy. It is best used
+for making small changes to the firewall, not large changes. '''This
+file is not required for a normal functioning firewall unless you want
+to let people in from the Internet.'''
+
+'''Each line can be read as 
+<pre>
+"______ a packet if it is sent from the ____ to the ____ 
+using the protocol of ____ on port number ____"}}}'''
+
+Each entry can be restrictive. For example, the rule below that has "net:14.15.16.112/27" as the source will only match if that IP address range tries to ping us.
+
+Each entry can have multiple comma delimited fields, EX: port 21,22,53,80,443 or net:1.2.3.4,55.66.77.88
+
+{{{
+ACCEPT  net                     fw      tcp     80
+ACCEPT  net:77.88.99.110        fw      udp     1194
+ACCEPT  net:14.15.16.112/27     fw      icmp    8
+
+</pre>
+
+==== /etc/shorewall/masq ====
+----
+The masq file is required if you want your shorewall box to be a router.
+
+'''This file can be read as 
+<pre>
+"if someone is trying to get to a network that ____ has access to,
+and that someone is coming in from ____ then pass it through. When
+passing the packet on, rewrite it so it looks like it is coming from
+me directly."
+</pre>
+'''
+
+Note: Masq(erading) is almost always required for routing. This is based on the assumption that your internal network and your external network have completely different IP address ranges. When your firewall is fully configured for routing, '''it will rewrite outgoing packets to make the traffic appear to come from itself, rather then the original device on the protected lan.''' This is normal.
+
+EX: Device with IP address 192.168.1.101 is on the internal lan, and
+wants to ping 10.10.10.1 on your external lan. If your router passed the
+whole packet on exactly as is, 10.10.10.1 would try to respond to
+192.168.1.101. It does not know which network that is, and will fail.
+If your router rewrites the sender as being itself (10.10.10.2) then
+10.10.10.1 will know how to respond. The route then rewrites the
+destination on the response so it gets forwarded on to 192.168.1.101.
+
+<pre>
+eth0 eth1
+
+</pre>
+
+=== Shorewall - Testing settings ===
+Once all of the files listed above have been updated as needed, issue the following command:
+<pre>
+sudo shorewall check
+</pre>
+
+That will spew multiple screens worth of info at you. The important info is at the bottom. If you have a line that says <code>Shorewall configuration verified</code> or other similar joy, you are in business. If the output complains about a file, you probably have a typo. Double check your spelling and capitalization. 
+
+If the check went through successfully, lets continue. Otherwise go back and figure out what is wrong.
+
+=== Shorewall - Applying settings ===
+To take your newly checked settings and apply them, issue the following command:
+<pre>
+sudo shorewall restart
+</pre>
+
+You should now be firewalled, and allowing all traffic through this router from the internal LAN. Make sure that the computers on the LAN use your new router as their default gateway. DNS servers also need to be pingable. DNSMasq documentation is very useful to read up on for getting a dhcp server functional within your new LAN.
+
+== Command Reference ==
+
+== Additional Info ==
+
+== Todo ==
+* More 'human interpretation' examples
+* DNSMasq - DHCP & DNS server for LAN
+* Example conf files for different environments
+* Adding a VPN connection
+* Oops - undo shorewall via 'shorewall stop' and 'shorewall clear'
+* shorewall ipcalc
+
+----
+CategorySecurity CategoryNetworking

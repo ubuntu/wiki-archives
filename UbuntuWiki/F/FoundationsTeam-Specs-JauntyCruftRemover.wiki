@@ -1,0 +1,212 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+* '''Launchpad Entry''': UbuntuSpec:jaunty-cruftremover-improvements
+* '''Created''': MichaelVogt, LarsWirzenius
+* '''Contributors''': 
+* '''Packages affected''': update-manager, cruft-remover (still called system-cleaner)
+
+=== Summary ===
+
+This spec is about changes to Cruft Remover to be implemented
+for the jaunty release. The changes fall into three categories:
+* Share as much code as possible with update-manager, particularly all
+ the code to identify problems to be fixed during an upgrade, and the
+ infrastructure for running that code, should be in update-manager.
+* Add new features.
+* Improve Cruft Remover usability.
+
+=== Release Note ===
+
+The 9.04 release installs Cruft Remover, a new tool to find and fix
+problems in systems that have been upgraded from previous releases. Such
+problems may be now-unnecessary packages, or missing configuration
+tweaks that the current Ubuntu installer adds. Cruft Remover works
+together with Update Manager to make sure these things get fixed during
+an upgrade, but can also be used on its own.
+
+Cruft Remover was already included in the 8.10 release, but was not
+installed by default.
+
+=== Rationale ===
+
+Update Manager performs some cleanup on upgrade, Cruft Remover does this
+anytime. Currently they do not share the same code. This duplication of
+code is a bug that needs fixing.
+
+Cruft Remover also needs to learn to find more kinds of problems, and
+its user interface needs improving, because users report it to be
+confusing.
+
+=== Design ===
+
+==== Merging code bases ====
+
+Both Update Manager and Cruft Remover need to perform two tasks:
+* Identify and clean up cruft (obsolete packages, auto-removable
+ packages, etc).
+* Fix anomalies relative to a fresh install (missing relatime in
+ /etc/fstab).
+The two programs should share the code that performs those tasks.
+
+There are some constraints in the release upgrader:
+* Must not have hard dependencies on external python libraries (other than the
+ stuff in ubuntu-minimal).
+* Must work on previous version/LTS-version of the distro
+ (intrepid, hardy).
+
+The external dependencies can just be bundled inside the release
+upgrader so that is not a real problem (just something that makes it a
+bit more difficult). We should consider if we need some cruft/anomalies
+to be version specific (e.g. only if the current version is hardy). The
+release upgrader does that in a number of cases, but it could be argued
+that such checks are not required since an anomaly is an anomaly.
+
+The cruft removal code in u-m needs to be able to be seeded with a
+blacklist (the list of packages obsolete before the upgrade and a
+explicit blacklist).
+
+Changes needed:
+* Move Cruft Remover's plugin manager code into Update Manager.
+* Move those Cruft Remover plugins that are used by Update Manager
+ into Update Manager's source tree.
+* Convert Update Manager's quirks to Cruft Remover plugins.
+* Modify Update Manager to use the code from Cruft Remover to
+ handle quirks.
+* Change Cruft Remover to get its plugin manager and plugins from
+ Update Manager.
+
+==== Usability improvements ====
+
+Based on feedback from Martin Albisetti, users, bug reports, and
+elsewhere, the Cruft Remover user interface needs at least the
+following improvements:
+* Break the list of "cruft" found into parts, with the same kind of
+ stuff in each part (e.g., packages to remove in one part, files to
+ remove in another part, configuration tweaks in their own part).
+* Put stuff the user has previously ignored in its own section in
+ the list, hidden by default.
+* Provide more information about problems found. For example, if a
+ package should be removed, tell the user what the package is, when
+ it was installed, what release it came from, what size it is, and
+ perhaps more.
+
+==== New plugin: unpurged packages ====
+
+Cruft Remover should find packages that have been removed, but not
+purged, so that they have configuration files remaining. Since purging
+may delete valuable information (log files, databases, etc.), 
+un-purged packages should be put on the list shown to the user, but
+not marked for removal by default.
+
+==== New plugin: autoremovable packages ====
+
+Apt can keep track of which packages a user has explicitly asked to
+install, and which got installed because some other package depended
+on them. Such automatically installed packages may become unnecessary,
+and Cruft Remover should report them.
+
+==== New plugin: .dpkg-old/new files ====
+
+The way dpkg handles conffiles often results in the old or new version
+of a conffile staying on the filesystem, renamed with a .dpkg-old
+or .dpkg-new suffix. Cruft Remover should find them, and offer to
+delete them.
+
+=== Implementation ===
+
+==== Code merge ====
+
+Overview: Cruft Remover has a Plugin``Manager class that finds plugins,
+and the plugins find "pieces of cruft". A piece of cruft might be a
+package that should be removed (for whatever reason), or a specific
+change to be made to some file (e.g., add relatime to fstab).
+
+The Cruft Remover code has been explicitly designed to be used as a
+library, so it would make more sense to have Update Manager use the
+Cruft Remover code than the other way around. 
+
+Update Manager needs to look at problems to fix at several points in the
+upgrade process, and it should notice those problems only at the
+relevant points. To fix this, Cruft Remover's plugin framework should add
+a new concept, "condition": the plugin can require that the application
+has set a specific condition for it to be active, and if a condition is
+set, only plugins requiring that condition should be active.
+
+<pre>
+Plugins:
+foo.require_condition("red")
+bar.require_condition(None)
+foobar.require_condition("orange")
+...
+plugin_manager.get_plugins() -> [bar_plugin]
+plugin.manager.get_plugins(condition="orange") -> [foobar]
+</pre>
+
+(Condition might be used by Update Manager like this:
+"hardy_to_intrepid.post_dist_upgrade", "hardy.postupgrade", etc. Cruft
+Remover won't care about the actual names, it just compares strings.)
+
+* ''This choice of implementation feels slightly odd to me, perhaps because it seems as if it will require changes in the generic Cruft Remover library code to check conditions that are specific to Update Manager. Did you consider the alternative of having Update Manager simply ask Cruft Remover for all problems, and then ignore the ones that aren't relevant (for example using isinstance, or some "type" property)? Then you could write generic code in Cruft Remover and have all the, er, "business logic" specific to release upgrades in Update Manager. Obviously this only works if problems are not too expensive to compute, but I would expect this normally to be the case.'' --ColinWatson
+* ''This implementation makes things more generic. I envision that it, or something based on it, will be useful for a version of the program that looks in a user's home directory for stuff to clean up.'' --LarsWirzenius
+
+Update Manager and Cruft Remover will collaborate to develop the shared
+plugins, and could have plugins specific to themselves as well.
+Update Manager will have stuff that won't make sense to run from
+Cruft Remover.
+
+==== New plugin: unpurged packages ====
+
+We can get the list of unpurged packages from python-apt. After that,
+the plugin can just return the list of packages as Package``Cruft
+instances, and the Cruft Remover infrastructure takes care of the rest.
+
+This feature will probably find some packages that fail when they
+are purged from the removed state. Such packages are buggy and will
+need to be fixed. An efficient way of finding such packages is to
+test all packages with piuparts.
+
+==== New plugin: autoremovable packages ====
+
+The code for this already exists, but was not enabled in intrepid.
+It needs to be enabled, and if any bugs are found in user testing,
+they need to be addressed.
+
+==== New plugin: .dpkg-old/new files ====
+
+Scan /etc for files with the .dpkg-old or .dpkg-new suffix. Since they
+will only exist for dpkg conffiles, they will all be in /etc.
+
+* ''I can think of at least one counterexample, namely /var/yp/Makefile (for NIS users). Is there anything we can do about this? I certainly don't think it's sensible to scan the whole filesystem given that the vast majority of conffiles will be in /etc, but we should at least cover all known examples. Perhaps you should do a quick archive scan for conffiles (just dumping out the conffiles file in the dpkg control area of each .deb) and make sure there aren't any others; then just extend this plugin to cover whatever special cases are found.'' --ColinWatson
+* ''Good point. I'll do the scan and add the ability to look in all the known location. The list of directories to scan (with sub-directories) will be easy to expand anyway.'' --LarsWirzenius
+
+Add a File``Cruft class that will remove the associated file when cleaned
+up, and report useful information about it: what package the .dpkg-old/new
+file belongs to, if known.
+
+==== UI Changes ====
+
+The Cruft Remover user interface will need to change a bit. This needs
+some further thought.
+
+=== Test/Demo Plan ===
+
+* Perform a test upgrade from hardy to intrepid to jaunty, using
+ Update Manager. The hardy system should not have relatime options in
+ fstab. The jaunty one should have. Verify that the jaunty system works. This should become part of the update-manager/Auto``Upgrade``Test 
+ code to test post-upgrade conditions.
+
+=== Unresolved issues ===
+
+N/A
+
+----
+CategorySpec

@@ -1,0 +1,129 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+{| class="wikitable"
+|-
+| <tablestyle="float:right; width:40%; background:#F1F1ED; margin: 0 0 1em 1em;" style="padding:0.5em;">'''Table of Contents'''<<BR>>
+|}
+== Performance Considerations ==
+Ubuntu is built based on balance of hardware capability, performance and security. Here are several options you would like to use for best performance.
+
+=== 4k page size vs 64k page size ===
+Ubuntu currently supports 4k page size for all architectures except for ppc64el. 64k page sizes are beneficial to certain memory bound benchmarks, but there is a penalty, it might be wasteful if you are dealing with small data structures that have to be page aligned. Also, 64k page size could break compatibility with old ARMv7 binaries. 64k page size will need to reconsidered with the introduction of 52bit VA
+
+== Improve performance benchmarks with 4k pages ==
+There are ways to get comparable performance using 4k page size and avoid the penalties of 64k pages. 
+* IOMMU Passthrough.
+* Hugetlbfs
+ 
+=== IOMMU Passthrough ===
+Setting iommu.passthrough to 1 on th kernel command line bypasses the IOMMU translation for DMA, setting it to 0 uses IOMMU translation for DMA. This will need to be set at the time of deployment (using preseeds) or by editing the appropriate grub configuration files and reboot the system for the changes to take effect. 
+
+It has been observed that on Cavium Thunder X2 setting the kernel command line parameter iommu.passthrough=1, Flexible I/O Tester Synthetic Benchmark (Fio) performance (with 4k page size) was comparable to that of 64k pages.  
+
+==== Pros ====
+* All I/O bandwidth increased
+
+==== Cons ====
+* '''Elevated security risk''': Disabling IOMMU exposes all of your RAM to full access by USB4, Thunderbolt, or other PCIe devices.
+* Only available on arm64
+
+==== Enable IOMMU passthrough ====
+* Append “iommu.passthrough=1 into GRUB_CMDLINE_LINE in /etc/default/grub update grub config and reboot the system.
+<pre>
+sudo sed -i \ 's/^GRUB_CMDLINE_LINUX=\"/GRUB_CMDLINE_LINUX=\"iommu.passthrough=1 /' \ /etc/default/grub
+sudo update-grub2
+sudo reboot
+</pre>
+
+=== Hugetlbfs ===
+This is a runtime feature that can be enabled from userspace, and is currently supported by applications like Java, QEMU, DPDK, and benchmarks like Flexible I/O Tester Synthetic Benchmark (Fio).
+
+==== Pros ====
+* Avoid tasks from large number of brk/mmap to increase performance
+
+==== Cons ====
+* Waste lots of memory
+* Need application support
+
+==== Enable hugetlbfs ====
+* Specify the number of hugepages (''here I am using 512 as an example, you might need to change that depending on your use case.'')
+<code> sudo sysctl -w vm.nr_hugepages=512 </code>
+* Mount the hugetlbfs
+{{{ 
+ sudo mkdir /hugetlbfs
+ sudo mount -t hugetlbfs none /hugetlbfs 
+}}}
+
+==== Using hugetlbfs with Fio benchmark ====
+With Fio benchmark you can enable mmaphuge for iomem and mem options.
+<pre>
+ sudo touch hugepages/file
+ sudo  fio -rw=read -blocksize=128k -iodepth=128 -buffered=0 -direct=1 -ioengine=libaio -runtime=180 -filename=/dev/nvme0n1 -name=test -time_based -group_reporting -numjobs=4 -iomem=mmaphuge -mem=mmaphuge:/home/ubuntu/hugepages/file -output=output.txt
+</pre>
+
+=== CPU affinity ===
+For single thread process, you can bind it to specific CPU. This is helpful when process and PCI device use CPU in the same NUMA node. Some application can bind with its parameter e.g. iperf3 or you need to `taskset` to set it manually.
+
+==== Pros ====
+* Memory access of devices and tasks can be high speed cached
+
+==== Cons ====
+* Only work on multiple NUMA system
+
+==== Find NUMA group for devices ====
+* Find from PCI bus and device number
+<pre>
+$ lspci | grep <device> | cut -d \  -f 1
+7d:00.0
+</pre>
+* Find NUMA node in /sys
+<pre>
+$ find /sys/devices -name numa_node | grep '7d:00.0' | xargs cat
+0
+</pre>
+}}}
+
+==== Bind process on specific NUMA group ====
+* Reference the output of lscpu and find out CPU number
+<pre>
+$ lscpu | grep NUMA
+NUMA node(s):        4
+NUMA node0 CPU(s):   0-23
+NUMA node1 CPU(s):   24-47
+NUMA node2 CPU(s):   48-71
+NUMA node3 CPU(s):   72-95
+</pre>
+* Start process on selected CPU e.g. iperf3
+<pre>
+iperf3 -sD -A 0
+</pre>
+* Or use taskset
+<pre>
+taskset -p 1 <pid>
+</pre>
+
+=== Force CPU max frequency ===
+Most of CPUs are capable of automatic changing its frequencies and use slower frequencies when it is idle. Use `cpufreq-set -r -g performance` to set it always on max frequency to avoid the latency when CPU changing its frequency
+
+==== Pros ====
+* Easy to set
+
+==== Cons ====
+* Not all architecture supported
+* CPU might slow down if overheated
+
+==== Set CPU max frequency ====
+* Assuming a system with 72 CPU
+<pre>
+for x in `seq 0 71`;do
+    cpufreq-set -r -g performance -c $x
+done
+</pre>

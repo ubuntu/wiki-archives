@@ -1,0 +1,1401 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+
+== Setting up an Ubuntu System to deploy Ubuntu ==
+
+Installing an operating system on multiple systems can be a complicated and daunting task. A check-list may be employed to ensure all systems have similar if not identical configurations.  We will employ tools to automate the process not only for disk-full systems, but will include disk-less systems as well. 
+
+Many "how to" documents exist on automating the installation of the Linux operating system to include  making hard drive images and scripted installations.  Many how to documents exist on how to set up various services in Linux as well.
+
+This document was created with the intent of  being a comprehensive document that will allow the easy deployment of an Ubuntu HPC cluster.  We will not concentrate on parallel computing,  only on the deployment of the nodes to support a HPC Cluster.
+
+Bash will be our main tool for the automation.  I will explain the purpose of each script as you encounter them on this page.
+
+== Prerequisites ==
+
+=== Required ===
+
+* TFTP Server
+* Syslinux
+* DHCP Server
+* NFS Server
+* Debootstrap
+* PXE capable NICs
+
+=== Optional ===
+* Wake-on-LAN
+* Apache
+* Apt-mirror
+* BIND
+* Whois (for the mkpassword command)
+* Expect
+
+I highly recommend the optional requirements as they will ease the installation of the operating system.
+
+== Getting Started ==
+
+Install Ubuntu 9.04 (Jaunty Jackalope) on a system that you will use as the deployment server.  I prefer a minimal install and then install required/optional packages as needed.
+
+I maintain all the scripts in /opt/cluster, however, you can modify them to be placed in any location.  All bash scripts make reference to a global configuration file.  Having common variables in a single location eases the coding involved in other scripts, however, may cause confusion when encountering unknown variables when you are making changes to the code.
+
+* /opt/cluster will contain bash scripts
+* /opt/cluster/config will contain configuration information
+
+Let's create the directory that will contain our scripts and various configuration files:
+
+<pre>
+mkdir -p /opt/cluster/config
+</pre>
+
+== Global Configuration ==
+
+The global configuration file /opt/cluster/config/global.conf contains information related to:
+* Network
+* Server identification
+* File locations
+* Operating system
+* Packages
+* Nodes
+
+Create the common configuration file that is sourced by all other scripts.
+
+- Please note: a file that is sourced does not need to start with a shebang.  The shebang i.e #!/bin/bash may be missing from the other scripts due to the wiki mark-up
+
+Create the global configuration:
+
+<pre>
+touch /opt/cluster/config/global.conf
+</pre>
+
+<pre>
+
+DOMAIN_NAME="home.local" 
+DOMAIN_ADMIN="root" 
+NETWORK="10.10.1.0" 
+SUBNET_MASK="255.255.255.0" 
+BROADCAST="10.10.1.255" 
+ROUTER_NAME="router" 
+ROUTER_IP="10.10.1.1" 
+NAME_SERVER_NAME="dns" 
+NAME_SERVER_IP="10.10.1.10" 
+NTP_SERVER_NAME="ntp" 
+NTP_SERVER_IP="10.10.1.10" 
+DHCP_SERVER_NAME="dhcp" 
+DHCP_SERVER_IP="10.10.1.10" 
+HTTP_SERVER_NAME="www" 
+HTTP_SERVER_IP="10.10.1.10" 
+PROXY_SERVER_NAME="proxy" 
+PROXY_SERVER_IP="10.10.1.10" 
+TFTP_SERVER_NAME="tftp" 
+TFTP_SERVER_IP="10.10.1.10" 
+NFS_SERVER_NAME="nfs" 
+NFS_SERVER_IP="10.10.1.10" 
+MIRROR_SERVER_NAME="mirror" 
+MIRROR_SERVER_IP="10.10.1.10" 
+
+DHCPD_CONFIG_FILE="/etc/dhcp3/dhcpd.conf" 
+DNS_CONFIG_FILE="/etc/bind/named.conf.local" 
+DNS_FORWARD_CONFIG="/etc/bind/db.$DOMAIN_NAME" 
+DNS_REVERSE_CONFIG="/etc/bind/db.10.10.1" 
+UBUNTU_MIRROR_URL="http://$MIRROR_SERVER_NAME.$DOMAIN_NAME/ubuntu" 
+NFS_CONFIG_FILE="/etc/exports" 
+NFS_ROOT_EXPORT="/srv/nfsroot" 
+NFS_HOME_EXPORT="/srv/cluster" 
+OFFICIAL_MIRROR="us.archive.ubuntu.com/ubuntu" 
+MIRROR_LIST_FILE="/etc/apt/mirror.list" 
+TFTP_ROOT="/var/lib/tftpboot" 
+DEFAULT_PXE_CONFIG_FILE="$TFTP_ROOT/pxelinux.cfg/default" 
+
+HEAD_NODE="headnode" 
+HEAD_NODE_IP="10.10.1.10" 
+HEAD_NODE_WORKING_DIR="/root" 
+HEAD_NODE_CONFIG_DIR="/opt/cluster/config" 
+BASE_NODE_NAME="node" 
+NODE_NUMBER=71 
+MASTER_NODE_LIST="$HEAD_NODE_CONFIG_DIR/nodes.txt" 
+NEW_NODES_LIST="$HEAD_NODE_CONFIG_DIR/new_nodes.txt" 
+PSSH_HOST_FILE="$HEAD_NODE_CONFIG_DIR/hosts.txt" 
+DHCP_RANGE_START="10.10.1.100" 
+DHCP_RANGE_STOP="10.10.1.200" 
+NODE_USER="cluster" 
+NODE_USER_UID=1010 
+
+ARCH="amd64" 
+RELEASE="jaunty" 
+PRE_INST_PKGS="language-pack-en,language-pack-en-base,vim,wget,openssh-server,ntp,nfs-common" 
+PRE_INST_EXCL_PKGS="ubuntu-minimal" # separated by a comma 
+POST_INST_PKGS="linux-image-server" #separated by a space 
+PKGS_TO_PURGE="" # separated by a space 
+NODE_PXE="$TFTP_ROOT/nodes/$RELEASE/$ARCH" 
+REPOSITORY="main restricted universe multiverse" 
+NFS_BUILD_DIR="$HEAD_NODE_WORKING_DIR/nfsroot/$RELEASE/$ARCH" 
+APT_SOURCES_FILE="$NFS_BUILD_DIR/etc/apt/sources.list" 
+FSTAB_FILE="$NFS_BUILD_DIR/etc/fstab" 
+HOSTNAME_FILE="$NFS_BUILD_DIR/etc/hostname" 
+NTP_CONF_FILE="$NFS_BUILD_DIR/etc/ntp.conf" 
+INTERFACE_FILE="$NFS_BUILD_DIR/etc/network/interfaces" 
+HOSTS_FILE="$NFS_BUILD_DIR/etc/hosts" 
+CURRENT_PXE_FILES="$HEAD_NODE_CONFIG_DIR/pxefiles.txt" 
+
+printf "Global configration file loaded\n"
+</pre>
+
+The global configuration file can be sourced with either
+* . /opt/cluster/config/global.conf
+* source /opt/cluster/config/global.conf
+
+As you read on, you will notice most if not all scripts will refer to /opt/cluster/config/global.conf.
+
+global.conf sections:
+
+* Site information – identifies how our site is configured
+* Service information – identifies various services and their related configuration files
+* Node information – identifies node information.  Please take node of the variable NODE as it identifies the name of the first node in the cluster.
+* NFS Root file-system information – identifies information related to creating our NFS root for disk-less systems.
+
+You will notice that Site information uses the same IP address for multiple servers.  This is from dedicating a “head node” to systems deployment.  You can substitute pre-existing servers to perform some of the same roles.
+
+== Head Node Creation ==
+
+Now that we have defined our global configuration, we will now install the necessary software to make our system the head node.  If we can automate the installation of nodes, we should be able to automate the installation and configuration of our deployment server.
+
+The script to create the “head node”:
+* Creates our cluster user with a specific ID and home directory
+* Installs openssh
+* Installs debootstrap
+* Installs apt-mirror (see Note(1) regarding apt-mirror located after script)
+* Configures /etc/apt/mirror.list
+* Installs TFTP 
+* Installs syslinux
+* Installs ISC DHCP Server
+** Configures the scope for the DHCP server
+* Installs NTP
+** Configures NTP
+* Installs BIND
+** Configures the forward look-up zone
+** Configures the reverse look-up zone
+* Installs NFS server
+** Configures our exports
+* Install the LAMP stack (see Note(2) regarding LAMP located after script)
+** Makes our Ubuntu mirror available via HTTP
+* Creates our initial node list (blank to begin)
+* Installs parallel-ssh
+* Installs expect
+* Installs wakeonlan
+
+Create makeHeadNode make it executable:
+
+<pre>
+touch /opt/cluster/makeHeadNode
+chmod u+x /opt/cluster/makeHeadNode
+</pre>
+
+The following bash script will install the necessary software to allow our head node to be the system used to deploy others, and configure the services provided by each package as it is installed:
+
+<pre>
+
+CONFIG_DIR="/opt/cluster/config" 
+
+if [ ! $(whoami) = "root" ]; then 
+  printf "This script must run with root access.\n" 
+  exit 192 
+fi 
+
+if [ -f $CONFIG_DIR/global.conf ]; then 
+  source $CONFIG_DIR/global.conf 
+else 
+  printf "Unable to locate the global configuration file.\n" 
+  printf "This script looks for configuration files in:\n" 
+  printf "$CONFIG_DIR\n" 
+  exit 192 
+fi 
+ 
+adduser --uid $NODE_USER_UID --home $NFS_HOME_EXPORT --gecos $NODE_USER $NODE_USER 
+tasksel install openssh-server 
+apt-get -y install debootstrap 
+apt-get -y install apt-mirror 
+printf "set nthreads\t\n" > $MIRROR_LIST_FILE 
+printf "set _tilde 0\n\n" >> $MIRROR_LIST_FILE 
+printf "deb http://$OFFICIAL_MIRROR $RELEASE main restricted universe multiverse\n" >> $MIRROR_LIST_FILE 
+printf "deb http://$OFFICIAL_MIRROR $RELEASE-updates main restricted universe multiverse\n" >> $MIRROR_LIST_FILE 
+printf "deb http://$OFFICIAL_MIRROR $RELEASE-security main restricted universe multiverse\n" >> $MIRROR_LIST_FILE 
+printf "deb http://$OFFICIAL_MIRROR $RELEASE main/debian-installer restricted/debian-installer universe/debian-installer multiverse/debian-installer" >> $MIRROR_LIST_FILE 
+printf "deb http://$OFFICIAL_MIRROR $RELEASE-updates main/debian-installer universe/debian-installer\n">> $MIRROR_LIST_FILE 
+printf "deb http://$OFFICIAL_MIRROR $RELEASE-security main/debian-installer\n\n" >> $MIRROR_LIST_FILE 
+printf "clean http://$OFFICIAL_MIRROR\n" >> $MIRROR_LIST_FILE 
+apt-get -y install tftpd-hpa 
+/etc/init.d/openbsd-inetd stop 
+update-rc.d -f openbsd-inetd remove 
+sed -i s/no/yes/ /etc/default/tftpd-hpa 
+/etc/init.d/tftpd-hpa start 
+apt-get -y install syslinux 
+cp /usr/lib/syslinux/pxelinux.0 $TFTP_ROOT 
+mkdir -p $TFTP_ROOT/pxelinux.cfg 
+touch $DEFAULT_PXE_CONFIG_FILE 
+apt-get -y install dhcp3-server 
+DDNS_STYLE="none" 
+DEFAULT_LEASE_TIME="86400" 
+MAX_LEASE_TIME="604800" 
+TIME_OFFSET="-18000" 
+AUTHORITATIVE="authoritative" 
+LOG_FACILITY="local7" 
+ALLOW_BOOT="booting" 
+ALLOW_BOOTP="bootp" 
+FILENAME="pxelinux.0" 
+GET_LEASE_NAMES="on" 
+USE_HOST_DECL_NAME="on" 
+printf "#Global options\n\n" > $DHCPD_CONFIG_FILE 
+printf "ddns-update-style $DDNS_STYLE;\n" >> $DHCPD_CONFIG_FILE 
+printf "option domain-name \"$DOMAIN_NAME\";\n" >> $DHCPD_CONFIG_FILE 
+printf "option domain-name-servers $NAME_SERVER_IP;\n" >> $DHCPD_CONFIG_FILE 
+printf "option ntp-servers $NTP_SERVER_IP;\n" >> $DHCPD_CONFIG_FILE 
+printf "option routers $ROUTER_IP;\n" >> $DHCPD_CONFIG_FILE 
+printf "option subnet-mask $SUBNET_MASK;\n" >> $DHCPD_CONFIG_FILE 
+printf "option broadcast-address $BROADCAST;\n" >> $DHCPD_CONFIG_FILE 
+printf "default-lease-time $DEFAULT_LEASE_TIME;\n" >> $DHCPD_CONFIG_FILE 
+printf "max-lease-time $MAX_LEASE_TIME;\n" >> $DHCPD_CONFIG_FILE 
+printf "option time-offset $TIME_OFFSET;\n" >> $DHCPD_CONFIG_FILE 
+printf "$AUTHORITATIVE;\n" >> $DHCPD_CONFIG_FILE 
+printf "log-facility $LOG_FACILITY;\n" >> $DHCPD_CONFIG_FILE 
+printf "allow $ALLOW_BOOT;\n" >> $DHCPD_CONFIG_FILE 
+printf "allow $ALLOW_BOOTP;\n" >> $DHCPD_CONFIG_FILE 
+printf "filename \"$FILENAME\";\n" >> $DHCPD_CONFIG_FILE 
+printf "next-server $TFTP_SERVER_IP;\n\n" >> $DHCPD_CONFIG_FILE 
+printf "#Undiscovered nodes\n\n" >> $DHCPD_CONFIG_FILE 
+printf "subnet $NETWORK netmask $SUBNET_MASK {\n" >> $DHCPD_CONFIG_FILE 
+printf "\tget-lease-hostnames $GET_LEASE_NAMES;\n" >> $DHCPD_CONFIG_FILE 
+printf "\tuse-host-decl-names $USE_HOST_DECL_NAME;\n" >> $DHCPD_CONFIG_FILE 
+printf "\trange $DHCP_RANGE_START $DHCP_RANGE_STOP;\n" >> $DHCPD_CONFIG_FILE 
+printf "}\n\n" >> $DHCPD_CONFIG_FILE 
+printf "#Begin reservations for discovered nodes\n\n" >> $DHCPD_CONFIG_FILE 
+/etc/init.d/dhcp3-server start 
+apt-get -y install ntp 
+sed -i s/server\ ntp.ubuntu.com/server\ us.pool.ntp.org/ /etc/ntp.conf 
+sed -i '/us.pool.ntp.org/a server ntp.ubuntu.com\nrestrict us.pool.ntp.org mask 255.255.255.255 nomodify notrap noquery\nrestrict ntp.ubuntu.com mask 255.255.255.255 nomodify notrap noquery\nrestrict 10.10.1.0 mask 255.255.255.0 nomodify notrap' /etc/ntp.conf 
+/etc/init.d/ntp restart 
+apt-get -y install bind9 
+printf "zone \"$DOMAIN_NAME\" {\n" > $DNS_CONFIG_FILE 
+printf "\ttype master;\n" >> $DNS_CONFIG_FILE 
+printf "\tnotify no;\n" >> $DNS_CONFIG_FILE 
+printf "\tfile \"$DNS_FORWARD_CONFIG\";\n" >> $DNS_CONFIG_FILE 
+printf "};\n\n" >> $DNS_CONFIG_FILE 
+printf "zone \"1.10.10.in-addr.arpa\" {\n" >> $DNS_CONFIG_FILE 
+printf "\ttype master;\n" >> $DNS_CONFIG_FILE 
+printf "\tnotify no;\n" >> $DNS_CONFIG_FILE 
+printf "\tfile \"$DNS_REVERSE_CONFIG\";\n" >> $DNS_CONFIG_FILE 
+printf "};\n" >> $DNS_CONFIG_FILE 
+printf ";\n; BIND data file for $DOMAIN_NAME domain\n;\n" > $DNS_FORWARD_CONFIG 
+printf "\$TTL\t604800\n" >> $DNS_FORWARD_CONFIG 
+printf "@\t\tIN\tSOA\t$HEAD_NODE.$DOMAIN_NAME.\t$DOMAIN_ADMIN.$DOMAIN_NAME. (\n" >> $DNS_FORWARD_CONFIG 
+printf "\t\t\t\t1\t\t; Serial\n" >> $DNS_FORWARD_CONFIG 
+printf "\t\t\t\t604800\t\t; Refresh\n" >> $DNS_FORWARD_CONFIG 
+printf "\t\t\t\t86400\t\t; Retry\n" >> $DNS_FORWARD_CONFIG 
+printf "\t\t\t\t2419200\t\t; Expire\n" >> $DNS_FORWARD_CONFIG 
+printf "\t\t\t\t604800 )\t; Negative Cache TTL\n" >> $DNS_FORWARD_CONFIG 
+printf ";\n" >> $DNS_FORWARD_CONFIG 
+printf "\t\t\tNS\t$NAME_SERVER_NAME.$DOMAIN_NAME.\n" >> $DNS_FORWARD_CONFIG 
+printf "\t\t\tMX\t10 $HEAD_NODE.$DOMAIN_NAME.\n" >> $DNS_FORWARD_CONFIG 
+printf "@\t\tIN\tA\t$HEAD_NODE_IP\n" >> $DNS_FORWARD_CONFIG 
+printf "$ROUTER_NAME\t\tIN\tA\t$ROUTER_IP\n" >> $DNS_FORWARD_CONFIG 
+printf "$HEAD_NODE\t\tIN\tA\t$HEAD_NODE_IP\n" >> $DNS_FORWARD_CONFIG 
+printf "$NAME_SERVER_NAME\t\tIN\tCNAME\t$HEAD_NODE\n" >> $DNS_FORWARD_CONFIG 
+printf "$DHCP_SERVER_NAME\t\tIN\tCNAME\t$HEAD_NODE\n" >> $DNS_FORWARD_CONFIG 
+printf "$NTP_SERVER_NAME\t\tIN\tCNAME\t$HEAD_NODE\n" >> $DNS_FORWARD_CONFIG 
+printf "$NFS_SERVER_NAME\t\tIN\tCNAME\t$HEAD_NODE\n" >> $DNS_FORWARD_CONFIG 
+printf "$MIRROR_SERVER_NAME\t\tIN\tCNAME\t$HEAD_NODE\n" >> $DNS_FORWARD_CONFIG 
+printf "$NTP_SERVER_NAME\t\tIN\tCNAME\t$HEAD_NODE\n" >> $DNS_FORWARD_CONFIG 
+printf "$PROXY_SERVER_NAME\t\tIN\tCNAME\t$HEAD_NODE\n" >> $DNS_FORWARD_CONFIG 
+printf "$HTTP_SERVER_NAME\t\tIN\tCNAME\t$HEAD_NODE\n" >> $DNS_FORWARD_CONFIG 
+printf "$TFTP_SERVER_NAME\t\tIN\tCNAME\t$HEAD_NODE\n\n" >> $DNS_FORWARD_CONFIG 
+printf ";Automatic name generation for undiscovered nodes\n" >> $DNS_FORWARD_CONFIG 
+printf "\$GENERATE $(printf $DHCP_RANGE_START | cut -d. -f4)-$(printf $DHCP_RANGE_STOP | cut -d. -f4) dhcp-\$\tIN\tA\t$(printf $NETWORK | sed 's\0$\\')\$\n\n" >> $DNS_FORWARD_CONFIG 
+printf ";Discovered nodes\n" >> $DNS_FORWARD_CONFIG 
+printf ";\n; BIND reverse data file for $DOMAIN_NAME domain\n;\n" > $DNS_REVERSE_CONFIG printf "\$TTL\t604800\n" >> $DNS_REVERSE_CONFIG 
+printf "@\t\tIN\tSOA\t$NAME_SERVER_NAME.$DOMAIN_NAME.\t$DOMAIN_ADMIN.$DOMAIN_NAME. (\n" >> $DNS_REVERSE_CONFIG 
+printf "\t\t\t\t1\t\t; Serial\n" >> $DNS_REVERSE_CONFIG 
+printf "\t\t\t\t604800\t\t; Refresh\n" >> $DNS_REVERSE_CONFIG 
+printf "\t\t\t\t86400\t\t; Retry\n" >> $DNS_REVERSE_CONFIG 
+printf "\t\t\t\t2419200\t\t; Expire\n" >> $DNS_REVERSE_CONFIG 
+printf "\t\t\t\t604800 )\t; Negative Cache TTL\n" >> $DNS_REVERSE_CONFIG 
+printf ";\n" >> $DNS_REVERSE_CONFIG 
+printf "\t\tIN\tNS\t$NAME_SERVER_NAME.$DOMAIN_NAME.\n" >> $DNS_REVERSE_CONFIG 
+printf "$(printf $ROUTER_IP | cut -d. -f4)\t\tIN\tPTR\t$ROUTER_NAME.$DOMAIN_NAME.\n" >> $DNS_REVERSE_CONFIG 
+printf "$(printf $HEAD_NODE_IP | cut -d. -f4)\t\tIN\tPTR\t$HEAD_NODE.$DOMAIN_NAME.\n\n" >> $DNS_REVERSE_CONFIG 
+printf ";Automatic name generation for undiscovered nodes\n" >> $DNS_REVERSE_CONFIG 
+printf "\$GENERATE $(printf $DHCP_RANGE_START | cut -d. -f4)-$(printf $DHCP_RANGE_STOP | cut -d. -f4) \$\t\tIN\tPTR\tdhcp-\$.$DOMAIN_NAME.\n\n"  >> $DNS_REVERSE_CONFIG 
+printf ";Discovered nodes\n" >> $DNS_REVERSE_CONFIG 
+/etc/init.d/bind9 restart 
+printf "domain $DOMAIN_NAME\n" > /etc/resolv.conf 
+printf "search $DOMAIN_NAME\n" >> /etc/resolv.conf 
+printf "nameserver $NAME_SERVER_IP\n" >> /etc/resolv.conf 
+apt-get -y install nfs-kernel-server 
+mkdir -p $NFS_ROOT_EXPORT 
+printf "$NFS_ROOT_EXPORT\t\t$NETWORK/24(rw,sync,no_root_squash,no_subtree_check)\n" > $NFS_CONFIG_FILE 
+printf "$NFS_HOME_EXPORT\t\t$NETWORK/24(rw,sync,no_root_squash,no_subtree_check)\n" >> $NFS_CONFIG_FILE 
+exportfs -a 
+tasksel install lamp-server 
+ln -s /var/spool/apt-mirror/mirror/us.archive.ubuntu.com/ubuntu /var/www/ubuntu 
+> $MASTER_NODE_LIST 
+> $NEW_NODES_LIST 
+apt-get -y install pssh 
+for PUSHTOPLACE in /root /srv/cluster; do 
+	pushd $PUSHTOPLACE 
+	printf "alias /usr/bin/parallel-ssh='pssh -h /opt/cluster/config/hosts.txt'\n" >> $PUSHTOPLACE/.bashrc 
+	printf "alias /usr/bin/parallel-scp='pscp -h /opt/cluster/config/hosts.txt'\n" >> $PUSHTOPLACE/.bashrc 
+	printf "alias /usr/bin/parallel-rsync='prsync -h /opt/cluster/config/hosts.txt'\n" >> $PUSHTOPLACE/.bashrc 
+	printf "alias /usr/bin/parallel-nuke='pnuke -h /opt/cluster/config/hosts.txt'\n" >> $PUSHTOPLACE/.bashrc 
+	printf "alias /usr/bin/parallel-slurp='pslurp -h /opt/cluster/config/hosts.txt'\n" >> $PUSHTOPLACE/.bashrc 
+	popd 
+done
+apt-get -y install expect
+apt-get -y install wakeonlan
+ 
+
+exit 0
+</pre>
+
+Note(1)
+Apt-mirror is a tool which will allow you to maintain a local mirror of the Ubuntu repositories. You will be able to make the mirror available via HTTP, FTP, NFS, etc. In our scenario, we will use HTTP which will require the installation of a Web Server.
+Mirroring the repository (to include main, updates, multiverse, universe, and restricted for the amd64 architecture of a  single release will require approximately 24 GB of space.
+The length of time required for the mirror process to complete is dependent upon several factors, one of which is bandwidth. It took me approximately 2.5 days via DSL.
+Apt-mirror is not a requirement for this exercise, however, greatly reduces the length of time to deploy an Ubuntu system. I recommend apt-mirror to be installed.
+If you choose to use apt-mirror, you can update /etc/apt/sources.list to point to the local repository.  This can be included in the makeHeadNode script.
+
+Note(2)
+The entire LAMP stack is not needed.  Since we will be providing the Ubuntu repositories via HTTP as well as the preseed configuration file, all that is needed is Apache.  I prefer the LAMP stack as it provides a multitude of possibilities.  Some of which will be appended to the end of this document.
+
+== Bootstrap an Ubuntu Installation ==
+
+Now that our prerequisite software is installed and configured we will create a base installation for use by disk-less nodes.
+
+The script to bootstrap an Ubuntu installation:
+
+* Archives the previous bootstrap installation if one was completed for the same release and architechure
+* Performs a bootstrap installation based upon variables sourced from /opt/cluster/global.conf
+* Updates the bootstrap installation:
+* Updates /etc/apt/sources.list to use our local repository
+* Updates /etc/fstab to mount our cluster user home directory
+* Updates the bootstrap build environment with a generic host name
+* Updates /etc/ntp.conf to use our own NTP server
+* Updates /etc/apt/network/interfaces to be a generic configuration
+* Chroots into out build environment and installs additional software based upon /opt/cluster/global.conf
+* Chroots into our build environment and removes software based upon /opt/cluster/global.conf
+* Updates the build environment's initramfs to be NFS aware and copies it to out TFTP server root directory
+* Prompts for a root password
+* Creates our cluster user with a specific UID and home directory
+* Determines what kernel and initramfs was installed
+* Copies the build environment kernel and initramfs to our TFTP server root directory
+* Downloads the Ubuntu installer from an official repository to out TFTP server root directory (see Note(3) following the script)
+
+Create buildBase and  make it executable:
+
+<pre>
+touch /opt/cluster/buildBase
+chmod u+x /opt/cluster/buildBase
+</pre>
+
+The following script will create our bootstrapped system to be used as our NFS root file-system:
+
+<pre>
+
+CONFIG_DIR="/opt/cluster/config" 
+
+if [ ! $(whoami) = "root" ]; then 
+  printf "This script must run with root access.\n" 
+  exit 192 
+fi 
+
+if [ -f $CONFIG_DIR/global.conf ]; then 
+  source $CONFIG_DIR/global.conf 
+else 
+  printf "Unable to locate the global configuration file.\n" 
+  printf "This script looks for configuration files in:\n" 
+  printf "$CONFIG_DIR\n" 
+  exit 192 
+fi 
+
+progress () 
+{ 
+	DOT=0 
+	until [ $DOT -gt 30 ]; do 
+		printf "." 
+	((DOT++)) 
+	done 
+	printf "\n" 
+} 
+
+if [ -d $NFS_BUILD_DIR ]; then 
+  printf "Archiving previous installation...\n" 
+  tar --checkpoint=100 --checkpoint-action=exec='printf "."' -czf $HEAD_NODE_WORKING_DIR/nfsroot-$(date +%m-%d-%y).tgz $NFS_BUILD_DIR 
+  printf "\n" 
+  printf "Removing previous installation..."; progress 
+  rm -rf $NFS_BUILD_DIR 
+else 
+  mkdir -p $NFS_BUILD_DIR 
+fi 
+
+printf "Performing a bootstrap of $RELEASE-$ARCH..."; progress 
+debootstrap --arch $ARCH --include=$PRE_INST_PKGS --exclude=$PRE_INST_EXCL_PKGS $RELEASE $NFS_BUILD_DIR $UBUNTU_MIRROR_URL 
+
+printf "Updating locale and timezone..."; progress 
+chroot $NFS_BUILD_DIR dpkg-reconfigure locales 
+chroot $NFS_BUILD_DIR dpkg-reconfigure tzdata 
+
+printf "Updating apt sources..."; progress 
+printf "deb $UBUNTU_MIRROR_URL $RELEASE $REPOSITORY\n" > $APT_SOURCES_FILE 
+printf "deb $UBUNTU_MIRROR_URL $RELEASE-updates $REPOSITORY\n" >> $APT_SOURCES_FILE 
+printf "deb $UBUNTU_MIRROR_URL $RELEASE-security $REPOSITORY\n" >> $APT_SOURCES_FILE 
+
+printf "Updating fstab to include proc..."; progress 
+printf "proc\t\t/proc\t\tproc\tdefaults\t0\t0\n" >> $FSTAB_FILE 
+printf "Updating fstab to include CD-ROM..."; progress 
+printf "/dev/scd0\t/media/cdrom\tudf,iso9660\tuser,noauto,exec,utf8\t0\t0\n" >> $FSTAB_FILE 
+printf "Updating fstab to include $NFS_USER\'s NFS home directory..."; progress 
+printf "$NFS_SERVER_NAME.$DOMAIN_NAME:$NFS_HOME_EXPORT\t/home/cluster\tnfs\trw,auto\t0 0\n" >> $FSTAB_FILE 
+
+printf "Updating build environment with generic host name..."; progress 
+printf "$BASE_NODE_NAME\n" > $HOSTNAME_FILE 
+
+printf "Updating NTP configuration..."; progress 
+sed -i s/ntp.ubuntu.com/$NTP_SERVER_NAME.$DOMAIN_NAME/ $NTP_CONF_FILE 
+sed -i "/$NTP_SERVER_NAME.$DOMAIN_NAME/a restrict $NTP_SERVER_NAME.$DOMAIN_NAME mask 255.255.255.255 nomodify notrap noquery" $NTP_CONF_FILE 
+
+printf "Updating build environment with generic interface configuration..."; progress 
+printf "#The loopback network interface\n" >> $INTERFACE_FILE 
+printf "auto lo\n" >> $INTERFACE_FILE 
+printf "iface lo inet loopback\n\n" >> $INTERFACE_FILE 
+printf "#The primary network interface\n" >> $INTERFACE_FILE 
+printf "auto eth0\n" >> $INTERFACE_FILE 
+printf "iface eth0 inet manual\n" >> $INTERFACE_FILE 
+printf "Updating hosts files to include loopback interface..."; progress 
+printf "127.0.0.1\tlocalhost\n" > $HOSTS_FILE 
+
+printf "Updating packages to most recent versions..."; progress 
+mount proc $NFS_BUILD_DIR/proc -t proc 
+chroot $NFS_BUILD_DIR apt-get -y update 
+chroot $NFS_BUILD_DIR apt-get -y dist-upgrade 
+
+printf "Installing additional packages..."; progress 
+for PACKAGE in $POST_INST_PKGS; do 
+  chroot $NFS_BUILD_DIR apt-get -q -y install $PACKAGE 
+done 
+
+printf "Purging packages..."; progress 
+for PACKAGE in $PKGS_TO_PURGE; do 
+  chroot $NFS_BUILD_DIR apt-get -y remove --purge $PACKAGE 
+done 
+
+BASE_KERNEL_FILE=$(basename `ls $NFS_BUILD_DIR/boot/vmlinuz*`) 
+BASE_INITRD_FILE=$(basename `ls $NFS_BUILD_DIR/boot/initrd*`) 
+ORIGINAL_INITRD_FILE=$(printf $BASE_INITRD_FILE | sed s/img/img-original/) 
+NFS_INITRD_FILE=$(printf $BASE_INITRD_FILE | sed s/img/img-nfs/) 
+
+printf "Copying unmodifed inittf to TPTP server..."; progress 
+mkdir -p $NODE_PXE 
+printf "base-initrd,$ORIGINAL_INITRD_FILE\n" > $CURRENT_PXE_FILES 
+cp $NFS_BUILD_DIR/boot/$BASE_INITRD_FILE $NODE_PXE/$ORIGINAL_INITRD_FILE 
+
+printf "Updating initramfs to reflect an NFS root..."; progress 
+sed -i.orig s/BOOT=local/BOOT=nfs/ $NFS_BUILD_DIR/etc/initramfs-tools/initramfs.conf 
+chroot $NFS_BUILD_DIR update-initramfs -u 
+
+printf "Installing ubuntu-server..."; progress 
+chroot $NFS_BUILD_DIR tasksel install server 
+
+printf "Cleaning package cache..."; progress 
+chroot $NFS_BUILD_DIR apt-get clean 
+
+chroot $NFS_BUILD_DIR unlink /etc/rcS.d/S45mountnfs.sh 
+chroot $NFS_BUILD_DIR ln -s /etc/network/if-up.d/mountnfs /etc/rcS.d/S45mountnfs 
+
+printf "Setting password for root..."; progress 
+chroot $NFS_BUILD_DIR passwd 
+
+printf "Setting password for $NODE_USER..."; progress 
+chroot $NFS_BUILD_DIR adduser --uid $NODE_USER_UID --gecos $NODE_USER $NODE_USER 
+
+umount $NFS_BUILD_DIR/proc 
+
+printf "Copying kernel to TFTP server..."; progress 
+printf "base-kernel,$BASE_KERNEL_FILE\n" >> $CURRENT_PXE_FILES 
+cp $NFS_BUILD_DIR/boot/$BASE_KERNEL_FILE $NODE_PXE/$BASE_KERNEL_FILE 
+
+printf "Copying NFS root aware initramfs to TFTP server..."; progress 
+printf "nfs-initrd,$NFS_INITRD_FILE\n" >> $CURRENT_PXE_FILES 
+cp $NFS_BUILD_DIR/boot/$BASE_INITRD_FILE $NODE_PXE/$NFS_INITRD_FILE 
+
+if [ ! -f $NODE_PXE/installer-linux ]; then 
+  printf "Collecting the netboot installer kernel and initrd from us.archive.ubuntu.com"; progress 
+  wget -nv -O $NODE_PXE/installer-linux http://us.archive.ubuntu.com/ubuntu/dists/$RELEASE/main/installer-$ARCH/current/images/netboot/ubuntu-installer/$ARCH/linux 
+  wget -nv -O $NODE_PXE/installer-initrd.gz  http://us.archive.ubuntu.com/ubuntu/dists/$RELEASE/main/installer-$ARCH/current/images/netboot/ubuntu-installer/$ARCH/initrd.gz 
+fi 
+
+printf "Process complete!\n" 
+
+exit 0
+</pre>
+
+Note(3)
+The Ubuntu installer is downloaded to support the installation of Ubuntu on disk-full nodes.
+
+At this point, we can simple copy the Ubuntu bootstrap installation to our NFS export and update our PXELINUX configuration however, this document is intended to mass produce both disk-full and disk-less systems.
+
+== Create a method to discover new nodes ==
+
+We can either use a menu based PXE install and boot each node one at a time to either a NFS root or to the Ubuntu installation routine, or we can allow the nodes to communicate with the head node and register if they have a local disk installed along with their MAC address.  The head node will in-turn maintain a list of known nodes and configure DHCP and DNS to support them along with a NFS root if the nodes do not have local disks.
+
+To support the nodes communicating with the head node, we will boot the nodes via PXE to a minimal environment using the kernel and initramfs we initially copied to the root of our TFTP server.  The initramfs needs to be modified to provide a method of informing the head node of its hardware details.
+
+We can either uncompress the initial initramfs manually, or we can create a script to do it for us.
+
+The script to modify the initramfs should:
+* Create a temporary working location
+* Uncompress the initramfs
+* Copy netcat into the initramfs working location
+* Modify init so it will:
+* Start udev
+* Start networking
+* Check if a local disk exists
+* Communicate with the head node
+* Power off
+* Compress our modified initramfs and copy it to our TFTP server
+
+Create buildDiscoveryInitrd and make it executable:
+
+<pre>
+touch /opt/cluster/ buildDiscoveryInitrd
+chmod u+x /opt/cluster/ buildDiscoveryInitrd
+</pre>
+
+The following bash script will add netcat to our initramfs and modify init:
+
+<pre>
+
+CONFIG_DIR="/opt/cluster/config" 
+
+if [ ! $(whoami) = "root" ]; then 
+  printf "This script must run with root access.\n" 
+  exit 192 
+fi 
+
+if [ -f $CONFIG_DIR/global.conf ]; then 
+  source $CONFIG_DIR/global.conf 
+else 
+  printf "Unable to locate the global configuration file.\n" 
+  printf "This script looks for configuration files in:\n" 
+  printf "$CONFIG_DIR\n" 
+  exit 192 
+fi 
+
+INITRD_TMP_DIR="/tmp/initrd-tmp" 
+
+mkdir -p $INITRD_TMP_DIR 
+
+pushd $INITRD_TMP_DIR 
+
+gzip -dc $NODE_PXE/$(grep base-initrd $CURRENT_PXE_FILES | cut -d, -f2) | cpio -id 
+
+cp $NFS_BUILD_DIR/bin/nc ./bin 
+
+cp $NFS_BUILD_DIR/sbin/fdisk ./sbin 
+
+sed -i '/^load_modules/a /sbin/udevd --daemon\n/sbin/udevadm trigger\n/sbin/udevadm settle\nifconfig eth0 up\n/bin/ipconfig eth0 > /tmp/ipinfo\nmac=\$(cat /tmp/ipinfo \| grep hardware \| cut -d" " -f5)\nif [ -b /dev/sda ] || [ -b /dev/hda ] || [ -b /dev/vda ]; then\n\tboot_method="local"\nelse\n\tboot_method="nfs"\nfi\nprintf "$boot_method,$mac" \| /bin/nc -q2 '"$HEAD_NODE_IP"' 3001\npoweroff' init 
+
+find . | cpio --quiet --dereference -o -H newc | gzip -9 > $NODE_PXE/discovery-initrd.img 
+popd 
+
+rm -rf $INITRD_TMP_DIR 
+
+printf "PROMPT 0\n" > $DEFAULT_PXE_CONFIG_FILE 
+printf "DEFAULT linux\n\n" >> $DEFAULT_PXE_CONFIG_FILE 
+printf "LABEL linux\n" >> $DEFAULT_PXE_CONFIG_FILE 
+printf "KERNEL nodes/$RELEASE/$ARCH/$(grep base-kernel $CURRENT_PXE_FILES | cut -d, -f2)\n" >> $DEFAULT_PXE_CONFIG_FILE 
+printf "APPEND initrd=nodes/$RELEASE/$ARCH/discovery-initrd.img ip=dhcp\n" >> $DEFAULT_PXE_CONFIG_FILE 
+
+exit 0
+</pre>
+
+At this point, when an undiscovered node boots via PXE it will attempt to inform the head node what the node's MAC address is and if it has a local hard drive.
+
+== Head Node Listens for Connections ==
+
+We will need netcat on the head node to listen for connections from undiscovered nodes and register them to await Ubuntu deployment.
+
+The script to get the MACs from the nodes:
+* Determines what the node name will be
+* Runs netcat indefinitely waiting for node information
+* Registers:
+** Node name
+** Architecture
+** Ubuntu release
+** Boot method (local disk or NFS)
+** MAC address
+** IP address
+
+Create getMACs and make it executable:
+
+<pre>
+touch /opt/cluster/getMACs
+chmod u+x /opt/cluster/getMACs
+</pre>
+
+If the getMACs script is not running, no new nodes will be registered for deployment.
+
+<pre>
+
+CONFIG_DIR="/opt/cluster/config" 
+
+if [ ! $(whoami) = "root" ]; then 
+  printf "This script must run with root access.\n" 
+  exit 192 
+fi 
+
+if [ -f $CONFIG_DIR/global.conf ]; then 
+  source $CONFIG_DIR/global.conf 
+else 
+  printf "Unable to locate the global configuration file.\n" 
+  printf "This script looks for configuration files in:\n" 
+  printf "$CONFIG_DIR\n" 
+  exit 192 
+fi 
+
+TEMP_NUMBER=$(tail -n1 $MASTER_NODE_LIST | cut -d, -f1 | sed s/$BASE_NODE_NAME//) 
+if [ ! $TEMP_NUMBER = "" ]; then 
+	((NODE_NUMBER=+TEMP_NUMBER)) 
+	((NODE_NUMBER++))	 
+fi 
+
+while true; do 
+	NODE_INFO=$(netcat -l -p 3001) 
+	printf "$BASE_NODE_NAME$NODE_NUMBER,$ARCH,$RELEASE,$NODE_INFO,$(printf $NETWORK | sed s/0$//)$NODE_NUMBER\n" >> $NEW_NODES_LIST 
+	((NODE_NUMBER++)) 
+done 
+</pre>
+
+When an undiscovered node is booted via PXE, it will now boot our discovery initramfs and provide the head node with useful information.  The head node will register the nodes into a simple text file /opt/cluster/config/new_nodes.txt.
+
+You can watch the process of new nodes registering once /opt/cluster/getMACs is executed by switching to a different console or terminal and executing:
+
+<pre>
+tail -f /opt/cluster/config/new_nodes.txt
+</pre>
+
+== Process new nodes ==
+
+We now need to process the registered nodes.  We need to create a NFS root file system for each node that does not have a local disk, and we need to prepare to install Ubuntu on nodes that have a disk.
+
+We will use a preseed configuration file to install Ubuntu on the nodes that have local disks.
+
+The script to process the newly registered nodes should:
+* Determine if it will be a NFS node or a local boot node
+* Creates the PXELINUX configuration for the nodes
+* Updates DNS with the node's host name and IP address
+* Reserves an IP address with DHCP for the nodes
+* Create the NFS root filesystem for the node (copies our boostrapped installation to our NFS export for each node)
+* Moves the node from the new node registration to our master node list
+
+Create makeNodes and make it executable:
+
+<pre>
+touch /opt/cluster/makeNodes
+chmod u+x /opt/cluster/makeNodes
+</pre>
+
+The following script will parse newly registered nodes:
+
+<pre>
+
+CONFIG_DIR="/opt/cluster/config" 
+
+if [ ! $(whoami) = "root" ]; then 
+  printf "This script must run with root access.\n" 
+  exit 192 
+fi 
+
+if [ -f $CONFIG_DIR/global.conf ]; then 
+  source $CONFIG_DIR/global.conf 
+else 
+  printf "Unable to locate the global configuration file.\n" 
+  printf "This script looks for configuration files in:\n" 
+  printf "$CONFIG_DIR\n" 
+  exit 192 
+fi 
+
+if [ ! $(whoami) = "root" ]; then 
+  printf "This script must run with root access.\n" 
+  exit 192 
+fi 
+
+updateDHCP () 
+{ 
+  case $BOOT_METHOD in 
+  local) 
+    printf "host $NODE_NAME {\n" >> $DHCPD_CONFIG_FILE 
+    printf "\thardware ethernet $MAC_ADDRESS;\n" >> $DHCPD_CONFIG_FILE 
+    printf "\tfixed-address $IP_ADDRESS;\n" >> $DHCPD_CONFIG_FILE 
+    printf "\toption host-name \"$NODE_NAME\";\n" >> $DHCPD_CONFIG_FILE 
+    printf "}\n\n" >> $DHCPD_CONFIG_FILE 
+### 
+### Create the PXELINUX configuration for the node 
+### 
+    PXE_CONFIG_FILE="$TFTP_ROOT/pxelinux.cfg/01-$(printf $MAC_ADDRESS | tr : -)" 
+    printf "PROMPT 0\n" > $PXE_CONFIG_FILE 
+    printf "DEFAULT linux\n\n" >> $PXE_CONFIG_FILE 
+    printf "LABEL linux\n" >> $PXE_CONFIG_FILE 
+    printf "KERNEL nodes/$RELEASE/$ARCH/installer-linux\n" >> $PXE_CONFIG_FILE 
+    printf "APPEND initrd=nodes/$RELEASE/$ARCH/installer-initrd.gz ip=dhcp preseed/url=http://www.home.local/preseed.cfg auto-install/enable debconf/priority=critical locale=en_US console-setup/ask_detect=false console-setup/modelcode=pc105 console-setup/layoutcode=us hw-detect/start_pcmcia=false\n" >> $PXE_CONFIG_FILE 
+    ;; 
+  nfs) 
+    printf "host $NODE_NAME {\n" >> $DHCPD_CONFIG_FILE 
+    printf "\thardware ethernet $MAC_ADDRESS;\n" >> $DHCPD_CONFIG_FILE 
+    printf "\tfixed-address $IP_ADDRESS;\n" >> $DHCPD_CONFIG_FILE 
+    printf "\toption host-name \"$NODE_NAME\";\n" >> $DHCPD_CONFIG_FILE 
+    printf "\toption root-path \"$NFS_ROOT_EXPORT/$NODE_NAME\";\n" >> $DHCPD_CONFIG_FILE 
+    printf "}\n\n" >> $DHCPD_CONFIG_FILE 
+### 
+### Create the PXELINUX configuration for the node 
+### 
+    PXE_CONFIG_FILE="$TFTP_ROOT/pxelinux.cfg/01-$(printf $MAC_ADDRESS | tr : -)" 
+    printf "PROMPT 0\n" > $PXE_CONFIG_FILE 
+    printf "DEFAULT linux\n\n" >> $PXE_CONFIG_FILE 
+    printf "LABEL linux\n" >> $PXE_CONFIG_FILE 
+    printf "KERNEL nodes/$RELEASE/$ARCH/$(grep base-kernel $CURRENT_PXE_FILES | cut -d, -f2)\n" >> $PXE_CONFIG_FILE 
+    printf "APPEND root=/dev/nfs initrd=nodes/$RELEASE/$ARCH/$(grep nfs-initrd $CURRENT_PXE_FILES | cut -d, -f2) ip=dhcp\n" >> $PXE_CONFIG_FILE 
+    ;; 
+  esac 
+} 
+
+updateDNS () 
+{ 
+        printf "$NODE_NAME\t\tIN\tA\t$IP_ADDRESS\n" >> $DNS_FORWARD_CONFIG 
+# reverse zone 
+	IP_OCTET=$(printf $IP_ADDRESS | cut -d. -f4) 
+	printf "$IP_OCTET\t\tIN\tPTR\t$NODE_NAME.$DOMAIN_NAME.\n" >> $DNS_REVERSE_CONFIG 
+} 
+
+updateNFSROOT () 
+{ 
+  if [ ! -d $NFS_ROOT_EXPORT/$NODE_NAME ]; then 
+    mkdir -p $NFS_ROOT_EXPORT/$NODE_NAME 
+    rsync -a --numeric-ids $NFS_BUILD_DIR/ $NFS_ROOT_EXPORT/$NODE_NAME 
+### 
+### Make filesystem node specific 
+### 
+    printf "$NODE_NAME\n" > $NFS_ROOT_EXPORT/$NODE_NAME/etc/hostname 
+    printf "$IP_ADDRESS\t$NODE_NAME.$DOMAIN_NAME\t$NODE_NAME\n" >> $NFS_ROOT_EXPORT/$NODE_NAME/etc/hosts 
+    printf "$NODE_NAME... file-system created\n" 
+  else 
+    printf "$NODE_NAME... file-system already exists; not created\n" 
+  fi 
+} 
+
+while read LINE ; do 
+  NODE_NAME=$(printf $LINE | cut -d, -f1) 
+  BOOT_METHOD=$(printf $LINE | cut -d, -f4) 
+  MAC_ADDRESS=$(printf $LINE | cut -d, -f5) 
+  IP_ADDRESS=$(printf $LINE | cut -d, -f6) 
+  updateDHCP 
+  printf "$NODE_NAME... DHCP updated\n" 
+  updateDNS 
+  printf "$NODE_NAME... DNS updated\n" 
+  if  [ $BOOT_METHOD = "nfs" ]; then 
+    printf "$NODE_NAME... creating file-system\n" 
+    updateNFSROOT 
+  else 
+    printf "$NODE_NAME... local boot; NFS root file-system not created\n" 
+  fi 
+  printf "\n" 
+done < $NEW_NODES_LIST 
+
+cat $NEW_NODES_LIST >> $MASTER_NODE_LIST 
+
+> $NEW_NODES_LIST 
+
+/etc/init.d/dhcp3-server restart 
+
+/usr/sbin/rndc reload 
+
+cat $MASTER_NODE_LIST | cut -d, -f1 > $PSSH_HOST_FILE 
+
+exit 0
+</pre>
+
+When a discovered disk-less system is now booted via PXE, the node will boot the NFS aware initramfs and mount their root directory over NFS.
+
+The nodes with local disks will boot the Ubuntu installer kernel and initramfs and will attempt to download a preseed configuration file from the head node.  Using the preseed configuration file will allow us to have a no questions asked installation of Ubuntu.
+
+The installer will attempt to locate the preseed file from the root document directory of our Apache server.
+
+Create /var/www/preseed.cfg
+
+<pre>
+touch /var/www/preseed.cfg
+</pre>
+
+The following is the pressed.cfg file I am using to perform a hands-off installation of Ubuntu:
+
+<pre>
+d-i debian-installer/locale string en_US 
+d-i console-setup/ask_detect boolean false 
+d-i console-setup/modelcode string pc105 
+d-i console-setup/layoutcode string us 
+d-i netcfg/choose_interface select eth0 
+d-i netcfg/get_hostname string unassigned-hostname 
+d-i netcfg/get_domain string unassigned-domain 
+d-i mirror/country string manual 
+d-i mirror/http/hostname string mirror.home.local 
+d-i mirror/http/directory string /ubuntu 
+d-i mirror/http/proxy http://proxy.home.local:3128/ 
+d-i mirror/suite string jaunty 
+d-i mirror/udeb/suite string jaunty 
+d-i mirror/udeb/components multiselect main, restricted 
+d-i clock-setup/utc boolean false 
+d-i time/zone string US/Eastern 
+d-i clock-setup/ntp boolean false 
+d-i partman-auto/method string lvm 
+d-i partman-lvm/device_remove_lvm boolean true 
+d-i partman-lvm/confirm boolean true 
+d-i partman-auto/choose_recipe select atomic 
+d-i partman/confirm_write_new_label boolean true 
+d-i partman/choose_partition select finish 
+d-i partman/confirm boolean true 
+d-i base-installer/kernel/image string linux-server 
+d-i passwd/root-login boolean true 
+d-i passwd/make-user boolean true 
+d-i passwd/root-password-crypted password $1$lQ7iu8aE$9YeFJJsCCVd9hgWD48VG11 
+d-i passwd/user-fullname string cluster 
+d-i passwd/username string cluster 
+d-i passwd/user-password-crypted password $1$lQ7iu8aE$9YeFJJsCCVd9hgWD48VG11 
+d-i passwd/user-uid string 1010 
+d-i apt-setup/restricted boolean true 
+d-i apt-setup/universe boolean true 
+d-i apt-setup/services-select multiselect security 
+d-i apt-setup/security_host string mirror.home.local 
+d-i apt-setup/security_path string /ubuntu 
+tasksel tasksel/first multiselect ubuntu-server 
+d-i pkgsel/include string openssh-server nfs-common wget ntp vim 
+d-i pkgsel/language-packs multiselect en 
+d-i pkgsel/update-policy select none 
+popularity-contest popularity-contest/participate boolean false 
+d-i grub-installer/only_debian boolean true 
+d-i grub-installer/with_other_os boolean true 
+d-i finish-install/reboot_in_progress note 
+d-i cdrom-detect/eject boolean false 
+xserver-xorg xserver-xorg/autodetect_monitor boolean true 
+xserver-xorg xserver-xorg/config/monitor/selection-method \ 
+       select medium 
+xserver-xorg xserver-xorg/config/monitor/mode-list \ 
+       select 1024x768 @ 60 Hz 
+d-i preseed/late_command string wget -q -O - http://headnode.home.local/preseed_late_command.sh | chroot /target /bin/bash
+</pre>
+
+I have removed the comments from the above preseed.cfg file to make the document shorter.   A commented example for intrepid can be located at: https://help.ubuntu.com/9.04/installation-guide/example-preseed.txt
+
+The encrypted password was generated with mkpasswd.  mkpasswd is part of the whois package.
+
+The format of the preseed file changes as each new Ubuntu release.  Be sure to use an example for your specific version.
+
+When our discovered nodes boot via PXE, they will initiate the Ubuntu installer and automatically have  their operating system installed.
+Our preseed example includes the statement:
+
+<pre>
+d-i preseed/late_command string wget -q -O – http://headnode.home.local/preseed_late_command.sh | chroot /target /bin/bash
+</pre>
+
+This will cause the node to download the file preseed_late_command.sh from our head node using wget.  Using the preseed/late_command in our preseed will allow us to make any post-installation tasks to the newly installed operating system prior to its reboot.  
+
+Our preseed late command will:
+* Add our NFS mounted home directory to /etc/fstab
+* Modify /etc/ntp.conf to use our head node as the time server
+* Update /etc/apt/sources.list
+* Modify the symlink for /bin/sh
+
+The preseed/late command allows us to make changes as if we were logged in to the system.
+
+Example preseed_late_command.sh:
+
+<pre>
+
+printf "nfs.home.local:/srv/cluster\t/home/cluster\tnfs\trw,auto\t0 0\n" >> /etc/fstab 
+
+NODE_NAME=$(hostname) 
+NODE_IP=$(host $NODE_NAME | cut -d" " -f4) 
+sed -i s/127.0.1.1/$NODE_IP/ /etc/hosts 
+
+sed -i s/ntp.ubuntu.com/ntp.home.local/ /etc/ntp.conf 
+sed -i '/ntp.home.local/a restrict ntp.home.local mask 255.255.255.255 nomodify notrap noquery' /etc/ntp.conf 
+
+sed -i /deb-src/d /etc/apt/sources.list 
+sed -i /#/d /etc/apt/sources.list 
+sed -i /^$/d /etc/apt/sources.list 
+
+ln -sf /bin/bash /bin/sh 
+
+exit 0
+</pre>
+
+== SSH ==
+
+By this time, our nodes are running their new Ubuntu operating system.
+In order to communicate with the nodes using SSH, we must first gather the host key for each node, and then copy our SSH public key to each node.  This can be accomplished manually, however, would be very time intensive on multiple nodes.
+We will script this process using both BASH and Expect but first we should generate our SSH keys for our root user and our cluster user.  We will not use a password to allow for password-less SSH.
+
+=== Generate Head Node SSH keys ===
+
+<pre>
+ssh-keygen -t dsa 
+Enter file in which to save the key (/root/.ssh/id_dsa): <press enter>
+Enter passphrase (empty for no passphrase): <press enter>
+Enter same passphrase again: <press enter>
+</pre>
+
+=== Update Node SSH keys ===
+
+The following  two scripts will gather the SSH host key from each node, and then copy the known hosts along with our public and private keys to every node.  A common set of keys will allow us to SSH between nodes without having to copy public keys from node A to every node, then node B to every node, etc.
+
+Although the script will prompt us for a password, please consider this insecure as the password can be viewed with ps aux while the script is running.
+
+Since the home directory for the cluster user is shared among all the nodes, they will share the same ssh keys.  We will however, need to update the cluster users known_hosts file.  A similar bash script can be used to accomplish this.
+
+The bash script will execute the expect script.
+
+<pre>
+CONFIG_DIR="/opt/cluster/config" 
+if [ ! $(whoami) = "root" ]; then 
+  printf "This script must run with root access.\n" 
+  exit 192 
+fi 
+if [ -f $CONFIG_DIR/global.conf ]; then 
+  source $CONFIG_DIR/global.conf 
+else 
+  printf "Unable to locate the global configuration file.\n" 
+  printf "This script looks for configuration files in:\n" 
+  printf "$CONFIG_DIR\n" 
+  exit 192 
+fi 
+printf "We need a password to communicate with disk-ful systems:\n" 
+read -s -p "Password: " SSH_PASSWORD 
+while read LINE; do 
+	NODE_NAME=$(printf $LINE | cut -d, -f1) 
+# If we can ping the host, attempt to ssh to it just to get its host key 
+	if /bin/ping -c2 -w2 $NODE_NAME > /dev/null; then 
+	    printf "Ping of $NODE_NAME succeeded\n" 
+	    ssh -n -o "StrictHostKeyChecking no" -o "BatchMode yes" $NODE_NAME date > /dev/null 
+	else 
+	    printf "Unable to ping $NODE_NAME\n" 
+	    printf "$NODE_NAME not added to ssh known hosts\n" 
+	fi 
+done < $MASTER_NODE_LIST 
+
+while read LINE; do 
+	NODE_NAME=$(printf $LINE | cut -d, -f1) 
+	if /bin/ping -c2 -w2 $NODE_NAME > /dev/null; then 
+	    printf "Ping of $NODE_NAME succeeded\n" 
+	    /usr/bin/expect copyKeys.exp $NODE_NAME $SSH_PASSWORD 
+	else 
+	    printf "Unable to ping $NODE_NAME\n" 
+	    printf "SSH keys not copied to $NODE_NAME\n" 
+	fi 
+done < $MASTER_NODE_LIST 
+exit 0
+</pre>
+
+<pre>
+
+set force_conservative 0  ;# set to 1 to force conservative mode even if 
+                          ;# script wasn't run conservatively originally 
+if {$force_conservative} { 
+        set send_slow {1 .1} 
+        proc send {ignore arg} { 
+                sleep .1 
+                exp_send -s -- $arg 
+        } 
+} 
+
+set NODE_NAME "[lindex $argv 0]" 
+set SSH_PASSWORD "[lindex $argv 1]" 
+set timeout -1 
+match_max 10000 
+set timeout 100 
+spawn /bin/bash -c "scp -r /root/.ssh $NODE_NAME:/root/" 
+expect { 
+	-re "password: " {send "$SSH_PASSWORD\r";exp_continue} 
+} 
+exit
+</pre>
+
+== Parallel-SSH ==
+
+Attempting to execute commands via SSH to each node may be a bit cumbersome.  We can of course create a script to loop through all the nodes listed in nodes.txt.  Parallel-ssh is an alternative method to accomplish this. Parallel-ssh allows execution of commands on the nodes at the same time (i.e. in parallel).
+
+The pssh package provides:
+* Parallel ssh
+* Parallel scp
+* Parallel rsync
+* Parallel nuke
+* Parallel slurp
+
+The parallel-ssh suite of tools requires the list of hosts to be in a format different than master node list (nodes.txt). Create the host file that contains only the host names:
+
+<pre>
+pushd /opt/cluster/config
+cut -d, -f1 nodes.txt > hosts.txt
+popd
+</pre>
+
+We of course,  can create a script that will parse the master node list and output the host list in a pssh friendly format.  The following script will do just that:
+
+<pre>
+
+CONFIG_DIR="/opt/cluster/config" 
+
+if [ ! $(whoami) = "root" ]; then 
+  printf "This script must run with root access.\n" 
+  exit 192 
+fi 
+
+if [ -f $CONFIG_DIR/global.conf ]; then 
+  source $CONFIG_DIR/global.conf 
+else 
+  printf "Unable to locate the global configuration file.\n" 
+  printf "This script looks for configuration files in:\n" 
+  printf "$CONFIG_DIR\n" 
+  exit 192 
+fi 
+ 
+cut -d, -f1 $MASTER_NODE_LIST > $HEAD_NODE_CONFIG_DIR/hosts.txt 
+
+exit 0
+</pre>
+
+When we installed the parallel-ssh suite of tools, we also created aliases to shorten their names for both the root and cluster users.  Instead of executing parallel-ssh -h /opt/cluster/config/hosts.txt command, we can simply type pssh command.
+
+Example output from a pssh session: 
+
+<pre>
+sudo pssh -i -h hosts.txt uptime 
+[1] 00:48:32 [SUCCESS] node81 
+ 00:48:32 up 4 min,  0 users,  load average: 0.05, 0.03, 0.00 
+[2] 00:48:33 [SUCCESS] node71 
+ 00:48:32 up 7 min,  0 users,  load average: 0.00, 0.02, 0.01 
+[3] 00:48:33 [SUCCESS] node75 
+ 00:48:32 up 0 min,  0 users,  load average: 0.53, 0.17, 0.06 
+[4] 00:48:33 [SUCCESS] node73 
+ 00:48:32 up 6 min,  0 users,  load average: 0.00, 0.03, 0.01 
+[5] 00:48:33 [SUCCESS] node77 
+ 00:48:32 up 4 min,  0 users,  load average: 0.13, 0.08, 0.03 
+[6] 00:48:33 [SUCCESS] node72 
+ 00:48:32 up 7 min,  0 users,  load average: 0.00, 0.02, 0.00 
+[7] 00:48:33 [SUCCESS] node79 
+ 00:48:32 up 3 min,  0 users,  load average: 0.04, 0.14, 0.07 
+[8] 00:48:33 [SUCCESS] node74 
+ 00:48:32 up 6 min,  0 users,  load average: 0.00, 0.04, 0.02 
+[9] 00:48:33 [SUCCESS] node80 
+ 00:48:32 up 3 min,  0 users,  load average: 0.03, 0.07, 0.03 
+[10] 00:48:33 [SUCCESS] node76 
+ 00:48:32 up 5 min,  0 users,  load average: 0.08, 0.11, 0.07 
+[11] 00:48:33 [SUCCESS] node78 
+ 00:48:32 up 4 min,  0 users,  load average: 0.08, 0.14, 0.08 
+
+sudo pssh -i -h hosts.txt apt-get -y -qq -s install ethtool 
+[1] 00:53:15 [SUCCESS] node81 
+Inst ethtool (6+20080227-1 Ubuntu:8.10/jaunty) 
+Conf ethtool (6+20080227-1 Ubuntu:8.10/jaunty) 
+[2] 00:53:20 [SUCCESS] node71 
+Inst ethtool (6+20080227-1 Ubuntu:8.10/jaunty) 
+Conf ethtool (6+20080227-1 Ubuntu:8.10/jaunty) 
+[3] 00:53:22 [SUCCESS] node72 
+Inst ethtool (6+20080227-1 Ubuntu:8.10/jaunty) 
+Conf ethtool (6+20080227-1 Ubuntu:8.10/jaunty) 
+[4] 00:53:22 [SUCCESS] node75 
+Inst ethtool (6+20080227-1 Ubuntu:8.10/jaunty) 
+Conf ethtool (6+20080227-1 Ubuntu:8.10/jaunty) 
+[5] 00:53:22 [SUCCESS] node76 
+Inst ethtool (6+20080227-1 Ubuntu:8.10/jaunty) 
+Conf ethtool (6+20080227-1 Ubuntu:8.10/jaunty) 
+[6] 00:53:22 [SUCCESS] node74 
+Inst ethtool (6+20080227-1 Ubuntu:8.10/jaunty) 
+Conf ethtool (6+20080227-1 Ubuntu:8.10/jaunty) 
+[7] 00:53:22 [SUCCESS] node73 
+Inst ethtool (6+20080227-1 Ubuntu:8.10/jaunty) 
+Conf ethtool (6+20080227-1 Ubuntu:8.10/jaunty) 
+[8] 00:53:22 [SUCCESS] node80 
+Inst ethtool (6+20080227-1 Ubuntu:8.10/jaunty) 
+Conf ethtool (6+20080227-1 Ubuntu:8.10/jaunty) 
+[9] 00:53:22 [SUCCESS] node78 
+Inst ethtool (6+20080227-1 Ubuntu:8.10/jaunty) 
+Conf ethtool (6+20080227-1 Ubuntu:8.10/jaunty) 
+[10] 00:53:22 [SUCCESS] node79 
+Inst ethtool (6+20080227-1 Ubuntu:8.10/jaunty) 
+Conf ethtool (6+20080227-1 Ubuntu:8.10/jaunty) 
+[11] 00:53:22 [SUCCESS] node77 
+Inst ethtool (6+20080227-1 Ubuntu:8.10/jaunty) 
+Conf ethtool (6+20080227-1 Ubuntu:8.10/jaunty)
+</pre>
+
+== Node Maintenance ==
+
+=== Node Replacement ===
+
+If you experience a hardware failure on a node, the configuration files pertaining to that node will need to be updated with the MAC of the replacement node.  We can manually update the configuration files, or we can have the head node update the files for us.
+
+The following script will parse the configuration files and update the failed node MAC with that of the replacement node:
+
+<pre>
+
+CONFIG_DIR="/opt/cluster/config" 
+
+if [ ! $(whoami) = "root" ]; then 
+  printf "This script must run with root access.\n" 
+  exit 192 
+fi 
+
+if [ -f $CONFIG_DIR/global.conf ]; then 
+  source $CONFIG_DIR/global.conf 
+else 
+  printf "Unable to locate the global configuration file.\n" 
+  printf "This script looks for configuration files in:\n" 
+  printf "$CONFIG_DIR\n" 
+  exit 192 
+fi 
+ 
+printf "Enter name of node to replace:\n" 
+read -p "(e.g. node71): " NODE_TO_REPLACE 
+printf "Enter MAC address of new system:\n" 
+read -p "(e.g. 00:aa:01:bb:02:cc): " REPLACEMENT_NODE_MAC 
+
+NEW_MAC=$(printf $REPLACEMENT_NODE_MAC | tr '[:upper:]' '[:lower:]') 
+
+LINE=$(grep $NODE_TO_REPLACE $MASTER_NODE_LIST) 
+if [ ! -z $LINE ]; then 
+  NODE_NAME=$(printf $LINE | cut -d, -f1) 
+  BOOT_METHOD=$(printf $LINE | cut -d, -f4) 
+  MAC_ADDRESS=$(printf $LINE | cut -d, -f5) 
+  IP_ADDRESS=$(printf $LINE | cut -d, -f6) 
+  case $BOOT_METHOD in 
+    local) 
+#### Update the node list to reflect the new MAC 
+      sed -i s/$MAC_ADDRESS/$NEW_MAC/ $MASTER_NODE_LIST 
+#### Update DHCP to reflect the new MAC 
+      sed -i s/$MAC_ADDRESS/$NEW_MAC/ $DHCPD_CONFIG_FILE 
+#### UPDATE PXELINUX to reflect the new MAC 
+      mv $TFTP_ROOT/pxelinux.cfg/$(printf 01-$MAC_ADDRESS | tr : -) $TFTP_ROOT/pxelinux.cfg/$(printf 01-$NEW_MAC | tr : - ) 
+#### Update the node NFSROOT udev configuration to reflect the new MAC 
+      printf "$NODE_NAME MAC changed from $MAC_ADDRESS to $NEW_MAC\n" 
+#### Changes made.  Restart DHCP server 
+      /etc/init.d/dhcp3-server restart 
+    ;; 
+  nfs) 
+#### Update the node list to reflect the new MAC 
+      sed -i s/$MAC_ADDRESS/$NEW_MAC/ $MASTER_NODE_LIST 
+#### Update DHCP to reflect the new MAC 
+      sed -i s/$MAC_ADDRESS/$NEW_MAC/ $DHCPD_CONFIG_FILE 
+#### UPDATE PXELINUX to reflect the new MAC 
+      mv $TFTP_ROOT/pxelinux.cfg/$(printf 01-$MAC_ADDRESS | tr : -) $TFTP_ROOT/pxelinux.cfg/$(printf 01-$NEW_MAC | tr : - ) 
+#### Update the node NFSROOT udev configuration to reflect the new MAC 
+      sed -i s/$MAC_ADDRESS/$NEW_MAC/ $NFS_ROOT_EXPORT/$NODE_NAME/etc/udev/rules.d/70-persistent-net.rules 
+      printf "$NODE_NAME MAC changed from $MAC_ADDRESS to $NEW_MAC\n" 
+#### Changes made.  Restart DHCP server 
+      /etc/init.d/dhcp3-server restart 
+    ;; 
+  esac 
+else 
+	printf "The node name you entered is invalid\n" 
+	exit 192 
+fi 
+
+exit 0
+</pre>
+
+=== Power on with wake-on-LAN ===
+
+You may find it convenient to power on your nodes using wake-on-LAN.  Wake-On-LAN requires the MAC of the node you wish to power on to be known.
+
+The nodes.txt file containts the known MACs of installed nodes.  
+
+Using Wake-on-LAN, we should be able to:
+
+* Turn on a single node by name
+* Turn on multiple nodes by name
+* Turn on all nodes
+
+The following script will parse nodes.txt and send a wake-On-LAN packed to the nodes you specify:
+
+<pre>
+
+CONFIG_DIR="/opt/cluster/config" 
+
+if [ ! $(whoami) = "root" ]; then 
+  printf "This script must run with root access.\n" 
+  exit 192 
+fi 
+
+if [ -f $CONFIG_DIR/global.conf ]; then 
+  source $CONFIG_DIR/global.conf 
+else 
+  printf "Unable to locate the global configuration file.\n" 
+  printf "This script looks for configuration files in:\n" 
+  printf "$CONFIG_DIR\n" 
+  exit 192 
+fi 
+
+if [ ! $(whoami) = "root" ]; then 
+  printf "This script must run with root access.\n" 
+  exit 192 
+fi 
+
+helpMe () 
+{ 
+	printf "usage: $0 [NODE] \n" 
+	printf "[NODE]\n" 
+	printf "\tall\tpower on all nodes\n" 
+	printf "\tnode#\tpower on a single node\n" 
+	printf "\t\tMultiple nodes names should be separated by white space.\n" 
+	printf "\t\t\te.g. node_on.sh node1 node2\n" 
+ } 
+
+if [ -z $1 ]; then 
+  helpMe 
+  exit 0 
+fi 
+
+case $1 in 
+	all) 
+		while read LINE; do 
+	        	NODE_NAME=$(printf $LINE | cut -d, -f1) 
+			MAC_ADDRESS=$(printf $LINE | cut -d, -f5) 
+			printf "Sending Wake-On-LAN packet to $NODE_NAME at $MAC_ADDRESS\n" 
+## Send more than one WOL packet to the node 
+			I=0; until [ $I -gt 5 ]; do 
+				wakeonlan $MAC_ADDRESS >/dev/null 
+				((I++)); done 
+		done < $MASTER_NODE_LIST 
+		;; 
+	-h|--help) 
+		helpMe 
+		;;	 
+* ) 
+	        until [ -z $1 ]; do 
+                	NODE_NAME=$1 
+	                MAC_ADDRESS=$(grep -w $NODE_NAME $MASTER_NODE_LIST | cut -d, -f5) 
+        	        if [ ! -z $MAC_ADDRESS ]; then 
+				printf "Sending Wake-On-LAN packet to $NODE_NAME at $MAC_ADDRESS\n" 
+########## Send more than one WOL packet to the node 
+	        	        I=0; until [ $I -gt 5 ]; do 
+        	                wakeonlan $MAC_ADDRESS >/dev/null 
+		                ((I++)); done 
+	                else 
+				printf "$NODE_NAME does not have a MAC listed in nodes.txt\n" 
+			fi 
+			shift 
+		done 
+		;; 
+esac 
+
+exit 0	 
+</pre>
+
+To turn on node1.home.local:
+
+<pre>
+sh /opt/cluster/nodeOn node1
+
+</pre>
+
+To turn on multiple nodes:
+
+<pre>
+sh /opt/cluster/nodeOn node1 node23 node43
+</pre>
+
+To turn on all nodes:
+
+<pre>
+sh /opt/cluster/nodeOn all
+</pre>
+
+== Summary ==
+
+This article has descirbed a method to deploy Ubuntu onto both disk-full and disk-less nodes in an automated manner.  It is not intended to be the one-for-everyone solution.  The possibilities for improvement are endless, and I hope this article has spawned an “oh I can do that” attitude within its readers.
+
+My own improvement ideas are:
+* Use a database backend
+* Use a multiple headnode model
+* Daemonize some of the processes
+** getMacs
+** makeNodes
+** makePSSH
+
+An addition to the above method to deploy Ubuntu, could be a method to monitor the status of the nodes. This can be done with bash of course.  Since part of creating the head node was installing the LAMP stack, the following PHP code will parse the master node list and determine if the nodes are online.  This too can be improved by using SNMP to communicate status information.
+
+Currently, the following ping.php simply pings the nodes to determine if they are online, and displays a web page with their status:
+
+<pre>
+<html><head><title>System Status</title></head> 
+<body> 
+<pre> 
+<?php 
+function ping($host) { 
+    exec(sprintf('ping -c 1 -w1 -W1 %s', escapeshellarg($host)), $res, $rval); 
+    return $rval === 0; 
+  } 
+
+$green = "/images/status/green.png"; 
+$red = "/images/status/red.png"; 
+$counter = 1; 
+$hostfile = "status.conf"; 
+$nodefile = "/opt/cluster/config/nodes.txt"; 
+
+$nodefile_handle = fopen($nodefile, "r"); 
+$counter = 1; 
+echo "Nodes:<br>"; 
+echo "<table border=0 width=80%>"; 
+echo "<tbody>"; 
+echo "<tr>"; 
+while (!feof($nodefile_handle)) { 
+        $line_of_text = fgets($nodefile_handle); 
+        if (!feof($nodefile_handle)): 
+                $nodeinfo = explode(',', $line_of_text); 
+                $up = ping($nodeinfo[0]); 
+                if ($counter > 2): 
+                        echo "<tr>"; 
+                endif; 
+		if ($up == 1): 
+			echo "<td><img border=0 height=49 width=58 alt=Up title=Up src=$green></td><td>$nodeinfo[0] <br> $nodeinfo[1]</td>"; 
+			$counter = $counter + 1; 
+		else: 
+			echo "<td><img border=0 height=49 width=58 alt=Down title=Down  src=$red></td><td>$nodeinfo[0].home.local<br>Arch:$nodeinfo[1] Release:$nodeinfo[2]<br>Boot method:$nodeinfo[3]<br>MAC address:$nodeinfo[4]<br>IP address:$nodeinfo[5]</td>"; 
+			$counter = $counter + 1; 
+		endif; 
+                if ($counter > 2): 
+                        echo "</tr>"; 
+                        $counter = 1; 
+		endif; 
+	endif; 
+} 
+fclose($nodefile_handle); 
+echo "</tbody>"; 
+echo "</table>"; 
+?> 
+</body> 
+</html>
+</pre>
+
+The output of the above page will list nodes in 2 columns.
+
+{| class="wikitable"
+|-
+| <nowiki>[[File:green.png]]</nowiki>
+| node71.home.local <<BR>>Arch:amd64 Release:intrepid <<BR>>Boot method:local <<BR>>MAC address:08:00:27:0c:09:27 <<BR>>IP address:10.10.1.71
+| <nowiki>[[File:red.png]]</nowiki>
+| node72.home.local <<BR>>Arch:amd64 Release:intrepid <<BR>>Boot method:nfs <<BR>>MAC address:08:00:27:3f:4e:2c <<BR>>IP address:10.10.1.72
+|}

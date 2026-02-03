@@ -1,0 +1,116 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+==== NOTE - OBSOLETE ====
+
+This document is obsolete.  User namespaces are now fully implemented as of
+3.12.  The approach used differs from the one detailed below.  It is based
+on 1-1 mappings from userspace uids to kernel 'kuids'.  For instance uid 0
+in a container maps to uid 100000 on the host, naturally insulating the host
+from any privilege leaks in the container.
+
+I'm leaving this document up for historical reference.
+
+==== User Namespaces in Linux ====
+
+User namespaces in Linux have a few goals:
+
+** Make it safe for an unprivileged user to unshare namespaces.  They will be privileged with respect to the new namespace, but this should only include resources which the unprivileged user already owns.
+** Provide separate limits and accounting for userids in different namespaces.
+
+=== Status ===
+
+Currently (as of 2.6.38) you can clone with the CLONE_NEWUSER flag to get a new user namespace if you have the CAP_SYS_ADMIN, CAP_SETUID, and CAP_SETGID capabilities.  What this gets you is a whole new set of userids, meaning that user 500 will have a different 'struct user' in your namespace than in other namespaces.  So any accounting information stored in struct user will be unique to your namespace.
+
+However, throughout the kernel there are checks which
+
+** simply check for a capability.  Since root in a child namespace has all capabilities, this means that a child namespace is not constrained.
+** simply compare uid1 == uid2.  Since these are the integer uids, uid 500 in namespace 1 will be said to be equal to uid 500 in namespace 2.
+
+As a result, the lxc implementation at lxc.sf.net does not use user namespaces.  This is actually helpful because it leaves us free to develop user namespaces in such a way that, for some time, user namespaces may be unuseful.
+
+=== Currently developed patchset ===
+
+Work is under way to continue the development of user namespaces.  It is being stored at http://kernel.ubuntu.com/git?p=serge/natty-userns.git;a=summary.  Note that this tree is frequently completely recreated (unavoidable as it sits on the Ubuntu development tree which itself is rebased) and only intended as a patch cache.
+
+=== Design ===
+
+The design of user namespaces can be described in several parts:
+
+** hierarchical user namespaces.  The init task runs in init_user_ns.  If a task with userid 500 does clone with CLONE_NEWUSER, then the resulting task will have userid 500 in the init_user_ns, and userid 0 in a new user_ns.  User namespaces are not named, but let's call it '1' for convenience.  So we might describe this task's uid as (500:0, 0:1), that is, userid 500 in userns 0, and userid 0 in userns 1.
+
+** targeted capabilities.  The POSIX capabilities sets currently are context-free - if you have CAP_SYS_ADMIN, you have it, and that's that.  With targeted capabilities, proposed and implemented by Eric Biederman, capabilities are actually targeted to a user namespace, specifically to the deepest user namespace in your hierarchy.  In the example above, where a task has userid (500:0, 0:1), if the task has a private network namespace, then it will have CAP_NET_ADMIN to that namespace.  If it inherited the init_net_ns, then since that net_ns is owned by init_user_ns, (500:0, 0:1) will not have CAP_NET_ADMIN to its user_ns.  The rules specifically are:
+*** If current->userns == target->user_ns, and current has capability, then granted
+*** If current->user is the creator of target->user_ns, then granted
+*** If current->userns is an ancestor of target->user_ns, and current has capability, then granted.  (This allows privileged root in init_user_ns to always be privileged to any resource)
+*** Else denied.
+
+** simple file access.
+  
+*** Every file, at first, will be owned by init_user_ns.
+*** If current->user_ns == target->user_ns, then normal userid-based file access rules apply.
+*** if current is ns_capable(target->user_ns, CAP_DAC_OVERRIDE), that is, has CAP_DAC_OVERRIDE to target->user_ns, then current gets access.
+*** Otherwise, current gets the user nobody, or 'world', access rights to the file.
+*** Eventually, three ways will be implemented to make file ownership more flexible:
+**** Some filesystems, esp proc, will need to mark some files as owned by init_user_ns unconditionally
+**** A mount option will be implemented to make a whole, new, filesystem owned by the user_ns of the caller of mount, provided that the caller owns the block device (or fstype is virtual), and the fstype is known safe to mount in non-init user_ns.
+**** Filesystems may implement (and use a generic lib/ implementation of) more flexible uid mapping, described below.
+
+=== flexible uid mapping ===
+
+This is very open to change, but reflects the latest discussions with Eric as of 2008.
+
+First, the inode->uid (and ->gid) will reflect init_user_ns owners of the file.  Xattrs will list (uid,userns) owners for the file.  So if (500:0, 0:1) creates a file, it will have inode->uid 500, and a (0:user1_ns) xattr.
+
+But remember user namespaces are not named.  This will not change, because if it did we would need a namespace of network namespaces.  So next, a simple policy will dictate names which specific users may use for their child user namespaces.  For instance:
+
+<pre>
+    [domains]
+    INIT    1
+    serge   2
+    vs2 3
+
+    [owners]
+    serge serge.INIT
+    vs2 root.INIT
+</pre>
+
+So init_user_ns is called '1', a user_ns 'serge' is '2', and one called 'vs2' is '3'.  User serge in the init_user_ns can create a user_ns called 'serge, and a user called 'vs2' in init_user_ns can create a user_ns called 'vs2'.  If (serge:1, 0:2) creates a file, it will have inode->uid=serge and an xattr (0:2), since '2' is userns 'serge'.
+
+The mechanism for the association of a name with a created user_ns is not yet certain.  It may simply be done using a mount flag.
+
+By way of implementation, not much should need to be done.  The fs can fix its getattr() to return the (uid, gid) which should be valid in current's userns, and then use those for judging permission.
+
+=== Discussion ===
+
+So right now you can clone with CLONE_NEWUSER and end up with a process which can be useful on the system or even for a full container, but have separate accounting for userids.  It's not particularly useful, but not completely useless.
+
+With the current development patchset, functionality is very different.  When you clone with CLONE_NEWUSER, you certainly cannot start a container.  However, the resulting task can be much better contained.
+
+=== Development Next steps ===
+
+I've been thinking about how to best approach the development of the remaining features.  I intend to do it in 3 steps:
+
+** First, I'll painstakingly go through the kernel addressing capable() calls and uid comparisons which allow a task in a non-init namespace to get privilege it shouldn't have.  I expect to spend the next few months on that effort.  I hope to start pushing patches upstream in the meantime.  The end-result from this effort, if pushed upstream, would be a user namespace which can be used for sandboxing of very simple apps.
+** Next, I'll likely add the ability for a full filesystem to be owned by a non-init userns.  This in itself will include:
+*** Tagging fstypes if they are safe to mount in non-init userns.
+*** A mount flag to mount a filesystem in your own userns, which is only allowed if the fs is virtual or the backing device or file is owned by your userns, and is marked as safe to mount in non-init userns.
+*** No new uid translations will be introduced.  inode->i_uid will always be the owning userid.
+*** A filesystem like proc will need to mark files which allow control of host resources as always owned by init_user_ns
+** Finally, full-fledged uid mapping will be introduced, as described above.
+
+At the end of the first step, we may have a user namespace which is safe for unprivileged users to unshare.
+
+At the end of the second step, we should have something which full containers are able to use.
+
+At the end of the third step, we have something which more complicated application containers (which bind-mount part of the hostfs into themselves) can use, and which users can safely use to mount removable filesystems from other hosts with different userid mappings.  Furthermore, I believe we'll have full in-kernel support for what the 'fakeroot' utility currently does.
+
+Links:
+  a patchset implementing user namespace knowledge in VFS from 2008: https://lists.linux-foundation.org/pipermail/containers/2008-August/012679.html

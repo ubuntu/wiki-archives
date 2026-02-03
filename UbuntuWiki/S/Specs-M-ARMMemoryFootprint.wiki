@@ -1,0 +1,294 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+* '''Launchpad Entry''': UbuntuSpec:arm-m-memory-footprint
+* '''Created''': DaveMartin
+* '''Contributors''': JohnRigby
+* '''Packages affected''': TBD
+
+=== Summary ===
+Identify and implement memory footprint optimisations for Maverick on ARM.  This includes identifying the target package profile and tools for measuring the memory footprint of packages/processes.  Also identify areas of potential improvement for future releases.
+
+=== Release Note ===
+There should be minimal end-user impact other than improved performance.
+
+Other end-user impact TBD.
+
+=== Rationale ===
+Run-time memory optimisations help to get the best performance and battery life from lightweight and mobile devices.  Mobile devices have sensitivity to RAM usage which differs from heavyweight laptops / desktops due to among other things reduced RAM, TLB and cache sizes.  Optimising memory footprint has potential to bring speed improvements (particular boot, login and application launch times) and improved power efficiency + battery life.
+
+=== Implementation ===
+Implementation requires identifying a target profile, defining what is meant by memory footprint, identifying tools for measuring memory footprint, using the tools to find areas of potential improvement and finally implementing those improvements.  See Work items in blueprint whiteboard:  https://blueprints.launchpad.net/ubuntu-arm/+spec/arm-m-memory-footprint.
+
+==== Target Profile Selection ====
+
+For now, the target profile will be as follows:
+* Initially, the headless profile will be targeted, with the aim of optimising the memory footprint of the core system.
+* The netbook profile will be a secondary target if we have time.
+
+See UbuntuSpec:arm-m-ui-and-test-heads for details.
+
+==== Tools for Instrumenting Memory Footprint ====
+
+This section proposes:
+* presicely what we will attempt to optimise;
+* how to measure it;
+* what tools to use.
+
+===== Definition of Memory Footprint =====
+
+Goal: provide a definition of the memory footprint of ''each process'' in the system which can be used as a basis for profiling and optimisation.
+
+Proposed definition:
+* Virtual memory allocation shall be considered (i.e., all pages mapped to a process)
+* Physical memory usage (resident pages) shall be considered as a separate statistic from virtual memory
+** Currently it's not easy to determine ''what'' memory is resident for a given process, only how much memory is resident for the process as a whole.  Kernel work might be needed if we decide we need more precision.
+* Two accounting policies (useful to have both for analysis purposes):
+** account all mapped memory to the parent process (useful for understanding the memory use of each individual process; due to memory sharing, this will account more than 100% of the mapped memory in the system)
+** account a share of memory to each process, according to the number of processes mapping it (useful for a system-level view of memory use across all processes).
+** Note: the "proportional set size" (PSS) reported by Linux in <code>/proc/*/smaps</code> is an equivalent metric.
+* Orphaned global shared memory objects (SYSV and POSIX shared memory) would not be accounted by the above mechanisms and must be accounted separately.  Orphaned objects (i.e., mapped by no process) are rare and usually indicate a memory leak, so we can monitor these crudely unless there is a significant memory load here.
+* Kernel / module memory usage shall not be considered (rationale: in an Ubuntu system, most memory is owned by userspace)
+** It could be useful to monitor physical memory in use by the kernel, but how to do this would need more discussion.
+
+===== Tools Survey =====
+
+A quick review of some relevant tools and utilities:
+ 
+* vmstat (procps) - provides one-shot aggregate memory status (same statistics top shows):
+<pre>
+procs -----------memory---------- ---swap-- -----io---- -system-- ----cpu----
+ r  b   swpd   free   buff  cache   si   so    bi    bo   in   cs us sy id wa
+ 0  0  32372 784880 154488 832572    0    0     7    10   21   46  0  0 99  0
+</pre>
+* free (procps) - displays similar info, optionally polling periodically
+<pre>
+             total       used       free     shared    buffers     cached
+Mem:       1896300    1111296     785004          0     154492     832592
+-/+ buffers/cache:     124212    1772088
+Swap:      5582548      32372    5550176
+</pre>
+* sar (sysstat) - takes periodic readings of the same information (and much besides, but does not profile memory usage per process	)
+<pre>
+$ sar -r
+
+Linux 2.6.32-22-generic (e200948)       05/28/10        _i686_  (4 CPU)
+13:38:33    kbmemfree kbmemused  %memused kbbuffers  kbcached  kbcommit   %commit
+13:38:43       761320   1134980     59.85    155548    854884    224820      3.01
+13:38:53       761320   1134980     59.85    155552    854888    224820      3.01
+13:39:03       760356   1135944     59.90    155572    855784    224820      3.01
+13:39:13       759884   1136416     59.93    155608    856136    224820      3.01
+13:39:23       759660   1136640     59.94    155688    856364    224820      3.01
+13:39:33       759660   1136640     59.94    155692    856364    224820      3.01
+</pre>
+* frysk
+** sophisticated system monitoring and debugging tool
+** not obvious whether it does/can measure the kind of information we're interested in
+** not in Ubuntu (for now)
+* ipcs -m: lists extant SYSV shared memory blocks:
+<pre>
+$ ipcs -m
+------ Shared Memory Segments --------
+key        shmid      owner      perms      bytes      nattch     status      
+0x00000000 131072     ubuntu     600        393216     2          dest         
+0x00000000 163841     ubuntu     600        393216     2          dest         
+0x00000000 196610     ubuntu     600        393216     2          dest         
+</pre>
+* /dev/shm: ls and/or stat can be used to examine extant POSIX shared memory blocks:
+<pre>
+$ ls -al /dev/shm
+total 1192
+drwxrwxrwt  2 root  root       120 May 28 15:06 .
+drwxr-xr-x 17 root  root      3960 May 28 13:02 ..
+-r--------  1 ubuntu ubuntu 67108904 May 28 15:06 pulse-shm-1306850678
+-r--------  1 ubuntu ubuntu 67108904 May 28 15:06 pulse-shm-2493460948
+-r--------  1 ubuntu ubuntu 67108904 May 28 15:06 pulse-shm-3315159511
+-r--------  1 ubuntu ubuntu 67108904 May 28 15:06 pulse-shm-549372063
+</pre>
+* <code>/proc/*/maps</code>: processes' virtual memory mapping info can be dumped directly for later processing using a command such as the one below.  The amount of data from a dump can be quite large (1MB or more) but it should be possible to process it entirely offline, due to the explicit dev, inode, offset and pid information:
+<pre>
+
+/proc/3856/maps:00008000-00093000 r-xp 00000000 b3:0a 207460     /usr/bin/gnome-keyring-daemon
+/proc/3856/maps:0009a000-0009f000 r--p 0008a000 b3:0a 207460     /usr/bin/gnome-keyring-daemon
+/proc/3856/maps:0009f000-000a1000 rw-p 0008f000 b3:0a 207460     /usr/bin/gnome-keyring-daemon
+/proc/3856/maps:000a1000-000e5000 rwxp 000a1000 00:00 0          [heap]
+/proc/3856/maps:40000000-4001c000 r-xp 00000000 b3:0a 202828     /lib/ld-2.10.1.so
+/proc/3856/maps:4001c000-40023000 rw-p 4001c000 00:00 0 
+/proc/3856/maps:40023000-40024000 r--p 0001b000 b3:0a 202828     /lib/ld-2.10.1.so
+/proc/3856/maps:40024000-40025000 rw-p 0001c000 b3:0a 202828     /lib/ld-2.10.1.so
+/proc/3856/maps:40025000-40026000 r--p 00000000 b3:0a 398963     /usr/lib/locale/en_GB.utf8/LC_IDENTIFICATION
+/proc/3856/maps:40026000-4002d000 r--s 00000000 b3:0a 301799     /usr/lib/gconv/gconv-modules.cache
+[...]
+</pre>
+* <code>/proc/*/smaps</code>: Similar to <code>/proc/*/maps</code>, but provides a stanza of detailed information per mapping.  It looks useful, though the data is relatively huge (5-10MB to dump all processes) and may be impractical to dump at high frequency unless some processing is done to compact the information on the host at dump time.  See also http://bmaurer.blogspot.com/2006/03/memory-usage-with-smaps.html
+<pre>
+b77b8000-b77b9000 r--p 00000000 08:01 7202724    /usr/lib/locale/en_GB.utf8/LC_PAPER
+Size:                  4 kB
+Rss:                   4 kB
+Pss:                   4 kB
+Shared_Clean:          0 kB
+Shared_Dirty:          0 kB
+Private_Clean:         4 kB
+Private_Dirty:         0 kB
+Referenced:            4 kB
+Swap:                  0 kB
+KernelPageSize:        4 kB
+MMUPageSize:           4 kB
+</pre>
+* Maemo has some neat tools based on examining <code>/proc</code>:
+** good overview - see section 5 (Resource usage): http://www.cuteqt.com/blog/wp-content/uploads/2010/03/Qt_for_Maemo_Developers_Guide_v0_5_Beta.pdf
+** GPLv2 tools, seem to work out of the box on lucid armel:
+<pre>
+deb http://repository.maemo.org fremantle/tools free
+deb-src http://repository.maemo.org fremantle/tools free
+
+</pre>
+
+* <code>exmap</code> is a heavyweight memory usage analyser: see http://www.berthels.co.uk/exmap/
+** comprehensive - similar to the functionality from <code>smem</code> and <code>/proc/*/smaps</code>, but operates on page granularity.  This is more precise than the other techniques, but may be overkill for initial investigations.
+** not clear how maintained it is right now
+** not available in lucid/maverick.
+** depends on a custom kernel model to instrument page allocation in the kernel.
+** <code>exmap-console</code>, originating from Opened Hand http://labs.o-hand.com/exmap-console/ is a lighter-weight console-only frontend, supposedly offering the same functionality is the <code>exmap</code> graphical frontend.
+
+* <code>smem</code> is a command-line / graphical tool for querying process memory usage
+** http://www.selenic.com/smem/
+** relatively simple and lightweight
+** aware of memory sharing, so should provide useful output.
+** available in lucid/maverick (<code>smem</code> package)
+** Supports data capture and offline processing:
+** Capture <code>/proc</code> data with <code>smemcap</code> (<code>/usr/share/doc/smem/example/smemcap.c</code> in Ubuntu <code>smem</code> package).
+** Analyse later with <code>smem --source=</code>''tarball''<code> </code>''[arguments ...]''
+
+* <code>atop</code> is an interactive, "top"-like tool, but is more advanced
+** can accumulate resource usage per process name (not just per individual process), and can accumulate since boot.
+** not clear whether it's memory sharing aware
+** uses BSD process accounting to keep track of all processes' lifetimes
+** available in lucid/maverick (requires BSD process accounting to be enabled in the kernel for full functionality)
+
+===== TODO: still to investigate =====
+* Feasibility of extending bootchart
+** Action item: Contact Wookey about this
+* Tools from valgind suite for finding dead library tool code
+** callgrind
+** Action item: Guillaume Letellier to get feedback from Julian Seward about availability.
+** massif - potentially useful for heap profiling
+
+==== Build Time Tools for Reducing Memory Footprint ====
+Using definitions and tools determined above, investigate the effect of various build time tools and compiler options on memory footprint.
+* Compiler options
+** Wider use of -Os?  Need to do measurements to understand the runtime performance impact (but we build for Thumb2, so we reduce space and sometimes gain speed)
+** [FUTURE?] Feedback-directed optimisation
+** Action item: cjwatson to provide pointers to how to use compiler wrappers to achieve this
+*** The best pointer I have on this is the gcc-opt package, which we used to use to constrain optimisation levels in package builds although we don't use it any more.  This is now in the maverick archive; it'll undoubtedly require some work to bring it up to date, but it may provide a useful skeleton for you.  --cjwatson
+* Tools for finding and removing dead code from libraries
+** Code coverage metrics in Ubuntu is haphazard so there may not be much information available.
+** Investigate how coverage measurement can be used to assess the amount of unused code/data in binaries.
+* Investigate how the Ubuntu/Debian tool mklibs could be used to identify what parts of libc are currently used.
+** The libc.a archive could be kept on disk and after installing packages, mklibs could be run to produce a lib with exactly what is currently used.  Doubtful whether there would be a considerable win if you do this for a real install, e.g.  just the installer atm already pulls in 70% -> could be investigated in an experiment.
+
+==== Kernel Tuning for Optimised Memory Utilization ====
+Investigate how kernel tuning effects memory use.
+* Improve page cache performace tradeoff by using different /proc/sys/vm defaults for mobile devices?  Default VM tuning parameters may benefit from profiling for ARM - use different defaults for ARM versus x86, or per platform?
+** elinux.org: http://elinux.org/Kernel_Size_Tuning_Guide
+* Power benchmarking (may overlap with https://blueprints.launchpad.net/ubuntu-arm/+spec/arm-m-kernel-power-management-consolidation)
+* Build kernel for thumb2?
+** Likely to run into alignment bugs so if this task should be started early in the release period.
+
+==== Targets for Improvement ====
+Actual targets will be based on data gathered using tools from previous sections.
+* Work on low hanging fruit now and improve measurement techniques and tools for future integration.
+* Other existing work
+** elinux.org: http://elinux.org/System_Size
+* Memory hogs
+** Xorg
+** Others
+** update-apt-xapian-index (both CPU and memory hog, using 82MB and 100% CPU for multiple minutes on a Beagle Board)
+* Duplicate functionality across multiple libraries
+** Identify which packages use the various libraries and what the effort would be to use a single provider.
+** openssl / gnutls
+* Reduce the number of interpreters required by the base system and the boot process.
+* Converting from hard dynamic linking to a plugin model for libraries providing rarely-used functionaliy, to avoid loading (and maybe avoid installing) libraries which may commonly be unused
+* Reprofiling the boot process for ARM
+** upstart currently optimised mainly based on x86 world. ARM might benefit from benchmarking and tuning this arch specific.
+* uclibc? (Nicolas says it can run firefox) - internationalisation limitations
+
+==== UI Changes ====
+
+Memory concerns could influence the choice of graphics stack.
+
+==== Code Changes ====
+
+TBD
+
+==== Migration ====
+
+Probably no end user impact, but there may be software migration issues.
+
+=== Cross-References ===
+
+* The package/application selection for phone profile mentioned in the summary is covered by https://blueprints.edge.launchpad.net/ubuntu-arm/+spec/arm-m-ui-and-test-heads.
+
+=== Test/Demo Plan ===
+
+Before/after demonstration on chosen target profile on OMAP (256MB)?
+
+TODO: Add an entry to http://testcases.qa.ubuntu.com/Coverage/NewFeatures for tracking test coverage.  This need not be added or completed until the specification is nearing beta.
+
+=== Unresolved Issues / Future Work ===
+
+It is likely that more areas of improvement will be identified than can be addressed in this release.  This effort should continue in future releases.
+* hot/cold partitioning support in gcc
+** Richard Earnshaw to follow up
+* Link Time Dead Code and Data Elimination Using GNU Toolchain
+** http://elinux.org/images/2/2d/ELC2010-gc-sections_Denys_Vlasenko.pdf (not available yet for ARMv7 but being worked on)
+** Richard Earnshaw to follow up
+
+=== BoF agenda and discussion ===
+<pre>
+* work on low hanging fruits now and improve measurement techniques and tools for
+   future integration
+* minimal filesystem with just a shell would allow to run something on low mem
+   platforms. constraints:
+** low amount of memory
+** smaller caches
+* library duplication
+** openssl / gnutls
+* -Os needs to be measured to understand the runtime performance impact
+   (but we build for Thumb2, so we reduce space and sometimes gain speed)
+* finding dead library tool code: callgrind/valgrind
+** massif (from valgrind) also potentially useful for heap profiling
+* Link Time Dead Code and Data Elimination Using GNU Toolchain
+** http://elinux.org/images/2/2d/ELC2010-gc-sections_Denys_Vlasenko.pdf
+   (not available yet for ARMv7 but being worked on)
+* Reprofiling the boot process for ARM could be useful
+** upstart currently optimised mainly based on x86 world ... arm might benefit from benchmarking
+    and tuning this arch specific.
+* Default VM tuning parameters may benefit from profiling for ARM - use different defaults for ARM versus x86, or per platform?
+* Build kernel for thumb2?
+** Likely to run into alignment bugs, so sooner rather than later
+* Coverage measurement?
+** Haphazard in Ubuntu
+* how much of libc is used by the standard use case
+** mklibs on installed/embedded systems
+** the libc.a could be kept on disk and after installing packages, mklibs could be run to
+     produce a lib with exactly what is currently used
+** doubtful whether there would be a consierable win if you do this for a real install, e.g.
+     just the installer atm already pulls in 70% -> could be investigated in an experiment
+* Ubuntu/Debian has a library reduction tool - mklibs
+* uclibc? (Nicolas says it can run firefox) - internationalisation limitations
+* exmap(-console) may be a useful memory measurement tool
+* Additional possible memory profiling tools
+** sar
+** frysk
+</pre>
+----
+CategorySpec

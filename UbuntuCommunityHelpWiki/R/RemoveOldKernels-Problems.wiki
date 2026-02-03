@@ -1,0 +1,216 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+== GRUB reports no Operating System ==
+
+So, you deleted all the kernels? or possibly it's so messed up GRUB can't find it ?
+
+=== root with live system ===
+
+Boot from live media (the "Desktop" image), open an <nowiki>[[https://help.ubuntu.com/community/Lubuntu/Documentation/LXTerminal | LXTerminal]]</nowiki> session and gain root access by typing in
+
+<pre>
+sudo -i
+</pre>
+
+{{{#!wiki warning
+    {X} Please remember that you have now turned off the inbuilt protection of Lubuntu, be VERY careful what you type!
+}}}
+
+=== identify root filesystem ===
+
+Firstly, find where the Linux installation is..
+
+<pre>
+fdisk -l 
+</pre>
+
+==== traditional setup ====
+
+You will see something like this :
+
+<pre>
+    /dev/sda1   *           1        4660    37431418+  83  Linux
+    /dev/sda2            4661        4865     1646662+   5  Extended
+    /dev/sda5            4661        4865     1646631   82  Linux swap / Solaris
+</pre>
+
+Look for the entry that ends in "83 Linux" which is /dev/sda1 in the above example.
+
+If there is ''also'' a line with "LVM" in it, then you will need to skip to the <nowiki>[[#LVM|LVM]]</nowiki> section below.
+
+==== GPT ====
+
+If the disk you think it is has only one partition with a "GPT" system, then you'll need to use a different tool than `fdisk` (unless you have package util-linux v2.23+ which is available in Utopic and beyond). This indicates that the drive uses <nowiki>[[https://en.wikipedia.org/wiki/GUID_Partition_Table|GUID Partition Table]]</nowiki> instead of Master Boot Record. The former is starting to become more and more standard. Instead of `fdisk`, try:
+
+<pre>
+parted -l
+</pre>
+
+which should give an output something like:
+
+<pre>
+Model: ATA Hitachi HDS72168 (scsi)
+Disk /dev/sda: 80.0GB
+Sector size (logical/physical): 512B/512B
+Partition Table: msdos
+
+Number  Start   End     Size    Type     File system     Flags
+ 1      1049kB  62.5GB  62.5GB  primary  ext4
+ 2      62.5GB  71.1GB  8595MB  primary  linux-swap(v1)
+</pre>
+
+In this case, the right partition is certainly /dev/sda1. (Please note that this example is MBR and not GPT, but the output should be similar).
+
+==== LVM ====
+
+If the `fdisk` command above yields a line like:
+
+<pre>
+    /dev/sda5          501760   976771071   488134656   8e  Linux LVM
+</pre>
+
+Then you have <nowiki>[[Lvm|logical volume management]]</nowiki>, which requires a slightly different approach. You can get more information about your LVM partition with the following:
+
+<pre>
+pvs
+</pre>
+
+which will yield something like:
+
+<pre>
+  PV         VG         Fmt  Attr PSize   PFree 
+  /dev/sda5  lubuntu-vg lvm2 a--  465.52g 52.00m
+</pre>
+
+Usually with LVM your normal partitions are contained within volume groups, which is what the "VG" column refers to. The kernel usually maps these to /dev/<VG>, so in this case, that would be /dev/lubuntu-vg. You can find out more specific information about your volume group:
+
+<pre>
+lvdisplay /dev/<VG>
+</pre>
+
+which should include output like so:
+
+<pre>
+  --- Logical volume ---
+  LV Path                /dev/lubuntu-vg/root
+  LV Name                root
+</pre>
+
+You need to identify your root file system, which in this case is clearly /dev/lubuntu-vg/root.
+
+=== mount filesystem ===
+
+Next, mount the partition in terms of the device file as per what was reported above, e.g. /dev/sda1, /dev/lubuntu-vg/root, etc.
+
+<pre>
+mount <device file> /mnt
+</pre>
+
+/mnt can also be some other directory (that must exist), should you choose.
+
+=== Internet access ===
+
+Use `nm-applet` to get connected to your wifi or plug in your Ethernet. Then copy over `resolv.conf`:
+
+<pre>
+cp /etc/resolv.conf /mnt/etc/resolv.conf
+</pre>
+
+=== point local filesystem at your HDD ===
+
+<pre>
+for fs in sys proc dev dev/pts; do mount --bind /$fs /mnt/$fs; done 
+chroot /mnt
+</pre>
+
+{{{#!wiki warning
+    {X} At this point, if you `cd /`, you'll be in your hard drive rather than the root of the live desktop. That being said, be careful!
+}}}
+
+=== divert installation to your HDD ===
+
+<pre>
+dpkg-divert --local --rename --add /sbin/init
+ln -s /bin/true /sbin/init
+</pre>
+
+=== install the kernel ===
+
+<pre>
+apt-get install linux-image-generic
+</pre>
+
+{{{#!wiki note
+    {i} Be aware that if you use a different kernel than the standard one, such as low-latency, you should install the appropriate package, which you can list with: `apt-cache search linux-image-`.
+}}}
+
+If you have an error with the install, such as:
+
+<pre>
+P: Installing debian theme...cp: cannot stat ‘/usr/share/syslinux/themes/debian-wheezy/extlinu/memtest.bin’: No such file or directory
+</pre>
+
+then chances are you booted into memtest. For some reason you get an error that the file does ''not'' exist when it does. If you remove it, problem solved. After that, you'll need to reconfigure:
+
+<pre>
+dpkg --configure -a
+</pre>
+
+=== update GRUB ===
+
+Next, you need to tell GRUB to update grub.cfg to allow you to use the new kernel.
+
+<pre>
+update-grub
+</pre>
+
+==== LVM concerns ====
+
+A typical LVM setup puts /boot in a separate partition not managed by LVM. This means updating GRUB can only affect the /boot on the logical volume. 
+
+You could mount the separate partition, but you can't `chroot` to it since this command always runs some command (default is `/bin/sh`) and no commands exist on the partition.
+
+However, when you update GRUB, you load the necessary modules to load the kernel and initial ramdisk from the logical volume. So if you copy /boot from the logical volume to the separate partition, you'll be good to go!
+
+To do this:
+
+# Follow the <nowiki>[[#clean_up|clean up]]</nowiki> instructions below. No, you don't need to be in the `chroot` anymore.
+# Mount both filesystems. You should have the logical volume already mounted so just <nowiki>[[#identify_root_filesystem|go here]]</nowiki> to identify the separate partition and mount it.
+# Make a backup of the original boot:
+    <pre>
+mkdir /mnt/root/oldgrub         
+mv /mnt/boot/* /mnt/root/oldgrub
+    }}} 
+ 1. Copy over the new boot:
+    {{{
+cp -R /mnt/root/grub/* /mnt/boot/
+    }}}
+ 1. Reboot and enjoy your new kernel! To be sure all is well, make sure to update GRUB once again:
+    {{{
+update-grub
+    }}}
+
+=== clean up ===
+
+Remove the link and divert...
+
+{{{
+unlink /sbin/init
+dpkg-divert --rename --remove /sbin/init
+exit
+</pre>
+https://help.ubuntu.com/community/Grub2/Installing#Reinstalling_GRUB_2
+All done!! Restart you will have the option to boot into the new kernel. If for some reason, it doesn't boot right in, hold down SHIFT when your system starts up to see the GRUB menu.
+
+=== still problems… ===
+
+If you have come here for an edge case and/or not found luck, you may want to consider <nowiki>[[https://help.ubuntu.com/community/Grub2/Installing#Reinstalling_GRUB_2|reinstalling GRUB]]</nowiki>.

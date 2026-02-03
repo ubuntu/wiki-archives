@@ -1,0 +1,137 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+{| class="wikitable"
+|-
+| <tablestyle="float:right; font-size: 0.9em; width:40%; background:#F1F1ED; margin: 0 0 1em 1em;" style="padding:0.5em;"><<BR>>
+|}
+
+== Intro to what happens under the hood ==
+
+This is an attempt to follow the process of hibernation all the way from the point at which you press the hibernate button till the power going off.  It's based on Karmic.
+
+(So far it gets all the way through where the button comes from and how it lock screens and eventually calls the pm-hibernate command - more to come).
+
+== From the Gnome GUI to pm ==
+
+On Karmic there is an icon on the panel with a menu with lock screen, set status, and shutdown and hibernate and similar; ''about'' shows this as being from ''indicator-applet-session'' (from package '''indicator-applet''') - that's just a wrapper that provides the glue on the panel. A ''ps'' shows that there are indicator-status-service, indicator-users-service and indicator-session-service processes  - all from the '''indicator-session''' package, these populate the menu that ''indicator-applet-session'' provides.
+
+* The ''indicator-session-service'' in the '''indicator-session''' package provides the options for hibernation, shutdown etc.
+      ''session-service.c:create_items'' creates the menu items using
+      ''dbusmenu_menuitem_new'' (see '''libdbusmenu''' package) using the dbus object
+      ''/org/ayatana/indicator/session/menu''.  The menu item is bound to the
+      'sleep' callback with a data value of "Hibernate".  That seems to be registered in indicator-session.c (still in the same package) which actually does gtk_menu_insert's.
+
+  There is a also a 'dpk_changed_cb' (in session-service.c) that checks to see if hibernation and suspend are available. Via the ''hibernate_prop_cb'' they change the visibility of the hibernate menu option depending on the result of a dbus can-hibernate call on ''org.freedesktop.DeviceKit.Power'' (object ''/org/freedesktop/DeviceKit/Power.'')
+
+* The ''sleep'' function in session-service.c (still in '''indicator-session''') calls ''lock_screen'' 
+
+*** lock_screen exits if 'gdm_auto_login' is true but otherwise sends a ''Lock'' message on the session bus to ''org.gnome.ScreenSaver,"/","org.gnome.ScreenSaver"''. gdm_auto_login is read using gdm_get_autologin via a dbus call of GetValue on ''org.gnome.DisplayManager , /org/gnome/DisplayManager/Settings , org.gnome.DisplayManager.Settings'' (on the system bus) with the parameter of ''daemon/AutomaticLoginEnable''
+
+    On most systems that errors with no such key - but the ''gdm_auto_login'' variable is defaulted to false; it's only if you set this flag at some point that this returns. Reading gdm_auto_login is done at startup, a ValueChange signal is registered to detect it changing afterwards.
+
+* After the screen lock ''sleep'' then sends a message of ''Hibernate'' (from it's userdata field) via dbus to ''/org/freedesktop/DeviceKit/Power''. That's handled by ''/usr/lib/devicekit-power/devkit-power-daemon'' from the '''devicekit-power''' package.
+
+* In ''devicekit-power/src/dkp-daemon.c'' is the ''dkp_daemon_hibernate'' function where the ''Hibernate'' message is actioned.. It checks that:
+** the kernel can hibernate (having previously read from ''/sys/power/state'' and checking it contains the word '''disk''')
+** that there is enough swap (based on values previously read from ''/proc/meminfo'')
+** with polkit that you are allowed to hibernate (using ''polkit_authority_check_authorization_sync'' )
+
+  Finally it runs ''/usr/sbin/pm-hibernate'' which is from the '''pm-utils''' package.
+
+== pm-utils down to the kernel ==
+
+''pm-hibernate'' is a symlink to ''/usr/lib/pm-utils/bin/pm-action'' which is just a shell script.
+
+''pm-action'' picks up a lot of helper functions from ''/usr/lib/pm-utils/pm-functions''; this stores a lot of config and log files based on a ''STASHNAME'' variable that pm-action sets to pm-suspend; this leads for example to the whole process being logged in ''/var/log/pm-suspend.log''.
+
+Other places ''pm-action'' looks are:
+
+** ''/usr/lib/pm-utils'' other scripts, script fragments (''hooks'') for individual sections of the hibernate/resume/etc process.
+  
+** ''/etc/pm'' for configuration and extra script fragments to get run during the hibernation/resume/etc process.
+  
+** ''/var/run/pm-utils'' for locks and temporary state files.
+  
+''pm-action'' sets up the ''STASHNAME'' variable and sources ''pm-functions''.
+
+* ''pm-functions'' sets up variables pointing to each of the directories it uses.  It also pulls in  ''/usr/lib/pm-utils/defaults'' and potentially ''/usr/lib/pm-utils/pm-suspend.defaults'' if it exists. It then sources each of the files in /etc/pm/config.d and ''/etc/pm/pm-suspend-config.d'' (that being from STASHNAME).  As it works through these files it concatenates the SUSPEND_MODULES, HOOK_BLACKLIST, ADD_PARAMETERS and DROP_PARAMETERS variables - thus if any of the config files set them they accumulate rather than overriding earlier ones.
+
+* ''pm-functions'' then sources ''/usr/lib/pm-utils/functions'' which is a set of generic helper functions.
+
+* There are three different ways of dealing with hibernation; the kernel, tuxonice and uswsusp - the choice is made by the ''SLEEP_MODULE'' in ''pm-functions''.  This is initially set as ''kernel'' but you can change that by setting the value in one of the config files - preferably ''/etc/pm/config.d/00sleep_module''. If it's set to ''auto'' ''pm_functions' will look for tuxonice and uswsusp.  
+
+ Given a particular settings for ''SLEEP_MODULE'' ''pm_functions'' sources file for that mechanism in ''/usr/lib/pm-utils/module.d''; the one for the ''kernel'' mode is pretty empty since ''pm_functions'' sets the defaults for that mode.  In either case by the end of ''pm_functions'' the ''do_hibernate'' and ''do_suspend'' functions have been defined to invoke which ever sleep mechanism has been selected.
+
+* A list of ''parameters'' is maintained in ''/var/run/pm-utils/pm-suspend/storage/parameters'' - this is initially cleared and the parameters to ''pm_action'' are added to it as are flags later on.  These flags indicate things like particular hardware specific ''quirks'' to use and avoid.
+
+* The ''load_hook_blacklist'' is used to take the ''HOOK_BLACKLIST'' variable and mark those hook scripts as being disabled. Similarly at this stage the ''ADD_PARAMETERS'' and ''DROP_PARAMETERS'' variables are merged with the existing set of parameters.
+
+* ''pm_action'' now uses ''run_hooks'' from ''pm_functions'' to run all the hook scripts; it must return true for the hibernate to actually happen.
+
+* ''run_hooks'':
+** first runs a ''before_hooks'' hook so you can execute any specials by setting the BEFORE_HOOKS variable.
+** Takes a list of all of the script fragments in ''/var/run/pm-utils/sleep.d'' and ''/etc/pm/sleep.d'' (sleep having been passed as a flag from pm-action).  These are sorted into alphanumeric order and any duplicates removed - so it's probably a bad idea to have the same named script in both of these directories.
+** For each hook file the flags are checked to see if it was previously disabled by the ''HOOK_BLACKLIST'' mechanism and if not the hook is run.  If the hook exits with an error the whole of the ''run_hooks'' exits stopping any further hooks running and the whole hibernate process is stopped.  The running set of parameters is also updated between each one.
+
+* The individual sleep.d hooks:
+** '''000record''' - aborts the hibernate/sleep if the kernel has been upgraded (checks for /var/run/do-not-hibernate)
+** '''00auto-quirk''' - these are extracted from lshal by looking for lines with power_management.quirk.* = true, these then get turned into parameters of the form --quirk- - for example on my machine I have --quirk-vga-mode-3 which comes from a hal entry of power_management.quirk.vga_mode_3 = true  (bool)
+** '''00logging''' - just add current modules, version number and free memory to the logs
+** '''00powersave''' - uses the pm-powersave to turn off powersaving features during the hibernate and restore them afterwards.  This calls back into another run of ''run_hooks'' but this time with the argument of ''power'' rather than ''sleep''  - see below. pm-powersave is also called by ''acpi'' scripts (such as '''/etc/acpi/power.sh''') when events such as connecting an AC adapter happen.
+*** Hooks in power.d - many appear to be the same as some of the files in sleep.d; it looks like some are moving to power.d as people find things that need to actually happens in power changes rather than just suspend/resume.
+**** '''95hdparm-apm''' - Changes hard drive power settings based on whether we are on battery or not
+**** '''anacron''' - as per the sleep.d equivalent script but used for changes in power.
+**** '''laptop-mode''' - see sleep.d equivalent
+**** '''sched-powersave''' - When on battery tune the scheduler for lower power usage in the way processes get scheduled accross multiple chips and threads.
+
+** '''01PulseAudio''' - For every pulseaudio daemon running (found from a ps) it mutes all the sinks and sources and then suspends the daemon
+** '''10_grub-common''' - Tell Grub the resume worked OK.
+** '''10_unattended-upgrades-hibernate''' - Waits for any unattended upgrades to finish before hibernating.  This uses ''/usr/share/unattended-upgrades/unattended-upgrade-shutdown'' to do the bulk of the work.
+** '''49bluetooth''' - Suspend/resume bluetooth on some systems
+** '''55NetworkManager''' - Uses the dbus system bus to send a ''sleep'' or ''wake'' message to NetworkManager
+** '''75modules''' - unloads any modules set in the ''SUSPEND_MODULES'' variable and anything that depends on them, and loads them back on resume.
+** '''90clock''' - saves the current time to the hardware clock before hibernate and pulls it back during restore.
+** '''94cpufreq''' - sets the cpu frequency governers to performance during the hibernate cycle and restores it afterwards.  This uses the ''savestate'' and ''restorestate'' functions to save the current state in ''/var/run/pm-utils/pm-suspend/storage/state\:cpu*_governor''
+** '''95anacron''' - stop and start the ''anacron'' job scheduler.   This seems to be on the basis that when you resume from hibernation there is a chance you are now on power and anacron doesn't run on battery.
+** '''95led''' - a trivial script to start the suspend LED blinking on some machines.
+** '''96laptop-mode''' - during resume turns laptop mode on if it's enabled
+** '''98smart-kernel-video''' - Removes a lot of the quirks that came from HAL if the kernel mode switching is in use, since they seem to be trusted to do the right thing most of the time. This file has rules for different vendors about which quirks can be ignored. 
+** '''99video''' - This does the bulk of the video hibernation/resume work, guided by any remaining quirks.  Some happen by default and are turned off by quirks (e.g. chvt and fb) others are turned on by quirks (e.g. vga_mode_3).   Many use the VESA Bios extension (VBE) to get the video card bios to do things themselves.  As noted above most of these are disabled in the case of KMS. The quirks are:
+*** dpms-on - Use VBE to turn DPMS on during resume
+*** dpms-suspend - Use VBE to suspend DPMS during hibernate/sleep
+*** radeon-off - Radeon specific tweak using the '''radeontool''' package.
+*** reset-brightness - Explicitly restore the brightness during resume.
+*** s3-bios and s3-mode - Use the video bios to restore settings when coming back from sleep; see the Documentation/power/video.txt file in the kernel source for more details.
+*** vbe-post - Use VBE to run the Video bios initialisation.
+*** vbemode-restore and vbestate-restore - use VBE to save and restore some of the state of the video system.
+*** no-fb - Refuse to suspend if framebuffer is in use
+*** pci-save - Save and restore the PCI config space for the video card. (Appears to be broken by a thinko to me)
+*** no-chvt - Don't flick to a spare virtual terminal and back during suspend/resume
+** '''action_wpa''' - Shut down interfaces used by wpa-roaming during suspend/resume.
+
+ We've run all the hooks, assuming that none of them have failed we find ourselves back in pm-action.  It's going to now run the ''do_hibernate'' function that was set up earlier to which ever hibernate system we're going to use.
+
+== From the kernel to sleep (using standard kernel hibernate) ==
+
+** The ''do_hibernate'' function defined in pm-functions is pretty simple; it sets up the mode used to force the hardware into hibernate ( by writing it to /sys/power/disk ) and then just writes '''disk''' to /sys/power/state.
+
+** The write ends up calling ''state_store'' in kernel/power/main.c (via the sysfs_create_group call in the ''pm_init'' function and the rather sneaky ''power_attr'' macro that creates the data for each attribute/file).  ''state_store'' itself checks to see if it was the word '''disk''' and if so calls the '''hibernate()''' function in kernel/power/hibernate.c
+
+To be continued....
+** Must add where the quirks come from in hal
+** power.d - seem to have a lot of duplicates with sleep.d (asked about laptop-mode)
+---
+ubuntu@treblig.org
+
+== External Links ==
+
+http://www.ubuntu-forum.de/artikel/10046/gel%C3%B6st-standby-hibernate.html

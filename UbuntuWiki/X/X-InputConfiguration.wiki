@@ -1,0 +1,206 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+== Structure ==
+
+Unless `xorg.conf` has manual configuration, X.org uses udev for detecting
+input devices, and udev properties for configuring them. This is what happens
+in detail:
+
+ 1. A hardware input device is present at boot, or gets hotplugged.
+ 
+ 1. The kernel detects this, and creates a new "input" device (e. g.  `/sys/class/input/input3`) and an "event" interface for it (`/sys/class/input/event3` and a device node `/dev/input/event3`) which you can use to talk to the input device, see `/usr/include/linux/input.h`.
+
+ 1. udev picks up the "add" event and the new device. `/lib/udev/rules.d/60-persistent-input.rules` calls `/lib/udev/input_id` on it, which detects the class of the device (mouse, touchpad, etc.) and attaches some properties to it:
+
+ {{{
+ $ /lib/udev/input_id /class/input/event4
+ ID_INPUT=1
+ ID_INPUT_KEY=1
+ ID_INPUT_KEYBOARD=1
+
+ $ /lib/udev/input_id /class/input/event14
+ ID_INPUT=1
+ ID_INPUT_MOUSE=1
+ ID_INPUT_TOUCHPAD=1
+ }}}
+
+ 1. udev applies additional rules shipped by the X.org packages (`/lib/udev/rules.d/*xorg*`), which assign an X11 driver and device specific properties like keyboard layout or touchpad quirks:
+
+ {{{
+ P: /devices/platform/i8042/serio0/input/input4/event4
+ E: DEVNAME=/dev/input/event4
+ E: ID_INPUT=1
+ E: ID_INPUT_KEY=1
+ E: ID_INPUT_KEYBOARD=1
+ E: XKBMODEL=pc105
+ E: XKBLAYOUT=de
+ E: XKBVARIANT=nodeadkeys
+ E: x11_driver=evdev
+
+ P: /devices/platform/i8042/serio1/input/input14/event14
+ N: input/event14
+ E: DEVNAME=/dev/input/event14
+ E: ID_INPUT=1
+ E: ID_INPUT_MOUSE=1
+ E: ID_INPUT_TOUCHPAD=1
+ E: x11_driver=synaptics
+ E: x11_options.JumpyCursorThreshold=20
+ }}}
+
+ 1. X.org picks up the add event or detects existing devices at startup, and adds it to its configuration:
+
+ {{{
+ (II) config/udev: Adding input device "AT Translated Set 2 keyboard" (/dev/input/event4)
+ (**) "AT Translated Set 2 keyboard": always reports core events
+ (**) "AT Translated Set 2 keyboard": Device: "/dev/input/event4"
+ (II) "AT Translated Set 2 keyboard": Found keys
+ (II) "AT Translated Set 2 keyboard": Configuring as keyboard
+ (II) XINPUT: Adding extended input device ""AT Translated Set 2 keyoard"" (type: KEYBOARD)
+ (**) Option "xkb_rules" "evdev"
+ (**) Option "xkb_model" "pc105"
+ (**) Option "xkb_layout" "de"
+ (**) Option "xkb_variant" "nodeadkeys"
+ }}}
+
+== Udev rules ==
+
+Please see <nowiki>[[http://manpages.ubuntu.com/manpages/lucid/en/man7/udev.7.html|the udev manpage]]</nowiki> (`man udev`) for general documentation about udev rules.
+
+=== Device classification ===
+
+As shown above, udev itself already classifies the input devices with `input_id`. Existing flags are:
+
+{| class="wikitable"
+|-
+| `ID_INPUT`
+| All input devices have this flag.
+|-
+| `ID_INPUT_MOUSE`
+| Touchscreens and tables have this flag as well, since by the type of events they can produce they act as a mouse.
+|-
+| `ID_INPUT_TABLET`
+| 
+|-
+| `ID_INPUT_TOUCHSCREEN`
+| 
+|-
+| `ID_INPUT_JOYSTICK`
+| 
+|-
+| `ID_INPUT_KEY`
+| Keyboards have this, but also things like lid switches which have just a few buttons
+|-
+| `ID_INPUT_KEYBOARD`
+| 
+|}
+
+=== Driver assignment ===
+
+Most input devices like simple mice, keyboards, lid switches, etc. are supported by the general "evdev" X.org input driver, so `/lib/udev/rules.d/65-xorg-evdev.rules` sets `ENV{x11_driver}="evdev"` by default. 
+
+Later rules (i. e. with a prefix higher than 65) can change the property to use a different driver. `66-xorg-synaptics.rules` is a prominent example for using the "synaptics" driver for touchpads and setting `ENV{x11_driver}="synaptics"` for devices which have `ID_INPUT_TOUCHPAD`. 
+	
+=== Keyboard layout ===
+
+In Ubuntu, the system default keyboard layout is configured in `/etc/default/console-setup`, in particular the `XKB*` fields.  `64-xorg-xkb.rules` greps those variables out of there and attaches them to all devices which have `ID_INPUT_KEY`, so that they end up as udev properties like shown above (`XKBLAYOUT=de`).
+
+=== Driver/device options (Ubuntu 9.10) ===
+
+''Note: The x11_options properties are not supported in Ubuntu 10.04. Use xorg.conf.d snippets instead.''
+
+In general, an udev property
+
+ {{{
+ ENV{x11_options.name}="value"
+ }}}
+
+will achieve the same as specifying
+
+ {{{
+ Option "name" "value"
+ }}}
+
+in `xorg.conf` for that particular device. However, unlike `xorg.conf`, udev
+rules are distributed over many files and thus can be shipped by the packages
+that they affect, and they are much more dynamic: for example, they can check
+for a particular machine brand/type, call external programs to check state,
+etc.
+
+`66-xorg-synaptics.rules` shows how to define machine specific options:
+
+ {{{
+ ATTR{[dmi/id]product_name}=="Inspiron 1011|Inspiron 1012", \
+   ENV{x11_options.JumpyCursorThreshold}="90", \
+   ENV{x11_options.AreaBottomEdge}="4100"
+ }}}
+
+`[dmi/id]product_name` means that the value is read from `/sys/class/dmi/id/product_name`, which has all the DMI data.
+
+Note that this rule only gets executed for devices which have `ID_INPUT_TOUCHPAD`, which is tested earlier on in the file. If you want to define your own rule file (e. g. `/etc/udev/rules.d/90-xorg-local.rules`), you should explicitly add this test, and of course you don't need to check the machine name:
+
+ {{{
+ ENV{ID_INPUT_TOUCHPAD}=="1", ENV{x11_options.AreaBottomEdge}="5000"
+ }}}
+
+== Migration from hal FDI files ==
+
+Up to Ubuntu 9.10, X.org used hal and fdi files for input hotplugging and
+configuration. The distribution-provided fdi files have all been replaced with
+udev rules already, but if you created local custom fdi files, you need to
+translate them into udev rules which follow the existing structure of e. g.
+`/udev/rules.d/66-xorg-synaptics.rules`. You should create them in
+`/etc/udev/rules.d/90-xorg-local.rules`, so that they are not affected by
+packages and overwrite the distribution default settings.
+
+This is how the concepts translate:
+
+{| class="wikitable"
+|-
+| '''hal fdi rule element'''
+| '''corresponding udev rule element'''
+|-
+| `<match key="info.capabilities" contains="input.mouse">`
+| `ENV{ID_INPUT_MOUSE}==1`
+|-
+| `<match key="info.product" string="ProductName">`
+| `ATTRS{idProduct}=="ProductName"`
+|-
+| `<merge key="input.x11_driver" type="string">vmmouse</merge>`
+| `ENV{x11_driver}="vmmouse"`
+|-
+| `<merge key="input.x11_options.VertTwoFingerScroll" type="string">true</merge>`
+| `ENV{x11_options.VertTwoFingerScroll}="true"`
+|-
+| `<append key="info.callouts.add" type="strlist">hal-setup-wacom</append>`
+| `RUN+="/usr/lib/wacom/setup-wacom %p"`
+|}
+
+(NOTE: `ATTRS{idProduct}` did not translate properly for me (and I've not found a way to query what it returned). I've used `ENV{ID_MODEL}` instead (which I could query via `udevadm info --query=all --path=...` (path via `udevadm monitor`))
+
+So, if you previously used a custom fdi file like
+
+ {{{
+ <?xml version="1.0" encoding="ISO-8859-1"?>
+ <deviceinfo version="0.2">
+   <device>
+     <match key="info.capabilities" contains="input.mouse">
+       <merge key="input.x11_driver" type="string">vmmouse</merge>
+     </match>
+   </device>
+ </deviceinfo>
+ }}}
+
+This would now become the following udev rule:
+
+ {{{
+ ENV{ID_INPUT_MOUSE}==1, ENV{x11_driver}="vmmouse"
+ }}}

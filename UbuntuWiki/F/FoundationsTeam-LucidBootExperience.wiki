@@ -1,0 +1,119 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+* '''Launchpad Entry''': UbuntuSpec:foundations-lucid-boot-experience
+* '''Created''': 2009-11-17 by ScottJamesRemnant
+* '''Contributors''': 
+* '''Packages affected''': linux, xorg-server, xserver-xorg-video-intel, xserver-xorg-video-nouveau, xserver-xorg-video-radeon, gdm, usplash, plymouth, mountall, initramfs-tools, xsplash
+
+=== Summary ===
+
+This specification details the foundation team plans for the technology for the Lucid Lynx boot experience, changing from using usplash to plymouth to provide the graphical splash screen while waiting for the boot to complete.  The "look" and "theme" components are not covered here.
+
+=== Release Note ===
+
+Ubuntu 10.04 has switched from using usplash to Plymouth for the boot splash screen, providing a flicker-free experience on Intel, NVIDIA and ATI hardware.
+
+=== Rationale ===
+
+The current boot experience is still jarring, with obvious flickers and transitions between the separate phases.  These flickers are caused by three types of change:
+
+* Mode switches where the actual resolution and/or colour-depth of the panel or monitor is changed
+
+* Changing the console from text to graphics mode (or vice-versa), which inherently incurs a mode switch
+
+* Switching the active Virtual Terminal (VT), which inherently incurs a console mode change
+
+There are techniques which permit these to be eliminated as much as possible, building on the kernel mode setting GPU drivers added to the kernel in Ubuntu 9.04.  While usplash can render to the framebuffer provided by those drivers, plymouth is far more developed and capable and gives us the wanted experience out of the box.
+
+=== Assumptions ===
+
+The release note assumes that we will have KMS drivers for the Intel, NVIDIA and ATI hardware ranges, however karmic only released with support for Intel.  Fedora 12 released with additional support for NVIDIA and ATI, so it seams reasonable that we will have that for the next release.  This is a kernel team decision, however.
+
+The fallback case for non-KMS described below assumes that the Design team remain happy with the "reduced look and feel" for those systems.
+
+=== Implementation ===
+
+==== X server ====
+
+When using a Kernel Mode Setting driver, the X server has no current need to perform a mode switch if the kernel driver is already loaded; however it does clear the screen to black because it is called with the "-br" (black root) option.
+
+A patch exists that adds a new "-nr" (no root) option to the X server.  If supported by the driver, this places the contents of the framebuffer in the X root window, giving a seamless transition until some other X client clears or paints to the root window.
+
+Patches are also required to each driver to support that option.
+
+==== Display Manager ====
+
+The X server needs to be called with the new option, and this is called by the display manager.  We already have a patch for gdm to identify the first server (the one forced onto vt7), and have written a patch to adjust the options of that server to use "-nr" instead of "-br".
+
+==== Plymouth packaging ====
+
+Plymouth packages (as used by our OEM team) will be updated to the current version, and uploaded replacing the usplash package.
+
+We will use an Upstart job to manage Plymouth, and it will be started once the kernel DRM or framebuffer driver is added to the system and stopped when the display manager is started, or the boot sequence otherwise completes.  Splash retention is handled by passing the `--retain-splash` option in case of that event.
+
+Plymouth will render to VT7, the same VT that X will use; it will perform this VT switch itself on startup, meaning that X need not.  If Plymouth is not started, boot messages would appear on VT1 as they used to before X is started and invokes the VT switch.
+
+==== initramfs considerations ====
+
+Plymouth will only be included in the initramfs in cases such as encrypted disks, using the same PID handover as usplash currently uses.
+
+==== Boot-time progress and input ====
+
+mountall will need to be modified to send filesystem progress to Plymouth instead of usplash, we will likely want to extend plymouth's protocol to allow us to send the actual progress information across.
+
+cryptsetup will need to use plymouth to request the passphrases instead of usplash.
+
+==== LSB init script functions ====
+
+Since plymouth is able to log the console during boot, most of the changes to the LSB init script logging functions are un-necessary and it's instead fine to just output them as usual and have them captured by the splash screen.
+
+This means that server boot will become "normal" one again.
+
+=== Non-KMS case ===
+
+In the case of hardware where we do not have a kernel mode setting driver, we will instead fallback to using ordinary framebuffer drivers which Plymouth is also capable of rendering to.
+
+For non-x86 ports, this may be sufficient to eliminate the flickers and mode-switches; though this will require that the appropriate X drivers also be patched to support the `-nr` option.  If not patched, a black screen will appear as the X server starts, otherwise the experience will be reasonable.
+
+For x86 hardware with a different graphics card to the "big three", we will fallback to loading the 16-color VGA framebuffer driver.  This will require a kernel change to load that driver on graphics hardware, but ensure it is last in the link/module order so that others take preference to it.
+
+While limited in colors, a sufficiently simple plugin will be provided to give a similar experience to the current usplash.
+
+=== Non-graphical case ===
+
+In the non-graphical case, the plymouth daemon will not be started, so boot messages will appear on the console as normal until the X server starts.
+
+=== Optional X extension ===
+
+Plymouth's design means that the backend renderers are actually plugins, and includes an X11 plugin intended for theme developers to test their theme.  It's possible (and easy) to create a replacement for xsplash out of this plugin.
+
+This would mean that rather than exiting plymouth when the display manager is started, the splash plugin would be idled and DRM/FB renderer would be closed down retaining the image on screen as if quitting.  Then once the display manager is started, it would pass the DISPLAY and XAUTHORITY environment variables to the running daemon and resume the splash screen in a new X window.
+
+The renderer to do this is largely complete, however requires some help from DX team experts to eliminate a transition when a compositing window manager starts and to improve performance.  We would also potentially want to move the decision as to when the splash screen is hidden to the display manager itself.
+
+Plymouth also requires some fixes to permit the plugin to close down the terminal file descriptors, since having the same VT open as X can crash the X server.
+
+The foundations team will include the current version of this plugin in the packages, however we will not activate it immediately until the DX team are happy that it provides at least as good an experience as xsplash.
+
+=== Work Items ===
+
+* Add "no root" patch to X server package (BryceHarrington)
+* Add support for no root patch to X server driver packages (BryceHarrington)
+* Finish gdm patch to pass "-nr" (ScottJamesRemnant)
+* Apply gdm patch to package (SebastienBacher)
+* Patches for other display managers, such as gdm, need to be written (Community Teams)
+* Package plymouth (ScottJamesRemnant)
+* Replace usplash hooks in mountall with plymouth hooks (ScottJamesRemnant)
+* Add module alias to vga16fb and adjust link/module order (AndyWhitcroft)
+
+----
+CategorySpec

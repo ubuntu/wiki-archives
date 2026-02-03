@@ -1,0 +1,289 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+<nowiki>[[Novacut|Novacut Wiki Home]]</nowiki> > '''Testing Dmedia'''
+
+=== Intro ===
+
+<nowiki>[[https://launchpad.net/dmedia|Dmedia]]</nowiki> is a ''distributed object store'', offering (generally) similar semantics to software such as the <nowiki>[[http://ceph.com/ceph-storage/object-storage/|Ceph object store]]</nowiki>, <nowiki>[[http://docs.openstack.org/developer/swift/|OpenStack Swift]]</nowiki>, and <nowiki>[[http://aws.amazon.com/s3/|Amazon S3]]</nowiki>.
+
+While all the above software is designed to maintain data safety and availability in the face of hardware failure and (to some extent) human error, Dmedia is unique in that it attempts to do so under ''far'' more chaotic circumstances. Dmedia is designed to run on a ragtag pile of consumer hardware, and in particular to work well with ''removable'' storage. Dmedia nodes can be offline for arbitrary amounts of time and might never all be online at the same time. And removable drives in particular open the door for human error.
+
+Of course, you can't have your cake and eat it too, so Dmedia must make some trade-offs to achieve this:
+
+ 1. Objects use an intrinsic key based on their content-hash (computed with the <nowiki>[[http://docs.novacut.com/filestore/specification.html|Dmedia hashing protocol]]</nowiki>), whereas most object stores allow you to assign arbitrary keys to arbitrary objects
+
+ 2. Dmedia isn't built for hyperscale and isn't as scalable because it explicitly tracks each drive that a copy of an object is stored upon, wheres as Ceph uses its CRUSH maps, Swift uses a consistent hashing ring, etc
+
+(Note that the foundations of Dmedia are highly scalable, but as an implementation Dmedia is focused on solving UX problems on the client side, not scaling on the server side.)
+
+Because of the chaos that Dmedia must embrace, we're taking a perhaps rather unusual approach to our deep simulation testing. We're less focused on proving that Dmedia ''works'', and more focused on proving that Dmedia ''fails at a reasonable threshold''.
+
+It's important to acknowledge that all distributed object stores are fallible. To frame this idea with a silly example, note that when our sun goes supernova, all strictly Earth-bound distributed object stores will experience complete data loss.
+
+Now to be less silly, note that it's extremely easy to create contrived circumstances under which ''any'' such software would fail to prevent data loss. For example, if an out-of-band test harness simultaneously deletes all existing copies of a particular object, no such software can restore that object. Or more interestingly, if an out-of-band test harness destroys random copies of random objects (either by deleting the copy outright or corrupting its data) at an ''increasing rate'' (in bytes per second), all such software will fail to prevent data loss sometime after the rate of damage exceeds the IO capacity available for repair.
+
+=== Manual Testing ===
+
+We're doing extensive manual testing in order to understand the scenarios that we should include in our automated testing. It's very helpful for us to have more people doing manual testing on a wide range of hardware and scenarios.
+
+In order to help with manual Dmedia testing, you'll need one or more computers running Ubuntu 14.04 or newer.
+
+In general it's ''most'' helpful to test packages in <nowiki>[[https://launchpad.net/~novacut/+archive/daily|Novacut Daily PPA]]</nowiki>, which you can install like this:
+
+ <pre>
+sudo add-apt-repository -y ppa:novacut/daily
+sudo apt-get update
+sudo apt-get install -y novacut
+</pre>
+
+Of course, testing packages from the <nowiki>[[https://launchpad.net/~novacut/+archive/stable|Stable PPA]]</nowiki> is likewise helpful. 
+
+Note that we don't yet consider Dmedia production ready. At this time, please only test Dmedia with files that you have safely backed up elsewhere. Also note that there are important features that we ''deliberately'' don't yet expose in the UI, as we don't want to give the impression that Dmedia is yet ready for everyday use, so at this point to help with manual testing, you'll need to use a number of Dmedia command line tools.
+
+One of the most important tools is the `dmedia-cli` script, which gives you an easy way to call most Dmedia DBus methods from the command line. If you run it with no arguments, it will print out a list of available commands. For example, this is the output as of Dmedia 14.04:
+
+ <pre>
+$ dmedia-cli
+usage: dmedia-cli [-h] [--version] [--bus BUS] [method] [args [args ...]]
+
+positional arguments:
+  method
+  args
+
+optional arguments:
+  -h, --help  show this help message and exit
+  --version   show program's version number and exit
+  --bus BUS   DBus bus name; default is 'org.freedesktop.Dmedia'
+
+DBus methods on org.freedesktop.Dmedia:
+  Version          Show version of running dmedia-service
+  Kill             Deprecated, run `stop dmedia` instead
+  GetEnv           Get the CouchDB and Dmedia environment info
+  Tasks            Info about currently running background tasks
+  Stores           Show the currently connected file-stores
+  Peers            Show peers
+  CreateFileStore  Create a new FileStore
+  DowngradeStore   Downgrade durability confidence to zero copies
+  DowngradeAll     Downgrade all files in all stores (stress test)
+  PurgeStore       Purge references to a store
+  PurgeAll         Purge all files in all stores (stress test)
+  Resolve          Resolve Dmedia file ID into a regular file path
+  AllocateTmp      Allocate a temporary file for rendering or import
+  HashAndMove      Allocate a temporary file for rendering or import
+  Snapshot         Create a snapshot of a database [EXPERIMENTAL]
+  SnapshotAll      Snapshot all databases [EXPERIMENTAL]
+  AutoFormat       Set 'auto_format' to 'true' or 'false'
+  SkipInternal     Set 'skip_internal' to 'true' or 'false'
+
+Misc commands:
+  futon            Open CouchDB Futon UI in default web browser
+</pre>
+
+==== Watching Dmedia in Action ====
+
+In general, Dmedia should be the silent partner, quietly keeping the user's data safe without distracting them. There ''are'' a few critical scenarios under which Dmedia will need to alert the user, but we want to be very careful that Dmedia doesn't cry wolf too often.
+
+So we wont ever expose the blow-by-blow of what Dmedia is doing through its standard UI (although there might eventually be some special developer tools for visualizing certain things).
+
+Currently there are two ways to watch the gory details of what Dmedia is doing. First is to tail the `dmedia-service.log` file, like this:
+
+ <pre>
+$ tail -F ~/.cache/upstart/dmedia.log
+</pre>
+
+Second is to open the <nowiki>[[http://couchdb.apache.org/|CouchDB]]</nowiki> Futon UI to directly inspect the metadata, like this:
+
+ <pre>
+$ dmedia-cli futon
+</pre>
+
+In terms of object (file) data-safety, the '''dmedia-1''' and '''log-1''' databases are the only two of interest. And in particular, the ''file/rank'' view in the '''dmedia-1''' DB is of interest, as you can see here:
+
+<nowiki>[[File:Dmedia_file-rank.png]]</nowiki>
+
+When all files are at rank=6, then Dmedia is at its equilibrium point, considers all files to have sufficient durability.
+
+==== Provisioning Drives ====
+
+Dmedia deals with storage entire drives at a time. By default Dmedia will automatically create a ''file-store'' on your system drive (specifically, on the drive containing your user's home directory).
+
+However, once Dmedia is production ready, we expect most people will use their system drive to store metadata only, and will use other drives as dedicated file-stores. In particular, we expect the typical Dmedia configuration to use a rather small SSD (say, 120 GB or so) for the system drive, plus several, large HDD (say, 2 TB or larger) for object storage.
+
+For now, there is a `dmedia-cli` command you'll need to run to tell Dmedia not to use the file-store on your system drive:
+
+ <pre>
+$ dmedia-cli SkipInternal true
+</pre>
+
+Note that you'll have to restart Dmedia for the change to take effect:
+
+ <pre>
+$ restart dmedia
+</pre>
+
+The recommended file-system for use with Dmedia is <nowiki>[[http://en.wikipedia.org/wiki/Ext4|ext4]]</nowiki>. Although Dmedia in theory should work with a wide range of file-systems (even crufty ol' blokes like FAT32, NTFS, and HFS+), we don't regularly test with them, so at this time you should not expect anything other than Dmedia on ext4 to be able to deliver enterprise-grade data-safety (and then, only after Dmedia has been certified as production ready, which it hasn't yet).
+
+The <nowiki>[[http://bazaar.launchpad.net/~dmedia/dmedia/trunk/view/head:/dmedia-provision-drive|dmedia-provision-drive]]</nowiki> command line tool provides a high-level way to partition, format, and initialize a drive the "Dmedia way", for example:
+
+ <pre>
+$ sudo dmedia-provision-drive /dev/sdc --label=MyDrive
+</pre>
+
+This command will:
+
+ 1. Wipe out any previous partition table
+ 2. Create a new GPT partition table
+ 3. Create a single partition from 1 MiB to the end of the drive
+ 4. Format that partition as ext4 with 0%  reserved blocks
+ 5. Mount the partition in a temporary directory
+ 6. Create a Dmedia file-store in the top-level directory
+ 7. Set the top-level directory to be world readable and writable (so it can play nice as a removable drive)
+ 8. Unmount the partition
+
+When any such drive is mounted, Dmedia will automatically add it into its storage pool. Dmedia has a stable way of tracking what file-store a drive contains, even as you, say, move a USB hard-drive between two or more peers in your Dmedia library. The file-store is located in a hidden, `'.dmedia'` directory. For example, to see the file-store metadata, run this:
+
+ <pre>
+$ cat /media/username/MyDrive/.dmedia/filestore.json
+</pre>
+
+==== Handy Test Data ====
+
+It's nice to have completely throw-away data to feed into Dmedia for testing. Importing everything in `/usr/share/` is quite handy, which on a default Ubuntu install will have over 50,000 unique files. You can best import them like this:
+
+ <pre>
+$ dmedia-migrate /usr/share/
+</pre>
+
+Because these files are all quite small, this library will be a good stress test for the Dmedia metadata layer and for CouchDB. Although note that Dmedia is built to work best with larger files.
+
+==== Starting Over ====
+
+When doing manual testing, you'll often want to start from scratch so you can run through testing scenarios again from a clean starting point.
+
+'''Warning: this will permanently delete all data in your Dmedia library!'''
+
+First, stop the Dmedia DBus service like this:
+
+ <pre>
+$ stop dmedia
+</pre>
+
+Then remove the CouchDB databases, SSL certificates, and the default file-store like this:
+
+ <pre>
+$ rm -rf ~/.local/share/dmedia/
+</pre>
+
+And remove the file-store on each drive like this:
+
+ <pre>
+$ rm -rf /media/username/MyDrive/.dmedia/
+</pre>
+
+(Or you might prefer to re-format the drives using `dmedia-provision-drive`.)
+
+==== Scenarios ====
+
+Ideally, we like to test with 3 devices in our Dmedia library and several removable drives. So typical manual testing will start with:
+
+ 1. Open Dmedia on the first device and click "New Account"
+ 2. Open Dmedia on subsequent devices, click "Connect to Devices", and go through the peering process
+ 3. Provision one or more removable drives using `dmedia-provision-drive`
+
+<nowiki>[[File:Dmedia_Setup.png]]</nowiki>
+
+Note that it's ''exceedingly'' helpful for people to be testing scenarios that are drastically different than those listed below. These are simply our current standard scenarios, the first that will be included in our automated testing.
+
+# Starting with an empty Dmedia library, a single local file-store, and no online peers, import some number of files into your Dmedia library such that all files are at rank=2; then repeat this clean setup for each of the following:
+## plug in a removable drive containing a file-store; Dmedia should create new copies till all files are at rank=4; then repeat this clean setup for each of:
+## plug in a 2nd removable drive containing a file-store; Dmedia should create a new copies till all are at rank=6
+   2. boot a peer with a single file-store; Dmedia should download from the first peer, creating new copies on the 2nd peer till all files are at rank=6
+  2. boot a peer with a single file-store; Dmedia should download from the first peer, creating new copies on the 2nd peer till all files are at rank=4; then repeat this clean setup for each of:
+    1. boot another peer with a single file-store; Dmedia should download from the 1st and 2nd peer, creating new copies on the 3rd peer till all files are at rank=6
+    2. plug a removable drive containing a file-store into the 2nd peer; Dmedia should create new copies (from internal file-store on 2nd peer to removable drive connected to 2nd peer) till all files are at rank=6
+  3. at the same time, plug in ''two'' removable drives containing file-stores; Dmedia should first create new copies till all files are at rank=4, creating a copy on one removable drive or the other based on available space; Dmedia should then create a 2nd copy till all files are at rank=6
+  4. at the same time, boot ''two'' peers with one file-store each; Dmedia should first download new copies till all files are at rank=4, Dmedia should then download new copies till all files are at rank=6; at the end, both the 2nd and 3rd peer should contain a copy of all files on their single filestore
+ 2. Starting with a populated Dmedia library at is equilibrium point (all files at rank=6), repeat this clean setup for each of:
+  1. Downgrade all copies in a single store with `dmedia-cli DowngradeStore`; Dmedia should verify all these downgraded copies till everything is back at rank=6
+  2. Purge all copies in single store with `dmedia-cli PurgeStore`; Dmedia should relink and then verify all these purged copies till everything is back at rank=6
+  3. Downgrade all copies in ''all'' stores with `dmedia-cli DowngradeAll`; Dmedia should verify all these downgraded copies till everything is back at rank=6
+  4. Purge all copies in ''all'' stores with `dmedia-cli PurgeAll`; Dmedia should relink and then verify all these purged copies till everything is back at rank=6
+
+=== Automated Testing ===
+
+Despite tough talk in the intro, an important goal of our automated testing ''is'' to prove that Dmedia "just works (TM)" under a wide range of ''ordinary'' circumstances. These scenarios will generally be the same as we use in our manual testing, and we'll use real-world usage patterns as a guiding light here.
+
+However, we see that as just the starting point. We want our deep simulation tests ''always'' to push Dmedia to the point of failure. There is an added fail-safe here because by regularly pushing Dmedia to the point of failure, we can be more confident that the test harness can actually detect failure in the first place. If all the tests just "pass", is it because Dmedia meets our quality standards, or is it because the test harness is erroneously ignoring data loss?
+
+The test harness will push Dmedia to the point of failure by creating ''extraordinary'' circumstances, by injecting random damage into the Dmedia library at an increasing rate till Dmedia fails to keep up in repairing that damage. We will note when the first failure occurs (when the first object is lost), but we might as well push Dmedia to the point of total data loss (when all objects in the library are unrecoverable).
+
+We can learn a lot (and prove a lot) by the ''threshold'' at which Dmedia fails. Now what is a good or even acceptable threshold is not an easy matter to decide. That will take sophisticated statistical analysis to make sense of, plus we want normalize this threshold against real-world usage patterns... which means we need considerable data about these real-world usage patterns.
+
+And there is a 3rd domain the automated tests will tackle: proving that Dmedia provides the same data safety and stability as a long running process. Dmedia must be ever vigilant, whether it's been running for 30 minutes or 30 days. So we need to make sure Dmedia (and CouchDB) are free of memory leaks, and generally don't experience degraded performance or stability after running for many days or even weeks continuously.
+
+==== Ideal Failure Threshold ====
+
+We'll judge Dmedia against an ''ideal failure threshold''. Although it will be quite complex to accurately calculate this number for an actual test run, it's at least fairly easy to define as a concept.
+
+The ideal failure threshold is the maximum rate of damage that Dmedia could sustain without data loss, assuming that Dmedia instantly made the most strategic decision at each opportunity, and assuming that Dmedia could fully utilize the available IO.
+
+The reason this value will be difficult to calculate is that the available IO will change over time (for example, peers may go offline, drives may be unplugged), and the IO available to correct specific damage depends on where that damage occurred. So the test harness will need to log exact details about when and where it injects damage, and about what the ideal action should be given the state of the Dmedia library at that moment.
+
+We'll score Dmedia based on what percentage of this ideal it achieves:
+
+ <pre>
+score = measured / ideal
+</pre>
+
+Again, we don't yet know what we'll consider a "good" score, but note that by definition Dmedia will never reach 100%. In fact, reaching even 25% is probably stellar for any distributed object store. Once we can measure this, we want to improve this number each release, or at the very least hold our line in the sand.
+
+Even before we have a mature way of calculating these values for actual test runs, this concept holds Dmedia to a very high standard (and one that it doesn't yet fully live up to).
+
+For example, when calculating the cost (in bytes) that the harness inflicts through damaging a single copy, we must consider both the IO costs involved in ''discovering'' the damage, and the cost involved in ''repairing'' the damage (by creating a new copy).
+
+The cost of discovery has some interesting subtleties:
+
+ 1. discovering that a copy is missing has zero cost
+ 2. discovering that a copy has the wrong size has zero cost
+ 3. discovering that a copy has a single corrupt bit costs the IO of reading from the first leaf up to the leaf containing the corrupt bit
+
+There are some sobering ideas here. First, (1) and (2) should be done quite frequently, because they have no IO cost. However, the ideal is calculated under the assumption that Dmedia detects (1) and (2) ''instantaneously'', so any delay between when the damage is inflicted and then detected will lower Dmedia's score.
+
+And (3) points to an immediate improvement that can be made in Dmedia. Currently `MetaStore.verify()` will always read the entire file, and then check if the computed root-hash matches the file ID. Instead, it should first check the file size. Then it should retrieve the leaf-hashes from CouchDB, and stop upon the first corrupt leaf it encounters, rather than always reading the full file.
+
+==== Injecting Data Damage ====
+
+A fundamental design tenet of Dmedia is that it doesn't particularly trust its metadata. Dmedia treats the metadata as a quickly fading picture of reality, and as a result, Dmedia constantly takes new pictures of reality, and completely discards pictures that pass a certain age. (Well, that's a fairly accurate metaphor anyway.)
+
+This is important especially when you consider removable drives. When a drive isn't connected, Dmedia has no possible way of knowing what is happening to it, and must assume the worse will happen fairly quickly.
+
+The <nowiki>[[https://launchpad.net/filestore|FileStore]]</nowiki> is the lens through which Dmedia views reality. This is one of the most critical pieces of code because Dmedia counts on the `FileStore` to convey the true current state of the object storage on a particular drive.
+
+Some types of data damage that the harness will need to be able to inject:
+
+* Delete a copy (Dmedia should notice the copy is gone, mark it as removed)
+* Change the mtime of a copy (Dmedia should respond by downgrading the copy, then verifying the copy)
+* Change the file size of a copy (Dmedia should respond by marking the copy as corrupt)
+* Change a single bit somewhere in the copy (Dmedia should detect this when the copy is next verified, mark it as corrupt)
+
+==== Injecting Metadata Damage ====
+
+The test harness will also inject damage into the metadata (by making out-of-band updates to CouchDB documents). In someways this side of the coin is more contrived as Dmedia doesn't need to worry about metadata damage in the same way it needs to worry about damage to a removable drive when it's disconnected.
+
+The real-world scenario here is not so much about metadata ''damage'' as it is about the metadata being out of sync between peers and introducing problematic conflict scenarios.
+
+Which brings up an important topic: how Dmedia currently resolves metadata conflicts: it doesn't even try. For now, we use last-change-wins resolution, completely ignore the conflicting revisions. And this is deliberate.
+
+Eventually we will do intelligent merging of changes when possible, and it usually will be possible because our key document schema was specifically designed for this. However, even if conflicting changes were correctly merged, it ''still'' doesn't mean that document currently matches reality. So at this point, we don't want to become so enamored with our merge algorithms that we forget that.
+
+We ''really'' want to make sure Dmedia frequently checks reality and correctly updates its metadata, so right now, that ''is'' the conflict resolution method. And it works fantastically well (bearing in my that Dmedia isn't production ready, so don't get too excited).
+
+But it does says a lot about the stability of Dmedia and the correctness of its design that it can be so robust at this stage. If you merge multiple conflicting docs into a new doc revision, statistically speaking that new revision will more accurately reflect reality than the last changed revision. Yet Dmedia is highly reliable without such merging.

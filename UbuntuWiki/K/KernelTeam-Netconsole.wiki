@@ -1,0 +1,314 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+
+== Introduction ==
+
+Sometimes it's hard to capture a kernel panic: You don't know how to reproduce the kernel panic and/or once you have rebooted your system, there are no clues in the logfiles. This is where netconsole might help out. Netconsole is a ''kernel module that logs kernel printk messages over UDP allowing debugging of problems where disk logging fails''. This is just a techno-way of saying that the kernel messages will get send over the network in certain packets (UDP packets).
+
+There are a couple of disadvantages though:
+
+* Since netconsole needs to send it's UDP packets to some other host, you need to setup a "receiver" as well
+* Netconsole initializes when modules are loaded into the kernel. This doesn't allow capture of early kernel panics - for example when booting
+* The driver for the network card must support polling (netpoll api)
+* Only IP networks, UDP packets and ethernet devices are supported
+
+== Setup netconsole ==
+
+This document will guide you through the steps to setup netconsole for Ubuntu {*}.
+
+There are 5 steps to set it all up! Good luck! :))
+
+=== Step 1: Determine remote mac address ===
+
+We need to know a mac address where the UDP packets will get sent to (also known as the "receiver"). This "receiver" can or can't be in the same subnet:
+
+==== When "receiver" is in same subnet ====
+
+In this example I would like to send the UDP packets to 192.168.1.103 (which is in the same subnet as the sender is).
+
+<pre>
+ pet@sender:~$ ping -c 1 192.168.1.103 > /dev/null
+ pet@sender:~$ arp -n 192.168.1.103
+ Address                  HWtype  HWaddress           Flags Mask            Iface
+ 192.168.1.103            ether   08:00:46:d4:1d:82   C                     eth0
+</pre>
+
+In this example '''08:00:46:d4:1d:82''' is the mac address we need.
+
+==== When "receiver" isn't in the same subnet ====
+
+Okay, when that's the case, you need to determine the default gateway first:
+
+<pre>
+ pet@sender:~$ netstat -rn | grep ^0.0.0.0
+ 0.0.0.0         192.168.1.1     0.0.0.0         UG        0 0          0 eth0
+</pre>
+
+In this case, that's '''192.168.1.1'''.
+
+Now, we need to figure out which mac address our default gateway has:
+
+<pre>
+ pet@sender:~$ ping -c 1 192.168.1.1 > /dev/null
+ pet@sender:~$ arp -n 192.168.1.1
+ Address                  HWtype  HWaddress           Flags Mask            Iface
+ 192.168.1.1              ether   00:0f:66:5b:2a:3c   C                     eth0
+</pre>
+
+In this example '''00:0f:66:5b:2a:3c''' is the mac address we need.
+
+=== Step 2: Change kernel options at boot time ===
+
+Okay, let's assume you use grub as your bootloader. In this case grub will boot the kernel with (at least) the "`quiet splash`" options by default. We don't want that.
+
+==== Grub 0.97: if you are using Ubuntu 9.04 or older ====
+
+Just to be sure, create a backup of `/boot/grub/menu.lst` first:
+<pre>
+ pet@sender:~$ sudo cp /boot/grub/menu.lst /root/menu.lst.backup
+</pre>
+Now, open your favorite editor to edit `/boot/grub/menu.lst`.
+
+* For vi: 
+ <pre>
+ sudo vi /boot/grub/menu.lst
+ }}}
+* For gedit (to edit this file within Gnome): 
+ {{{
+ gksudo gedit /boot/grub/menu.lst
+ }}}
+
+Locate the line that starts with "`# defoptions=quiet splash`" (don't get mislead by the fact the line starts with a "#") and replace this line with "`# defoptions=debug ignore_loglevel`".
+
+Tell grub to update accordingly: 
+ 
+{{{ 
+ pet@sender:~$ sudo update-grub 
+</pre>
+
+==== Grub 2: if you are using Ubuntu 9.10 or newer ====
+
+Just to be sure, create a backup of `/etc/default/grub` first:
+<pre>
+ pet@sender:~$ sudo cp /etc/default/grub /etc/default/grub.backup
+</pre>
+Now, open your favorite editor to edit `/etc/default/grub`.
+
+* For vi: 
+ <pre>
+ sudo vi /etc/default/grub
+ }}}
+* For gedit (to edit this file within Gnome): 
+ {{{
+ gksudo gedit /etc/default/grub
+ }}}
+
+Locate the line `GRUB_CMDLINE_LINUX_DEFAULT="quiet splash"` and replace this line with `GRUB_CMDLINE_LINUX_DEFAULT="debug ignore_loglevel"`.
+
+Tell grub to update accordingly: 
+ 
+{{{ 
+ pet@sender:~$ sudo update-grub 
+</pre>
+
+=== Step 3: Initialize netconsole at boot time ===
+
+Okay, that went well. Three more steps to go! 
+
+Now we need to know the:
+
+* ip address and interface of the "sender" (use the following commands to determine these)
+ {{{ 
+ ifconfig -a
+ }}}
+* ip address and mac address of the "receiver" (these were already gathered in <nowiki>[[#Step 1: Determine remote mac address]]</nowiki>)
+
+In the following example, the part that starts with "netconsole=" is setup like this:
+
+`netconsole=<LOCAL_PORT>@<SENDER_IP_ADDRESS>/<SENDER_INTERFACE>,<REMOTE_PORT>@<RECEIVER_IP_ADDRESS>/<STEP_1_MAC_ADDRESS>`
+
+In this example, I use 6666 for both <LOCAL_PORT> and <REMOTE_PORT>. 
+
+<pre>
+ $ sudo sh -c 'echo netconsole >> /etc/modules'
+ $ sudo sh -c 'echo options netconsole netconsole=6666@192.168.1.102/eth0,6666@192.168.1.103/08:00:46:d4:1d:82 > /etc/modprobe.d/netconsole.conf'
+</pre>
+
+=== Step 4: Setup receiver ===
+
+There are several ways to retrieve the netconsole packets:
+
+==== Syslog-ng (Linux) ====
+
+Easiest way probably is to boot the receiver with an Ubuntu LiveCD. Setup networking and gain shell access.
+
+<pre>
+ pet@receiver:~$ sudo apt-get install syslog-ng 
+</pre>
+
+Edit `/etc/syslog-ng/syslog-ng.conf` with your favorite editor and append these lines at the very end of the file:
+
+<pre>
+ source net { udp(ip("0.0.0.0") port(6666)); };
+ destination netconsole { file("/var/log/$HOST-netconsole.log"); };
+ log { source(net); destination(netconsole); };
+</pre>
+
+Now restart syslog-ng:
+
+<pre>
+ pet@receiver:~$ sudo /etc/init.d/syslog-ng restart
+</pre>
+
+Continue with <nowiki>[[#Step 5: Check if it works]]</nowiki>. Once you are done, the logging will be in `/var/log/<SENDER_IP_ADDRESS>-netconsole.log`.
+
+==== Netcat (Linux) ====
+
+If you have the luxury of having a Linux machine as "receiver", you just might want to try this: 
+
+In this example 192.168.1.103 is the same as "<RECEIVER_IP_ADDRESS>" (see <nowiki>[[#Step 3: Initialize netconsole at boot time]]</nowiki>)
+
+<pre>
+ pet@receiver:~$ netcat -l -u 192.168.1.103 6666 | tee ~/netconsole.log
+</pre>
+
+Just let it sit there. Continue with <nowiki>[[#Step 5: Check if it works]]</nowiki>. Once you are done, press "Control-C". The messages you want are in `~/netconsole.log`.
+
+If this doesn't work, also try without the IP address specifically listed:
+<pre>
+ pet@receiver:~$ netcat -l -u 6666 | tee ~/netconsole.log
+</pre>
+
+==== Netcat (Linux, alternative) ====
+
+Some versions of Linux, such as Ubuntu Hardy (8.04), use a different version of Netcat that uses a different syntax. If you use a Linux receiver that has a different version of Netcat, it will print the following error message when you try the commands above:
+
+<pre>
+ UDP listen needs -p arg
+</pre>
+
+In this case, you need to issue the following command:
+
+<pre>
+ pet@receiver:~$ netcat -l -p 6666 -u | tee ~/netconsole.log
+</pre>
+
+==== Netcat (Mac OS-X) ====
+
+Unsurprisingly, as OS-X is a BSD UNIX derivative, Netcat is available out of the box on this platform with the minor difference from Linux that the command is actually called `nc` rather than `netcat`.
+
+In this example 192.168.1.103 is the same as "<RECEIVER_IP_ADDRESS>" (see <nowiki>[[#Step 3: Initialize netconsole at boot time]]</nowiki>)
+
+<pre>
+ receiver:~ pet$ nc -l -u 192.168.1.103 6666 | tee ~/netconsole.log
+</pre>
+
+Just let it sit there. Continue with <nowiki>[[#Step 5: Check if it works]]</nowiki>. Once you are done, press "Control-C". The messages you want are in `~/netconsole.log`.
+
+If this doesn't work, also try without the IP address specifically listed:
+<pre>
+ receiver:~ pet$ nc -l -u 6666 | tee ~/netconsole.log
+</pre>
+
+==== Netcat (Windows) ====
+
+There's a netcat for Windows available <nowiki>[[http://joncraton.org/files/nc111nt.zip|here]]</nowiki> or <nowiki>[[http://www.vulnwatch.org/netcat/nc111nt.zip|here]]</nowiki>.
+
+Unpack it somewhere (i.e. `C:\Users\Pet\Desktop\nc\`)
+
+Open a dosprompt (Start -> Run -> cmd). In this example 192.168.1.103 is the same as <RECEIVER_IP_ADDRESS>.
+
+<pre>
+ cd C:\Users\Pet\Desktop\nc\
+ nc -u -l -p 6666 192.168.1.103 > netconsole.txt
+</pre>
+
+Just let it sit there. Continue with <nowiki>[[#Step 5: Check if it works]]</nowiki>. Once you are done, press "Control-C". The messages you want are in `netconsole.txt`.
+
+==== Syslog (Windows) ====
+
+There's an open source syslog tool <nowiki>[[http://tftpd32.jounin.net/tftpd32_download.html|here]]</nowiki>. In the version currently available (2009, Jan), there is no way to change the port syslog listens on. You'll have to change the <REMOTE_PORT> to port 514 (which is the default syslog port).
+
+=== Step 5: Check if it works ===
+
+Reboot the "sender". Once rebooted execute the command below.
+
+<pre>
+ $ dmesg | grep netcon
+ [   21.048406] netconsole: local port 6666
+ [   21.048410] netconsole: local IP 192.168.1.102
+ [   21.048411] netconsole: interface eth0
+ [   21.048413] netconsole: remote port 6666
+ [   21.048415] netconsole: remote IP 192.168.1.103
+ [   21.048418] netconsole: remote ethernet address 08:00:46:d4:1d:82
+ [   21.048421] netconsole: device eth0 not up yet, forcing it
+ [   22.908106] console [netcon0] enabled
+ [   22.911536] netconsole: network logging started
+</pre>
+
+Seems to be working! {OK} Now check your "receiver" to see whether the kernel messages were received! If that's the case, continue to use the "sender" until it crashes, hopefully the "receiver" receives some useful information about the crash.
+
+You don't actually need to reboot the sender if you don't want to.  You can manually load netconsole via:
+
+<pre>
+ $ sudo modprobe netconsole netconsole=6666@192.168.1.102/eth0,6666@192.168.1.103/08:00:46:d4:1d:82
+</pre>
+
+One way to test whether logging is working correctly or not is to insert some removable media like a CD, DVD or usb stick.
+
+== Remove netconsole ==
+
+Once you retrieved the information you needed, we need to clean things up again.
+
+=== Revert Grub to its original configuration ===
+
+==== Grub 0.97: if you are using Ubuntu 9.04 or older ====
+
+<pre>
+ pet@sender:~$ sudo mv /root/menu.lst.backup /boot/grub/menu.lst 
+ pet@sender:~$ sudo update-grub
+</pre>
+
+==== Grub 2: if you are using Ubuntu 9.10 or newer ====
+
+<pre>
+ pet@sender:~$ sudo mv /etc/default/grub.backup /etc/default/grub 
+ pet@sender:~$ sudo update-grub
+</pre>
+
+=== Remove netconsole itself ===
+
+<pre>
+ pet@sender:~$ sudo sed -i '/^netconsole/d' /etc/modules
+ pet@sender:~$ sudo rm -f /etc/modprobe.d/netconsole.conf
+</pre>
+
+== Note from author ==
+
+Do you have comments on the content above? Something incomplete or incorrect? Please don't hesitate to <nowiki>[[https://launchpad.net/~petski/+contactuser|drop me a few lines]]</nowiki>.
+
+I would like to say thanks to <nowiki>[[https://launchpad.net/~pveerman|Peter Veerman]]</nowiki> and <nowiki>[[https://launchpad.net/~leannogasawara|Leann Ogasawara]]</nowiki> for reviewing this document.
+
+A big thanks to <nowiki>[[https://launchpad.net/~brunogirin|Bruno Girin]]</nowiki> for adding the grub-2 instructions
+
+== See also ==
+
+https://wiki.ubuntu.com/KernelTeam/KernelTeamBugPolicies#Problems%20in%20capturing%20information
+
+<nowiki>[[http://www.cyberciti.biz/tips/linux-netconsole-log-management-tutorial.html|Another netconsole tuturial]]</nowiki>
+
+<nowiki>[[http://www.cyberciti.biz/files/linux-kernel/Documentation/networking/netconsole.txt|Netconsole documentation]]</nowiki>
+
+<nowiki>[[http://www.novell.com/communities/node/4753/netconsole-howto-send-kernel-boot-messages-over-ethernet|Netconsole tutorial for SuSe]]</nowiki>
+
+----
+CategoryDebugging

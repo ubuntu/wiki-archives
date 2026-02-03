@@ -1,0 +1,191 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+* '''Launchpad Entry''': UbuntuSpec:autoregistermonitoring
+* '''Created''': 2008-11-08
+* '''Contributors''':  SorenHansen
+* '''Packages affected''': apache, lighttpd, slapd, dovecot
+
+=== Summary ===
+
+Define a format and provide a mechanism for having packages register with a central availability monitoring service.
+
+=== Release Note ===
+
+A number of services in the server edition will now automatically register with a central nagios instance, making availability monitoring very simple.
+
+=== Rationale ===
+
+If an organisation has a central monitoring server and a new service is installed, it's more likely than not, that they will want this service to be monitored. This will happen automatically.
+
+=== Use Cases ===
+
+* Allan has a nagios server set up on machine A. When he installs Apache on machine B, the nagios server will automatically start monitoring port 80.
+* Brian also has a nagios server set up on machine A. He has installed lots of stuff on machine B, and is happy that it's being monitored now. He now installs apache2, but doesn't want it to be monitored.
+* Joe only has one computer: his laptop. He installs the LAMP stack on it for development purposes. He doesn't care about monitoring at all.
+
+=== Assumptions ===
+
+=== Design ===
+
+We'll define a (monitoring system agnostic) format for defining things to be monitored on the monitored host as well as a directory the these files will be stored.
+We'll provide a script that goes through these files, turns them into configuration for our availability monitoring service of choice (currently nagios). We'll provide a mechanism for defining a central monitoring service, and syncing the local monitoring info with that.
+
+=== Implementation ===
+
+==== File format and location ====
+
+/etc/monitoring-info/ will contain files of the form:
+
+<pre>
+[<servicename1>]
+type = <type>
+<key1> = <value1>
+<key2> = <value2>
+...
+
+[<servicename2>]
+type = <type>
+<key3> = <value3>
+<key4> = <value4>
+</pre>
+
+The type field is mandatory. Current valid types are:
+* http
+* imap
+* pop3
+* smtp
+* ldap
+* ssh
+* tcp
+* udp
+
+Each type have a set of named parameters that can or must be passed to them.
+These are:
+
+* http
+** port: Integer. Optional. Port to connect to. Default: 80 for ssl=off, and 443 for ssl=on.
+** uri: String. Optional. URI to request. Default: /
+** accept_redirection: Boolean. Optional. Treat HTTP 3xx responses as succesful. Default: True
+** hostname: String. Optional. If set, this will be used instead of the host's fqdn for the HTTP Host header.
+** SSL capable. See section SSL.
+** Checks if the connection gives a succesful response to an HTTP GET request.
+
+* udp
+** port: Integer. Mandatory. Defines the port to connect to.
+** Checks whether host accepts UDP connections on the given port. (probably not very useful, but felt appropriate for completeness)
+
+* tcp
+** port: Integer. Mandatory. Defines the port to connect to.
+** SSL capable. See section SSL.
+** Checks whether host accepts TCP connections on the given port.
+
+* smtp
+** port: Integer. Optional. Port to connect to. Default: 25 for ssl=off, and 465 for ssl=on.
+** email: String. Optional. 
+** mailflowid: String. Optional.
+** SSL capable. See section SSL.
+** Checks for SMTP greeting. If email is set, an an e-mail will be sent to
+    this address with a token in it. This token will be stored locally
+	along the given mailflowid and a timestamp denoting when it was sent.
+
+* imap
+** port: Integer. Optional. Port to connect to. Default: 143 for ssl=off, and
+     993 for ssl=on
+** username: String. Optional.
+** password: String. Optional.
+** mailflowid: String. Optional.
+** SSL capable. See section SSL.
+** Checks if the connection gives a proper IMAP greeting and if the server
+     handles the LOGOUT command properly.
+** If username and password are both set, an authentication attempt is made
+     using those credentials, and INBOX is checked for e-mails from the smtp
+	 plugin. When an e-mail with a token is found, the token is removed from the
+	 local list of tokens associated with the given mailflowid.
+
+* pop3
+** port: Integer. Optional. Port to connect to. Default: 110 for ssl=off, and
+     995 for ssl=on
+** username: String. Optional.
+** password: String. Optional.
+** mailflowid: String. Optional.
+** SSL capable. See section SSL.
+** Checks for a proper pop3 greeting and if the server handles the QUIT command properly.
+** If username and password are both set an authentication attempt is made using those credentials, and the mailbox is checked for e-mails from the smtp
+     plugin. When an e-mail with a token is found, the token is removed from the local list of tokens associated with the given mailflowid.
+
+* mailflow
+** seconds: Integer. Mandatory.
+** id: String. Mandatory.
+** Checks whether the token list for id contains tokens that are older than the given number of seconds.
+
+* ldap
+** username: String. Optional. If given, will be used for a bind attempt.
+** password: String. Optional. If given, will be used for a bind attempt.
+** SSL capable. See section SSL.
+** Checks if the connection does valid LDAP stuff.
+
+=== SSL ===
+
+Many services have an ''ssl'' option. If set to True, an SSL connection will be expected, and the following checks are performed:
+
+* Has the certificate expired?
+* Does the Common Name match the host's FQDN?
+* Is the certificate signed by a trusted CA?
+
+Each service supporting SSL accepts the following settings:
+* ssl_hostname: String. Optional. Overrides the hostname against which the certificate Common Name will be checked. Default: the host's fqdn
+* ignore_invalid_ssl: Boolean. Optional. Don't perform ssl certificate validity check.
+* expire_before_days: Integer. Optional. Treat a certificate that will expire
+                       within the given number of days like a failure, thus
+					   giving an early warning of a soon to expire certificate.
+
+=== Packaging ===
+
+==== auto-monitor-client ====
+
+A new package "auto-monitor-client" (actual name tbd) will be added.
+
+Upon configuration it will prompt the user for the nagios server with which to integrate (also attempting to discover it using avahi). It will ship a script that will take care of registering the services defined in the config files with the given nagios server. The script can be called on demand, and will also be triggered by new files in the designated config directory.
+
+Services offering this functionality will depend on auto-monitor-client
+
+==== auto-monitor-server-nagios ====
+
+A new package, "auto-monitor-server-nagios" (actual name tbd) will be added. It will add a user (or possibly reuse the nagios user), create an ssh keypair for it, and set up an avahi broadcasting thing, letting the rest of the network know about its existense on the network.
+
+It will receive the registration requests from the clients via ssh and replace the current configuration for the given client with the new ones. Changing the generated config file on the host is not supported. In an attempt to make this obvious, the data will be put in /var/lib/auto-monitor-server-nagios/ with a header saying that it any changes will need to be overridden in config files in /etc/ or by changing the config on the client.
+
+It will have the following relationships:
+
+* Depends: nagios3
+* Provides: auto-monitor-server
+* Replaces: auto-monitor-server
+* Conflicts: auto-monitor-server
+
+thus making a later transition to a different monitoring tool seamless.
+
+=== Test/Demo Plan ===
+
+It's important that we are able to test new features, and demonstrate them to users.  Use this section to describe a short plan that anybody can follow that demonstrates the feature is working.  This can then be used during testing, and to show off after release.
+
+This need not be added or completed until the specification is nearing beta.
+
+=== Unresolved issues ===
+
+This should highlight any issues that should be addressed in further specifications, and not problems with the specification itself; since any specification with problems cannot be approved.
+
+=== BoF agenda and discussion ===
+
+Use this section to take notes during the BoF; if you keep it in the approved spec, use it for summarising what was discussed and note any options that were rejected.
+
+----
+CategorySpec

@@ -1,0 +1,728 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+== Introduction ==
+
+Coova``Chilli is an open-source software access controller, based on the popular (but now defunct) ChilliSpot project, and is actively maintained by an original ChilliSpot contributor.
+
+Coova``Chilli is a feature rich software access controller that provides a captive portal / walled-garden environment and uses RADIUS for access provisioning and accounting. Coova``Chilli is an integral part of the CoovaAP OpenWRT-based firmware which is specialized for hotspots. For more information on how Coova's Chilli differs from the standard ChilliSpot, see the ChangeLog. 
+
+== Requirements ==
+
+ubuntu 10.10-LTS, two network cards, WRT54GL router for testing (optional)
+
+This tutorial will show how to run all this software on a single machine. However, you could install Apache, MySQL, and FreeRADIUS on a separate one, or even have 4 different machines: you'll just need to adjust the configuration parameters of each piece of software. Though, the more typical way to run CoovaChilli is on the router itself - using firmware such as OpenWrt (or CoovaAP), vendor SDKs (such as Ubiquiti), or pre-installed in hardware like that used by FON and open-mesh.com. 
+
+NOTE: both coovachilli and chillispot don't work with 64bit OS. RADIUS authentication is flawed in those setups.
+
+== Caveats ==
+
+This HOWTO presumes you have an x86 machine with at least two physical network interfaces. Usually, this is an Ethernet WAN interface and "subscriber" LAN interface that CoovaChilli will control - it can be either a Ethernet or WiFi interface. In our case, we'll assume two Ethernet interfaces for the WAN (eth0) and LAN (eth1). 
+
+== The proccess ==
+
+Coova``Chilli takes control of the internal interface (eth1) using a raw promiscuous socket. It then uses the vtun kernel module to bring up a virtual interface (either a tun or tap) to pass and receive packets to and from the WAN. In fact the vtun kernel module is used to move IP packets from the kernel to user mode, in such a way that Coova``Chilli  can function without any non-standard kernel modules. Coova``Chilli  then provides DHCP, ARP, and HTTP Hijacking on the "dhcpif" interface, in our case that's eth0.
+
+A client connecting to this interface is limited to a "walled garden" until authorized. The client is only able to resolve DNS and web browser web sites specifically added to the walled garden. Authentication (and authorization) in Coova``Chilli typically happens in one of two ways. Either it was a MAC based authentication (using the macauth option in chilli.conf) or it was the more typical "Universal Access Method" (UAM).  This method uses a captive portal that initiates authentication. When a non-authenticated client tries to connect to a web-page (on port 80) the request is intercepted by Coova``Chilli and redirected to the captive portal. In our case, we'll use a perl-script called hotspotlogin.cgi (served by apache over https).
+
+hotspotlogin.cgi serves a page to the end-user with a username and password field. These authentication data are then forwarded to the FreeRADIUS server, which matches them with information in it’s back-end (using either PAP, CHAP, or MSCHAPv2). The FreeRADIUS back-end in this case is mysql, but could be any number of services such as LDAP, Kerberos, unix passwd files or even Active Directory (probably).
+
+A user is then either rejected or authenticated by FreeRADIUS, prompting hotspotlogin.cgi to present either a rejection message or a page with a success message and a logout link to the user.
+
+== Hardware Requirements ==
+
+Any PC with '''2 network interfaces'''.
+
+== Software Versions ==
+This howto has been tested with:
+* Ubuntu 9.04 i386 server and 10.10-i386
+* coova-chilli-1.0.13
+
+== Software Installation ==
+For this howto we start with an installation of Ubuntu Linux.
+
+The base installation is beyond the scope of this document, but the Ubuntu Website has plenty of documentation on installing ubuntu from scratch.
+
+Towards the end of the ubuntu server edition install it asks you if you require extra packages. Enable the following:
+<pre>
+ LAMP
+ SSH server
+ DNS Server
+</pre>
+
+Note:When asked for a mysql password and you want to use the default password for this howto use:
+<pre>
+mysqladminsecret
+</pre>
+{| class="wikitable"
+|-
+| <rowstyle="background-color: #FFFFE0;">Of course for a live chillispot access point you will need to change all password to your own
+|}
+
+If you are using a different version or forget to install extra packages you can install them at a latter date by using the command:
+<pre>
+tasksel
+</pre>
+=== gdm ===
+
+to shut down gdm on ubuntu you should do this:
+edit /etc/init/gdm.conf and comment out full "start on" directive (attention: it is spreaded across multiple lines).  
+
+=== Root ===
+To make the installation easier create a root user. Many files can only be changed with root user.
+
+Login user, then enter command:
+<pre>
+Enter new UNIX password:
+Retype new UNIX password:
+Password:
+</pre>
+=== SSH ===
+So we can cut and paste commands to make life easier
+
+Install putty on you windows machine
+
+Assuming that your ubuntu box is connected to your ADSL router/DHCP server you will need to find your IP address of your ubuntu box so you can connect with putty
+<pre>
+ip addr
+</pre>
+Type in your ip address and connect
+
+=== Repository ===
+Use default repository or better
+
+=== Update Ubuntu ===
+
+<pre>
+sudo apt-get update
+</pre>
+
+<pre>
+sudo apt-get upgrade
+</pre>
+
+=== Network setup ===
+Setup up your network hardware/software
+
+==== Interfaces ====
+<pre>
+nano -w /etc/network/interfaces
+</pre>
+
+<pre>
+auto lo
+iface lo inet loopback
+
+auto eth0
+iface eth0 inet dhcp
+
+auto eth1
+</pre>
+
+== Install Radius server and Database ==
+
+<pre>
+sudo apt-get install freeradius freeradius-mysql apache2 php5 libapache2-mod-php5  mysql-server mysql-client php5-mysql phpmyadmin vim 
+</pre>
+Create database to store usernames and passwords
+
+<pre>
+# ##########################################################################
+# create users and database   with radius:mysqlsecret
+# ##########################################################################
+CREATE USER 'radius'@'%' IDENTIFIED BY  'mysqlsecret';
+
+GRANT USAGE ON * . * TO  'radius'@'%' IDENTIFIED BY  'mysqlsecret' WITH MAX_QUERIES_PER_HOUR 0 MAX_CONNECTIONS_PER_HOUR 0 MAX_UPDATES_PER_HOUR 0 MAX_USER_CONNECTIONS 0 ;
+
+CREATE DATABASE IF NOT EXISTS  `radius` ;
+
+USE `radius`;
+
+GRANT ALL PRIVILEGES ON  `radius` . * TO  'radius'@'%';
+
+# ##########################################################################
+# src = http://wiki.freeradius.org/MySQL-DDL-script 
+# db_mysql.sql                     rlm_sql - FreeRADIUS SQL Module       #
+# #
+# Database schema for MySQL rlm_sql module                            #
+# #
+# To load:                                                            #
+# mysql -uroot -prootpass radius < db_mysql.sql                   #
+# #
+# Mike Machado <mike@innercite.com>     #
+# ##########################################################################
+# 
+# Table structure for table 'radacct'
+# 
+ 
+ CREATE TABLE radacct (
+   RadAcctId bigint(21) NOT NULL auto_increment,
+   AcctSessionId varchar(32) NOT NULL default "",
+   AcctUniqueId varchar(32) NOT NULL default "",
+   UserName varchar(64) NOT NULL default "",
+   Realm varchar(64) default "",
+   NASIPAddress varchar(15) NOT NULL default "",
+   NASPortId varchar(15) default NULL,
+   NASPortType varchar(32) default NULL,
+   AcctStartTime datetime NOT NULL default '0000-00-00 00:00:00',
+   AcctStopTime datetime NOT NULL default '0000-00-00 00:00:00',
+   AcctSessionTime int(12) default NULL,
+   AcctAuthentic varchar(32) default NULL,
+   ConnectInfo_start varchar(50) default NULL,
+   ConnectInfo_stop varchar(50) default NULL,
+   AcctInputOctets bigint(12) default NULL,
+   AcctOutputOctets bigint(12) default NULL,
+   CalledStationId varchar(50) NOT NULL default "",
+   CallingStationId varchar(50) NOT NULL default "",
+   AcctTerminateCause varchar(32) NOT NULL default "",
+   ServiceType varchar(32) default NULL,
+   FramedProtocol varchar(32) default NULL,
+   FramedIPAddress varchar(15) NOT NULL default "",
+   AcctStartDelay int(12) default NULL,
+   AcctStopDelay int(12) default NULL,
+   PRIMARY KEY  (RadAcctId),
+   KEY UserName (UserName),
+   KEY FramedIPAddress (FramedIPAddress),
+   KEY AcctSessionId (AcctSessionId),
+   KEY AcctUniqueId (AcctUniqueId),
+   KEY AcctStartTime (AcctStartTime),
+   KEY AcctStopTime (AcctStopTime),
+   KEY NASIPAddress (NASIPAddress)
+ ) ;
+ 
+# 
+# Table structure for table 'radcheck'
+# 
+ 
+ CREATE TABLE radcheck (
+   id int(11) unsigned NOT NULL auto_increment,
+   UserName varchar(64) NOT NULL default "",
+   Attribute varchar(32)  NOT NULL default "",
+   op char(2) NOT NULL DEFAULT '==',
+   Value varchar(253) NOT NULL default "",
+   PRIMARY KEY  (id),
+   KEY UserName (UserName(32))
+ ) ;
+ 
+# 
+# Table structure for table 'radgroupcheck'
+# 
+ 
+ CREATE TABLE radgroupcheck (
+   id int(11) unsigned NOT NULL auto_increment,
+   GroupName varchar(64) NOT NULL default "",
+   Attribute varchar(32)  NOT NULL default "",
+   op char(2) NOT NULL DEFAULT '==',
+   Value varchar(253)  NOT NULL default "",
+   PRIMARY KEY  (id),
+   KEY GroupName (GroupName(32))
+ ) ;
+ 
+# 
+# Table structure for table 'radgroupreply'
+# 
+ 
+ CREATE TABLE radgroupreply (
+   id int(11) unsigned NOT NULL auto_increment,
+   GroupName varchar(64) NOT NULL default "",
+   Attribute varchar(32)  NOT NULL default "",
+   op char(2) NOT NULL DEFAULT '=',
+   Value varchar(253)  NOT NULL default "",
+   PRIMARY KEY  (id),
+   KEY GroupName (GroupName(32))
+ ) ;
+ 
+# 
+# Table structure for table 'radreply'
+# 
+ 
+ CREATE TABLE radreply (
+   id int(11) unsigned NOT NULL auto_increment,
+   UserName varchar(64) NOT NULL default "",
+   Attribute varchar(32) NOT NULL default "",
+   op char(2) NOT NULL DEFAULT '=',
+   Value varchar(253) NOT NULL default "",
+   PRIMARY KEY  (id),
+   KEY UserName (UserName(32))
+ ) ;
+ 
+ 
+# 
+# Table structure for table 'radusergroup'
+# 
+ 
+ CREATE TABLE radusergroup (
+   UserName varchar(64) NOT NULL default "",
+   GroupName varchar(64) NOT NULL default "",
+   priority int(11) NOT NULL default '1',
+   KEY UserName (UserName(32))
+ ) ;
+ 
+# 
+# Table structure for table 'radpostauth'
+# 
+ 
+ CREATE TABLE radpostauth (
+   id int(11) NOT NULL auto_increment,
+   user varchar(64) NOT NULL default "",
+   pass varchar(64) NOT NULL default "",
+   reply varchar(32) NOT NULL default "",
+   date timestamp NOT NULL,
+   PRIMARY KEY  (id)
+ ) ;
+ 
+# #####################################################################
+# 
+# The next table is commented out because it is not
+# currently used in the server.
+# 
+ 
+# 
+# Table structure for table 'dictionary'
+# 
+# CREATE TABLE dictionary (
+# id int(10) DEFAULT '0' NOT NULL auto_increment,
+# Type varchar(30),
+# Attribute varchar(64),
+# Value varchar(64),
+# Format varchar(20),
+# Vendor varchar(32),
+# PRIMARY KEY (id)
+# );
+ 
+# 
+# Table structure for table 'nas'
+# 
+ CREATE TABLE nas (
+   id int(10) NOT NULL auto_increment,
+   nasname varchar(128) NOT NULL,
+   shortname varchar(32),
+   type varchar(30) DEFAULT 'other',
+   ports int(5),
+   secret varchar(60) DEFAULT 'secret' NOT NULL,
+   community varchar(50),
+   description varchar(200) DEFAULT 'RADIUS Client',
+   PRIMARY KEY (id),
+   KEY nasname (nasname)
+ );
+</pre>
+Tell freeradius where to find the database
+
+<pre>
+nano -w /etc/freeradius/sql.conf
+</pre>
+
+<pre>
+server = "localhost"
+login  = "radius"
+password = "mysqlsecret" 
+</pre>
+Set Free``Radius server client password
+and also uncomment readclients = yes on line 100 . see the the comment in there for an explanation.
+<pre>
+nano -w /etc/freeradius/clients.conf
+</pre>
+
+<pre>
+client 127.0.0.1 {
+    secret = radiussecret
+}
+</pre>
+
+=== Testing default file setup ===
+
+The default Free``Radius setup authorize's usernames and passwords from a "file" found in '''/etc/freeradius/users'''. We should test the default Free``Radius setup before we change the authorization link from "file" to "sql" (mysql).
+
+Add username an password to our user "file". edit "John Doe"
+
+<pre>
+nano -w /etc/freeradius/users
+</pre>
+uncomment
+<pre>
+"John Doe"     Auth-Type := Local, User-Password == "hello"
+               Reply-Message = "Hello, %u"
+</pre>
+At this point you need to reboot your ubuntu box
+<pre>
+reboot
+</pre>
+ 
+Check Free``Radius config files.
+
+<pre>
+sudo /etc/init.d/freeradius stop
+sudo freeradius -XXX
+</pre>
+If all goes well the last line should display
+<pre>
+Mon Jun 29 15:24:34 2009 : Debug: Ready to process requests.
+Ctrl+C to exit.
+</pre>
+Start Free``Radius again
+<pre>
+sudo /etc/init.d/freeradius start
+</pre>
+Test password authorization to "file"
+<pre>
+sudo radtest "John Doe" hello 127.0.0.1 0 radiussecret
+</pre>
+If all goes well you should get a reply
+<pre>
+
+Sending Access-Request of id 136 to 127.0.0.1 port 1812
+        User-Name = "John Doe"
+        User-Password = "hello"
+        NAS-IP-Address = 255.255.255.255
+        NAS-Port = 0
+rad_recv: Access-Accept packet from host 127.0.0.1:1812, id=136, length=37
+        Reply-Message = "Hello, John Doe"
+</pre>
+
+=== change authorization to sql ===
+
+in 
+<pre>
+/etc/freeradius/radiusd.conf 
+</pre>
+on line 683 include the sql module: 
+uncomment the line "$INCLUDE sql.conf" and " $INCLUDE sql/mysql/counter.conf" in "modules { ... }"
+
+If the above tests worked we can now change authorization from "file" to "sql" in:
+ 
+<pre>
+/etc/freeradius/sites-available/default
+</pre>
+comment "files" (line 152) and uncomment sql on line 159
+also uncomment sql on line 428 under the "session {... }" section and also in the accounting section on line 383 
+
+Note: You can only use one authorisation method at a time, not both. Therefore "files" section needs to be commented out otherwise free radius will still try to authorize with '''/etc/freeradius/users''' "file" instead of "sql"
+=== SQL Logging ===
+If you want to use software packages like ezRADIUS or  Dialup Admin you need to enable logging to sql
+<pre>
+nano -w /etc/freeradius/sql.conf
+</pre>
+<pre>
+sql {
+        driver = "rlm_sql_mysql"
+        server = "localhost"
+        login = "radius"
+        password = "mysqlsecret"
+        radius_db = "radius"
+        [...]
+##### Set to 'yes' to read radius clients from the database ('nas' table)
+        readclient = yes ###change manually
+}
+</pre> 
+ 
+
+=== Add users ===
+
+<pre>
+echo "INSERT INTO radcheck (UserName, Attribute, Value) VALUES ('mysqltest', 'Password', 'testsecret');" | mysql -u radius -p radius
+Enter password:mysqlsecret
+</pre>
+
+coovachilli uses the username 'chillispot' with the password 'chillispot' for logging into the radius by default. Add this user in the table radcheck too.
+
+its defined in the default config file `/etc/chilli/config`
+
+<pre>
+HS_ADMUSR=chillispot
+HS_ADMPWD=chillispot
+</pre>
+
+<pre>
+echo "INSERT INTO radcheck (UserName, Attribute, Value) VALUES ('chillispot', 'Password', 'chillispot');" | mysql -u radius -p radius
+Enter password:mysqlsecret
+</pre>
+
+Restart Radius
+<pre>
+sudo /etc/init.d/freeradius restart
+</pre>
+
+==== Test link ====
+
+<pre>
+sudo radtest mysqltest testsecret 127.0.0.1 0 radiussecret
+sudo radtest chillispot chillispot 127.0.0.1 0 radiussecret
+</pre>
+If all goes well you should receive an Access-Accept response like this:
+<pre>
+Sending Access-Request of id 180 to 127.0.0.1 port 1812
+        User-Name = "mysqltest"
+        User-Password = "testsecret"
+        NAS-IP-Address = 255.255.255.255
+        NAS-Port = 0
+rad_recv: Access-Accept packet from host 127.0.0.1:1812, id=180, length=20
+</pre>
+== Install CoovaChilli ==
+
+=== CoovaChilli Source Installation ===
+
+there are several build flags on http://coova.org/CoovaChilli/Building
+
+Optional: To get started from SVN read http://coova.org/CoovaChilli/Developers
+
+<pre>
+useradd -s /sbin/nologin chilli
+sudo apt-get install build-essential linux-headers-server  libssl-dev
+wget http://coova-chilli.s3.amazonaws.com/coova-chilli-1.2.9.tar.gz
+tar -xzf coova-chilli-1.2.9.tar.gz 
+cd coova-chilli-1.2.9
+./configure --prefix= --enable-miniportal --with-opensslmake
+make 
+sudo make install
+wget http://dfn.dl.sourceforge.net/project/haserl/haserl-devel/haserl-0.9.29.tar.gz
+tar xzf haserl-0.9.29.tar.gz
+cd haserl-0.9.29
+./configure --prefix=
+make
+sudo make install
+</pre>
+ 
+To enable our chilli start up script at boot.
+<pre>
+update-rc.d freeradius defaults
+update-rc.d chilli defaults
+</pre>
+
+also there is a problem at rebooting time. the workaround is to put the following in 
+<pre>
+/etc/rc.local
+</pre>
+
+<pre>
+/etc/init.d/freeradius restart
+/etc/init.d/chilli restart
+exit 0
+</pre>
+
+=== Basic Configuration ===
+
+See /etc/chilli/defaults file for details on possible configurations. Copy this to a new file called "config" (in the same directory) and edit the settings. To load the settings and start chilli, run "/etc/init.d/chilli start". This will generate main.conf, local.conf, and hs.conf files in /etc/chilli/ for you. In order to make changes to the settings at a later date, rerun chilli start.
+
+<pre>
+/etc/init.d/chilli start && /etc/init.d/chilli stop # = apply the config /etc/chilli/config
+</pre>
+
+NOTE:
+the chilli config file only generates the main.conf if the service is restarted by /etc/init.d/chilli which we start to configure now. 
+When you start chilli in debug mode by entering 
+<pre>
+chilli --debug --fg
+</pre>
+then coovachilli gets started with the main.conf. If you change the config file and restart chilli in debug mode nothing would change. So you can ether edit the main.conf and edit in debug mode or edit the config file and restart the service
+
+Per default, it is assumed that Ethernet device eth0 is your connection to the Internet and eth1 is the interface you want to have clients (subscribers) on. If this is not the case, then change the HS_WANIF configuration to be your Internet connected device and HS_LANIF to be your WiFi device, for example. With the right devices configured, restart chilli and you are on your way.
+
+<pre>
+vim /etc/chilli/config
+</pre>
+
+<pre>
+HS_WANIF=eth1
+HS_LANIF=eth0 
+HS_RADSECRET=radiussecret
+</pre>
+
+== Install Firewall ==
+=== IPtables ===
+The creators of Coova``Chilli have predefined rules for iptables, but their script needs a little help before it works.  Coova``Chilli's iptables config is done in the /etc/chilli/up.sh script which runs after the tun interface is up, so that the exact tun interface is known.
+ 
+/etc/chilli/up.sh calls /etc/chilli/ipup.sh, if it exists.  By default, it does not.  If you need to run your own commands after the main iptables configuration is done, create /etc/chilli/ipup.sh and populate it however you like, being sure to make it executable (chmod +x /etc/chilli/ipup.sh) when done.
+
+create 
+<pre>
+/etc/chilli/ipup.sh
+</pre>
+with the following content:
+{{{ 
+iptables -I POSTROUTING -t nat -o $HS_WANIF -j MASQUERADE
+}}}
+
+ 
+== testing ==
+reboot the server and test like this:
+now connect the wrt54gl to the eth0 card (HS_LANIF). make sure you connect to the ethernet 1 channel on the router. 
+configure the router for an ip: 10.0.1.3 for example. and turn off the routers internal dhcp server.
+now you can also configure the wifi on the router and connect to it via an iPhone or something.
+
+on the iPhone search something on google. you should get redirected right away to the coovachilli login site. there you can put the username "mysqltest" and for password "testsecret".
+now you should be able to access the internet as usual.
+
+== Additional Info ==
+
+==== COOVA-CHILLI FILES ====
+
+ `/etc/chilli.conf`
+
+The main chilli configuration file.
+
+ `/etc/chilli/defaults`
+
+Default configurations used by the chilli init.d and functions scripts.
+
+ `/etc/chilli/config`
+
+Location specific configurations used by chilli init.d and functions scripts. Copy the defaults file mentioned above and edit.
+
+ `/etc/chilli/functions`
+
+Helps configure chilli by loading the above configurations, sets some defaults, and provides functions for writing main.conf, hs.conf, and local.conf based on local and possibily centralized. See chilli.conf(5)
+
+ `/etc/init.d/chilli`
+
+The init.d file for chilli which defaults to using the above configurations to build a set of configurations files in the /etc/chilli directory - taking local configurations and optionally centralized configurations from RADIUS or a URL. See chilli.conf(5)
+
+ `/var/run/chilli.sock`
+
+UNIX socket used to daemon communication.
+
+ `/var/run/chilli.pid`
+
+Process ID file.
+
+ `/etc/chilli/www/`
+
+The typical location of location content served up by chilli using a minimal web server.
+SIGNALS
+
+Sending HUP to chilli will cause the configuration file to be reread and DNS lookups to be performed. 
+
+The configuration options are not affected by sending HUP: fg, conf, pidfile, statedir, net, dynip, statip, uamlisten, uamport, radiuslisten, coaport, coanoipcheck, proxylisten, proxyport, proxyclient, proxysecret, dhcpif, dhcpmac, lease, or eapolenable
+
+The above configuration options can only be changed by restarting the daemon.
+
+== Optional Features ==
+
+==== extra authentication parameters ====
+
+you can add a column to the radcheck table for example: is the user account still valid? with this command:
+
+<pre>
+alter table radcheck add column `Valid` tinyint(1) default 0 not null;
+</pre>
+
+than in the 
+<pre>
+/etc/freeradius/sql.conf
+</pre> 
+change the variable authorize_check_query by adding `and Valid = 1` 
+after `where username = “%{SQL-User-Name}” \`
+
+in the future time you can change the valid to serve many purposes for example email authorization, ...
+
+==== xml service for the freeradius database ====
+
+<nowiki>[[http://blog.srvme.de/2008/08/18/xml-for-mysql-for-radius-for-coovachilli-because-hibernates-2nd-datasource-was-weak/|this]]</nowiki> cgi bash script is experimental for analysing an xml file and for inserting the parsed data into a mysql database.
+it is used for inserting a new user to the radcheck table or to modify an user of freeradius in combination with coovachilli.
+
+== Post Install Trouble Shooting ==
+When coovachilli is started it automatically installs required modules and network access. Use the following commands to check:
+
+=== Packet Forwarding ===
+
+Test the current setting of the kernel:
+<pre>
+cat /proc/sys/net/ipv4/ip_forward
+</pre>
+
+==== Manual Install ====
+
+Immediately allow the forwarding of packets. The configuration is not preserved on reboot but sets a flag in the kernel itself.
+<pre>
+echo 1 > /proc/sys/net/ipv4/ip_forward
+</pre>
+
+=== EnableTUN/TAP device driver support ===
+
+Test the current setting of the kernel:
+<pre>
+lsmod
+</pre>
+Look for the module '''tun'''
+
+The TUN/TAP driver is required for proper operation of the chilli server. Linux kernels later than 2.4.7 already include the driver, but could be loaded manually with '''modprobe tun''' or automaticly by adding '''tun''' to the `/etc/modules` configuration file.
+
+==== Manual Install ====
+<pre>
+sudo modprobe tun
+</pre>
+
+=== Firewall / Port Forward ===
+On start up coovachilli runs a firewall script defining rules. Rules are as follows:
+<pre>
+* nat
+:PREROUTING ACCEPT [0:0]
+:POSTROUTING ACCEPT [1:530]
+:OUTPUT ACCEPT [1:530]
+COMMIT
+* mangle
+:PREROUTING ACCEPT [0:0]
+:INPUT ACCEPT [0:0]
+:FORWARD ACCEPT [0:0]
+:OUTPUT ACCEPT [1:530]
+:POSTROUTING ACCEPT [1:530]
+COMMIT
+* filter
+:INPUT ACCEPT [181:23233]
+:FORWARD ACCEPT [0:0]
+:OUTPUT ACCEPT [148:77128]
+-A INPUT -d 192.168.2.1 -i tun0 -p tcp -m tcp --dport 3990 -j ACCEPT 
+-A INPUT -d 192.168.2.1 -i tun0 -p tcp -m tcp --dport 3991 -j ACCEPT 
+-A INPUT -d 255.255.255.255 -i tun0 -p udp -m udp --dport 67:68 -j ACCEPT 
+-A INPUT -d 192.168.2.1 -i tun0 -p udp -m udp --dport 53 -j ACCEPT 
+-A INPUT -d 192.168.2.1 -i tun0 -j DROP 
+-A INPUT -i tun0 -j DROP 
+-A FORWARD -i tun0 -o ! eth0 -j DROP 
+-A FORWARD -o tun0 -j ACCEPT 
+-A FORWARD -i tun0 -j ACCEPT 
+-A FORWARD -o eth1 -j DROP 
+-A FORWARD -i eth1 -j DROP 
+COMMIT
+</pre>
+
+== Authors ==
+* <nowiki>[[http://blog.srvme.de/|Nils Petersohn]]</nowiki>
+
+== References ==
+
+* <nowiki>[[http://coova.org/wiki/index.php/CoovaChilli/VMWare|CoovaChilli with VMWare]]</nowiki>
+* <nowiki>[[http://ubuntu.wordpress.com/2005/09/07/adding-a-startup-script-to-be-run-at-bootup/|Ubuntu Startup Script]]</nowiki>
+* <nowiki>[[http://www.grymoire.com/Unix/Sed.html|SED command]]</nowiki>
+
+== Support ==
+
+* <nowiki>[[http://coova.org/wiki/index.php/Main_Page|coova wiki]]</nowiki>
+* <nowiki>[[http://coova.org/phpBB3/|coova fourm]]</nowiki>
+* IRC irc.freenode.net:#coova
+
+== Comments / log ==
+
+Hi All,
+
+The .cgi script is ancient and coova now makes use of a JSON interface which is quite complex.
+If you want to use you own server as an authentication source with PAP passwords you have to create your own HS_UAMSERVICE.
+
+You can check out how to do this by navigating to the following link:
+http://hotcakes.wiki.sourceforge.net
+
+Thanks for the initial documentation!
+----
+'''NEW!'''
+
+CoovaChilli Ver. 1.0.14 now support VLAN. I've installed new version on Ubuntu 9.04 server from source: This version have also some more utilities (build configuration on the fly, tool for monitoring). Unfortunately is no more dettailed instructions (probably is too new)
+Great work !
+
+----
+CategoryWireless

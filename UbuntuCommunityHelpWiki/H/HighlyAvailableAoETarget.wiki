@@ -1,0 +1,718 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+In this tutorial we will set up a highly available server providing ATA-over-Ethernet (AoE) targets to AoE initiators. Should a server become unavailable, services provided by our cluster will continue to be available to client systems.
+
+Our highly available system will resemble the following:
+
+<nowiki>[[File:aoe.jpg]]</nowiki>
+
+<pre>
+AoE server1: node1.home.local IP address: 10.10.1.251
+AoE server2: node2.home.local IP address: 10.10.1.252
+</pre>
+
+To begin, set up two Ubuntu 9.04 (Jaunty Jackalope) systems. In this guide, the servers will be set up in a virtual environment using KVM-84. Using a virtual environment will allow us to add additional disk devices and NICs as needed.
+
+The following partition scheme will be used for the Operating System installation:
+<pre>
+/dev/vda1 -- 10 GB / (primary' jfs, Bootable flag: on)
+/dev/vda5 -- 1 GB swap (logical)
+</pre>
+
+After the installation of a minimal Ubuntu install on both servers, we will install packages required to configure a bonded network interface, and in-turn assign static IP addresses to bond0 of node1 and node2. Using a bonded interface will prevent a single point of failure should the client accessible network fail.
+
+Install ifenslave
+<pre>
+apt-get -y install ifenslave
+</pre>
+
+Append the following to /etc/modprobe.d/aliases.conf:
+<pre>
+alias bond0 bonding
+options bond0 mode=0 miimon=100 downdelay=200 updelay=200 max_bonds=2
+</pre>
+
+Modify our network configuration and assign eth0 and eth1 as slaves of bond0.
+
+Example /etc/network/interfaces:
+<pre>
+auto lo
+iface lo inet loopback
+
+auto eth0
+iface eth0 inet manual
+
+auto eth1
+iface eth1 inet manual
+
+auto bond0
+iface bond0 inet static
+	address 10.10.1.251
+	netmask 255.255.255.0
+	broadcast 10.10.1.255
+	network 10.10.1.0
+	gateway 10.10.1.1
+	up /sbin/ifenslave bond0 eth0
+	up /sbin/ifenslave bond0 eth1
+</pre>
+
+We do not need to define eth0 or eth1 in /etc/network/interfaces as they will be brought up when the bond comes up. I have included them for documentation purposes.
+
+Please note: AoE does not use TCP/IP for communication, it instead uses raw Ethernet frames to carry ATA commands and data.  We are assigning an IP address so we can administer the nodes on the public interface.
+
+Review the current status of the bonded interface.
+
+<pre>
+cat /proc/net/bonding/bond0 
+Example output:
+Ethernet Channel Bonding Driver: v3.3.0 (June 10, 2008)
+
+Bonding Mode: load balancing (round-robin)
+MII Status: up
+MII Polling Interval (ms): 100
+Up Delay (ms): 200
+Down Delay (ms): 200
+
+Slave Interface: eth0
+MII Status: up
+Link Failure Count: 0
+Permanent HW addr: 54:52:00:6d:f7:4d
+
+Slave Interface: eth1
+MII Status: up
+Link Failure Count: 0
+Permanent HW addr: 54:52:00:11:36:cf
+</pre>
+
+Please note: A bonded network interface supports multiple modes. In this example eth0 and eth1 are in an round-robin configuration.
+
+Shutdown both servers and add additional devices. We will add additional disks to contain the DRBD meta data and the data that is mirrored between the two servers. We will also add an isolated network for the two servers to communicate and transfer the DRBD data.
+
+The following partition scheme will be used for the DRBD data:
+<pre>
+/dev/vdb1 -- 1 GB unmounted (primary) DRBD meta data
+/dev/vdc1 -- 1 GB umounted (primary) DRBD device used for AoE configuration files
+/dev/vdd1 -- 10 GB unmounted (primary) DRBD device used as the AoE target
+</pre>
+
+Sample output from fdisk -l:
+<pre>
+Disk /dev/vda: 10.7 GB, 10737418240 bytes
+255 heads, 63 sectors/track, 1305 cylinders
+Units = cylinders of 16065 * 512 = 8225280 bytes
+Disk identifier: 0x000d570a
+
+   Device Boot      Start         End      Blocks   Id  System
+/dev/vda1   *           1        1244     9992398+  83  Linux
+/dev/vda2            1245        1305      489982+   5  Extended
+/dev/vda5            1245        1305      489951   82  Linux swap / Solaris
+
+Disk /dev/vdb: 1073 MB, 1073741824 bytes
+root@node1:~# fdisk -l
+
+Disk /dev/vda: 10.7 GB, 10737418240 bytes
+255 heads, 63 sectors/track, 1305 cylinders
+Units = cylinders of 16065 * 512 = 8225280 bytes
+Disk identifier: 0x000d570a
+
+   Device Boot      Start         End      Blocks   Id  System
+/dev/vda1   *           1        1244     9992398+  83  Linux
+/dev/vda2            1245        1305      489982+   5  Extended
+/dev/vda5            1245        1305      489951   82  Linux swap / Solaris
+
+Disk /dev/vdb: 1073 MB, 1073741824 bytes
+16 heads, 63 sectors/track, 2080 cylinders
+Units = cylinders of 1008 * 512 = 516096 bytes
+Disk identifier: 0xba6f1cad
+
+   Device Boot      Start         End      Blocks   Id  System
+/dev/vdb1               1        2080     1048288+  83  Linux
+
+Disk /dev/vdc: 1073 MB, 1073741824 bytes
+16 heads, 63 sectors/track, 2080 cylinders
+Units = cylinders of 1008 * 512 = 516096 bytes
+Disk identifier: 0xdbde4889
+
+   Device Boot      Start         End      Blocks   Id  System
+/dev/vdc1               1        2080     1048288+  83  Linux
+
+Disk /dev/vdd: 10.7 GB, 10737418240 bytes
+16 heads, 63 sectors/track, 20805 cylinders
+Units = cylinders of 1008 * 512 = 516096 bytes
+Disk identifier: 0xf505afa1
+
+   Device Boot      Start         End      Blocks   Id  System
+/dev/vdd1               1       20805    10485688+  83  Linux
+</pre>
+
+The isolated network between the two servers will be:
+<pre>
+AoE server1: node1-private IP address: 10.10.2.251
+AoE server2: node2-private IP address: 10.10.2.252
+</pre>
+
+We will again bond these two interfaces. If our server is to be highly available, we should eliminate all single points of failure.
+
+Append the following to /etc/modprobe.d/aliases.conf:
+<pre>
+alias bond1 bonding
+options bond0 mode=0 miimon=100 downdelay=200 updelay=200
+</pre>
+
+Example /etc/network/interfaces:
+<pre>
+auto lo
+iface lo inet loopback
+
+auto eth0
+iface eth0 inet manual
+
+auto eth1
+iface eth1 inet manual
+
+auto eth2
+iface eth2 inet manual
+
+auto eth3
+iface eth3 inet manual
+
+auto bond0
+iface bond0 inet static
+        address 10.10.1.251
+        netmask 255.255.255.0
+        broadcast 10.10.1.255
+        network 10.10.1.0
+        gateway 10.10.1.1
+        up /sbin/ifenslave bond0 eth0
+        up /sbin/ifenslave bond0 eth1
+
+auto bond1
+iface bond1 inet static
+        address 10.10.2.251
+        netmask 255.255.255.0
+        broadcast 10.10.2.255
+        network 10.10.2.0
+        up /sbin/ifenslave bond1 eth2
+        up /sbin/ifenslave bond1 eth3
+</pre>
+
+Ensure that /etc/hosts on both nodes contains the names and IP addresses of the two servers.
+
+Example /etc/hosts:
+<pre>
+127.0.0.1       localhost
+10.10.1.251     node1.home.local    node1
+10.10.1.252     node2.home.local    node2
+10.10.2.251     node1-private
+10.10.2.252     node2-private
+</pre>
+
+Install NTP to ensure both servers have the same time.
+
+<pre>
+apt-get -y install ntp
+</pre>
+
+You can verify the time is in sync with the date command.
+
+At this point, you can either modprobe the second bond, or restart both servers.
+
+Install drbd and heartbeat.
+
+<pre>
+apt-get -y install drbd8-utils heartbeat
+</pre>
+
+As we will be using heartbeat with drbd, we need to change ownership and permissions on several DRBD related files on both servers.
+
+<pre>
+chgrp haclient /sbin/drbdsetup
+chmod o-x /sbin/drbdsetup
+chmod u+s /sbin/drbdsetup
+chgrp haclient /sbin/drbdmeta
+chmod o-x /sbin/drbdmeta
+chmod u+s /sbin/drbdmeta
+</pre>
+
+Using /etc/drbd.conf as an example create your resource configuration. We will define two resources.
+
+   1. The drbd device that will contain our AoE configuration files
+   2. The drbd device that will become our AoE target 
+
+Example /etc/drbd.conf: 
+<pre>
+resource aoe.config {
+        protocol C;
+ 
+        handlers {
+        pri-on-incon-degr "echo o > /proc/sysrq-trigger ; halt -f";
+        pri-lost-after-sb "echo o > /proc/sysrq-trigger ; halt -f";
+        local-io-error "echo o > /proc/sysrq-trigger ; halt -f";
+        outdate-peer "/usr/lib/heartbeat/drbd-peer-outdater -t 5";      
+        }
+
+        startup {
+        degr-wfc-timeout 120;
+        }
+
+        disk {
+        on-io-error detach;
+        }
+
+        net {
+        cram-hmac-alg sha1;
+        shared-secret "password";
+        after-sb-0pri disconnect;
+        after-sb-1pri disconnect;
+        after-sb-2pri disconnect;
+        rr-conflict disconnect;
+        }
+
+        syncer {
+        rate 100M;
+        verify-alg sha1;
+        al-extents 257;
+        }
+
+        on node1 {
+        device  /dev/drbd0;
+        disk    /dev/vdc1;
+        address 10.10.2.251:7788;
+        meta-disk /dev/vdb1[0];
+        }
+
+        on node2 {
+        device  /dev/drbd0;
+        disk    /dev/vdc1;
+        address 10.10.2.252:7788;
+        meta-disk /dev/vdb1[0];
+        }
+}
+
+resource aoe.target.0 {
+        protocol C;
+ 
+        handlers {
+        pri-on-incon-degr "echo o > /proc/sysrq-trigger ; halt -f";
+        pri-lost-after-sb "echo o > /proc/sysrq-trigger ; halt -f";
+        local-io-error "echo o > /proc/sysrq-trigger ; halt -f";
+        outdate-peer "/usr/lib/heartbeat/drbd-peer-outdater -t 5";      
+        }
+
+        startup {
+        degr-wfc-timeout 120;
+        }
+
+        disk {
+        on-io-error detach;
+        }
+
+        net {
+        cram-hmac-alg sha1;
+        shared-secret "password";
+        after-sb-0pri disconnect;
+        after-sb-1pri disconnect;
+        after-sb-2pri disconnect;
+        rr-conflict disconnect;
+        }
+
+        syncer {
+        rate 100M;
+        verify-alg sha1;
+        al-extents 257;
+        }
+
+        on node1 {
+        device  /dev/drbd1;
+        disk    /dev/vdd1;
+        address 10.10.2.251:7789;
+        meta-disk /dev/vdb1[1];
+        }
+
+        on node2 {
+        device  /dev/drbd1;
+        disk    /dev/vdd1;
+        address 10.10.2.252:7789;
+        meta-disk /dev/vdb1[1];
+        }
+}
+</pre>
+
+Duplicate the DRBD configuration to the other server.
+<pre>
+scp /etc/drbd.conf root@10.10.1.252:/etc/
+</pre>
+
+Initialize the meta-data disk on both servers.
+<pre>
+[node1]drbdadm create-md aoe.config
+[node1]drbdadm create-md aoe.target.0
+[node1]drbdadm create-md aoe.config
+[node2]drbdadm create-md aoe.target.0
+</pre>
+
+We could have initialized the meta-data disk for both resources with:
+<pre>
+[node1]drbdadm create-md all
+[node2]drbdadm create-md all
+</pre>
+
+If a reboot was not performed post-installation of drbd, the module for DRBD will not be loaded.
+
+Start the drbd service (which will load the module).
+<pre>
+[node1]/etc/init.d/drbd start
+[node2]/etc/init.d/drbd start
+</pre>
+
+Decide which server will act as a primary for the DRBD device that will contain the AoE configuration files and initiate the first full sync between the two servers.
+
+We will execute the following on node1: 
+<pre>
+drbdadm -- --overwrite-data-of-peer primary aoe.config
+</pre>
+
+Review the current status of DRBD.
+
+<pre>
+cat /proc/drbd 
+Example output:
+IT-hash: 9ba8b93e24d842f0dd3fb1f9b90e8348ddb95829 build by ivoks@ubuntu, 2009-01-17 07:49:56
+ 0: cs:SyncSource ro:Primary/Secondary ds:UpToDate/Inconsistent C r---
+    ns:761980 nr:0 dw:0 dr:769856 al:0 bm:46 lo:10 pe:228 ua:256 ap:0 ep:1 wo:b oos:293604
+        [=============>......] sync'ed: 72.3% (293604/1048292)K
+        finish: 0:00:13 speed: 21,984 (19,860) K/sec
+ 1: cs:Connected ro:Secondary/Secondary ds:Inconsistent/Inconsistent C r---
+    ns:0 nr:0 dw:0 dr:0 al:0 bm:0 lo:0 pe:0 ua:0 ap:0 ep:1 wo:b oos:10485692
+</pre>
+
+I prefer to wait for the initial sync to complete before proceeding, however, waiting is not a requirement.
+
+Once completed, format /dev/drbd0 and mount it.
+<pre>
+[node1]mkfs.jfs /dev/drbd0
+[node1]mkdir -p /srv/data
+[node1[mount /dev/drbd0 /srv/data
+</pre>
+
+To ensure replication is working correctly, create data on node1 and then switch node2 to be primary.
+
+{{{ 
+dd if=/dev/zero of=/srv/data/test.zeros bs=1M count=100
+}}}
+
+Switch to node2 and make it the Primary DRBD device:
+<pre>
+On node1:
+[node1]umount /srv/data
+[node1]drbdadm secondary aoe.config
+On node2:
+[node2]mkdir -p /srv/data
+[node2]drbdadm primary aoe.config
+[node2[mount /dev/drbd0 /srv/data
+</pre>
+
+You should now see the 100MB file in /srv/data on node2. We will now delete this file and make node1 the primary DRBD server to ensure replication is working in both directions.
+
+Switch to node1 and make it the Primary DRBD device:
+<pre>
+On node2:
+[node2]rm /srv/data/test.zeros
+[node2]umount /srv/data
+[node2]drbdadm secondary aoe.config
+On node1:
+[node1]drbdadm primary aoe.config
+[node1]mount /dev/drbd0 /srv/data
+</pre>
+
+Performing an ls /srv/data on node1 will verify the file is now removed and synchronization successfully occured in both directions.
+
+Decide which server will act as a primary for the DRBD device that will be the AoE target and initiate the first full sync between the two servers. We will execute the following on node1:
+<pre>
+drbdadm -- --overwrite-data-of-peer primary aoe.target.0
+</pre>
+
+We could have initiated the full sync for both resources with:
+<pre>
+drbdadm -- --overwrite-data-of-peer primary all
+</pre>
+
+Next we will install AoE target package.  The plan is to have heartbeat control the service instead of init, thus we will prevent AoE from starting with the normal init routines. We will then place the AoE target configuration files on the DRBD device so both servers will have the information available when they are the primary DRBD device.
+
+Install AoE target package on node1 and node2.
+[node1]sudo apt-get -y install vblade
+[node2]sudo apt-get -y install vblade
+
+The init scripts for vblade as of 4/22/2009 need to be modified.  
+# The init script attempts to create a PID file in a directory that does not exist
+# The init script attempts to place a null value in the PID file.
+
+<pre>
+Working /etc/init.d/vblade:
+
+set -e
+
+test -x /usr/sbin/vblade || exit 0
+
+. /lib/lsb/init-functions
+
+test -d /var/run/vblade || mkdir -p /var/run/$prog
+
+RETVAL=0
+prog=vblade
+
+test -d /var/run/vblade || mkdir -p /var/run/$prog
+
+start_vblade() {
+   ALLOWMACS=""
+   [ -n "$5" ] && ALLOWMACS="-m $5"
+   ID="$1-e$2.$3"
+   PID_FILE=/var/run/$prog/${ID}.pid
+   if [ -f $PID_FILE ]; then
+	log_daemon_msg "The PID for $ID exists."
+	continue
+   fi
+   $prog $ALLOWMACS $2 $3 $1 $4 >> /var/log/$prog.log 2>&1 &
+   pid=$!
+   echo $pid > $PID_FILE
+   echo -n $"$4 (e$2.$3@$1) [pid $pid]"
+   [ "$RETVAL" = 0 ] && log_end_msg 0 || log_end_msg 1
+   echo
+}
+
+start() {
+   log_daemon_msg "Starting vblade daemons" "vblade"
+   sed /^#/d /etc/$prog.conf | sed /^$/d | while read line
+   do
+	 start_vblade $line
+   done
+}
+
+stop() {
+   log_daemon_msg "Stopping vblade daemons" "vblade"
+   log_progress_msg "vblade"
+   if ! ls /var/run/vblade/*.pid 2> /dev/null; then
+	log_daemon_msg "No vblade to stop"
+   else
+      for pidfile in `ls /var/run/$prog/*.pid`
+         do
+	 kill -9 `cat $pidfile`
+	 rm -f $pidfile
+       done
+   fi
+  echo
+}
+
+case "$1" in
+	start)
+		start
+		;;
+	stop)
+		stop
+		;;
+	restart|force-reload)
+		stop
+		start
+		;;
+	reload)
+		stop
+		start
+		;;
+* )
+	echo $"Usage: $0 {start|stop|restart|reload|restart|force-reload}"
+	RETVAL=1
+esac
+
+exit 0
+</pre>
+
+Temporarily stop vblade
+<pre>
+/etc/init.d/vblade stop
+</pre>
+
+Remove vblade from the init scripts.
+
+<pre>
+update-rc.d -f vblade remove
+</pre>
+
+Relocate vblade configuration to /srv/data/aoe:
+<pre>
+[node1]mkdir -p /srv/data/aoe
+[node1]mv /etc/vblade.conf /srv/data/aoe
+[node1]ln -s /srv/data/aoe/vblade.conf /etc/vblade.conf
+[node2]rm /etc/vblade.conf
+[node2]ln -s /srv/data/aoe/vblade.conf /etc/vblade.conf
+</pre>
+
+Define our AoE target.
+
+Vblade defines AoE targets in /etc/vblade.conf
+
+Example /etc/vblade.conf:
+<pre>
+bond0 0 1 /dev/drbd1
+</pre>
+
+The above example:
+# Will use bond0 as out network interface
+# Defines our AoE target as shelf 0 slot 1
+# Defines the device associated with the AoE target
+
+Last but not least configure heartbeat to failover AoE in case a node fails.
+
+On node1, define the cluster within /etc/heartbeat/ha.cf.
+
+Example /etc/heartbeat/ha.cf:
+<pre>
+logfacility     local0
+keepalive 2
+deadtime 30
+warntime 10
+initdead 120
+bcast bond0
+bcast bond1
+node node1
+node node2
+</pre>
+
+On node1, define the authentication mechanism within /etc/heartbeat/authkeys the cluster will use. 
+
+Example /etc/heartbeat/authkeys:
+<pre>
+auth3
+3 md5 password
+</pre>
+
+Change the permissions of /etc/heartbeat/authkeys.
+<pre>
+chmod 600 /etc/heartbeat/authkeys
+</pre>
+
+On node1, define the resources that will run on the cluster within /etc/heartbeat/haresources. We will define the master node for the resource, the Virtual IP address, the file systems used, and the service to start.
+
+Example /etc/heartbeat/haresources:
+<pre>
+node1 drbddisk::aoe.config Filesystem::/dev/drbd0::/srv/data::jfs
+node1 drbddisk::aoe.target.0 vblade
+</pre>
+
+Copy the cluster configuration files from node1 to node2.
+<pre>
+[node1]scp /etc/heartbeat/ha.cf root@10.10.1.252:/etc/heartbeat/
+[node1]scp /etc/heartbeat/authkeys root@10.10.1.252:/etc/heartbeat/
+[node1]scp /etc/heartbeat/haresources root@10.10.1.252:/etc/heartbeat/
+</pre>
+
+At this point you can either:
+  1.  Unmount /srv/data, make node1 secondary for drbd,  and start heartbeat
+  2.  Reboot both servers
+
+To test connectivity to our new AoE target, configure an additional system to be an initiator.
+
+I will use Ubuntu 9.04 (Jaunty Jackalope) for this as well.
+
+Install the AoE userland tools.
+
+<pre>
+apt-get -y install aoetools
+</pre>
+
+The default configuration does not automatically start AoE communication.
+Modify /etc/default/aoetools to indicate which interface AoE should communicate on.
+
+<pre>
+sed -i 's/INTERFACES="none"/INTERFACES="eth0"/' /etc/default/aoetools
+</pre>
+
+Start the aoetools init script.  This will cause a discovery to start.
+
+Review the status of AoE discovery.
+
+<pre>
+aoe-stat
+Example output:
+      e0.1        10.737GB   eth0 up
+
+</pre>
+
+Once the available LUNs are discovered, as expected, we have a new disk.
+
+Example fdisk -l sample output:
+<pre>
+Disk /dev/vda: 10.4 GB, 10485760000 bytes
+255 heads, 63 sectors/track, 1274 cylinders
+Units = cylinders of 16065 * 512 = 8225280 bytes
+Disk identifier: 0x000478c5
+
+   Device Boot      Start         End      Blocks   Id  System
+/dev/vda1   *           1        1214     9751423+  83  Linux
+/dev/vda2            1215        1274      481950    5  Extended
+/dev/vda5            1215        1274      481918+  82  Linux swap / Solaris
+
+Disk /dev/etherd/e0.1: 10.7 GB, 10737345024 bytes
+255 heads, 63 sectors/track, 1305 cylinders
+Units = cylinders of 16065 * 512 = 8225280 bytes
+Disk identifier: 0x00000000
+
+Disk /dev/etherd/e0.1 doesn't contain a valid partition table
+</pre>
+
+Create a partition and file-system on our new AoE device.
+<pre>
+fdisk /dev/etherd/e0.1
+Command (m for help): 							<--- n
+Command action
+   e   extended
+   p   primary partition (1-4) 						<--- p
+Partition number (1-4):							< ---1 
+First cylinder (1-10239, default 1): 					<--- enter
+Last cylinder, +cylinders or +size{K,M,G} (1-10239, default 10239):	<--- enter
+Command (m for help): 							<--- w
+mkfs.jfs -q /dev/etherd/e01.p1
+</pre>
+
+Create a mount point for the new file-system.
+
+<pre>
+mkdir -p /mnt/aoe
+</pre>
+
+We can either use /etc/fstab to mount our file-system at boot time, or we can add it to /etc/default/aoetools.  To keep all the disks in one location, we will place an entry in /etc/fstab.  Modern distros prefer to use the disk's UUID for mounting in fstab, referring to the device "old school" still works as well.
+
+The aoetools script is run after fstab is parsed and file systems are loaded.  We can either move the init scripts to support AoE discovery before /etc/fstab is parsed, or we can use the "old school" enty in /etc/fstab.  The aoetools init script will parse /etc/fstab and mount file-systems with entries for /dev/etherd.
+
+Add our new AoE disk to /etc/fstab.
+
+<pre>
+printf "/dev/etherd/e01.p1\t/mnt/aoe\tjfs\tnoatime\t0\t0\n" >> /etc/fstab
+</pre>
+
+Mount our new AoE block device.
+
+<pre>
+mount /mnt/aoe
+</pre>
+
+Create data on the initiator node and test failover of the target.  I prefer using a movie or a sound file as this will help show latency.  Once you have the test data availble, play the movie or the mp3, and instruct node1 it is no longer a member of the cluster.  This can be done by simply shutting down heartbeat.
+
+<pre>
+[node1]/etc/init.d/heartbeat stop
+</pre>
+
+Once you have tested the latency of the data transfer when node1 fails, start heart beat on node1, this will in-turn move the resources back to node1  
+
+<pre>
+[node1]/etc/init.d/heartbeat start
+</pre>
+
+An alternative test would be to failover the nodes while writing data.

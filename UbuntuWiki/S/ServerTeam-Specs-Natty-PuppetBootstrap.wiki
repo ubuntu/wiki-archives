@@ -1,0 +1,249 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+* '''Launchpad Entry''': UbuntuSpec:cloud-server-n-install-bootstrap-puppet
+* '''Created''':
+* '''Contributors''': 
+* '''Packages affected''':
+* Follow up from UbuntuSpec:server-maverick-puppet-bootstrap
+
+=== Summary ===
+
+The puppet client registration process will be extended to include information
+proving that the puppet client request is legitimate.
+
+=== Release Note ===
+
+=== Rationale ===
+
+In the context of Cloud, puppet client running on instances come and go.
+
+=== User stories ===
+
+=== Assumptions ===
+
+=== Design ===
+
+==== X509 PKI ====
+
+<nowiki>[[File:pki.png]]</nowiki>
+
+==== Registration process ====
+
+<nowiki>[[File:registration.png]]</nowiki>
+
+===== Cloud conductor =====
+
+====== Extended Key usage attribute in Conductor certificates ======
+
+Cloud conductor certificates include an extended key usage attribute to note that they can be used to sign the extended attributes included in a csr request from a puppet client:
+
+<pre>
+## Allowed to create new instances
+  1.3.6.1.4.1.34380.2.0
+</pre>
+
+====== Extended attributes for puppet client CSR ======
+
+Whenever a puppet client asks to be registered additional attributes from the conductor are added to the CSR to legitimate the request:
+
+<pre>
+1.3.6.1.4.1.34380.2.1 =
+1.3.6.1.4.1.34380.2.2 = 1
+1.3.6.1.4.1.34380.2.3 = 2010-05-07T23:31:03+00:00
+1.3.6.1.4.1.34380.2.4 =-----BEGIN CERTIFICATE [...] -----
+1.3.6.1.4.1.34380.2.5 = 
+</pre>
+
+Version 1 signature:
+
+ 1. Create the string to be signed:
+
+    <pre>
+1.3.6.1.4.1.34380.2.2=1\n
+1.3.6.1.4.1.34380.2.3=2010-05-07T23:31:03+00:00\n
+1.3.6.1.4.1.34380.2.4=-----BEGIN CERTIFICATE [...] -----\n
+1.3.6.1.4.1.34380.2.5=\n 
+</pre>
+
+ 1. Sign it with the private key of the conductor.
+
+===== cloud-config support =====
+
+Cloud-config puppet syntax is extended to support csr attributes:
+
+<pre>
+puppet:
+ csr_attributes:
+   "1.3.6.1.4.1.34380.2.1": "aaaaabbbbb"
+   "1.3.6.1.4.1.34380.2.2": "1"
+   "1.3.6.1.4.1.34380.2.3": "2010-05-07T23:31:03+00:00"
+   "1.3.6.1.4.1.34380.2.4": "-----BEGIN CERTIFICATE [...] -----"
+   "1.3.6.1.4.1.34380.2.5": "aaaabbbbbbb"
+</pre>
+
+===== Puppet client =====
+
+The puppet client supports an additional option to be able to specify a list of
+extended attributes to be added to the csr:
+
+In puppet.conf:
+<pre>
+  csr_attributes_file = /etc/puppet/csr_attributes.txt
+</pre>
+
+Example  ``/etc/puppet/csr_attributes.txt``:
+
+<pre>
+1.3.6.1.4.1.34380.2.1 = aaaaabbbbb
+1.3.6.1.4.1.34380.2.2 = 1
+1.3.6.1.4.1.34380.2.3 = 2010-05-07T23:31:03+00:00
+1.3.6.1.4.1.34380.2.4 = -----BEGIN CERTIFICATE [...] -----
+1.3.6.1.4.1.34380.2.5 = aaaabbbbbbb
+</pre>
+
+The Puppet client validates the puppet master certificate by checking the
+complete certificate path up to the Puppet Root CA.
+
+===== Puppet master =====
+
+====== CSR checking and certificate issuance ======
+
+For each CSR the puppetmaster:
+ 1. verifies that the certificate included in the CSR is from the trusted
+    Puppet Root CA.
+ 1. verifies that the conductor certificate included in the CSR extended
+    attribute has the AllowedToCreateInstance attribute as an extended key
+    usage.
+# validates the signature of the extended attributes in the CSR.
+# issues a certificate to the puppet client that includes the node 
+    classification as an extended attribute:
+
+    <pre>
+1.3.6.1.4.1.34380.2.5 = 
+</pre>
+
+ 1. sends the new certificate *and* its own certificate to the puppet client.
+
+==== Run process ====
+
+<nowiki>[[File:run.png]]</nowiki>
+
+===== Puppet client =====
+
+The Puppet client validates the puppet master certificate by checking the
+complete certificate path up to the Puppet Root CA.
+
+===== Puppet master =====
+
+====== 1. Client authentication ======
+
+Every puppet client sends its own certificate *and* the puppet master
+certificate that issued its certificate. The puppet master validates the
+complete certificate chain up to the Puppet Root CA.
+
+====== 2. Node classification ======
+
+The node classification is extracted from the client certificate and used to compute the client manifest.
+
+=== Implementation ===
+
+See Work Items definition in the <nowiki>[[https://blueprints.launchpad.net/ubuntu/+spec/server-maverick-puppet-bootstrap|blueprint whiteboard]]</nowiki>.
+
+=== Test/Demo Plan ===
+
+=== Unresolved issues ===
+
+=== BoF agenda and discussion ===
+
+==== UDS Lucid discussion notes ====
+
+<pre>
+Support for multi masters (ie a puppet client can request its certificate (CSR) from a master out of multiple ones (HA/Load balanced)) and multi cloud conductors (multiple components can start new instances which will be accepted by all puppetmasters):
+  best practices == one server used for cert requests, cert chaining
+  Michael would like to talk about Riak implementation :)
+  - Root CA
+    - puppetmaster1 CA
+        - puppetclient1 cert (started by cloud_conductor1)
+        - puppetclient3 cert (started by cloud_conductor2)
+    - puppetmaster2 CA
+        - puppetclient2 cert (started by cloud_conductor2)
+        - puppetclient4 cert (started by cloud_conductor1)
+    - cloud_conductor1 cert
+    - cloud_conductor2 cert
+
+Extend csr format to include specific attributes to ensure the csr is genuine (ie started by a authorized/recognized/trusted cloud conductor):
+    [ req_attributes ]
+### Signature (base64 encoded)
+    1.3.6.1.4.1.34380.2.0 = 
+### Signature version (integer)
+    1.3.6.1.4.1.34380.2.1 = 1
+### expiration date (rfc3339)
+    1.3.6.1.4.1.34380.2.2 = 2010-05-07T23:31:03+00:00
+### Cloud conductor certificate (PEM format)
+    1.3.6.1.4.1.34380.2.3 =-----BEGIN CERTIFICATE [...] -----
+
+Puppetmaster hooks for csr signing (dynamic client registration in cloud):
+** pupptca command to get the waiting csr
+** Can we add arbitrary data?
+    - http://ruby-doc.org/ruby-1.9/classes/OpenSSL/X509.html < Documentation of OpenSSL:X509 Library, which puppet uses to generate CSR
+(daemon calling puppetca ?)
+
+Puppet client csr hook: add specific attributes to the csr generated by the puppet client:
+(implementation thoughts?  how to get data into CSR?)
+(freeform JSON acceptable? -- sounds like we are embedding cloudmaster cert in CSR)
+
+Other puppet related topics:
+  - initctl (upstart) service provider: http://projects.puppetlabs.com/issues/3747
+    - status support
+    - disable/enable support
+  - review upstream test suite:
+*** fix all tests
+*** enable tests during package build (ie get rid of puppet-testsuite)
+
+It would be more user friendly to use hostnames over UUIDs, before reinstall/reprovision of existing hostname,
+revoke/remove existing cert.  (Helps logs).
+
+Some Conclusions
+
+     - need to check if CA chaining works with common root (multiple puppet CA from common master) 
+   
+     - need to find out does ruby ssl libs allow injecting of extra data in CSR ?
+       + http://ruby-doc.org/ruby-1.9/classes/OpenSSL/X509.html < Documentation of OpenSSL:X509 Library, which puppet uses to generate CSR
+     - want puppetd flag --extra-csr-info=<filepath>, embeds data into CSR
+     - if not embeddable in CSR could store it on puppetmaster in parallel
+     - script or web service to call out to say "should I autosign this?" (script most likely, outputs log messages, returns pass/fail ?)
+       configurable as --autosigner-hook=<path-to-script> or equivalent
+     - intent is to NOT have to have admins approve any systems manually
+ 
+</pre>
+
+==== UDS Natty discussion ====
+
+<pre>
+	Tuesday, October 26, 0900
+Next steps after installation service.  Image is installed, we need to hook it up to the existing puppet infrastructure; in particular the puppet infrastructure includes a puppet Certificate Authority (CA).
+
+Agent         Master
+    --CSR-->
+    <--Cert--
+    
+Focus of this session is how this exchange is set up.
+
+Mattias' current approach uses an S3 store. The Deployment service registers a UUID, and timestamp in S3; the puppet CA checks the store during the CSR exchange ("Plan B").  Another approach is to create a link directly between the deployment server and the CA ("Plan A").  Either way, the private key doesn't have to travel on the network; and the agent (started by the deployment server) uses the cert to talk to the puppet master.
+
+Is this approach any different than what is already used in a cloud infrastructure to set up images?  Obviously there's the difference in setting up the original image, but that occurs before these steps. So why shouldn't cloud-init be the intermediate agent to allow phyical hardware installs to get access to puppet (or chef or whatever)?  This means the original image on which the agent runs must be cloud-init enabled.
+
+Use cases for revocation are legitimate and important, but maybe don't have to be supported in Natty.
+
+</pre>
+----
+CategorySpec

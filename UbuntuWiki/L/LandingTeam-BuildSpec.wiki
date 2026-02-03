@@ -1,0 +1,92 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+These are the steps that the CI Train takes in order to build silo packages in PPAs (the jenkins "build" job):
+
+=== Validation Phase ===
+
+The build job must validate its inputs. This means: ensure that the user did not specify invalid packages in PACKAGES_TO_REBUILD, and if certain defined packages are present in the silo, that the silo contains the package's "twin" (eg qtmir build must be accompanied by qtmir-gles build, etc).
+
+Note that we should disable by default a rebuild without any PACKAGES_TO_REBUILD or WATCH_ONLY. This is to avoid slippery fingers when the user just wanted to rebuild some packages or run a WATCH_ONLY but didn't complete and ends up rebuilding everything in the silo (and so, revalidate, retests…). A confirmation is then asked for such a case.
+
+If we detect packages in the silo not being in the configuration (so, not "locked"), we stop here and ask for a reconfiguration.
+
+In case of a rebuild after a publication, (like, the package is blocked in -proposed and an additional fix is needed), an option should be set to ack that we go back to a partial build on purpose.
+
+=== Settings storage Phase ===
+
+The job needs to register what was the status when the last build started:
+- what packages were directly uploaded to the silo. Note that we don't stop yet if there are more packages found in the ppa than registered at the configure phase. The blocking phase will come at publication time to let developer work without having to reconfigure at every build the silo. We still write a warning in logs to warn the user about it.
+- what are the packages versions (if any) in the destination (archive). We store that settings so that at publication time, we can ensure there were no new intermediate upload undetected (but still let people to erase an upload without having the changelog backported, see "Check phase").
+
+=== Clean Phase ===
+
+If rebuilding the silo, stale files leftover from previous builds must be cleared out. This includes sources, dsc files, changes files, etc. We only clean in case the list of packages set in PACKAGES_TO_REBUILD if this option is provided. Note that if the package was already published and we step back to another build phase (see previously), we don't destroy those metadata from the previous publication, but as they are versionned, CI train will keep them around and just ignore them.
+
+This phase is destructive in nature and will be skipped during a WATCH_ONLY build.
+
+=== Package Preparation Phase ===
+
+The source packages to be built must be retrieved from somewhere. This can be either by merging a series of merge proposals into one local branch directory (note that each revno should be available explicitely in the logs during the merge in case something needs to dig into them afterwards), or it can be by copying a package from another silo (eg when no-change syncing packages from ubuntu to ubuntu-rtm).
+
+In the case of merge proposals:
+* We generate new versions number which differs depending on native-only and traditional debian packages. We take into account both destination version, current version in silo (i.e: a rebuild) and the intermediate "SRU" ppas for SRU to ensure we are bumping correctly the version. If the version set manually as per a merge proposal is fitting all those needs, we keep it.
+* We replace any "0replaceme" in debian/*symbols by the new version we just generated and write an new changelog entry from this.
+* Finally we generate the changelogs:
+** commit message from each manual push to trunk since last release (from CI Train or direct upload, using the tag as a reference)
+** each commit messages set on merge proposals, if they didn't do any change in debian/changelog manually (in that case, this change will be used in debian/changelog instead).
+* We commit and tag with the release number the new package release.
+
+We check the finale changelog and ensure it's not empty (case where there is a single merge proposal, touching debian/changelog, but leaving it empty).
+
+We also ensure that the previous version in the destination archive (we look at all pockets) is available in debian/changelog (so that we don't override previous work in the archive). A force option is available to not stop the job in this case (a Warning would be written anyway in the logs if someone needs to dig, stating about this override). This is to ease the "reverting a revert" for instance.
+
+This phase is destructive in nature and will be skipped during a WATCH_ONLY build.
+
+=== Build Phase ===
+
+The locally-collected source packages are built, generating dsc and changes files for each package. This is done in a chroot.
+
+This phase is destructive in nature and will be skipped during a WATCH_ONLY build.
+
+=== Upload Phase ===
+
+The locally-built source packages are uploaded into a launchpad "silo" PPA to have their binary packages built.
+
+This phase is destructive in nature and will be skipped during a WATCH_ONLY build.
+
+=== Watch Phase ===
+
+The uploaded source packages are monitored in the launchpad PPA in order to determine whether the binary packages were successfully built or not.
+
+We monitor each archs this package is supposed to be built on. We ensure no regression in term of archs this package is build on compared to the destination (an override is still available). We should still blogs warnings for all failures to build, even if they are not set as blocking due to those previous conditions.
+
+In case of a new packages, we force that the package is at least building successfully on a restrictive set of architecture (i386, amd64, armhf). Note, they are a lot of corner cases to be taken into account, like arch: any -> arch:all transition on some binary packages and so on. Packages with only arch: all packages…
+
+Note that if at any time, we detect some new packages in the ppa not in the configuration, we warn and ask for a reconfigure mostly with WATCH_ONLY). We don't want to have a package built against a library unknown (and possibly with a new ABI) being tested without being noticed.
+
+------
+Just note that there are many checks that are linked to the generated data here during the publication (ensuring packages that were watched are the last ones available in the ppa, checking diff, packages in configuration that are not in the silo and packages in the silos not in the configuration, checking that the destination versions for each packages didn't change, only publishing package that were not already published, handling of SRUs…).
+
+Also, the merge and clean phase is supporting people pushing to trunks after the publication phase to restack the commits in the correct orders (for instance: autocommit launchpad translations)
+
+=== Diff Phase ===
+
+The package we've built is compared against the package as it exists at the destination archive, and if changes under debian/* are found, a diff is produced which must be ACKed at publication time by a core dev or someone with upload rights for that package before the silo can be published. The diff is a filterdiff showing all potential build system-related diff (autotools, cmake, qmake, setup.py…) and diff in debian/ directory to give context to the person who will ACK the change.
+
+We run this diff against 2 source packages (previous one in the destination and this newly created one). If we detect some special cases like, new binary packages available and so on, we add another warning on top of the diff itself, stating to ask an archive admin to ACK the new packages as package copy skips binNEW.
+
+----
+This step must come last because, in the case of manual source package uploads, we must wait for them to finish building in the PPA, then download them from the PPA, in order to generate the required diff.
+-> This is not needed at all to be last step (and wasn't in the past), as we don't block on packages that are in the configuration but not in the ppa before the publication.
+
+Yeah, this phase really does need to come last: Doing it sooner than last makes it more difficult to make diffs against manual source uploads, and doing it sooner than last has no advantage. 
+
+-----

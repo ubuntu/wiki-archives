@@ -1,0 +1,174 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+== Ubuntu Active Directory Authentication (an alternative solution) ==
+
+=== Description ===
+In order to authenticate a linux desktop client against Windows Directory services there are several configuration files and services which need to exist. The PAM authentication stack utilizing the pam_ldap and nss_ldap authentication modules. Network services such as NFS etc. Extensive configuration settings regarding the nsswitch.conf, pam.d/* configuration files, ldap.conf etc.
+
+As a systems administrator these factors create a sharp learning curve, and time to not only configure all of these things, but to also maintain them. Having this many variables lead to errors costing time and money.
+
+What if you could install one Pluggable Authentication Module, modify one configuration file to begin authenticating an existing Windows Directory Service or OpenLDAP directory containing existing users and groups?
+
+=== Background ===
+I work for a University. We have an existing Windows Directory full of students. Two hundred thousand plus accounts. To bring Linux into the destkop environment as an alternative to the Windows and OSX clients we needed a simple to maintain, simply to configure solution.
+
+Kerberos Authentication was needed. Active Directory / OpenLDAP support was needed. Minimal configuration and minimal network services was also needed.
+
+We have been utilizing Linux on the desktop in our student labs, public access terminals and some staff machines for close to 5 years now without the need for the pam_ldap, nss_ldap, nsswitch.conf, ldap.conf or NFS configurations necessary for this type of Linux desktop integration.
+
+=== Alternative Solution ===
+Because there is a perfectly viable solution existing regarding the necessary Kerberos Realm authentication a simple patch, or feature was added to dynamically query the existing Windows / OpenLDAP directory services in order to provide the pam_krb5 TGT to UID/GID verification.
+
+The pam_krb5+ldap project page:
+<nowiki>[[http://sourceforge.net/apps/mediawiki/pam-krb5-ldap/index.php?title=Main_Page|pam_krb5+ldap project page @ sourceforge.net]]</nowiki>
+
+<nowiki>[[File:IconsPage/note.png]]</nowiki> A patch has also been submitted to the original developer as a feature request to integrate this functionality to any new releases. Details can be found on bugzilla. <nowiki>[[http://bugzilla.redhat.com/show_bug.cgi?id=517096|patch to integrate ldap uid/gid mapping to pam_krb5]]</nowiki>
+
+=== Installation, configuration, usage ===
+
+==== Installation HOWTO ====
+Simple, get the package. You can download the latest release at the following URL:
+<nowiki>[[http://sourceforge.net/projects/pam-krb5-ldap/files/|pam_krb5+ldap download]]</nowiki>
+
+Next simple extract the package contents:
+<pre>
+%> tar zxvf pam_krb5+ldap-version.tgz
+</pre>
+
+Compile the package using the '--with-ldap' switch to enable the Widows Directory / OpenLDAP option (please note the libpam, libldap and libkrb5 libraries are required)
+<pre>
+%> ./configure --with-ldap
+</pre>
+
+Now install the compiled shared objects
+<pre>
+%> make && make install
+</pre>
+
+<nowiki>[[File:IconsPage/note.png]]</nowiki> You may need to change the installation directory from /var/lib/security/pam_krb5 by issuing the following command:
+<pre>
+%> cp -dfrv /var/lib/security/pam_krb5/* /lib/security/
+</pre>
+
+<nowiki>[[File:IconsPage/note.png]]</nowiki> If you receive errors during the compile or make commands please file bug reports at the following URL: <nowiki>[[https://lists.sourceforge.net/lists/listinfo/pam-krb5-ldap-support|pam_krb5+ldap support]]</nowiki>
+
+==== Configuration ====
+There are two areas to configure, one being the krb5.conf and the other being the pam.d/<service> file to ensure the Linux client uses the proper authentication method.
+
+We will start with the krb5.conf file, below is an example. The following items will need to be changed to match your environment:
+* default_realm (your kerberos realm)
+
+* kdc (kerberos realm server address)
+
+* default_domain (your domain name)
+
+* ldap_servs (list of ldap/active directory server addresses separated by a space)
+
+* ldap_port (connection port, default is 389, to use TLS/SSL specify 689)
+
+* binddn (location of user accounts used in bind process)
+
+* basedn (location of users used during search process)
+
+* ldapuser (default user account used during bind process)
+
+* ldappass (default password associated with bind user)
+
+* group_list (comma separated list of groups to ad user to)
+
+<pre>
+[libdefaults]
+        default_realm = EXAMPLE.EDU
+        clockskew = 300
+
+[realms]
+UTAH.EDU = {
+        kdc = KDC1.EXAMPLE.COM
+        default_domain = EXAMPLE.COM
+        admin_server = KDC1.EXAMPLE.COM
+}
+
+[logging]
+        kdc = FILE:/var/log/krb5kdc.log
+        admin_server = FILE:/var/log/kadmin.log
+        default = FILE:/var/log/krb5lib.log
+[domain_realm]
+        .sub.example.com = EXAMPLE.COM
+
+[appdefaults]
+pam = {
+        ticket_lifetime = 1d
+        renew_lifetime = 1d
+        forwardable = true
+        proxiable = false
+        retain_after_close = false
+        minimum_uid = 2
+        try_first_pass = true
+        ignore_root = true
+
+        schema = ad
+        ldapservs = ldap1.example.com ldap2.example.com
+        ldapport = 389
+        binddn = uid=username,ou=Users,dc=example,dc=com
+        basedn = ou=remoteusers,dc=example,dc=com
+        ldapuser = [readonly-username]
+        ldappass = [readonly-password]
+        
+        passwd = /etc/passwd
+        shadow = /etc/shadow
+        groups = /etc/group
+
+        groups_list = audio,cdrom,cdrw,usb,plugdev,video,games
+
+##### If you define these they will
+##### over write anything obtained from
+##### ldap/active directory
+        homedir = /home
+        defshell = /bin/bash
+}
+</pre>
+
+Now simply configure any service you wish to utilize this authentication method. For example if you wish to use this method to only authenticate the user at the terminal configure the /etc/pam.d/system-login file, if you wish to also enable ssh users access utilizing this authentication method you would also configure the /etc/pam.d/ssh configuration file.
+
+Below is an example of the /etc/pam.d/system-login configuration
+<pre>
+auth            required        pam_env.so
+auth            sufficient      pam_krb5.so
+auth            sufficient      pam_unix.so try_first_pass likeauth nullok
+auth            required        pam_deny.so
+
+account         required        pam_unix.so
+
+password        required        pam_cracklib.so difok=2 minlen=8 dcredit=2 ocredit=2 retry=3
+password        sufficient      pam_krb5.so
+password        sufficient      pam_unix.so try_first_pass use_authtok nullok sha512 shadow
+password        required        pam_deny.so
+
+session         required        pam_limits.so
+session         required        pam_env.so
+session         optional        pam_krb5.so
+session         required        pam_unix.so
+session         required        pam_mkhomedir.so skel=/etc/skel/ umask=0022
+session         optional        pam_permit.so
+</pre>
+
+<nowiki>[[File:IconsPage/note.png]]</nowiki> You may want to take note of the utilization of the pam_mkhome.so module as this is required for this authentication type.
+
+=== Conclusion ===
+Thats it. Hopefully linux on the desktop in educational, corporate environments will start becoming a bit easier to integrate.
+
+=== Help & Support ===
+Problems and questions can be directed to the support forums. Thanks.
+<nowiki>[[https://lists.sourceforge.net/lists/listinfo/pam-krb5-ldap-support|pam_krb5+ldap support]]</nowiki>
+
+----
+ CategorySecurity CategoryNetworking CategoryDevelopment

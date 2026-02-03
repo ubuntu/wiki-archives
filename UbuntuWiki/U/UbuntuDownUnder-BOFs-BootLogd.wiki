@@ -1,0 +1,108 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== BootLogd ==
+
+=== Status ===
+
+** Created:  by MattZimmerman<<BR>>
+** Priority: HighPriority<<BR>>
+** People: AndresSalomonLead, HerbertXuSecond<<BR>>
+** Contributors: MattZimmerman<<BR>>
+** Interested: OliverGrawert, JeffBailey, PaulSladen <<BR>>
+** Status: BreezyGoal, UduBof, DistroSpecification, ApprovedSpecification<<BR>>
+** Branch: <<BR>>
+** Malone Bug: <<BR>>
+** Packages: <<BR>>
+** Depends: <<BR>>
+** UduSessions: 2
+
+=== Introduction ===
+
+Preserve output from the system initialization process.
+
+=== Rationale ===
+
+A lot of useful information is discarded, especially due to early gdm startup, and later <nowiki>[[USplash]]</nowiki>.  This becomes an even larger problem as things are moved earlier and earlier into the boot process.
+
+=== Scope and Use Cases ===
+
+** Debugging user problems early in the boot process (init script related).  Logging everything to a file will go a long way towards tracing problems.
+** <nowiki>[[USplash]]</nowiki> wants a way to grab status information and output from init scripts, and displaying a subset of it.  As well, init script output should be directed to `/dev/null`, or some other tty, so that the user doesn't see it.
+** Enable remote logging of problems on servers, for cases where the disk is not writable.
+
+=== Implementation Plan ===
+
+** Enable bootlogd immediately; this simply requires changing '/etc/default/bootlogd'.  Fix immediate bugs (at least on Debian and Hoary, it seems to log correctly).
+** Modify bootlogd to create a socket/pipe/pty device in /dev (ie, /dev/bootlogd).  Anything written to this device will get written to the log file (/var/log/boot).
+** Modify init scripts to (if VERBOSE=no in /etc/default/rcS) redirect output to /dev/bootlogd instead of /dev/null.  This ensures that the user only sees "pretty" output on console, but verbose output ends up in /var/log/boot.
+** <nowiki>[[USplash]]</nowiki> can either hook into bootlogd's nonverbose output (requiring modifications to bootlogd), or can hook into init scripts
+** Possible enhancements:
+*** Move bootlogd startup to even earlier in the boot process (perhaps from initrd or initramfs).  Currently, bootlogd will store output in a ring buffer, and dump to file once the file is writable.  Ensure that this ring buffer is large enough for the extra output added by bootlogd starting earlier.  As things are moved into initramfs (ie, hotplug), this becomes more important.
+*** Log to syslog instead of writing directly to file.  This allows for more flexibility, as we can suddenly log all console output remotely.
+**** Support logging via 'netcat' straight to another IP:port on a different machine.
+***** With appropriate bootloader commands and a working Ethernet network, should allow submitting straight to the HardwareDatabase even if the root filesystem can't be brought up.
+
+==== Data Preservation and Migration ====
+
+  N/A
+
+==== Packages Affected ====
+
+* `sysvinit`
+* `lsb-init`
+* `initscripts`
+* `initramfs-tools`
+* `linux-image-*` (?)
+ 
+==== User Interface Requirements ====
+
+<nowiki>[[USplash]]</nowiki> requirements need to be taken into consideration; if it is using the non-verbose output from init scripts, this needs to be made available in a simple fashion.  Non-USplash users should not see verbose output on their console, but it should be logged to a file.
+
+=== Outstanding Issues ===
+
+The bootlogd author considers bootlogd experimental, and not suitable for end users.  We should find out the author's exact concerns, and check the relevancy.  <nowiki>[[USplash]]</nowiki> requirements, once it has a clear implementation path, may require further bootlogd or init changes, or vice-versa.
+
+==== UDU BOF Agenda ====
+
+* What needs to be done in order to enable bootlogd?
+* Enable it and start fixing the bugs
+* How early should it be enabled?  One of the suggestions (<nowiki>[[http://bugs.debian.org/cgi-bin/bugreport.cgi?bug=272428|#272428]]</nowiki>) included starting bootlogd from initrd, so that everything gets logged.
+
+==== UDU Pre-Work ====
+
+* Bootlogd is started (in debian) from S05 (after udev, mountvirtfs, and mdadm), and logs to `/var/log/boot`.  The (sysvinit) author considers it broken/experimental, and has disabled it by default.
+
+* Known problems include:
+** <nowiki>[[http://bugs.debian.org/cgi-bin/bugreport.cgi?bug=205724|#205724]]</nowiki>: Since it runs before fsck, it logs all spinner changes. This causes huge logfiles, and slows down fsck considerably since it fsyncs after every line/write. Joeyh proposed only writing upon newlines...
+** <nowiki>[[http://bugs.debian.org/cgi-bin/bugreport.cgi?bug=237056|#237056]]</nowiki>: udev was not providing `/dev/ttyzf`, which `bootlogd` needs.  This appears to no longer be the case; at least w/debian's udev_056-2 + 2.6.11, as well a hoary's udev (w/ 2.6.10), /dev/ttyzf is created.
+** <nowiki>[[http://bugs.debian.org/cgi-bin/bugreport.cgi?bug=213028|#213028]]</nowiki>: bootlogd needs to not run while in single user mode, otherwise things like passwords, fsck, and lots of unnecessary stuff end up getting logged to a world-writable log file.
+** direct logging of console requires:
+     a. figuring out what the console actually is, either by parsing kernel arg console=, or using the TIOCGDEV ioctl (not present in stock kernels as of 2.6.12)
+**** There is a <nowiki>[[http://dl.bytesex.org/patches/2.6.12-rc3-1/tiocgdev|TIOCGDEV]]</nowiki> patch for the Linux kernel.  `bootlogd` already supports use of the IOCTL if it's defined by `glibc`, but `glibc` does not yet, thus the IOCTL command number will need to be (temporarily) hard-coded (ifdef) into `bootlogd` for it to work.
+     b. logging terminal control characters.
+
+* Suggestions by the author:
+** Add more support in kernel for `bootlogd`; author didn't expand upon that.
+*** Providing a 'tee' ioctl() rather than a 'redirection' would be better and suit our needs better.
+** Provide wrapper for starting init scripts, that logs all output to `/dev/bootlogd`.  Bootlogd listens on this socket, stores logging info in ring buffer, and dumps to /var once it's writable.
+ Other possibilities:
+** When starting init scripts from `/etc/init.d/rc{,S}`, log all output to socket and console.  Bootlogd then reads logs from socket instead of `/dev/console`.  Or, skip bootlogd stuff and write to `/dev/log` once sysklogd has been started, so that syslog.conf can control logging.
+*** Can be done by replacing '/dev/null' with `$MESSAGE_BUCKET`
+**** Figure out Pipe/Rediction/Tee syntax for this.
+** Start bootlogd from initrd; store logs in ring buffer until `/var/log` is writable, at which point dump early logs to disk, fsync, and begin normal logging.
+
+----
+CategoryUdu
+CategorySpec 
+
+I don't care how you get it done but get it done.  No bug that has literally hundreds of people attempting to create workarounds is a "lowpriority" item.  Now let's kick in gear and get this completed.  You want us to test the system but then you don't give us the tools we need to do the testing.  The confusion surrounding this issue is incredible and the constant repetition of inoperable work-arounds abound on board after board.  The users are screaming for this to be completed but apparently it's been falling on deaf ears.  I'm using 9.10 and it's still a problem.  And I've seen requests beginning in 2005 asking for a way to save the boot log information.
+----
+CategoryDebugging

@@ -1,0 +1,134 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== Server setup ==
+
+=== Run time dependencies ===
+
+* bzr (to grab the branch)
+* pxz | xz-utils
+* python3, python3-gpgme | python, python-gpgme
+* e2fsprogs
+* android-tools-fsutils
+* abootimg
+* fakeroot
+* apache2
+
+=== Test dependencies ===
+
+* python-tox
+* python-nose2, python3-nose2
+* python-mock, python3-mock
+* python-coverage, python3-coverage
+* libjs-jquery-hotkeys, libjs-jquery-isonscreen, libjs-jquery-tablesorter
+* pep8
+* pyflakes (includes executables for both Python 2 and 3)
+* both pxz and xz-utils (for 100% coverage)
+* cpio
+
+=== Web server setup ===
+<pre>
+sudo adduser $USER www-data
+sudo chgrp www-data /var/www/
+sudo chmod g+rwX /var/www/
+sudo rm -f /var/www/html/index.html
+</pre>
+
+=== Setting up the server itself ===
+This assumes all the above was installed and done, that the code is running as an "ubuntu" user in its default home directory, on a server accessible at system-image.test.com with a valid SSL certificate on port 443.
+
+<pre>
+bzr branch lp:~ubuntu-system-image/ubuntu-system-image/server system-image
+cd system-image
+tools/generate-keys
+tox -e fast-py34,fast-py27
+</pre>
+
+At this stage, you have the branch on your system, have generated some GPG keys (albeit test ones), and tested that the code works (at least the fast-path tests).  Now it's time to generated the matching keyrings, but first you have to configure the system by creating "etc/config" containing:
+
+<pre>
+[global]
+base_path = /home/ubuntu/system-image/
+channels = test
+gpg_key_path = secret/gpg/keys/
+gpg_keyring_path = secret/gpg/keyrings/
+publish_path = /var/www/
+state_path = state/
+public_fqdn = system-image.test.com
+public_http_port = 80
+public_https_port = 443
+
+[channel_test]
+type = auto
+versionbase = 1
+fullcount = 15
+files = ubuntu, device, custom-savilerow, keyring, version
+file_ubuntu = remote-system-image;https://system-image.ubuntu.com;trusty-proposed;ubuntu
+file_device = remote-system-image;https://system-image.ubuntu.com;trusty-proposed;device;keyring=archive-master
+file_custom-savilerow = http;https://jenkins.qa.ubuntu.com/job/savilerow-watch/lastSuccessfulBuild/artifact/custom.tar.xz;name=custom-savilerow,monitor=https://jenkins.qa.ubuntu.com/job/savilerow-watch/lastSuccessfulBuild/artifact/build_number
+file_keyring = keyring;archive-master
+file_version = version
+</pre>
+
+You may want to look at config.example for all possible key values.
+
+Relative paths, such as the <code>gpg_key_path</code> and <code>gpg_keyring_path</code> are relative to <code>base_path</code>.
+
+The above defines a server accessible at system-image.test.com, which listens for http on port 80 and for https on port 443, has one channel that's managed by the importer, that channel is configured to contain 5 tarballs:
+* ubuntu => Ubuntu root filesystem, imported as-is from system-image.ubuntu.com
+* device => Device tarball, imported from system-image.ubuntu.com and then repacked to swap the GPG keys
+* custom-savilerow => Imported from an http server (customization tarball)
+* keyring => Contains the GPG keys that override those from the ubuntu tarball
+* version => Contains the channel configuration and current build data
+
+Now that the configuration is done, you can generate the keyrings.
+
+<pre>
+cp -R tools/keys/* <base_path>/secret/gpg/keys/
+bin/generate-keyrings
+</pre>
+
+Now we need to actually create the channels, add a device and publish the keyrings, for that, run "bin/si-shell" and do:
+
+<pre>
+pub.create_channel("test")
+pub.create_device("test", "mako")
+for keyring in ("archive-master", "image-master", "image-signing", "blacklist"):
+    pub.publish_keyring(keyring)
+</pre>
+
+'''Note:''' you might want to omit <code>blacklist</code> if you don't have one, since <code>publish_keyring()</code> will give you an error if there is no blacklist keyring (there usually isn't by default).
+
+At this point, your server is ready, all you need to do now is generate images by running: <code>bin/import-images -v</code>
+
+=== copy-image ===
+
+On the actual system-image server <code>bin/copy-image</code> is used to copy images between channels, set up aliases, etc.  Since this is a local file system copy, and <code>copy-image</code> requires a source channel, you need to make a local mirror of a device/channel directory, and the related metadata files, on your local file system.  One way you could do that is a recursive <code>wget</code> of http://system-image.ubuntu.com but be prepared to devote tens of gigs of local disk space and saturate your network for a few days.
+
+A better way is to use the <nowiki>[[https://code.launchpad.net/~barry/ubuntu-system-image/grabber/+merge/259055|grabber]]</nowiki> script which will mirror just enough locally to run <code>copy-image</code>.  You need to have the <code>system-image-common</code> package (v3.0 or newer) installed, since <code>grabber</code> uses bits and pieces from the system-image client to do the work of resolving which files are needed for which device/channel pair.  Thus, you'll also need Python 3.
+
+Let's say you want to run the following <code>copy-image</code> command:
+
+<pre>
+$ bin/copy-image -vvvv -p 6 ubuntu-touch/rc/bq-aquaris.en ubuntu-touch/ubuntu-rtm/14.09 krillin 23
+</pre>
+
+You need to have the source channel (i.e. the first path argument) laid out locally.  Let's say further that you're going to build all this in <code>/tmp/si</code>.  Run the grabber like so:
+
+<pre>
+$ cd /path/to/server/branch
+$ bin/grabber -c ubuntu-touch/rc/bq-aquaris.en -d krillin /tmp/si
+</pre>
+
+If you don't have <code>system-image-common</code> v3.0 or newer installed, do <code>bzr branch lp:ubuntu-system-image</code> and put the resulting directory on your <code>$PYTHONPATH</code>.
+
+The <code>grabber</code> script will run for a while (but trust me, it's much faster than a full mirror!) and when it's done, you can now run <code>copy-image</code> after setting up your <code>etc/config</code> properly.
+
+Oh yeah, what are those funky version-*.json files for?  They're consumed by <code>copy-image</code> to produce the version-details in the channels.ini file.

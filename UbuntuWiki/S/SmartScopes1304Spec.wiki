@@ -1,0 +1,299 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+
+* '''Launchpad entry''': UbuntuSpec:desktop-r-smart-scopes
+* '''Created''': 28-01-2013
+* '''Contributors''': sil, luciotorre, mhr3, jonobacon, mhall, cparrino
+* '''Packages affected''': unity
+
+This document covers the ‘Smart Scopes’, ‘100 Scopes’ and ‘Direct Scopes’ features as part of the Online Dash initiative for the 13.04 Ubuntu release.
+
+=== Release note ===
+
+Ubuntu will include many new scopes, with many more in the future as part of the "100 Scopes" project. The Dash now gets and contributes information from a central server on which scopes are best able to answer Dash queries, in order to make the Dash home scope maximally useful through community-contributed scopes and usage data. As before, the Dash can be restricted from including any online content or contribution in the Privacy system settings.
+
+=== Rationale ===
+
+The driving factors behind the changes are the continual improvement of the Dash as a place for surfacing useful content, whether it’s local or remote, and a desire to take advantage of the amazing work done by contributors in building up a large amount of Scopes for the Dash.
+
+The features break down as:
+
+* Ability for the Home Master Scope to show a mixture of ranked results from the:
+** default scopes
+** some of the installed scopes
+** remote scopes (scopes run on the server)
+* The Dash gathering and posting metrics to the Smart Scopes Service, so we can produce better results for queries.
+* The Smart Scopes Service being able to give ranked list of Scopes to  present to the user.
+
+The goal of the 100 Scopes project and of Ubuntu in general is to provide lots and lots of scopes, and there should be lots and lots more in the future for every data source that anyone might want. These scopes should all be in Ubuntu and ready to surface appropriate content in the Dash. The Ubuntu experience would be compromised if all those scopes were running all the time, though; the goal of the Smart Scopes project is to intelligently decide, for a given query, which scopes are likely to be most relevant to that query so that those scopes can be chosen to be started and return results. Users can of course explicitly choose scopes that they want used in the query to override the suggestions from the Smart Scopes service.
+
+=== The Home Scope, technical detail ===
+
+The Home Scope will hold the intelligence for communicating with the Smart Scopes Service, the Default Scopes, and the other installed Scopes. From all these sources, the Home Scope will produce the final categories, results and filters for the Home Scope in the Dash.
+
+On Dash open, the scope will open a search session with the  Smart Scopes Service. In this session will be information that the service needs to return useful data for the search. In the first cut, the information will be:
+* A randomly generated ID for the session
+* Locale and geographical info
+* Ubuntu version and platform type
+* Difference between the scopes that Ubuntu release shipped with and what’s installed on the system currently (i.e +epicurious -grooveshark).
+* Permanently enabled (pinned) or disabled scopes by the user.
+
+Then, upon the user typing in a search term, the Dash would
+* Send a query to the service containing:
+** the session id (a time UUID)
+** search term
+** state of the filters (added and removed scopes from platform’s default)
+** environment info like user’s platform, geographic info and locale
+** other query specific parameters, like page size
+* Search the Default Scopes straight away, as they usually contain important data (mostly personal or semi-personal), so there is no need to wait for the server round-trip.
+* Scopes can declare search keywords. Searching the Dash for keyword:query (that is: a search keyword, colon, then any search query) will only search scopes declaring that keyword for the query. The Home Scope will not pass this query to the Smart Scopes service, nor pass metrics for it.
+
+The expected data returned from the service would contain:
+* An ordered by importance list of Recommendations (local Scopes for the Dash to search in).
+* A list of remote Scopes that were queried (also ordered by importance), with the results that were received from those remote scopes.
+
+At this point, the Home Scope has to do the following:
+# Use the ranking information returned from the Smart Scopes Service and balance that against the type of results returned from the Default Scopes to determine the final ranking order.
+## One of the default Scopes may return an exactly-matching personal result, and therefore we may give preference to that category. This is something the service would never know, so we have to make that decision.
+# Start populating the results model to the Home Scope with results that the Default Scopes are returning so the user starts to see results that they most likely care about ASAP.
+# Start populating categories representing the remote scopes as we already have the results available from the data returned from the service.
+# From the list of ranked scopes returned by the service, figure out which ones are not covered by the default scopes or remote scopes, to activate & search them (i.e 100 scopes).
+# As results are returned from the scopes searched in step 4., add them to the results models so the user can see them.
+
+As the user browses the Dash and finally makes a decision, the Dash will post the results to the Home Scope (through another D-Bus object, not related to Scopes), and the Home Scope will post the metrics to the service when appropriate.
+
+=== The Smart Scopes service and API ===
+
+The Smart Scopes service collects metrics from the Dash about which scope results correlate to which queries, and uses those metrics to predict which scopes will provide the most useful result for a given query.
+The smart scopes service is in charge of selecting scopes from the client and server which should be queried to produce the results for the current dash search.
+
+It will also embed the results from the server scopes in its reply, so the dash won’t need to ask again. Results will be returned in chunks so they can be used by the client as soon as we have them and want to return them.
+
+This service will collect user response information (what they clicked on, what they saw, session information, etc) so we can use that information to improve our recommendations.
+
+All the information we get is anonymous, the only thing we track is the session that ties together a series of queries like ‘t’, ‘ter’, ‘termi’, ‘terminal’. All request go through https and all images and other content gets proxied through us before reaching the 3rd party provider. No session or user identifiable information is passed to other parties.
+
+To maximize our relevancy metric, we want to have for each query the list of scopes ranked by how likely it is that the user will click on them. This is easy to build for the most popular query terms. The most naive method is to present the users with random ranking and then see which scopes get clicked. This is called 'exploration'.
+
+Search terms come in a power law distribution. The head of the curve is easy to predict as we will get lots of data. If we use heuristics to improve on blind exploration we can also provide results for the middle. The long tail will require smart heuristics to produce reasonable results for search terms  we have never seen.
+
+These heuristics take many forms:
+* We can ask scopes for results. A scope that returns relevant results is definitely better that one that will not produce results. We don’t require any history to rank scopes this way. This is a big benefit of moving scopes to the server side.
+* Also, Query terms can be normalized to reduce the number of search terms. Upper and lower case version of the same string can be considered the same. We can do spell checking and replacing the first few letters of a search by the most likely final query (that is, use the scope recommendation for ‘terminal’ when the user searches for ‘termi’, maybe even include the results for terminal if appropriate).
+* Another heuristic is feature extraction. eg, Is the query the name of a place? an artist? A thing? How do queries for things relate to scopes? This is a great technique for dimensionality reduction and makes categorization easier if we have good features.
+
+When these heuristic variations cannot be used against historical data we will start running  various versions of this service concurrently, so we can test which version produces better results and continue evolving from there; this is similar to the alpha-beta testing technique, and evolves comparative results.
+
+In summary, improving the results is done in two ways:
+* Collecting historical data correlating queries and clicks. This will be processed off line.
+* Programmatic changes in the service and scopes (exploration rate, normalizations, etc).
+
+<nowiki>[[File:Smart Scopes Architecture.svg]]</nowiki>
+<nowiki>[[attachment:Smart Scopes Architecture.svg]]</nowiki>
+
+API:
+
+<pre>
+"/smartscopes/v1/search": {
+ "query": {
+     "description": "a normal GET with all info properly encoded in UTF8 and for URLs",
+     "parameters": {
+         "q": "the actual search terms, mandatory",
+         "session_id": "the session id (a time-uuid for when the session
+                        started, mandatory)",
+         "platform": "the user platform (desktop, tablet, phone, etc) and version of the OS
+                      (in format '$platform-$version' mandatory)",
+         "geo_store": "the geographic location (a two letter country, optional,
+                       usually added by server side rewrites based on ip)",
+         "locale": "the locale of the user (also two letters, optional)",
+         "pagesize": "number of items per page (an int, optional, if not specified server
+                      will decide)",
+         "added_scopes": "the installed scopes that are not part of the platform defaults
+                          (optional)",
+         "removed_scopes": "the scopes that were removed from the platform defaults
+                            (optional)",
+     },
+     "example": {
+         "source data": 'locale=EN, q="foo bar moño", geo_store=UK, '
+                        'session_id=e5825e52-2fd8-11e2-84e5-001f3cc7dd9c, '
+                        'platform=desktop-1304',
+         "sent": 'locale=EN&q=foo+bar+mo%C3%B1o&platorm=desktop-1304&'
+                 'geo_store=UK&session_id=e5825e52-2fd8-11e2-84e5-001f3cc7dd9c',
+     },
+ },
+ "response": {
+         "description": "It's a HTTP 1.1 chunked transfer. Each chunk can be type
+                     'recommendations' or 'results', each JSON encoded separately.",
+         "types": {
+         "recommendations": "sorted list of (scope, [client|server]) for the dash to search
+                                or present",
+         "results": "dict with scope name and list of result info from that scope; note
+                     that the same scope may be in different 'results' chunk",
+     },
+         "examples": [
+         '{"type": "recommendations", "scopes": [["scope1", "client"],
+                                                    ["scope2", "server"]]}',
+         '{"type": "results", "info": {"scope2": [<result_info>], '
+         '"scope1": [<result_info>, <result_info>, <result_info>]}}',
+     ],
+ },
+}
+
+"/smartscopes/v1/feedback": {
+ "query": {
+     "description": "a POST with the data encoded in UTF8 and JSON; data
+                     is a list of events with some parameters",
+     "mandatory parameters for each event": {
+         "type": "the type of the event ('found', 'seen', or 'clicked')",
+         "timestamp": "the timestamp of the user at the moment the
+                       event happened",
+         "session_id": "the session id of the search",
+     },
+     "optional parameters, according to the event type": {
+         "found": "ordered list of (scope_id, quantity of results
+                   returned by the scope)",
+         "seen": {
+             "duration": "how much time the results were shown",
+             "results": "ordered list of (scope_id, quantity of
+                         results shown for the scope)",
+         },
+         "clicked": {
+             "duration": "how much time the results were shown",
+             "results": "ordered list of (scope_id, quantity of results
+                         shown for the scope)",
+             "clicked_scope": "the id of the scope for which a result
+                               was clicked",
+             "clicked_result": "the position of the result that
+                                was clicked",
+         },
+         "previewed": {
+             "duration": "how much time the results were shown",
+             "results": "ordered list of (scope_id, quantity of results
+                         shown for the scope)",
+             "previewed_scope": "the id of the scope for which a result
+                                 was previewed",
+             "previewed_result": "the position of the result that
+                                  was previewed",
+         },
+     },
+ },
+ "response": "None at all",
+}
+</pre>
+
+=== Data and metrics passed to the Smart Scopes service ===
+
+Smart Scopes is designed so that it is not able to correlate queries and feedback by user; that is, if there are two searches for the same query, it will use the results and feedback from the first search to improve its recommendations for the second search, but it will not (and cannot) refine recommendations based on other results for that user, because it deliberately protects user privacy by not having enough information to do so.
+
+Below is a summary of all the collected information, why and how Smart Scopes uses it, and how the privacy of that information is ensured.
+
+Data and metrics passed in Ubuntu 13.04
+
+{| class="wikitable"
+|-
+| '''metric'''
+| '''why we collect it'''
+| '''how we protect it'''
+|-
+| session id
+| used to tie a search query to feedback, so Smart Scopes can build a database of which scopes provide the best results for queries
+| Randomly and unidentifyingly generated by the client (not the server) and only used to combine one query with feedback for that query. Not reused, and not correlatable with other session IDs. Not passed to scopes or third parties.
+|-
+| q
+| the user’s search query
+| collected and correlated with feedback
+|-
+| platform
+| platform type (phone, desktop, tablet, tv, etc) and OS version. The OS version is used to know the default set of scopes available on that version of the OS. Platform type is used becase search intent may differ across different platforms (a search on an Ubuntu phone may be expected to return different results to the same search on an Ubuntu TV)
+| collected and correlated with feedback. Not passed to scopes or third parties.
+|-
+| country
+| This is used by some scopes to know which service to check (for example, Amazon) and for geolocated/geolocked content (for example, BBC iPlayer). If not provided by the Dash, it may be calculated using GeoIP from the request
+| collected and correlated with feedback
+|-
+| locale
+| The user’s system language. Collected so that scopes can return language-specific resources or localized search results
+| collected and correlated with feedback
+|-
+| pagesize
+| a display setting: only return a limited set of results
+| 
+|-
+| added_scopes
+| This lists extra scopes that the user has installed over those which came with this OS release. This is collected so that the Smart Scopes server can optionally recommend those scopes as part of exploration, and thus build up data from feedback on whether those added scopes provide better results than the default installed scopes for particular queries. This means that those scopes will rise in popularity and can be further recommended by the Smart Scopes service, making them more useful, and also suggests that those scopes should be included in future versions of Ubuntu. As above, a user can explicitly request that a scope be used even if Smart Scopes does not recommend it through filters in the Dash or an explicit search keyword
+| collected and correlated with feedback. Not passed to scopes or third parties.
+|-
+| removed_scopes
+| Scopes that came as part of the default set with this OS release but have been removed or disabled (via filters) by the user. Smart Scopes therefore knows to not recommend these scopes for this search query even if it believes that they would be relevant
+| collected and correlated with feedback. Not passed to scopes or third parties.
+|-
+| found-results-count
+| Lists the number of results (not the actual results) provided by each scope for this query. This is used to refine Smart Scopes’s predictions about which scopes would provide good results for a given query
+| collected and correlated with search query. Not passed to scopes or third parties. Note that this does not contain the actual results that a scope returned; merely the number of results that it returned.
+|-
+| clicked-scope-id
+| The ID of the scope which provided the result that the user chose. This is used to confirm that Smart Scopes recommended a scope and the user liked the results from that scope enough to at least click on them; this is the major piece of feedback which allows Smart Scopes to improve its recommendations for a query
+| collected and correlated with search query. Not passed to scopes or third parties.
+|-
+| previewed-scope-id
+| see clicked-scope-id; this is used when a search result is previewed rather than clicked
+| see clicked-scope-id
+|}
+
+Data planned for collection in later releases but not in 13.04 (some metrics in this list may be implemented in 13.04, depending on resourcing)
+
+{| class="wikitable"
+|-
+| '''metric'''
+| '''why we collect it'''
+| '''how we protect it'''
+|-
+| location
+| Passed so that scopes can customise search results to location, similarly to country, but with more detail: for example, a server-side concert tickets scope can prioritise results by closeness to your location. In Ubuntu 13.04 we will not pass this information.
+| For devices such as phones with accurate geolocation capabilities (such as GPS street-level resolution or wifi-related location) we will implement a settings switch which allows the user to disable passing accurate geolocation to the Smart Scopes service. This parameter will not be implemented in Ubuntu 13.04 but will be by the time Ubuntu Phone is released and the Dash has access to accurate geolocation via a specific platform API; when the Dash starts using geolocation data obtained from the platform, the settings switch will be implemented at the same time so that passing geolocation data can be disabled.
+|-
+| seen-duration
+| if the Dash is scrolled, shows how long the results were on screen for. This is used by Smart Scopes to influence how successful its recommendations were; for example, if results are on screen only for a very short time, it is possible that the user decided that those results were not useful, and therefore Smart Scopes can learn that its recommendations could be improved.
+| This is important because two successive queries from the same user are not correlateable: if a user searches, is unhappy with the results, and searches again with a different query to hopefully get better results, Smart Scopes does not know that the user was unhappy because it is deliberately designed for privacy protection so that it cannot know that the second query came from the same user as the first. Not passed to scopes or third parties.
+|-
+| seen-results-count
+| see found-results-count
+| collected and correlated with search query. Not passed to scopes or third parties.
+|-
+| clicked-duration
+| see seen-duration
+| see seen-duration
+|-
+| clicked-results-count
+| see found-results-count
+| see found-results-count
+|-
+| clicked-result-position
+| The position in the results from a scope of the clicked-on result (not the actual result itself). This is used to help refine Smart Scopes’ recommendations; if a scope provided a useful result high in its results, it is likely doing good relevancy ranking for this query
+| This is not the actual result data, but merely the position in the results of the clicked item. Smart Scopes does not know what a scope actually returns, for privacy protection; it merely knows whether the chosen result was high or low in that scope’s own ranking. Not passed to scopes or third parties.
+|-
+| previewed-duration
+| see seen-duration
+| see seen-duration
+|-
+| previewed-results-count
+| see found-results-count
+| see found-results-count
+|-
+| previewed-scope-result-position
+| see clicked-result-position
+| see clicked-result-position
+|-
+| IP
+| automatically passed as part of any HTTP query
+| Stored in webserver logs by Canonical IS. Not aggregated with other data on this list. Not passed to scopes or third parties.
+|}

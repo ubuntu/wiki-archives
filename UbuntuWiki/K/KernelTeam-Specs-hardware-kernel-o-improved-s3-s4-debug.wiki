@@ -1,0 +1,156 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+* '''Launchpad Entry''': https://blueprints.launchpad.net/ubuntu/+spec/hwe-o-improved-s3-s4-debug
+* '''Created''': 
+* '''Contributors''': 
+* '''Packages affected''': kernel
+
+=== Summary ===
+
+Suspend S3 and Hibernate S4 debug is notoriously difficult and the
+pm-debug via the RTC only goes so far.  S3/S4 debugging is tedious and
+time consuming, so it seems sensible to spend some effort in developing
+kernel debug that can help with debugging.   Currently we have very
+limited ways of getting state out of the kernel when the machine hangs,
+for example, ~20 or so bits in the Real Time Clock, or 1 to 3 bits of
+state from the keyboard LEDs or 8 bits over the port $80 debug port.
+
+The ability to dump console output when we do not have the luxury of serial 
+console or JTAG would help improve the S3/S4 debugging experience, especially in late suspend/hibernate or early resume phases.  A console driver that
+allows us to printk() debug and capture this on a debug host machine in
+realtime to allow more fine-grained and speedier debug cycles.
+
+Proposed ideas are:
+
+1. Debug via tones.
+
+It is possible to generate beeps via the PC speaker using the PIT or by just toggling bit 1 of port 0x61, so we can use this as an output device.  We could could either use simple beep
+codes (like BIOS POST codes) or something more sophisticated, such
+writing a console driver that uses the PC speaker output to encode the printk()
+data into a format that can be extracted in real time, e.g.:
+
+** By Morse code (slow, can work, need simple tools to decode this)
+** By frequency modulation (more sophisticated, faster, maybe need to hack up code to do a FFT and extract data from this). 
+** By pulse edges, akin to RS232 pulses over audio.
+
+2. LEDs
+
+It would be useful to have hardware (such an Arduino) to detect LED
+light pulses and extract debug data via a LED tty driver.   We could
+again signal this via simple techniques such as morse or use serial like
+start/stop bits and just send raw 7/8 bit data over the LED.   
+
+We can use either laptop keyboard LEDs or perhaps the "suspend" LEDs
+(programmed via GPIOs on the Southbridge).
+
+3. Patched debug kernel
+
+It would be useful to provide a heavily instrumented debug kernel that allows us to debug various sections of the S3 and S4 paths.  A debugfs interface that allows one to enable/disable specific features to be debugged will allow fine debug control.
+
+Solutions are:
+* A S3/S4 debug kernel will be automatically built and provided in a PPA so it is always in-sync with the latest Oneiric kernel, or
+* Patches installed using ksplice
+
+4. Simple tool to capture debug output and provide analysis.
+
+Being able to capture copious amounts of debug data is one thing, but it would also be useful to be able to provide an automated diagnosis of where the failure is occurring, e.g.
+
+** Failed to come out of the BIOS context on resume.
+** A specific driver is oopsing
+** Hang because of deep C state timer hangs
+** Memory corruption because of video driver issues
+** Or a generic "failure in or around a specific line of code."
+
+=== Release Note ===
+
+=== Implementation ===
+
+** SystemTap based S3 debugger has been implemented <nowiki>[[https://wiki.ubuntu.com/Kernel/Reference/S3SystemTapDebug|S3 System Tap Debug]]</nowiki>
+** S4 Hibernate debugger was not implemented - System``Tap hangs over S4 cycles.
+
+=== Work Items ===
+
+==== ACPI + pstore for debug status saving ====
+
+References: <nowiki>[[http://lwn.net/Articles/421297|http://lwn.net/Articles/421297]]</nowiki>
+
+Theoretically possible with Oneiric kernels, however, as yet, I don't have any hardware that contains
+any persistent storage NVRAM to test this.
+
+==== S3 early resume keyboard LED sanity check ====
+
+commit: 4aafbee4c985f74a3492fd75d65f16a0b5938612
+
+See notes: <nowiki>[[https://wiki.ubuntu.com/Kernel/Reference/S3LEDFlash|S3LEDFlash]]</nowiki>
+
+==== Review machines with PCSPKR and LED support ====
+
+One of the aims of the project was to see if we can emit debug via the PC speaker or keyboard LEDs. However,
+this would be useless if only slim percentage of machines have support for these outputs.
+
+A small representative sample of 18 laptops and netbooks ranging from 3 years old to pre-release hardware from several vendors was chosen.
+
+* ~15-20% could emit beep sounds via the PC speaker using the PIT.
+* ~55% had keyboard LEDs that could be flashed on/off using software control.
+
+The main issue with the PC speaker was that newer machines seemed to lack this support. On some of the newer machines that did support PC speaker output via the PIT the volume or power seemed to be controlled by the
+Intel HDA driver, which meant output was disabled during suspend. This means debug over PC speaker for suspend/resume debugging is impossible on these newer machine configurations.   Some of the newer machines did route the PC speaker beeps over the audio headphone socket, allowing higher fidelity sampling on a host machine which means we can push up the baud rate.
+
+==== Suspend GPIO LED debug investigation, can we use these LEDs for debug ====
+
+Laptops and netbooks contains LEDs that flash on/off while in suspend. We believe these
+are controlled by GPIO pins that can be set to 1Hz flashing.  In practice these seem to
+be chipset and machine specific, hence it is quite complex to determine which pin is
+configured to flash these LEDs, so we deemed this as not worth pursuing as a debug indicator.
+
+==== LED reading hardware ====
+
+This was prototyped using two methods - a photo transistor and a light sensitive resistor as a detector.
+These were biased using a variable resistor and connected to the analogue input to an Arduino. The Arduino
+sampled the analogue input and computed a sliding window min and max levels and automatically detected
+low/high transitions when a keyboard LED was enabled/disabled.  A precise sampling time locked to a specified
+baud rate was used to then sample input pulses based on serial protocol, e.g. start bit, 8 data bits, 1 stop bit.  Data was then emitted over the Arduino serial port and connected to a Linux host via the USB dongle and can be easily read on /dev/ttyUSB0.
+
+With heavily controlled lighting conditions, ~30 bits a second was the fastest reliably sampling rate possible
+before sampling rot occurred.  Tested against a variety of keyboard LEDs and lighting conditions, the most reliable output rate was 2 characters a second.
+
+A second approach was next considered.  A 50-60Hz filter was added to filter out input analogue noise that
+appeared on the analogue input line.  We suspect this is either from the laptop connecting the Arduino or from the mains lighting.  The analogue sample was then passed through a LM339 comparitor which was biased via a 5K variable resistor to do the signal thresholding. The output was then connected to a digital input pin on the Arduino.  Again, software in the Arduino treated the input as serial protocol.  This requires less expensive analogue sampling however, threholding was difficult as one has to keep adjusting the 5K variable resistor depending on the type in LED being sampled and ambient light. 
+
+Conclusion: While it is technically possible to bit bang serial data to an Arduino over a keyboard LED we were unable to rig up a resilient solution that worked at speed for a broad range of keyboard LEDs.
+
+==== Implement a pre-test program to confirm what output devices they may have ====
+
+Auto-detection of output devices is difficult, for example there is no way to determine of a PC has
+keyboard LEDs or if the PC speaker can be beeped using the Programmable Interrupt Timer.  So we deemed it
+as not-implementable.
+
+==== Look at providing switch for current suspend/resume output into new output driver ====
+
+The SystemTap scripts were flexible enough to deem this as redundant.
+
+=== Test/Demo Plan ===
+
+It's important that we are able to test new features, and demonstrate them to users.  Use this section to describe a short plan that anybody can follow that demonstrates the feature is working.  This can then be used during testing, and to show off after release. Please add an entry to http://testcases.qa.ubuntu.com/Coverage/NewFeatures for tracking test coverage.
+
+This need not be added or completed until the specification is nearing beta.
+
+=== Unresolved issues ===
+
+This should highlight any issues that should be addressed in further specifications, and not problems with the specification itself; since any specification with problems cannot be approved.
+
+=== BoF agenda and discussion ===
+
+Use this section to take notes during the BoF; if you keep it in the approved spec, use it for summarising what was discussed and note any options that were rejected.
+
+----
+CategorySpec

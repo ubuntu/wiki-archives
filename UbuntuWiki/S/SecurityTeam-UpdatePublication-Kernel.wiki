@@ -1,0 +1,322 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== Workflow ==
+
+Security updates for the Linux kernel are managed in a collaboration between the Security team and the Kernel SRU team. The <nowiki>[[ https:--discourse.ubuntu.com-t-ubuntu-kernel-4-2-sru-cycle-announcement-37478 | Kernel SRU cycle runs on a 4-2 cadence]]</nowiki>, where security fixes are included in both the kernel SRU team's 4-week standard stable update cycle and also in update released at the 2-week midpoint of the following 4-week cycle. In the latter it is expected to contain only CVE fixes rated critical or high.
+
+The security team's responsibilities in this are to:
+* <nowiki>[[SecurityTeam-UpdatePublication-Kernel#triage | triage issues]]</nowiki> and assist in identifying fixes
+* <nowiki>[[SecurityTeam-UpdatePublication-Kernel#signoff | signoff on kernels]]</nowiki> to verify that the fixes are contained therein (and also to annotate that the kernels need to go to the respective -security pockets)
+* <nowiki>[[SecurityTeam-UpdatePublication-Kernel#publication | publish the corresponding Ubuntu Security Notices]]</nowiki> for them
+* <nowiki>[[SecurityTeam-UpdatePublication-Kernel#tracking | update tracking]]</nowiki> for the set of kernels
+
+=== References ===
+
+This is the Kernel Stable Release Update Workflow that all the involved teams collaborate on. Launchpad is overloaded to build a release "state machine", managed by a bot.
+* process and "state machine" docs: https://wiki.ubuntu.com/Kernel/kernel-sru-workflow
+* Kernel SRU cycle dates are listed at https://kernel.ubuntu.com/
+* overview of the kernel workflow statuses: https://kernel.ubuntu.com/sru/kernel-sru-workflow.html
+* list of workflow items the Ubuntu Security Team should be aware of: https://bugs.launchpad.net/kernel-sru-workflow/security-signoff/
+
+There is a internal JIRA dashboard for tracking security team's work with kernels:
+* Kernel Security Coordination: https://warthogs.atlassian.net/jira/software/c/projects/SEC/boards/1895
+
+== Code ==
+There are several git trees with scripts in them. UCT carries the main CVE tracking and several of the triage and processing scripts. UQT carries validation scripts. kteam contains scripts written by the kernel team, some of which are used for interfacing with UCT and LP. kernel-versions contains relevant information for each kernel per cycle.
+
+* UCT: <nowiki>[[https://code.launchpad.net/ubuntu-cve-tracker | lp:~ubuntu-cve-tracker]]</nowiki>
+* UQT: <nowiki>[[https://code.launchpad.net/ubuntu-qa-tools | lp:ubuntu-qa-tools]]</nowiki>
+* kteam: <nowiki>[[https://code.launchpad.net/~canonical-kernel/+git/kteam-tools | kteam-tools]]</nowiki>
+* kernel per cycle: <nowiki>[[ https:--kernel.ubuntu.com-forgejo-kernel-kernel-versions.git | kernel-versions]]</nowiki>
+
+You will also need the `python3-launchpadlib` package installed.
+
+It is also useful to have both the upstream linux kernel and stable kernel trees as well as the primary ubuntu kernel trees checked out somewhere, too.
+
+An example of how to set them up:
+
+<pre>
+  $ mkdir -p ~/git/kernel-trees/ && cd ~/git/kernel-trees/
+  $ git clone https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git
+  $ git clone --reference linux https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git
+  $ export RELEASES=bionic focal impish jammy
+  $ for release in $RELEASES ; do
+      git clone --reference linux --reference linux-stable https://git.launchpad.net/~ubuntu-kernel/ubuntu/+source/linux/+git/$release ubuntu-$release
+    done
+</pre>
+
+Additional, optional external git trees useful for triage:
+
+* <nowiki>[[https://github.com/nluedtke/linux_kernel_cves | Nicholas Leudkte's kernel CVE tracker]]</nowiki>
+* <nowiki>[[https://salsa.debian.org/kernel-team/kernel-sec | Debian's kernel security tracker]]</nowiki>
+* <nowiki>[[https://git.kernel.org/pub/scm/linux/security/vulns.git/ | Kernel.org CNA CVE tracker]]</nowiki>
+
+== Security Team Duties ==
+
+=== Triage ===
+
+==== Per CVE ====
+Handling CVE triage is basically the same here as with standard CVE triage, mainly all kernel CVEs are comming from the Kernel.org CNA and end up being added to UCT during the daily CVE triage routine.
+* Triage normally.
+* Attempt to identify the upstream SHAs that fix the CVE.
+* Attempt to identify the upstream SHA that introduced the vulnerability. If it isn't relatively easy, just skip it. Having this isn't required, but makes backporting easier if it is known, and improves the value of future data-mining about when/where CVEs appear in the kernel. If skipped, use "-" for the SHA.
+* In the "Patches_linux:" tag, add one "break-fix" line per SHA fix. Please use full SHAs for the commit references, not 8 character shorthands, as the kernel team's triage scripts want the full commit hash.
+** For example, if 12345678 introduced the vulnerability, with abcdabcd and efefefef needed to fix it, this would be:
+<pre>
+Patches_linux:
+ break-fix: 1234567812345678123456781234567812345678 abcdabcdabcdabcdabcdabcdabcdabcdabcdabcd
+ break-fix: 1234567812345678123456781234567812345678 efefefefefefefefefefefefefefefefefefefef
+</pre>
+* If efefefef fixes an issue and we don't yet know what introduced it:
+<pre>
+Patches_linux:
+ break-fix: - efefefefefefefefefefefefefefefefefefefef
+</pre>
+* If 12345678 introduced an issue and we don't yet know what fixed it, or if there's no fix yet:
+<pre>
+Patches_linux:
+ break-fix: 1234567812345678123456781234567812345678 -
+</pre>
+* If the break commit exist since the beginning of the git repository or if predates it, we can use the very fist commit `1da177e4c3f41524e886b7f1b8a0c1fc7321cac2`
+* If we have a "SAUCE" or otherwise not upstream patch to fix an issue, or other quirks are needed, the `$UCT/active/10autotriage.linux` file can be used to create synthetic references for break-fix: entries. Ask apw for details on how to use this.
+* With CVEs from the Kernel.org CNA the `break-fix` is likely already filled, with an additional `Tags_linux: review-break-fix` right after it, which means that it was automatically added and may need a review, specially for the `break` SHA that was fetched from the 'Fixes:' tag in the commit and could be adapted to something that represents better our case.
+
+==== Merging status updates from the kernel team's cve tracker ====
+
+The kernel team uses automated tools (frequently known as autotriager) that take the identified git commits (the break-fix entries) and updates the status of CVEs in their branch of the ubuntu cve tracker . To handle this, one needs to add their tree as a remote to your UCT git tree:
+
+* <code>git remote add kernel-team https://git.launchpad.net/~canonical-kernel-team/ubuntu-cve-tracker</code>
+* <code>git fetch --all -v -p -t</code>
+
+In this fork, the kernel team maintain a few different branchs with different purposes, such as:
+
+* `for-security`: the branch that is ready to be merged to the security team's tree. it gets periodically rebased on top of its fork main branch with the most recent approved run of the autotriager tool. It usually contains "House Keeping" commits with easy to read messages that helps the identification about what is being changed by the autotriager alongside with other commits from the other branchs from this same fork;
+* `review`: a branch where the autotriager places commits that needs to be reviewed by the kernel team as they produce status changes that could result in more impacting changes, such as fixes that got removed upstream, reintroducing a CVE. Once they are reviewed and approved it gets merged into 'for-security';
+* `autotriage`: raw result of the autotriager as it is in the last run on top of the main branch before being shaped in different  commits as known in 'for-security';
+* `master`: the master branch as in the security-team repository with the kernel team's changes always on top. the kernel team's changes are usually manual changes as break-fix changes, notes, etc. Changes in this branch triggers the autotriager that will make updates in above different branchs;
+
+There should be a cron job set up to notice and send email to the team if there are unmerged commits to the kernel team's tree (Subject: Missing kernel CVE merge commits). This cron job is currently turned off but you can run this manually if your tree is set up like the above and the git remotes have been fetched by doing:
+
+* <code>$UCT/scripts/report-missing-kmerge</code>
+
+If there are outstanding commits to be merged, review them to ensure that the changes are sensible, and then merge them to the security team's tree with something like:
+
+* <code>git merge --no-ff --signoff -m 'merge cve updates from kernel team' kernel-team/for-security</code>
+
+You can use the bash shell function <code>uct_kernel_merge_commit</code> from <code>$UCT/scripts/dot.uct-functions.sh</code> to do the merge; it accepts an optional argument as a different branch to merge from. Sometimes there will be merge conflicts between the kernel team's branch and the primary branch, so it can be helpful to resolve this on a separate local branch, and then merge *that* branch into the primary UCT repo.
+
+If, when you try to push a merge to the shared UCT tree, someone beat you and your tree is out of date, you can do <code>git pull --rebase=merges</code> to rebase on top of the missing commits while preserving the merged branch.
+
+==== Retriage ====
+Kernel CVEs need to be occasionally re-triaged to identify CVEs either without a breaks-fix line or with an unpopulated fix entry.
+
+To re-triage:
+* Run <code>./scripts/kernel-triage-missing-break-fix</code> and <code>./scripts/kernel-retriage-cve</code> which will report kernel CVEs with missing information along with the information from the Debian and upstream git trees.
+* Double check that the commits in the script output do fix the issue they're listed as fixing and then add them to the breaks-fix line.
+* If there’s no identified fix, then you can investigate further. For example: the issue was fixed and the patch was sent to a mailing list but a CVE was not assigned at that time. You would then either look for the latest version of the patch in the mailing list or identify the fix from the git history. From there, validate that the fix landed in the upstream kernel and update UCT accordingly.
+
+=== Security team kernel signoffs ===
+
+Once the kernel team has prepared a kernel and pushed it to the appropriate proposed pocket, the kernel team's launchpad bot will mark the tracking bug for that kernel as needing the security team's signoff. To get a list of kernel tracking bugs needing signoff, do:
+
+** <code>$UQT/security-tools/kernel-sru-check</code>
+
+This should be in a cron job.
+
+To perform signoffs:
+* Update UCT tree: <code>cd $UCT && git pull --ff-only</code>
+* Update local kernel tree repos, then checkout the <code>master-next</code> branch on each: <code>git checkout origin/master-next</code>
+** For the first run, set up tracking for the branch as well by passing <code>--track</code> to the checkout command above
+** The <code>master-next</code> branch can get diverged sometimes, if that is the case, you can reset with <code>git reset --hard origin/master-next</code>. Watch out, if you have changes in your local repository, you will lose it.
+* For each generic kernel, identify any fixes
+** You can run <code>grep linux:</code> on the <code>kernel-sru-check</code> script output to list the generic kernels that need to be looked at
+** For each of the generic kernels, you can save the fixes included to a file for reference: <code>./scripts/report-pending-fixes -r <release> linux <version> <vers-in-proposed> > /tmp/<release>-cves</code> where <version> is the latest version from across the -release, -security and -updates pockets.
+** If any of the kernels report no CVEs, double check that there really have been no fixes
+** You can export the <code>lookup_upstream_commit</code> helper function which searches for upstream commits:
+<pre>
+lookup_upstream_commit () 
+{ 
+    commit="$1";
+    if git merge-base --is-ancestor "${commit}" HEAD; then
+        git describe --contains "${commit}";
+        return;
+    fi;
+    local_commit=$(git log --grep "${commit}" -1 --pretty=format:"%H");
+    if [ -n "${local_commit}" ]; then
+        git describe --contains "${local_commit}";
+    else
+        echo "Unable to find ${commit} in $(git branch)";
+    fi
+}
+</pre>
+** Locate the fixing commits: <code>./scripts/report-pending-fixes -f -r <release> linux <version> <vers-in-proposed> | grep -v ^CVE- | while read hash; do echo $hash ; (cd <kernel-release-repo-dir> && lookup_upstream_commit $hash) ; done</code>
+*** verify that the relevant commits have been made in the specific kernel's git tree
+** As most of the CVEs are being created by the Kernel.org CNA and we have been handling a lot of them, the USN descriptions are taking a standard paragraph that includes the affected subsystems for the set of CVEs in that USN. When running <code>./scripts/prepare-kernel-usn.py -n --kernel-cna-cves --keep-changes -p Proposed <release> <release>/linux: <vers-in-proposed></code> (note <code>--kernel-cna-cves</code> argument) you can find the list of CVEs that were created by the Kernel.org CNA and if there are missing subsystems being tracked, one should add them to <code>meta_lists/kernel_paths_overrides.json</code>;
+* If there are CVEs that are not in the list of Kernel.org CNA CVEs, populate the <code>Ubuntu-Description:</code> in UCT with a USN description for each of the fixed CVEs.
+** For esm kernels, add <code>--esm-ppa canonical-kernel-esm/proposed</code>
+*** e.g. <code>./scripts/prepare-kernel-usn.py -n --kernel-cna-cves --esm-ppa canonical-kernel-esm/proposed  bionic bionic/linux: 4.15.0-234.246</code>
+** If an editor pops up, that means all CVEs have descriptions. Simply exit the editor.
+* Check the derived kernels (from `kernel-sru-check`) for security fixes as well: <code>./scripts/prepare-kernel-usn.py -n --kernel-cna-cves --keep-changes -p Proposed <release> <release>/<derived-kernel>: <vers-in-proposed></code> (Note that the last three arguments have their own lines in the `kernel-sru-check` output.)
+** Check that all the CVEs from the generic kernel (as stored in the <code><release>-cves</code> file) are included. Take note if there are any new CVEs that weren’t in the primary kernel as those might warrant a separate USN for that kernel.
+** Sometimes a derived kernel will be behind the generic kernel. The changes file will have the <code>[ Ubuntu: <vers> ]</code> line followed by the updates from the generic kernel. If the version doesn’t match the latest version, it’s behind.
+** If it’s based off of the next release (e.g. focal based on groovy), check that it’s up-to-date with the release upon which it is based.
+** Note that OEM kernels are not based off the generic kernels and have their own set of CVEs they fix.
+** Following are some of the common scenarios you might encounter and how you should proceed:
+*** If the command reports that there are CVEs in the changelog not included in the USN, you will be required to do one of two things for each CVE mentioned: <code>--add</code> or <code>--ignore</code> during the USN publication (e.g. to ignore, during the USN publication add, <code>-i <CVE> [-i <CVE-2>] ...]</code>). Investigate every CVE and decide for each one, this decision can sometimes be pretty subjective.
+**** Check that the changelog doesn't just have a typo in the CVE number
+**** If it’s just an update to an already-fixed CVE (e.g. replacing the CVE patch with a better fix, etc) but users were not vulnerable between then and now, you can <code>ignore</code> it.
+**** Sometimes it will erroneously flag a CVE mentioned in the upstream changelog commit message subject line.
+**** If the CVE in UCT has a USN linked (so they’ve been previously fixed), you might issue a USN or decide it is not worth mentioning and <code>ignore</code> the CVE entirely.
+**** Check the CVE itself, for example, it might not even be fixing a vulnerability in the kernel itself, in which case you would <code>ignore</code> it (<nowiki>[[https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=7807dafda21a549403d922da98dde0ddfeb70d08 | this is an example of one such fix]]</nowiki>).
+*** If there are no CVEs marked fixed, the kernel was likely not in proposed when the kernel triage bot last ran. Though this is usually not indicative of an issue, do look at the changes entry to make sure it isn’t also another issue (e.g being out of sync).
+*** If there are extra CVE fixes not in the generic kernel, this usually indicates the kernel is behind or out of sync, this should be investigated.
+*** If the kernel is behind the generic kernel, check if it contains any security fixes and sign off on it appropriately. The USN publication will be different for it: if it’s the same set of fixes as listed in a previous USN, issue a -2 USN, otherwise issue a new, -1 USN.
+*** If the kernel changelog contain CVEs from the previous cycle that were already released, run the prepare-kernel-usn script with the argument <code>-ignore-released-cves-in-changelog</code>
+*** If the script is reporting <code>INFO: new binary</code>, this is usually a non-issue as the kernel versioning means there’s always new binaries. Depending on what the package is, it may also be a false package picked up from the <code>_source.changes</code> files. In the end, you can pretty much dismiss this.
+*** If the script is reporting, for example, <code>[== WARNING version 5.4.0-75.84 is older than 5.4.0-76.85 WARNING ==]</code>, this is just due to re-spinning. Look at the changelog (and if necessary, also the kernel mailing list) to check what the respin was for and look out for CVEs that are only present in the changelog (and not the USN)
+*** If the script is reporting <code>Unable to find signed kernel</code>, that’s fine, it just means that kernel doesn’t have a signed package
+*** If the script is reporting <code>Unable to find meta kernel</code>, the kernel isn’t being tracked in UCT yet. The kernels still need a sign-off and may or may not require a USN. If the kernel is only producing testing binaries (binaries are all suffixed with <code>-edge</code>), avoid including them in USNs. If it’s not testing, you need to add it to UCT (process outlined below under "Adding tracking for a new derived kernel").
+* For a better guidance of the groups of set of CVEs being fixed per kernel as listed in UCT, it is highly recommended to use the script <code>./scripts/kernel_partition_usns.py -c YYYY.MM.DD</code>. During signoff stage the script will help with organization of what is expected.
+* If the specific kernel update contains security related fixes (or regression fixes introduced by a prior kernel published to security), mark the <code>Security-signoff</code> workflow item "Fix Released", <code>./scripts/kernel-security-signoff.py -d <LP#></code>. Otherwise mark it as "Invalid" to indicate that it should only go to the updates pocket, <code>./scripts/kernel-security-signoff.py -i -d -n <LP#></code>. You can pass the <code>-n</code> flag to do a dry run first. Sign off on all of the bugs listed in <code>kernel-sru-check</code>, which includes derived kernels.
+
+=== USN publication ===
+
+Once the kernels have been verified and tested, they will be published to the appropriate security pocket, and thus the security team needs to publish USNs for them.
+
+Each kernel is actually composed from two or three source packages: the main kernel package (e.g. linux) which is what is tracked in UCT, the corresponding meta package (e.g. linux-meta) which generates the meta packages for each kernel that depend on the updated binary packages, to ensure that an update will pull in the binary kernel packages (and so that users can have multiple binary kernels installed), and for kernels that are signed, the corresponding signed kernel source (e.g. linux-signed).
+
+The script <code>$UCT/scripts/kernel-abi-check</code> will report if new kernels have been published to security pockets, and also does a consistency check to ensure that the primary source is in sync with its meta and signed source package ABIs. This script is run out of cron and sends email to the team if it has anything to report. The <code>--check-esm</code> argument can be passed to look for new kernels published in the <code>~ubuntu-esm/esm-infra-security</code> ppa (this should be added to the cron job run on the shared server). Additionally the argument <code>--check-cycle</code> returns which cycle that the kernel is placed, helping organize the USNs in set of CVEs per cycle.
+
+To generate USNs:
+
+* Update pickle: <code>cd $UCT && git fetch --all -v -p -t && git pull --ff-only && ./scripts/fetch-db database.pickle.bz2</code>
+* You can run the `$UCT/scripts/kernel-abi-script` locally to report on kernels needing USNs (same as what's run out of cron on people.c.c)
+* Run <code>./scripts/kernel_partition_usns.py -c YYYY.MM.DD</code> to get the updated list of group of set of CVEs per kernel
+* check the USN still generates correctly using `$UCT/scripts/prepare-kernel-usn.py -n REL SRC VERSION`
+** Check multiple derived kernels for the same kernel major version (from previous step) `$UCT/scripts/prepare-kernel-usn.py -n REL SRC VERSION SRC2 VERSION2 SRC3 VERSION3` (e.g. <code>./scripts/prepare-kernel-usn.py -n -p Security focal linux: 5.4.0-110.124 bionic/linux-hwe-5.4: 5.4.0-110.124~18.04.1</code>
+** Edge kernels (i.e. 'linux-hwe-edge' and linux-azure-edge') that get published in the security pocket need to be ignored. Edit the `kernel_glitches` dict in `$UCT/scripts/cve_lib.py` to match the recently published version and move on to the next kernel USN, if any.
+*** (Generally, we have stopped tracking edge kernels, and furthermore the kernel has stopped using source packages named <code>-edge</code>; instead when starting the process to move an HWE kernel to a newer major kernel versions, the binary debs and meta-packages generated are named with a <code>-edge</code> suffix... until they aren't. Need to coordinate with the kernel on when the newer HWE kernels start being supported; CVE tracking needs to happen before that point.)
+** Also, when the edge meta kernels aren't different from the stable version (this happens before the jump to a new kernel version in edge), kernel ABI warnings will occur. Edit the `kernel_abi_glitches` dict in `$UCT/scripts/cve_lib.py` to silence these warnings.
+*** Other kernel ABI warnings mean that something has gone wrong in the kernel publishing process; if the error is not transient (occurs more than once), then raise issue with the kernel team and/or an archive admin. (The ABI warnings are generated when the kernel meta source package ABI does not match the ABI of the corresponding kernel it should point to.)
+** For embargoed kernels, the triage bot will likely be out of sync, and unless the embargoed kernel is on top of a kernel at the end of its SRU cycle, the CVEs the tracker thinks will be fixed will not. Thus these CVEs need to be ignored. You can use the --embargoed option to `$UCT/scripts/prepare-kernel-usn.py` to do this.
+* Publish the USN for real using a new USN number: `$UCT/scripts/prepare-kernel-usn.py -f REL SRC VERSION SRC2 VERSION2 SRC3 VERSION3` (fetches a new USN, include other arguments from above as needed)
+** Example `$UCT/scripts/prepare-kernel-usn.py -f xenial linux 4.4.0-70.91 linux-raspi2 4.4.0-1050.57 linux-snapdragon 4.4.0-1053.57  linux-aws 4.4.0-1011.20 linux-gke 4.4.0-1008.8`
+** lts-backport/HWE kernels should be a XXXX-2 USN of the kernel they are derived from, drop the `-f` and use `--usn XXXX-2` when invoking `prepare-kernel-usn.py`.
+** Verify that all the kernels you passed are indeed included in the USN.
+** Bits of the USN to be sure to edit:
+*** Change the `--title` (aka Subject) to just refer to either "Linux kernel vulnerabilities" or a specific subtype "Linux (HWE) vulnerabilities" (examples <nowiki>[[https://usn.ubuntu.com/usn/usn-3696-1 | 3696-1]]</nowiki> <nowiki>[[https://usn.ubuntu.com/usn/usn-3696-2 | 3696-2 (HWE)]]</nowiki>)
+*** Change the `--summary` to drop the meta and signed packages and re-organize so either `linux`, `linux-hwe`, or `linux-lts-RELEASE` is first, with derived kernels afterward.
+*** Drop the `meta` and `signed` sources from the source descriptions section.
+*** Drop the `meta` and `signed` source packages from the source packages section.
+*** Prune the binary meta packages so that the meta packages correspond with the actual binary packages
+*** To modify the USN text itself, you will need to update the <code>Ubuntu-Description:</code> text in the CVE file in UCT and do another dry run to reproduce the USN script, otherwise the line width might be inconsistent between USNs which can cause issues down the line.
+*** The script will run automatically when you exit the editor (this will only occur once, subsequent exits of the file won’t re-run it).
+* ESM kernels can be published alongside regular Ubuntu USNs:
+** use `--esm-ppa <ESM ppa>` as additional arguments to `prepare-kernel-usn.py`
+*** e.g. <code>./scripts/prepare-kernel-usn.py -n --esm-ppa ubuntu-esm/esm-infra-security [-p Security] jammy jammy/linux: 5.15.0-73.80 xenial/linux-azure: 4.15.0-1166.181~16.04.1</code> (`-p Security` is optional as the default pocket for main archive is the security pocket. the script verifies which release is ESM and which is a regular release)
+** the same argument, `--esm-ppa ubuntu-esm/esm-infra-security`, is valid if publishing only ESM kernels
+*** e.g. <code>./scripts/prepare-kernel-usn.py -n --esm-ppa ubuntu-esm/esm-infra-security xenial/linux-azure: 4.15.0-1166.181~16.04.1</code>
+** because the esm ppa is not public, the process where it tries to ensure kernels have been published to the archive will fail if publishing only ESM kernels and will only check for the public kernels if the script is a combination of regular Ubuntu releases and ESM releases.
+** you will need to be a member of https://launchpad.net/~canonical-kernel-security-team/+members 
+* set the USN env variable: <code>export USN="1000-1"</code>.
+* You now need to do steps 6 to 11 of <nowiki>[[https://wiki.ubuntu.com/SecurityTeam/UpdatePublication#Announce_Publication | Announce Publication]]</nowiki>. You can pass multiple USN numbers to `$UCT/scripts/publish-usn-to-website`
+
+=== Tracking ===
+
+==== Adding tracking for a new derived kernel ====
+
+For each new added kernel to support, we need to add tracking to the CVE tracker. You can check that the kernel isn’t already in UCT with <code>grep <kernel-name> $UCT/boilerplates/linux</code>
+
+* Make sure the UCT tree is up to date: <code>cd $UCT && git pull --ff-only</code>
+* To add the basic tracking (this will pull CVE statuses from the kernel release it's derived from): <code>./scripts/add-derived-kernel -r <release> -d <derived-release> -D <derived-kernel> <name></code> where <code>derived-release</code> is the release it is based off of, <code>derived-kernel</code> is the name of the derived kernel it is based off of (if that isn’t the generic kernel) and <code>name</code> is the name of the kernel with the leading linux- truncated. Examples:
+** add xenial linux-aws kernel derived from primary xenial kernel: <code>./scripts/add-derived-kernel -r xenial -d xenial aws</code>
+** add linux-lts-vivid for the trusty release: <code>./scripts/add-derived-kernel -r trusty -d vivid lts-vivid</code>
+* The script will print the boilerplate file it’s modified at the top, open it and move the added kernel from the very bottom to the appropriate / logical place within the file
+*** e.g. you would move the <code>linux-hwe-6.11 kernel</code> just below the <code>linux-hwe-6.8 kernel</code>).
+* The bottom of the output will have instructions on which files to modify.
+** Start with <code>./scripts/cve_lib.py</code>
+*** Add the name of the kernel to <code>kernel_srcs</code> in the alphabetical order, <code>‘linux-<name>’,</code>
+** Then, update <code>./scripts/kernel_lib.py</code>
+*** In the <code>MetaKernelTable</code>, go to the release and duplicate a line of the kernel it’s derived off of. Make sure to update the kernel name.
+*** In the <code>kernel_glitches</code>, duplicate the structure for a kernel it’s derived from
+**** e.g.:
+<pre>
+    '<kernel-name>': {
+        '<release>': {
+            '<last-vers>': '<curr-vers>',
+        },
+    },
+</pre>
+**** Update the <code><kernel-name></code> and <code><release></code>. For <code><last-vers></code>, as this is the first addition, set it to <code>~</code>. For <code><curr-vers></code>, set it to the version in the <code>-security</code> pocket. Find that with <code>rmadison --arch source <kernel-name></code>
+** If you’re adding a new derivative kernel (and not just a new major version of a kernel already in the archive):
+*** update <code>cve-alert.sh</code> by adding the kernel to <code>alert_ignore</code>
+*** Update <code>prepare-kernel-usn.py</code> by adding the kernel to <code>generate_usn_regex</code>.
+** Add the description to <code>meta_lists/package_info_overrides.json</code>
+*** Copy an entry for another derivative kernel for a different major version and simply update the name,
+<pre>
+    "<kernel-name>": {
+    [...]
+</pre>
+* If the added kernel currently requires a USN, you can verify that you added it correctly: <code>python3 ./scripts/kernel-abi-check <kernel-name></code> which should return <code>USN needed: [...]</code>
+
+=== Dropping tracking support ===
+
+When a kernel is out of support, we need to mark UCT as such.
+A kernel going EOL usually happen because it was superseded (e.g. linux-hwe-6.5 is superseded by linux-hwe-6.8)
+The confirmation for when a kernel is out support can be acquired from the `kernel-versions` repository, <nowiki>[[https://kernel.ubuntu.com/forgejo/kernel/kernel-versions/src/branch/main/info/kernel-series.yaml | info/kernel-series.yaml]]</nowiki> file specifically. You will find information such as:
+<pre>
+    linux-hwe-6.5:
+...
+      supported: false
+...
+</pre>
+So, when it is time to drop support for a kernel, we add <code>ignored (superseded by <>)</code>' information in `boilerplates/linux` file in place of <code>needs-triage</code>, like:
+<pre>
+  Patches_linux-hwe-6.5:
+  upstream_linux-hwe-6.5: ignored (superseded by linux-hwe-6.8)
+  ...
+  focal_linux-hwe-6.5: DNE
+  jammy_linux-hwe-6.5: ignored (superseded by linux-hwe-6.8)
+  noble_linux-hwe-6.5: DNE
+  oracular_linux-hwe-6.5: DNE
+  ...
+</pre>
+In general we try to give a reason for being out of support that is different from "end of life" to try to clarify that
+it is not the release going EOL but the kernel package instead. The reasons we have used so far (but are not limited to) are:
+* <code>ignored (superseded by <new kernel>)</code>: a newer major version is in place
+* <code>ignored (replaced by <new kernel>)</code>: a different package is being used (e.g. linux-oem-5.14 was replaced by linux-hwe-5.15)
+* <code>ignored (end of kernel support)</code>: not clear or simply dropped support
+
+Besides updating the `boilerplates/linux` for the incoming CVEs, it is also good to update the active CVEs with the corresponding information, adding the previous state (e.g. <code>ignored (end of kernel support, was needs-triage)</code>). This could be incorporated to `scripts/check-syntax` at some point.
+But before that, there may be cases where we have a pending with an already released version, so instead of marking as `ignored` it will be `released`.
+
+==== Deprecated bits ====
+Reviewing the state of the CVEs between UCT, the kernel team's UCT tree, and the USN database should happen at least daily. In practice, the USN comparison usually happen much more rarely due to its current fragility.
+
+* Update git tree: `cd $UCT && git fetch --all -p -t && git pull --ff-only`
+* UCT merge with kernelteam: `./scripts/process_cves merge`
+* [Ignore this process for the time being] sync UCT to USNs (for any CVEs that have changed state, been revoked, etc)
+** fetch the full USN database: <code>./scripts/fetch-db database-all.pickle.bz2</code>
+** run report: <code>./scripts/report-mismatched-cve-fixes.py</code>
+** pull out hair, fix things (Important prerequisites: adequate sleep, money for swear jar)
+** declare a social lock on database-all.pickle
+** refetch and unpack database-all.pickle
+** perform any moves/insertions: `./scripts/report-mismatched-cve-fixes.py -u --ignore-...`
+** keep a backup of the database: `ssh people.canonical.com "cp ~ubuntu-security/usn/database-all.pickle ~ubuntu-security/usn/database-all.pickle.$(date +%Y-%m-%d)"`
+** upload updated database: `scp database-all.pickle people.canonical.com:~ubuntu-security/usn/`
+** declare unlock
+** Publish the USN changes: `ssh people.canonical.com "~ubuntu-security/bin/push-usn-db"`
+** Use the "Updated:" report to refresh affected USNs (`w3m -dump http://www.ubuntu.com/usn/update/usn-$USN`)
+** Fetch updated non-all database: <code>./scripts/fetch-db database.pickle.bz2</code>
+** Mark pending entries as released: `./scripts/sync-from-usns.py -u`
+** Commit the tree, rejoice
+
+(NOTE: we no longer require a bug report for each CVE being addressed.)

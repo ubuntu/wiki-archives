@@ -1,0 +1,324 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+* '''Launchpad Entry''': UbuntuSpec:server-karmic-directory-enabled-user-login
+* '''Created''': 01 Jun 2009
+* '''Contributors''': MathiasGug
+* '''Packages affected''':
+
+=== Summary ===
+
+This specification focuses on the process of user login (ie authentication) in a system part of a centralized network infrastructure. It outlines different solutions to provide a single-sign-on capability, disconnected mode (where the centralized network infrastructure is not available).
+
+=== Release Note ===
+
+Deploying Ubuntu systems in a centralized network authentication environment has been improved: support for disconnected mode as well as local caching is available from different packages.
+
+=== Rationale ===
+
+As Ubuntu moves into the enterprise - either as a server or as a workstation - integration with that enterprise's existing systems will not only become desired, but in some circumstances required. Various US security requirements for certain work types such as banking, credit unions or other financial institutions mandate security requirements which force networks to use some form of secure integrated authentication.
+
+A typical form of this is that all systems including workstations and servers need to authenticate to a centralized source in order to retrieve authentication information from a centralized source. This source is then free to apply logging and access restrictions to prevent devices or people from accessing network resources. Not only must LAN and WAN authentication be guaranteed to be encrypted, it must flow from a centralized authority. 
+
+Along with legal and organizational requirements, proper directory integration offers many compelling benefits. Security of authentication information in transit can reduce the number of attacks leveled against services. Single sign-on can reduce the management burden of users' passwords. Key-based authentication can reduce the number of times the user needs to be prompted and the number of places on the user's system their various passwords are stored. All of these reduce the necessary effort to access their services and result in a reduced attack footprint and fewer help desk calls.
+
+Improper directory service integration can, however, result in a negative benefit. Authentication failures can reduce large number of users' ability to get their work done or even access their systems. Simple network down-time which previously simply reduced a user's ability to access network resources can now impact a user's ability to even access his local machine. These types of possibilities are unacceptable and a large amount of thought must go into securing each potential fault point in the various systems involved. 
+
+=== User stories ===
+* Brad can logs on his workstation once and doesn't need to enter his credentials when logging on other systems (Single Sign On).
+* Eleonore applies a security updates to the central directory server and can reboot the system without blocking all of the workstations on her network. (Cached entries on local systems).
+* Franck brings his laptop home to finish up his reports. He can log in with his credentials in the evening at home the same way he does the day on the corporate network (Disconnected mode).
+* Gary installs a new system and configures it to integrate with the existing directory infrastructure (join domain).
+
+=== Design ===
+
+==== Integration with system components ====
+* nss:
+** group
+** passwd
+** shadow
+
+* pam:
+** account
+** auth
+** password
+** session
+
+* auth-client-config:
+** profiles to setup nss and pam.
+
+==== PAM: kerberos 5 ====
+* authentication: libpam-krb5 package.
+* provides Single-Sign On capability.
+
+==== PAM: ldap directory ====
+* authentication: pam support from nssov overlay
+* doesn't provide Single-Sign On capability.
+
+==== PAM+NSS: sssd ====
+* https://fedorahosted.org/sssd/
+* http://fedoraproject.org/wiki/Features/SSSD
+<nowiki>[[File:karmic-server-directory-login-sssd.png]]</nowiki>
+
+==== NSS: libnssd -- NSS + slapd ====
+* libnss_ldap module from libnss-ldapd
+* slapd running locally
+* nss slapd overlay
+* kerberos used for slapd authentication and encryption
+* passwd, shadow and group maps
+* options for local slapd configuration:
+## full replication: each slapd running locally has a full replica of the users and group information (note that this does '''not''' mean the whole DIT is replicated locally). syncrepl is used as the replication protocol.
+#### Using krb5 for authentication:
+<nowiki>[[File:karmic-server-directory-login-slapd-replica.png]]</nowiki>
+      1. Using ldap for authentication:
+<nowiki>[[File:karmic-server-directory-login-slapd-pam_nss-replica.png]]</nowiki>   
+
+## cache overlay + ldap backend: entries are cached when looked up. Issue with expiring entries in disconnected mode. ldap is used to access the remote directory.
+#### Using krb5 for authentication:
+<nowiki>[[File:karmic-server-directory-login-slapd-cache.png]]</nowiki>
+      1. Using ldap for authentication:
+<nowiki>[[File:karmic-server-directory-login-slapd-pam_nss-cache.png]]</nowiki>
+
+==== NSS: nsscache ====
+* http://code.google.com/p/nsscache/
+* passwd, shadow and group maps
+* ldap is used to access the remote directory.
+* use kerberos for authentication and encryption.
+<nowiki>[[File:karmic-server-directory-login-nsscache.png]]</nowiki>
+
+==== Comparison ====
+{| class="wikitable"
+|-
+| Option
+| local copy
+| remote directory access (protocol for data access)
+|-
+| libnssd - full replica
+| full copy of user/group info
+| remote openldap slapd (syncrepl)
+|-
+| libnssd - cache+back_ldap
+| cached entries only
+| directory server independent (ldap protocol)
+|-
+| nsscache
+| full copy of user/group info
+| directory server independent (ldap protocol)
+|}
+
+Note: all solutions listed above are DIT independent as the ldap queries can be customized.
+
+=== Implementation ===
+
+==== pam support in nssov ====
+* package canned configuration to enable pam support in nssov.
+* provide a default configuration for Ubuntu DIT.
+
+==== sssd ====
+* package sssd
+* provide auth-client-config profile for default Ubuntu DIT.
+
+==== libnssd -- NSS + slapd ====
+* fix cache overlay to not expire entries when unable to connect to the remote server (ITS 6152).
+* easier configuration to enable nss overlay:
+** split libnss_ldap from libnss-ldapd in its own package:
+*** <nowiki>[[http://bugs.debian.org/cgi-bin/bugreport.cgi?bug=535505|Debian bug 535505]]</nowiki>
+** package cn=config templates to enable local configuration of slapd for full replication and local caching.
+* provide auth-client-config profiles for default Ubuntu DIT:
+** krb5 pam + nssov
+** ldap pam + nssov
+
+==== nsscache ====
+* package <nowiki>[[http://code.google.com/p/nsscache/|nsscache]]</nowiki>.
+* kerberize nsscache: support kerberos for authentication and encryption (instead of x509 certs).
+* support for multiple configuration files.
+* provide a default configuration to use the default Ubuntu Directory DIT:
+** auth-client-config profiles for default Ubuntu DIT.
+** setup cron job
+** nsscache configuration for default Ubuntu DIT.
+
+=== Test/Demo Plan ===
+
+=== Unresolved issues ===
+
+=== BoF agenda and discussion ===
+
+===== Karmic UDS notes =====
+
+<pre>
+== Enabling Directory Login ==
+
+* Directory = not only LDAP, but other applications such as data store, etc.
+ 
+* Determine workstation requirements for LDAP authentication.
+** NSS and PAM
+  
+* How to get rid of libnss-ldap.
+
+ 
+* Need disconnected support
+** Problem with NSS and NSCD
+** Corporate desktop that use a directory
+   -> When you are deconnected, NSS gets disconnected and provoke timeouts that stop even
+    regular gnome session and anything that needs user/group access info is stalled
+** Client cache caching is needed : need to cache all groups
+  
+  
+  
+** Need to disable the "enum" part of enum nss-ldap otherwise delays -> latency and most
+    of the desktop programs are barely usable
+** May be able to use PAM cache credentials.
+     Very similar to what SSSD is doing
+     Keep some password with an additional salt (different from the LDAP pass)
+     The user/group/etc. database can be updated using a different process (i.e. : update lag)
+** NSS-cache :
+     Cron job that cache info for NSS-db database
+     Keeps all passwords, with another salt ??
+     Update lag 
+ 
+** Problem (Etienne) : 
+      Large scale : all the info dump on 10 000 workstations daily -> large transfer
+      Somone ? : NSS-cache is doing incremental update
+      
+* All the client cache technique will help scalability and lower the load on the LDAP server
+ 
+* Suggestion (foxbuntu):
+   Rather than using cron, should updates to the cache only be made on successful login?
+   i.e. userA successfully auths. to directory -> add to cache
+ 
+ 
+* SSSD Service -- Redhat FreeIPA.
+** https://fedorahosted.org/sssd/
+** http://fedoraproject.org/wiki/Features/SSSD
+** Seems a bit immature. Maybe removed from the Entreprise version of RedHat ?
+** Still cooking ?
+   
+* Likewise-open
+** Use likewise to talk to an OpenLDAP backend.
+** Version 5 may be more reliable than other versions.
+** Can run the complete database on the local machine using syncrep
+   -> Best way to do it : incremental update
+   -> The complete database is not needed
+  Question : attribute level sync ? Schema sync ? passwors sync ?
+   -> All this is working with syncrep
+   Password are stored in the local database (encrypted)
+   
+* libnssd -- NSS + slapd
+** Contains full copy, or configured portion, on each machine.
+** Can do attribute level syncs.
+** NSS Overlay
+** Allows pass through authentication to AD.
+** Backend requires careful tuning.
+** Still working out memory requirements for workstations.
+  
+* FreeIPA
+** http://freeipa.org/page/Main_Page
+** Released with Fedora 11.
+** Customers may not be very excited about adopting.
+  
+  
+  User login / PAM section :
+  
+** Use Kerberos
+  
+** Storing password = easy part
+** Password aging policy :
+    Each one has one ! But they are different.
+    How to manage this ?
+    Using overlays will help : ex smb5 overlay.
+    
+** Kerberos add complexity. Let's list the advantages !
+    -> SSO
+    -> Exposing the KDC to the Internet will allow SSO for every application out there
+    LDAP : complex
+    LDAP + Kerberos = more complex ;-)
+    NFSv4 + Kerberos = complex but security matters
+  
+** Difference between pam_ldap and pam_kerberos ? Missed this one ;-)
+  
+** Question is : mandating Kerberos into the solution.
+   -> Microsoft did this and they don't have the most sophisticated users ;-)
+   But they did it with a fixed standard with some options
+   
+   Soren : if we do it this way, it remove a large part of the complexity.
+  
+** Let's inverse this : tomorrow, session about kerberos client requirement
+  -> This will put some requirement on the directory structure, including
+      Microsoft proxy, CUPS+kerberos,NFS4, etc. etc. 
+  ¿Avahi KDC announces? Not a very secure system...
+  
+** Ticket caching from Kerberos + how to renew ticket ?
+   In freeIPA web page ?
+   -> http://freeipa.org/page/Automatic_Ticket_Renewal
+   
+   But the services using kerberos don't know how to renew tickets when
+   they have expired...
+   -> Most of the services run an outside daemon that is doing the ticket refresh
+   
+   Kerberos guys from MIT : What modification should we include into Kerberos in order
+   to provide this service ?
+   -> Good candidate to integrate into standard kerberos
+   http://www.eyrie.org/~eagle/software/kstart/k5start.html
+   Seems like a good solution. 
+   
+** We do not need "perfectly pure/perfect solution" but the "Ubuntu way of doing it"
+   -> Ease the pain to have enterprise class network login capacity ... without the 50 pages of documentation
+       usually needed for this kind of setup (31 pages for LDAP & co + 20 pages for Kerberos ;-)
+       
+       Example :
+**** When we install (postfix|cups|pam|etc.) : have an option to have "Ubuntu directory"
+       -> Will be discussed on the 5th session.
+**** Same thing for other clients (Mac, Windows, etc.) : they should be able to join easily the "ubuntu directory"
+          realm
+          
+** Hypothesis :
+     -> We have a working "out of the box" Ubuntu directory having LDAP + Kerberos
+     -> Next session will address this
+     
+** Question about NIS : 
+    -> Very specific about existing deployment -> more or less possible to provide a turnkey solution for this
+    -> Migration problem ? Good documentation will help
+    
+** Additional requirement ?
+   -> Some services will not be kerberized -> what about password management
+   It is integrated with likewise open : samba, kerberos (heimdall only?) and samba password are synchronized.
+   
+** Impact on existing tools :
+   -> Adduser : add "ubuntu directory"
+   -> Graphical tool : uses adduser as a backend ???? Tocheck/fixme
+   -> Scalability issue with 100 000 users and much more groups ?
+   -> GUI problems. Bugs have to be reported.
+   -> Multiple way to change password in the GUI.
+   --> Discussion needed with those developers
+   --> Entreprise password change : web page OK ... but everyone wants this integrated
+   
+** User level tool :
+   -> If you introduce password aging, then you need a desktop based tool in order to allow you
+   to ... change your password when it has expired.
+   
+* Determine next uidNumber.
+** Has to be centralized into the directory in order to avoid race condition
+** smbldap tools did this in order to have a unique uid ;-)
+** Provide reference implementation :
+*** LDAP based
+*** Web page to change password
+*** XML/RPC, SOAP, Rest API
+** Create an independant implementation for the unique identifier.
+   
+* Seemless roll over for application keys.
+ 
+* 11 AM session. Concentrate on other services than user&group
+  Example : DNS, DHCP, CUPS, SSH, etc.
+  -> See gobby document "karmic-server-ldap-services"
+</pre>  
+
+----
+CategorySpec

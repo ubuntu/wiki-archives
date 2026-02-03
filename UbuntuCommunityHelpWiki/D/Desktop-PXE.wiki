@@ -1,0 +1,486 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+'''STREAMING UBUNTU Desktop''' (or streaming linux desktop), so:
+* no local installation
+* highly scalable
+* high performance
+* low cost in administration and hardware
+* highly adaptable
+* <nowiki>[[http://www.math.leidenuniv.nl/~mvn/|management paper]]</nowiki> 
+* <nowiki>[[http://www.math.leidenuniv.nl/~mvn/streaming_linux.png | architecture overview]]</nowiki>
+
+NOTE:: this is '''work in progress''' to port from 9.10 to 10.04 LTS and later possibly newer versions of Ubuntu,  document is currently being updated.
+
+== Goal ==
+
+Offering a desktop based on Ubuntu GNU/Linux, booting over a local network from one single image.
+This image needs to be customized for our users at the Leiden University, The Netherlands.  
+Current authentication is done via Kerberos and LDAP. The home directories are mounted over NFS. 
+
+=== Results ===
+The test deployment has currently more than 75 clients desktops booting via PXE on a read-only squashfs image, served from a one single NFS/TFTP server (having a load of 0)'''
+
+=== Audience ===
+Unix admins:
+* shell scripting (debugging/patching / diffing)
+* ubuntu / debian experience for some time
+* understanding the "AS IS" section in the <nowiki>[[https://projects.math.leidenuniv.nl/trac/howto/wiki/mileiden_license|license]]</nowiki> .
+* use this on a non production machine 
+* make backups, duh
+* below in this page is my email address, use it wisely only, preferably for improvement and patches. 
+ 
+What is written here, will not work off the shelf. To make it work you have to customize it, in the end can save you a lot of time. 
+
+=== Set-up ===
+Our set-up has to offer:
+* NFS mounted home directories
+* authentication/authorisation via Kerberos/LDAP
+* tex / lyx / kyle
+* mutt / pine / elm
+* fully usable Gnome / KDE / Xfce4 / fluxbox 
+* access to Linux and Windows terminal servers
+* large amount of fonts
+
+Ubuntu Lucid 10.4.2 LTS (previous 9.10) is used as a base.
+
+Documentation used:
+* https://help.ubuntu.com/community/Installation/OnNFSDrive
+* https://help.ubuntu.com/6.10/ubuntu/installation-guide/hppa/linux-upgrade.html
+* http://ca.archive.ubuntu.com/ubuntu/dists/hardy/main/installer-i386/current/images/netboot/ubuntu-installer/i386/pxelinux.cfg/default
+* https://wiki.ubuntu.com/DebootstrapChroot 
+* http://syslinux.zytor.com/wiki/index.php/PXELINUX#Custom_Menu_Example_with_sub-menus
+* https://help.ubuntu.com/community/LiveCDCustomizationFromScratch
+
+Environment:
+* raid-1 Ubuntu NFS/PXE server
+* raid-1 + raid-5 Ubuntu build/test host
+* Gb network with several VLANs
+* about 100 <nowiki>[[http://www.asrock.com/nettop/overview.asp?Model=ION%20330| ASRock nettop]]</nowiki> clients 
+
+The main focus is the staging environment, keeping staging and production separate. For this !How-To I won't describe
+the production server, since they are mostly the same. But as a habit, I never build on production servers since one error in the build script
+could give me, and some hundred users, a bad day. This actually happened, one day my build server did not reboot any more.
+The build script escaped to the root and the initrd.img was replaced.....  
+
+As a policy, we use LTS on servers.   
+
+'''IMHO this is not a beginners howto.'''
+
+== Server Set-up ==
+=== Networks ===
+* 192.168.1.0/24 => external (uplink)
+* 192.168.2.0/24 => internal (pxeboot)
+
+=== Installation ===
+
+Install the build host with 3 raid1 partitions:
+* raid1 
+** md0 /
+** md1 swap
+** md2 /tmp
+** md3 /var/
+** md4 /usr
+* raid5 
+** md5 /data
+  
+Or choose another appropriate setup.  
+
+=== Packages ===
+First install some packages
+<pre>
+apt-get install dhcp3-server tftpd-hpa nfs-kernel-server syslinux debootstrap
+</pre>
+
+=== Network Configuration ===
+Content of /etc/network/interfaces:
+<pre>
+auto lo
+iface lo inet loopback
+auto eth0
+iface eth0 inet static
+	address 192.168.1.2
+	netmask 255.255.255.0
+	network 192.168.1.0
+	broadcast 192.168.1.255
+	gateway 192.168.1.1 
+        post-up iptables -t nat -I POSTROUTING -o eth0 -j MASQUERADE
+        down iptables -t nat -D POSTROUTING 1
+
+auto eth1
+iface eth1 inet static
+	address 192.168.2.1
+	netmask 255.255.255.0
+	network 192.168.2.0
+	broadcast 192.168.2.254
+</pre>
+
+Content of /etc/dhcp3/dhcpd.conf:
+<pre>
+DHCPDARGS=eth1; 
+ddns-update-style none;
+option domain-name "test.example.com";
+option domain-name-servers 192.168.1.1; 
+default-lease-time 600;
+max-lease-time 7200;
+authoritative;
+log-facility local7;
+
+subnet 192.168.2.0 netmask 255.255.255.0 {
+        range 192.168.2.100 192.168.2.200;
+        option routers 192.168.2.1;
+        filename "pxelinux.0";
+        next-server 192.168.2.1;
+        }
+</pre>
+
+=== NAT and Forwarding ===
+Content of /etc/sysctl.d/10-ip_forward.conf
+<pre>
+net.ipv4.ip_forward=1
+</pre>
+
+Content of /etc/exports:
+<pre>
+/data/tftpboot/ *(no_subtree_check,ro,no_root_squash,async)
+/data/home/ *(no_subtree_check,rw,no_root_squash,async)
+</pre>
+
+Content of /etc/default/tftpd-hpa:
+<pre>
+RUN_DAEMON="yes"
+OPTIONS="-l -s /data/tftpboot"
+</pre>
+  
+=== Prepare Pxe Set-up ===
+<pre>
+mkdir -p /data/tftpboot/pxelinux.cfg
+cp /usr/lib/syslinux/pxelinux.0 /data/tftpboot/
+cp /usr/lib/syslinux/menu.c32 /data/tftpboot/
+cp /usr/lib/syslinux/vesamenu.c32 /data/tftpboot/
+</pre>
+
+Content of /data/tftpboot/pxelinux.cfg/default :
+<pre>
+menu INCLUDE pxelinux.cfg/graphics.cfg
+DEFAULT vesamenu.c32
+NOESCAPE 1
+ALLOWOPTIONS 0
+boot label in /data/tftpboot
+LABEL Karmic 
+	MENU LABEL new test
+	MENU DEFAULT
+        KERNEL new/vmlinuz
+        APPEND quiet splash initrd=new/initrd.img boot=casper netboot=nfs raid=noautodetect root=/dev/nfs nfsroot=192.168.2.1:/data/tftpboot/new ip=dhcp rw --
+</pre>
+
+Content of /data/tftpboot/pxelinux.cfg/graphics.cfg:
+<pre>
+MENU TITLE PXE Menu
+menu color tabmsg 37;40      #80ffffff #00000000
+menu color hotsel 30;47      #40000000 #20ffffff
+menu color sel 30;47         #40000000 #20ffffff
+menu color scrollbar 30;47   #40000000 #20ffffff
+MENU WIDTH 80
+MENU MARGIN 20 
+MENU ROWS 20 
+MENU TABMSGROW 18
+MENU CMDLINEROW 18
+MENU ENDROW 2
+MENU MASTER PASSWD vingerhoed
+MENU PASSWORDROW 24 
+MENU PASSWORDMARGIN 20 
+MENU PASSPROMPT Enter Password:
+MENU TIMEOUTROW 20
+MENU TIMEOUTROW 13
+MENU VSHIFT 3 
+NOESCAPE 1
+ALLOWOPTIONS 0
+PROMPT 0
+TIMEOUT 60
+</pre>
+
+'''Important'''
+
+Keep an eye on the options, and make sure you understand the documentation!
+Setting bad options here may allow a user to escape from the loader menu and start a shell as root instead of invoking init.
+This would give one access to all user files on NFS, which would only make you popular to a very limited set of people (and not at all popular to many others). 
+<pre>
+NOESCAPE 
+ALLOWOPTIONS
+PROMPT
+</pre> 
+
+Read more about <nowiki>[[http://syslinux.zytor.com/wiki/index.php/PXELINUX| PXELinux]]</nowiki> how to get nice menus and more.
+
+=== Starting Services ===
+<pre>
+/etc/init.d/tftpd-hpa restart
+/etc/init.d/nfs-kernel-server
+/etc/init.d/dhcp3-server
+</pre>
+
+== Local Mirror ==
+Read this <nowiki>[[http://www.packtpub.com/article/create-local-ubuntu-repository-using-apt-mirror-apt-cacher |info]]</nowiki> and execute the next commands:
+<pre>
+apt-get install apt-mirror apache2
+vi /etc/apt/mirror.list # configure it to put every thing in /data/mirror/
+like this:
+set base_path /data/mirror
+mkdir -p /data/mirror/skel /data/mirror/mirror /data/mirror/var
+</pre>
+
+Run apt-mirror:
+<pre>
+apt-mirror
+</pre>
+ 
+Add it to cron:
+<pre>
+vi /etc/cron.d/apt-mirror 
+and remove the # from the last line
+</pre>
+
+Add to apache: assuming everything is in /data/mirror/
+
+Be '''sure''' you use the correct '''Alias''' and replace the XX for a working directory!
+
+In /etc/apache2/sites-enabled/mirror:
+<pre>
+Alias /ubuntu/ "/data/mirror/mirror/XX.archive.ubuntu.com/ubuntu/"
+<Directory "/data/mirror/mirror">
+        Options Indexes FollowSymLinks
+        Order allow,deny
+        Allow from all
+        AllowOverride None
+</Directory>
+
+</pre>
+
+Restart apache:
+<pre>
+/etc/init.d/apache2 restart
+</pre>
+
+Test the mirror:
+<pre>
+apt-get install lynx
+lynx http://localhost/ubuntu/
+</pre>
+
+== Running a Build ==
+No build scripts are available yet, but the picture
+
+=== Boot-strap Lucid ===
+<pre>
+apt-get install debootstrap
+mkdir build
+debootstrap lucid build
+</pre>
+
+generally while chrooting into build environment set correct env and mounts
+
+<pre>
+mount -o bind /dev/ build/dev
+chroot build
+export LANG=en_US.UTF-8
+export HOME=/root
+export LC_ALL=C
+mount -t proc none /proc
+mount -t sysfs none /sys
+mount -t devpts none /dev/pts
+umount -lf /proc
+umount -lf /sys
+umount -lf /dev/pts
+exit
+umount -lf build/dev
+</pre>
+
+=== Make a Suitable Kernel and Initrd ===
+
+The kernel and initrd environment needs:
+* nfs 
+* dhcp
+* network-cards
+* devtmpfs
+* aufs
+* squashf
+* casper
+
+There are two ways to build it, one is with a kernel package and the other is manual. I have found the manual manner more reliable. 
+
+==== 1 For Both Ways ====
+<pre>
+mount -o bind /dev/ build/dev
+chroot build 
+export LANG=en_US.UTF-8
+export HOME=/root 
+export LC_ALL=C 
+mount -t proc none /proc 
+mount -t sysfs none /sys 
+mount -t devpts none /dev/pts 
+vi /etc/initramfs-tools/initramfs.conf
+apt-get update
+apt-get install casper linux-source libncurses5-dev
+cd /usr/src/
+tar xvjf linux-source-2.6.32.tar.bz2
+ln -s  linux-source-2.6.32 linux
+cd linux
+make menuconfig 
+</pre>
+
+==== 2a Manual ====
+
+<pre>
+make
+make install 
+make modules
+make modules_install
+mkinitramfs -o /initrd.img `ls /lib/modules`
+cp /boot/vmlinuz /vmlinuz
+umount -lf /proc 
+umount -lf /sys 
+umount -lf /dev/pts
+exit 
+umount -lf build/dev
+</pre>
+
+==== 2b Kernel Package ====
+
+This will create packages. 
+<pre>
+fakeroot make-kpkg clean
+fakeroot make-kpkg --initrd --append-to-version=-1 kernel-image kernel-headers
+umount -lf /proc 
+umount -lf /sys 
+umount -lf /dev/pts
+exit 
+umount -lf build/dev
+</pre>
+I found issues creating an initrd file, to solve this:
+<pre>
+chroot built
+mkinitramfs -o /initrd.img `ls /lib/modules`
+</pre>
+
+=== Adding Packages ===
+
+* To-Do:
+** chroot build apt-get install <list> 
+** debconf
+** get|set selections
+
+=== Authentication + Storage ===
+
+* To-Do:
+** Auth:
+** kerberos
+** ldap
+** Centralized Administration with gosa 
+** AD ?
+** Storage:
+** NFS (authenticated) 
+** CIFFS (?)
+** application platforms:
+*** Ubuntu Server LTS
+*** FreeNAS 
+ 
+=== Automating the build (a tinderbox) ===
+
+* To-Do
+** Script a build for Lucid   
+** split configuation and script
+** make script work for:
+*** version 10.4 10.10 11.4
+*** arch i386 and AMD64
+
+== Setting up Support ==
+ 
+* online live images (http boot?)
+* FAQ + #channel
+* architecture paper (TOGAF-style with Archi+asciidoc)
+* 2nd management paper
+* commercial support for setup/administration and customized images 
+  
+
+== Previous Work (to be obsoleted) ==
+
+Here a sample tarbal: 
+* https://wiki.ubuntu.com/MartenVijn?action=AttachFile&do=get&target=ubuntu_pxe.desktop.0.0.128.tgz
+* Newer versions may exist <nowiki>[[https://wiki.ubuntu.com/MartenVijn?action=AttachFile|here]]</nowiki>.
+
+So download it and untar it. 
+
+Now you should be able to use the build-script:
+
+'''IMPORTANT'''
+<pre>
+Read and understand:
+* config.txt. 
+* build.sh  
+* LICENSE.txt
+
+Make sure are not on a production machine and you made backups
+</pre>  
+
+explanation of the files:
+* config.txt
+** A lot configuration options
+** a error handling funtion 
+* build.sh builds:
+** kernel 
+** initrd
+** installation dir
+** squashfs files
+* preseed.txt.
+** setting build environment for build tree
+* dpkg*
+** dpkg-set-selections_fastbuild.txt is a sample file
+** dpkg-set-selections_full.txt is a sample file
+** dpkg-set-selections.txt, file use by build.sh 
+* kernel.config is a sample kernel configation file, kernel must have 
+** initrd (casper) 
+** nfsroot 
+** able fetch an ipnumber by dhcp
+** driver for networkcards.
+
+== Getting it to Work ==
+With the TREE option you can add/utilize:
+* logings + passwords
+* kiosk functions
+* root ssh keys
+
+We add:
+* ldap
+* kerberos
+* ssh-keys
+* nfs mounts for homedirs
+* nfs mounts for software
+* printer settings
+* postfix settings
+
+Details of this are not public.  
+
+== HELP ==
+This is pre-alpha, meant as an example to feed unix admins creativity. 
+
+From you should be able the work yourself into it as you a unix admin. 
+
+Patches, Tips, better Ubuntu Practices are more than welcome.
+
+send an email to mvn at math dot leidenuniv dot nl 
+
+== Future plans ==
+* liveusb-drives mounting over insecure networks
+* booting over https
+
+----
+CategoryInternet

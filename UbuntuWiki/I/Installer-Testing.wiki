@@ -1,0 +1,104 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+The goal of this document is to construct a continuous integration and testing system for the desktop CD installer (ubiquity), such that every bzr commit to ubiquity trunk will result in a build of ubiquity, a live environment created containing that build, and a number of netbooks booted and run through a series of tests using this build.  These netbooks will not be physically modified and should be able to be added and removed with minimal change to this system.
+
+As netbooks do not have a BIOS option to boot when provided power, they cannot be used with a remote power unit.  Equally, while some netbooks support wake to boot, not all do.  Because of this, the netbooks will be left in a suspended state, woken up, and made to immediately reboot on this condition.  As NFS and TCP have short-lived timeouts, each suspended netbook will be assumed to be in a state where any further reads from disk will fail.  To work around this, during suspend, /sbin/reboot and all of its dynamically-linked libraries will be loaded into memory, using a similar approach to the one taken by casper.  Upon resume, reboot will be called with the -f flag (reboot immediately).
+
+The Hudson continuous integration system will be used to drive all of these tasks, and will be partitioned into three jobs.  The netbooks are assumed to have been PXE booted into the last live image and suspended, to start.
+
+=== Configuration ===
+
+You will need the following configuration on your Hudson master.
+
+* NFS server, with ./tftpboot shared as /srv/pxe/tftpboot/cd.  For example:
+ <code>/srv/pxe/tftpboot/cd  10.45.45.*(ro,no_subtree_check,async,all_squash)</code>
+* The tftp-hpa TFTP server, with TFTP_DIRECTORY set to /tftpboot.
+* A DHCP server with filename set to /pxelinux.0.  For example:
+ <pre>
+  allow booting;
+  allow bootp;
+
+  subnet 10.45.45.0 netmask 255.255.255.0 {
+    range 10.45.45.2 10.45.45.200;
+    option broadcast-address 10.45.45.255;
+    option routers 10.45.45.1;
+    option domain-name-servers 10.45.45.1;
+
+    filename "/pxelinux.0";
+  }
+</pre>
+Change the IP address in nfsroot= to that of your Hudson master in
+tftpboot/pxelinux.cfg/default.
+* A copy of the bootchart package unpacked to <code>/srv/pxe/tftpboot/bootchart</code>
+
+=== Hudson jobs ===
+==== build-root ====
+
+* restricted to master
+* `lp:~ev/+junk/hudson-infrastructure`
+* builds after build-ubiquity
+* runs <nowiki>[[http://bazaar.launchpad.net/~ev/%2Bjunk/hudson-infrastructure/annotate/head:/prepare-cd|./prepare-cd]]</nowiki>
+* then runs <nowiki>[[http://bazaar.launchpad.net/~ev/%2Bjunk/hudson-infrastructure/annotate/head:/wake|./wake]]</nowiki>
+
+==== build-ubiquity ====
+
+* description: Attempt to build the latest ubiquity.
+* parameterized, takes `REVNO`, set to `-1` by default as the revision to build.
+* restricted to master
+* `lp:~ubuntu-installer/ubiquity/trunk`
+** polls the scm at `*/15 * * * *`
+* runs:
+ <pre>
+set -x
+build=/srv/chroots/natty-i386/tmp/build
+rm -rf $build
+mkdir -p $build/ubiquity
+bzr export -r$REVNO $build/ubiquity
+
+cat > $build/ubiquity/run << EOF
+packages="\$(dpkg-checkbuilddeps 2>&1 | \
+            awk -F: '{ print $3 }' | \
+            sed 's/([^)]*)//g' | \
+            sed 's/|\s[^\s]*//g')"
+echo Installing \$packages
+[ -n "\$packages" ] && echo y | sudo apt-get install \$packages
+./debian/rules update
+dpkg-buildpackage
+EOF
+chmod +x $build/ubiquity/run
+schroot -c natty-i386 -d /tmp/build/ubiquity ./run
+rm -f /srv/pxe/tftpboot/ubiquity/*
+cp $build/ubiquity*.deb /srv/pxe/tftpboot/ubiquity/
+touch /srv/pxe/tftpboot/ubiquity/ubiquity-is-r$REVNO
+</pre>
+builds build-root once complete
+
+==== sikuli ====
+* description: Run Sikuli graphical tests on each netbook, then suspend them.
+* `lp:~ev/+junk/ubiquity-sikuli-tests/`
+* runs on the netbooks
+* tied to the master node
+* runs:
+ <pre>
+DISPLAY=:0 java -Dpython.path=/usr/share/pyshared -jar Sikuli-IDE/sikuli-script.jar default-options.sikuli
+</pre>
+* publishes: `**/result.xml`
+* post build task:
+ <pre>
+echo 'sleep 10; pkill -f slave.jar; pm-suspend' | sudo at now
+</pre>
+
+=== Tips ===
+
+You can run shell code in the Groovy script console for each slave, using similar code to this:
+<pre>
+"""cat /var/log/casper.log""".execute().text
+</pre>

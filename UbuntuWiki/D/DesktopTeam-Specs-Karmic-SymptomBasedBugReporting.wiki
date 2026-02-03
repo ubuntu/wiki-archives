@@ -1,0 +1,126 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+* '''Launchpad Entry''': UbuntuSpec:desktop-karmic-symptom-based-bug-reporting
+* '''Created''': 2009-05-24
+* '''Contributors''': MartinPitt
+* '''Packages affected''': apport, potentially all
+
+=== Summary ===
+
+We provide an extension of the notion of hooks to be symptom based and interactive. "ubuntu-bug" without parameters would then show the available symptoms, and the symptom hooks can do some (limited) interactivity to get more information from the user, and finally figure out which package to file it against and which information to collect.
+
+=== Release Note ===
+
+It is now possible to do symptom-based bug reporting in addition to reporting
+them against a package. This is particularly useful for symptoms like sound or
+external storage problems, where functionality is spread out across many
+packages. Calling "ubuntu-bug" without arguments will list known symptoms,
+interactively walk through debugging steps, and select the appropriate package
+against which to file the bug report.
+
+=== Rationale ===
+
+Apport package hooks help tremendously to collect specific information for a bug report. However, in some cases it is quite hard for the reporter to figure out which package to file a bug against, especially for functionality which spans multiple packages. For example, sound problems are divided between the kernel, alsa, pulseaudio, and gstreamer.
+
+In other cases, the information needed for a particular bug may vary depending on the type of symptom being experienced. Currently the apport hooks for a package workaround this by asking for all possible data for any appropriate symptom, even if unneeded, but this makes apport-based bug reports much bigger than they need to be.
+
+For a lot of debugging scenarios, the user needs to do an action during the debugging process, or needs to answer further questions interactively. This currently needs to happen in the bug report trail, but it would be better to ask these questions during the initial data collection to get better structured bug reports.
+
+=== User stories ===
+
+* Martin maintains hal in Ubuntu. In bug reports about automount failures he referred reporters to the DebuggingRemovableDevices wiki page. Now he writes an interactive hook to ask the reporter about the type of device, then set up hal in debug mode, ask the user to plug in the problematic device, collect debug logs, and then reset the system back to normal.
+
+* Chris maintains OpenOffice.org. He writes an Apport hook to ask the user for a document file which reproduces the problem.
+
+* Bryce maintains X.org.  He writes an Apport hook for bugs with screen corruption symptoms to prompt the user to attach a photo showing the corruption.
+
+* Joe installs Ubuntu on his notebook and tries to play a video. He does not hear any sound. He runs `ubuntu-bug sound`, gets asked a few questions. The apport hook does a few system checks, and together with the answers it determines that the Linux and PulseAudio portions work, and it is most probably a problem in the ALSA codec quirks. The bug gets filed against "alsa-lib" with a "codec-quirk" tag.
+
+=== Design ===
+
+* ''Interactivity'': Add standard UI methods to abstract user interface, implement it for GTK/Qt/CLI, and pass UI proxy object to package hooks so that they can call methods on it.
+
+* ''Run commands as root:'' Add function to the `hookutils` library, so that hooks do not need to duplicate detection for running desktop environment and availability of gksu/kdesudo/etc.
+
+* ''Symptoms:'' These are provided as Python scripts, very similar to Apport package hooks. Their primary purpose is to reliably detect the affected package, and enrich the report with helpful information such as tag classification or standard titles.
+
+=== Implementation ===
+
+==== Interactivity ====
+
+Extend `apport.ui.UserInterface` API with new methods:
+
+{| class="wikitable"
+|-
+| ''Method''
+| 'Return value''
+| ''Description''
+|-
+| `hook_question_yesno(self, text)`
+| Boolean, or `None` on cancel
+| Yes/No question
+|-
+| `hook_question_file(self, text)`
+| File path, or `None` on cancel
+| File selector
+|-
+| `hook_question_choice(self, text, options, multiple=False)`
+| List of choices, or `None` on cancel
+| Single or multiple choice question
+|-
+| `hook_question_choice_images(self, text, columns, images)`
+| Image number, or `None` on cancel
+| Single image choice question
+|}
+
+Create a new class `apport.ui.HookUi` which encapsulates functions which hooks can call. This will do the necessary marshaling/signaling to call the UI methods in the GUI thread. In addition to above methods, this will also wrap the existing `ui_info_message(self, title, text)` and `ui_error_message(self, title, text)`.
+
+Pass current `HookUI` object to hooks by extending the current API: `add_info(report, ui)`. For backwards compatibility, it should still be possible to run hooks with the `add_info(report)` API.
+
+==== Running commands as root ====
+
+Add new function `apport.hookutils.root_command_output()` which runs a command as root and returns its output, similar to the current `command_output()`. This will detect the currently used desktop environment and call gksu/kdesudo/sudo accordingly.
+
+==== Symptoms ====
+
+Symptom scripts are put into `/usr/share/apport/symptoms/` and need to define a
+method `run(report, ui)`. By a combination of interactive questions and
+automatic system tests this method needs to determine the affected package and
+return it. 
+
+It can optionally add information to the passed `report` object, such as tags.
+After that, Apport adds package related information and calls the package hooks
+as usual. Before `run()` is called, Apport already added the OS and user
+information to the `report` object.
+
+Symptom bugs should be tagged with `apport-symptom`.
+
+==== Abort ====
+
+If the user canceled an interactive question for which the hook requires an answer, the hook should `raise StopIteration`, which will stop the bug reporting process.
+
+==== Documentation ====
+
+Fully document hooks, symptoms, and interactivity in doc/package-hooks.txt. Also explain how to set tags.
+
+Drop hooks documentation from Apport/DeveloperHowTo wiki page and replace it with a link to doc/package-hooks.txt in the apport source through `bazaar.launchpad.net`.
+
+=== Test/Demo Plan ===
+
+* Call "ubuntu-bug". This should give a list of known symptoms. At the time of this writing, the only known symptom is "storage devices".
+* Do `killall gvfs-gdu-volume-monitor` to simulate a fault in GNOME's storage device handling daemon.
+* Walk through the debugging steps.
+* Observe that the bug gets reported against gvfs. Please note that it's not actually necessary to file the bug, just expand the details of what will be sent to Launchpad, and check the Package field.
+* Check that the report includes udev monitor logs and a devicekit-disks dump.
+
+----
+CategorySpec

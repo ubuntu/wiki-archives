@@ -1,0 +1,156 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+* '''Launchpad Entry''': UbuntuSpec:arm-m-image-building-console
+* '''Created''':
+* '''Contributors''': CodySomerville, MichaelHudson, ScottBambrough
+* '''Packages affected''':
+
+=== Summary ===
+
+Linaro requires a solution to allow its members, working groups and landing teams to be able to easily build images for various boards based on ARM SoC's. Due to the large number of ARM SoC's and boards on the market, a scalable and extensible solution is needed to handle this variety. Linaro's aim is to choose an existing tool, put it in the hands of developers, and work to improve it such that images can be created with minimum developer effort. The selection of this tool is based on the following criteria:
+
+   1. Linaro members and OEMs require the ability to build on internal servers due to IP concerns.
+   2. All software and tools that Linaro creates need to be open source. 
+
+Currently the best fit to Linaro's needs is the Canonical OEM !LexBuilder tool. However it currently is not an open source tool; hence it does not meet all the required criteria for use by Linaro.  At this point either !LexBuilder will be open sourced or this blueprint will be postponed  in its entirety.  Should that occur the fall back  plan is to document on the Linaro wiki how to use live-helper to build ARM images.
+
+=== Rationale ===
+
+It is desirable to be able to create images on a reference system for sharing with others or releasing, aiding reproducibility and reducing unpredictability. For this reason, we will provide a system which can be set up for image building on request, allowing developers to trigger daily builds or milestone builds on the reference hardware.
+
+=== User stories ===
+
+Project lead Boris wants to build the final version of the operating system for his Internet tablet to send to the factory and build onto 100,000 units of hardware.  He goes to the image building console, selects the final configuration and clicks go.  A few minutes later, the image is available for download.
+
+=== Assumptions ===
+
+* Running code as root on our slave hardware is OK for now.
+
+=== Design ===
+
+* The UI of this tool will be a web application.  As the image building tool we will be using only supports image building in a native environment, that is all the service can support for now.
+* The application needs to support automatic daily builds as well as one-off manually triggered builds.
+* The application will take as input for a build the URL of a branch that contains a configuration for the image building tool.
+
+=== Implementation ===
+
+Canonical have an internally-developed, proprietary tool (!LexBuilder) that currently does most of what is required.  The current plans are to open source this tool and base our future work on this.  Should open sourcing of !LexBuilder be unduly delayed, the specification will be postponed.  If for some reason, !LexBuilder is not open sourced, this specification will be postponed for further design and planning.
+
+We will not be changing the basic architecture of !LexBuilder.  !LexBuilder consists of three main components:
+
+* Master - manages slaves and dispatches jobs (build requests) to the slaves. Jobs can be scheduled nightly or at a specific time of day.
+* Slave - a build machine that builds an OS image using a replaceable backend. The current supported backend is based on live-helper.
+* User Interface - a web interface is provided for both end-users and administrators. Users and administrators interact with the build farm through this web interface.
+
+The master/slave parts consist of a master daemon, only one of which is running for a given installation, and a number of slave daemons, which run on the actual hardware which is to build the images.  These two daemons communicate via XML-RPC.  The user interface is implemented in Python as a web application using Django.  It allows users to request builds and set up automated daily builds, etc.  The two daemons and the user interface communicate via a postgres database.
+
+The !LexBuilder code has some issues that it need to be fixed before it can be turned into a deployable product:
+
+* Currently image configuration is done by (effectively) specifying only the name of a branch on Launchpad -- the branch owner and project are hard coded.
+** Need to support arbitrary locations for live-helper configuration files for !LexBuilder. The location of such configuration files is currently hard coded
+** Bug 582394 captures this requirement. 
+* Fix team access.  Currently restricted to a particular Launchpad team called Canonical.
+** First needs to be fixed to allow Launchpad team to be specified.
+*** investigate updating django_openid_auth (a Canonical project) to be able to restrict the creation of new accounts to users who are members of particular launchpad teams
+******* if the Ubuntu One team reject that idea then we can make the set of teams allowed to access the website a setting and create a middleware class that returns permission denied if a user isn't a member of one of the approved teams.
+*** also update !LexBuilder to manage the launchpad team mapping in the database instead of hard coded in the settings file (Bug 598658)
+** Then we need to look at a method of access control that doesn't depend on Launchpad
+*** its easy to use other authentication backends including the standard django auth app - it just involves modifying settings{,_production}.py. 
+**** need to document how to do this
+**** need to make it even easier.
+* Fix deployment path.  Currently !LexBuilder is deployed to /srv.  
+** We should deploy to /opt/linaro/lexbuilder for example.  
+** This can be done currently but you have to pass a bunch of options to tell !LexBuilder where things are.  
+*** Work needs to be done to make it easier to deploy to locations other then /srv
+*** Ensure everything still works after the changes.
+** currently everything defaults to finding things in /srv/ and things can break or act oddly if the codebase is deployed to another directory
+** most settings can be specified and/or overridden via command line arguments or environmental variables
+*** this is a suboptimal method of modifying things and the error messages aren't always very clear as to what the problem is when things go wrong
+* Fix feature that lets users get the sources.list file for the project
+** this is currently a hard coded feature, that includes the username and password for the OEM internal development repository
+** this isn't a trivial issue.       
+*** currently there is a field on each project called 'suite' that we use to specify the name of the project specific suite on some Canonical infrastructure.  
+*** an appropriate sources.list for a project is generated using this suite
+*** this works because all OEM projects are setup in the same way so we certain assumptions are made 
+** one possible solution is to change !LexBuilder so the full sources.list is specified
+*** then people will probably expect that sources.list to get used in the builds
+** another possible solution is to grab somehow the sources.list used in the last build
+*** the problem there is that often times the sources.list used by the build will point at internal mirrors
+*** also what happens if there was no prior build
+* clean up settings
+** audit all the configuration and settings files to ensure we're not releasing anything we shouldn't
+*** too much information about Lexington infrastructure is found in lib/lexbuilder/web/settings_production.py
+*** pre-set password for development instance found in lib/lexbuilder/web/settings_devel.py
+** define and set sane defaults for typical deployments
+** currently we have several different bash scripts that contain settings
+*** used by builder and other shell scripts
+*** some are obsolete and not used anymore
+*** some require general cleanup
+** a single RFC 822 style configuration file (used by master, slave, and user interface) is desirable
+** it would be nice if we had a single centralized place for managing the configuration
+* rewrite notifications
+** notifications are hard coded to send e-mails to Canonical personnel and to specific OEM mailing lists
+** the contents of the notifications are hard coded and contain OEM specific instructions and information
+** the notification framework (or lack there of) needs an overhaul. (Bug 544604)
+* Implement DB schema migration.  
+** New features to !LexBuilder will sometimes require changes to the database schema.  
+*** Implement use of South; a DB schema migration application for Django
+*** Prevent users from having to manually patch their database when such new features are introduced.
+* Dependencies are simply included wholesale into the project.  
+** As part of the work to open source, these need to be removed
+** Code should use the distributions versions as dependencies
+** The packaging will need to take care of this.
+** currently !LexBuilder is dependent on a patched version of Django
+*** the postgresql backend was modified to not store timestamp information due to issues with it and Storm
+*** this will need to be fixed if we are going to use the distribution version of dependencies
+*** note that the package dependency versions are not met by Hardy
+* The model code is duplicated: one for the Django ORM and one for the Storm ORM.  (Bug 544593)
+** The consensus decision from the sprint was to use the Django ORM
+** this still needs more consideration to ensure its the right thing and maybe a bit of experimentation
+* Setting up slaves is a little complicated
+** the documentation is very much production oriented
+*** setting up development instances requires a few extra steps that aren't documented
+*** these need to be identified and the documentation fixed
+**** these have been documented and are on Cody's TODO list to fix)
+*** too much assumed (ie: http://USER:PASSWORD@IP:PORT for a slave URL)
+*** ultimately automated deployment of all the !LexBuilder components is desirable
+* Fix bugs 429817 and 429806. 
+** if a build fails to start (ie. a failure before the builder creates the build result directory and starts logging), the build will be recorded with a build name of ERROR and there is no way to determine what caused the failure besides running the build manually on the slave
+* Fix bug 544616. 
+** the hostname to the release directory should not be hard coded in 'lib/lexbuilder/web/templates/queuemanager/project_details.html'
+* Fix bug 544609.
+** list of Ubuntu series should not be hard coded
+* weak encryption (BASE64) used for authentication
+** should use SSL
+
+==== Migration ====
+
+Would we want to migrate OEM services to using the version of the code we're developing?
+
+This is a choice for OEM to make.  Once !LexBuilder is open sourced, it is hoped that new feature development will take place in the public release, and both Linaro and OEM can benefit from each others work.
+
+The consensus reached at the sprint was that we'd have a trunk that would be managed like a normal open source project and then both OEM and Linaro would also maintain their own separate branches to provide control over what each deploy.
+ 
+
+=== Test/Demo Plan ===
+
+None.
+
+=== Unresolved issues ===
+
+None.
+
+=== Actions ===
+
+None.
+
+----
+CategorySpec

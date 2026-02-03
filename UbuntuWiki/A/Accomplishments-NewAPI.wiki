@@ -1,0 +1,211 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+=== New API ===
+
+This page was destined to gather all thoughts, ideas and drafts for the new Accomplishments API that were meant to be implemented for 0.2 milestone.
+
+It was considered as notes https://blueprints.launchpad.net/ubuntu-accomplishments-daemon/+spec/new-accomplishments-api
+
+'''The following draft has already been implemented as a part of work for 0.2 release!'''
+
+== Specification draft ==
+
+=== Logic changes ===
+
+====== Accomplishment ID's ======
+
+All functions (both internal and external) should never use (application, accom) as path. They should be rewritten to use accomplishment ID as parameter.
+
+====== Storing all accomplishments data in memory ======
+
+Currently whenever an accomplishment data is used, it is reloaded from the file(s), and read by ConfigParser. This is not very efficient, and may be even less when we'll use more basic functions for cleaner code.
+
+* During initialization daemon should read all available .accomplishment files, and keep their data (as dictionaries) in memory. Such dictionary will be referenced on this page as accomplishmentsDB.
+** From time to time (15 minutes or so) the daemon might reload the accomplishment database, to ensure that when the user installs a new collection on his system, the daemon will not need restarting.
+
+====== Preserving .trophies ======
+
+It was recently decided to never erase user's accomplishments, because some of them may be not achievable again. That means that the daemon should never delete accomplishments - it the signature is incorrect it should delete the .asc file, but never the trophy (if .asc is missing then it will not be treated as accomplished anyway).
+
+====== New collection structure ======
+
+It is planned to use two-leveled accomplishment hierarchy. A collection will contain several (or one) set(s), and API code needs to be adjusted for this, as currently no subdirectories are allowed within a collection.
+
+=== Functions and code restructuring ===
+
+====== Access functions ======
+
+For easy access to accomplishments data there should be simple wrappers provided.
+
+`get_accomplishment_data(accomID)` would return a dictionary of all data for given accomplishment ID (of course it should also take care about using appropriate locale).
+
+Similarly, `get_trophy_data(accomID)` would return such dictionary for a .trophy file (if it exists).
+
+Another helpful functions would be `get_accomplishment_script_path(accomID)`.
+
+====== Unifying code ======
+
+There are many things that are done in the source code several times in different places.
+
+For example, displaying a bubble "You have accomplished X" is written several times. There should be a single function `display_accomplished_bubble(accomID)` that would do this.
+
+Another issue is that some basic operations are performed on the viewer's side. For example, checking if an accomplishment has a valid .trophy - there should be a simple API function `get_accomplishment_is_completed(accomID)` which would check if there is a .trophy file, whether .asc is also needed etc., and return just True/False, because that's what clients will need. ''Such function would be also helpful internally, e.g. when checking if dependencies are met.''
+
+====== "get all data" functions ======
+
+To maintain simplicity of code, we should get rid of functions that are meant to provide all data that is available. A good example is `get_all_accomplishments_and_status()`. The problem is not that it is not efficient at all (though it indeed is) and it may take lots of time to complete. The problem is that only 1% of the data it provides is actually required by the caller (it returns an array of dictionaries of all fields of all available .accomplishments). It would much better if there were three separate functions for that: `get_accomplishments_list()` which would return a list of all accomplishment IDs available, and `get_accomplishment_data(accomID)` which would provide all data from .accomplishment file, and `get_accomplishment_is_completed(accomID)` which would determine if the accomplishment has been achieved.
+
+This way it is 1) easier to maintain functionality 2) more efficient 3) easier for clients to get the data they actually need.
+
+* An exception for this rule is function that returns all data for a single accomplishment. This actually makes sense, because if one wants to read pitfalls from an accomplishment, it is almost certain that he'll want to read steps, links etc. Such functions is also an equivalent for reading the .accomplishment file.
+
+====== Listing accomplishments from collection or set ======
+
+For listing accomplishments, it might be useful if there was present a function like `list_all_accomplishments_in_set(setID)`, which - for given setID (e.g. `ubuntu-community/launchpad`) would return a list (array) of accomplishment IDs, of all accoms that belong to this set. Similarly for collections. Also, provided that we keep all accomplishments data in memory, it might be also easy to get a list of accomplishments from one category - clients might potentially take great advantage of such functions. Another use is listing all accomplishments that depend on a given one (see ''Scripts queue'' paragraph).
+
+====== Unifying function names ======
+
+It may be a good idea to keep function names unified - especially these, that are meant to be used by external applications. While prefix `get_` which is already used is easy to define, we might consider using `get_accomplishment_` or `get_accom_` for functions that return accomplishment's parameters (like `is_valid`, `data`, `depends`). Functions that are supposed to return a list of accomplishment IDs (like all accoms from a set, or a category, or all unlocked opportunities etc.) `get_accomplishments_`, `get_accoms_`, `list_accomplishments_` or `list_accoms_`.
+
+=== Scriptrunner ===
+
+====== Scripts queue ======
+
+As suggested by Twistd/Python experts, it is a very good idea to put all scripts that need to be run in a queue, using a producer-consumer threads model. The scriptrunner takes scripts that need running from the front of the queue, and when a script is scheduled to be run, it is added to the end of the queue (unless it already is in the queue).
+
+This technique ensures much greater efficiency, because this way we can easily schedule only a few scripts that need to be run, instead of re-running all, as it takes place in current implementation. This would significantly shorten the time needed to check all accomplishments, including unlocked dependencies (when accomplishments get unlocked, instead of running all scripts we might just check the newly unlocked accoms [listing function `list_accomplishments_depending_on(accomID)`]). Moreover, this way we can avoid unnecessary running scripts, and thus save resources. Also, this would make it possible to re-check '''one''' particular accomplishment. Functions named like `run_script(accomID)` and `run_scripts_all()` would take care of scheduling the script at the end of the queue - and wake up the scriptrunner thread using a mutex / conditional variable.
+
+=== Functions ===
+
+This is a suggested list of functions and their behavior that should be available in the new API. As this is a proposed list, it may be changed as the discussion is still in progress.
+
+====== Access functions ======
+* `get_acc_data(accID)`
+** '''Args:''' AccomplishmentID.
+** '''Returns:''' A dictionary of all data of this accomplishment (it would have keys like 'steps', 'title', 'pitfalls' etc.)
+** It would read data from the accomplishmentsDB.
+
+* `get_acc_exists(accID)`
+** '''Args:''' AccomplishmentID.
+** '''Returns:''' True/False, depending on whether accomplishment with such ID exists.
+** Might be useful for checking if the accID is valid.
+
+* `get_acc_title(accID)`
+** '''Args:''' AccomplishmentID.
+** '''Returns:''' A string, accomplishment's title.
+
+* `get_acc_description(accID)`
+** '''Args:''' AccomplishmentID.
+** '''Returns:''' A string, containing short description of the accomplishment.
+
+* `get_acc_is_completed(accID)`
+** '''Args:''' AccomplishmentID.
+** '''Returns:''' True/False, depending on whether user have completed this accomplishment.
+
+* `get_acc_depends(accID)`
+** '''Args:''' AccomplishmentID.
+** '''Returns:''' AccomplishmentID of the accomplishment that has to be completed first.
+
+* `get_acc_is_unlocked(accID)`
+** It would make use of `get_acc_depends`, and `get_acc_is_completed`.
+** '''Args:''' AccomplishmentID.
+** '''Returns:''' True/False, depending on whether the accomplishment is locked.
+
+* `get_acc_needs_signing(accID)`
+** '''Args:''' AccomplishmentID.
+** '''Returns:''' True/False, depending on whether this is a local or a global accomplishment.
+
+* `get_acc_script_path(accID)`
+** '''Args:''' AccomplishmentID.
+** '''Returns:''' The path for this accomplishment's script.
+
+* `get_acc_icon(accID)`
+** '''Args:''' AccomplishmentID.
+** '''Returns:''' Icon file name of this accomplishment.
+
+* `get_acc_icon_path(accID)`
+** '''Args:''' AccomplishmentID.
+** '''Returns:''' Icon file path for this accomplishment.
+
+* `get_trophy_path(accID)`
+** '''Args:''' AccomplishmentID.
+** '''Returns:''' Path to .trophy file (possibly not existing) for this accomplishment.
+
+* `get_trophy_data(accID)`
+** '''Args:''' AccomplishmentID.
+** '''Returns:''' An array of all keys in .trophy for this accomplishment.
+
+====== Listing functions ======
+* `list_accomplishments()`
+** '''Returns:''' An array of accIDs of all available accomplishments.
+
+* `list_trophies()`
+** '''Returns:''' An array of accIDs of all completed accomplishments.
+
+* `list_opportunities()`
+** '''Returns:''' An array of accIDs of all not completed accomplishments.
+
+* `list_unlocked()`
+** '''Returns:''' An array of accIDs of all not completed accomplishments that are not locked.
+
+* `list_depending_on(accID)`
+** '''Args:''' AccomplishmentID.
+** '''Returns:''' An array of accIDs of all accomplishments, that depend on the given one.
+** This may be very useful when completing an accomplishment, it allows to easily get a list of newly unlocked accomplishments.
+
+* `list_accs_in_collection(collection)`
+** '''Args:''' Collection name.
+** '''Returns:''' An array of accIDs of all accomplishments belonging to given collection.
+
+* `list_accs_in_set(setID)`
+** '''Args:''' Set ID (collection/set).
+** '''Returns:''' An array of accIDs of all accomplishments belonging to given set.
+
+More listing functions may be implemented on demand.
+
+====== Scriptrunner functions ======
+* `run_script(accID)`
+** '''Args:''' AccomplishmentID.
+** Schedules a single accomplishment script to be run (adds it to the queue).
+
+* `run_all_scripts()`
+** Schedules all unlocked accomplishments scripts to be run (adds them to the queue).
+
+====== Misc functions ======
+* `accomplish(accID)`
+** '''Args:''' AccomplishmentID.
+** Used to accomplish something (either by a third party app or the daemon itself). It should generate a .trophy file etc.
+
+* `mark_as_completed(accID)`
+** Called when a local acc is accomplished, or when a global gets a valid .asc file. It set's it's 'complete' status in the database.
+** This function may not be exposed via DBus, it is for internal use only.
+
+* `display_accomplished_bubble(accID)`
+** '''Args:''' AccomplishmentID.
+** Displays a notifyOSD notification about accomplished accomplishment.
+** This function shall be not exposed via DBus, it is for internal use only.
+
+* `display_unlocked_bubble(accID)`
+** '''Args:''' AccomplishmentID.
+** Displays a notifyOSD notification about accomplishments unlocked by given accID.
+** This function shall be not exposed via DBus, it is for internal use only.
+
+* `reload_accomplishments_database()`
+** Essential function. It should prepare accomplishmentsDB, taking care of multiple directories where collections may be installed, user's locale, possible untranslated (missing) accomplishments, collection's default language.
+** This function should clear the acomplishmentDB and create a new one, as a dictionary of dictionaries. First level dictionary should have keys being accIDs, the inner dictionary should contain a list of all values of this .accomplishment file - e.g. accdb['ubuntu-community/general/register-on-lp']['title'] should should be "Registered on Launchpad".
+** This function should also add few more keys to each accomplishment: '''script-path''' and '''base-path''', because this is the only place in code when accomplishment paths are recognised. Script path should point to appropriate .py file, base path should point to collection's accomplishments install location, e.g.  `/usr/share/accomplishments/accomplishments/ubuntu-community` - this will be useful for accessing trophyimages directory, extrainformation directory and ABOUT file.
+** This function shall be not exposed via DBus, it is for internal use only. However, it may make sense to allow the viewer to manually reload all accomplishments, when the user asks to, e.g. he has just installed a new collection and would not like to restart the daemon.
+** For each accomplishment it should also create a 'completed' key, which will store accomplishment's status.
+
+* `validate_trophy(accID)`
+** '''Args:''' AccomplishmentID.
+** '''Returns:''' True/False, depending on whether related .asc file is valid.
+** Currently this function displays far too much junk in the log.

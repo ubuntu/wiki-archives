@@ -1,0 +1,453 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+=== IRC log from a user namespaces discussion on #lxcmeeting on Feb 7, 2013 (17:00 UTC) ===
+
+15:57 <idkfa> hi there
+
+17:01 <serue> Hey
+
+17:01 <serue> ok, when this is done, i will post the log (perhaps sanitized) and send a link to the list
+
+17:02 <serue> I'm going to blab a bit first about user namespaces, then we can mozy over to an ec2 instance for some demo
+
+17:02 <serue> So first off, I assume anyone interested enough to be here knows this, but the state of things right now
+
+17:03 <serue> is that when you start a container, a userid in a container is the same user as it is on the host
+
+17:03 <serue> we contain it somewhat with LSMs (apparmor/selinux), capability bounding sets, seccomp, and cgroups,
+
+17:03 <serue> and we try to keep it from getting access to somethings by not mapping them in a namespace,
+
+17:03 <serue> but the userid is the same.
+
+17:04 <serue> Uh, just to be sure, can someone ack that I'm actually showing up? :)
+
+17:04 <dengen> ack
+
+17:04 <dash17291> ack
+
+17:04 <serue> woot :)  thx
+
+17:04 <serue> ok, so Eric and I have been talking since I think 2007 about how we wanted user namespaces to look
+
+17:04 <serue> some of the goals we had were:
+
+17:04 <serue> one user on the host should be able to to use multiple uids in the container
+
+17:05 <serue> ability map uids on disk
+
+17:05 <serue> ability to use privilege in the container
+
+17:05 <serue> safety of the host from privilege in the container
+
+17:05 <serue> uid on host which created the userns should own everything int he userns
+
+17:05 <serue> sane lifetimes for userids (this was a problem before uids)
+
+17:05 <serue> sane conversion of userid comparisons in the kernel - this one especially was a huge problem before kuids
+
+17:06 <serue> so about a year ago I think, Eric came up with the brilliant idea we're using now:
+
+17:06 <serue> uids are mapped 1-1, by ranges
+
+17:06 <serue> so for instance, uids 0-99 in the container might map to userids 10100-10199 on the host
+
+17:06 <serue> uids are split into two types: the old uid_t, and a kuid_t for kernel uids
+
+17:06 >< JOIN (#lxcmeeting): 
+
+17:07 <serue> in the example above, uid_t is the uid in the container, i.e.0
+
+17:07 <serue> kuid_t is the uid as it is seen on the host, i.e. 10100
+
+17:07 <serue> THe kuids->uid_t are mapped at the kernel->user boundary
+
+17:07 <serue> So if I'm writing to disk from inside a container, and my uid_t 0 is mapped to kuid_t 100000,
+
+17:08 <serue> then when I do a stat, I'll see st_uid as 0, but on disk it will read 100,000,
+
+17:08 <serue> The user who creates a namespace owns a namespace, and root in a namespace owns all the resources "owned" by the container
+
+17:08 <serue> If I create a new user_ns, and just that, then I won't have privilege over the nics
+
+17:09 <serue> but if I now create a new network ns, then in that ns I can create and manage new nics
+
+17:09 <serue> Creating a uid mapping requires privilege to the parent user_ns
+
+17:09 <serue> So ignoring containers for now, Eric's shadow patch (still pending) introduces a new /etc/subuid (and /etc/subgid) file,
+
+17:09 <serue> which lists the uids which a uid on the host can use,
+
+17:10 <serue> for instance uid 1000, hallyn, can use uids 100000 through 110000
+
+17:10 <serue> then, a setuid-root program (pair) newuidmap/newgidmap, can be used by user hallyn to map ids in that range to whatever he wants in a new userns
+
+17:10 <serue> Any questions so far?
+
+17:11 <serue> While we wait to see if there are, please go ahead and log in as user guest, password lxcguest, to 54.234.113.209
+
+17:11 <serue> you'll be sent into a shared (ro) screen session
+
+17:11 <dengen> in your example above stat sees uid 0 in container, host stat sees 100000?
+
+17:11 <serue> yup
+
+17:12 <serue> ok, so on that host I've installed a kernel and lxc version from ppa:serge-hallyn/userns-natty.  The kernel is pretty much all stuff that will be upstream in 3.9
+
+17:12 <serue> and the lxc patch, if I'm not mistaken, actually is already in staging, so I ought to be able to use stgraber's daily ppa (but didn't)
+
+17:12 <serue> So I create a regular container,
+
+17:13 <stgraber> serue: yep, the daily should work
+
+17:13 <serue> Then I will use a script container-userns-convert (from ppackage nsexec in my userns-natty ppa)
+
+17:13 <serue> let's look at that script real quick,
+
+17:14 <serue> So it calls a program called 'uidmapshift' on the container rootfs,
+
+17:14 <serue> which just shifts the uids/gids of all files into the mapped range,
+
+17:14 <serue> so fora instance if we've mapped 0-10000 to 100000-110000, it'll chown root owned files to 100000
+
+17:15 <serue> (and re-set setuid/setgid if needed)
+
+17:15 <serue> The only other thing the script does is to add the lxc.id_map entries to the container configuration
+
+17:15 <serue> So I run the script,
+
+17:15 <serue> and start the container,
+
+17:15 <serue> log in,
+
+17:15 <serue> I'm userid 1000, ubuntu
+
+17:16 <serue> (my screen shortcuts aren't workign quite right)
+
+17:16 <serue> you see processes in the container are actually owned by uid 100000
+
+17:16 <serue> but network is working, files are looking fine,
+
+17:17 <serue> the one weirdness i've not yet figured out (something to do with sessions i guess),
+
+17:17 <serue> if I switch back to the /dev/console login,
+
+17:17 <serue> you see it isn't particularly happy,
+
+17:17 <serue> and in fact if i ctrl-c now, it'll reboot the container,
+
+17:17 <stgraber> serue: I don't think the screen guests follow window changes, at least mine kept showing the /dev/console tty
+
+17:17 <serue> stgraber: feh!
+
+17:18 <serue> ok, was what you saw helpful enough, or should i redo more slowly?
+
+17:18 <serue> in the meantime, i switched back to the /dev/tty1 login, from where iw as able to run sudo shutdown just fine
+
+17:19 <dengen> helpful enough here :)
+
+17:19 <serue> cool.
+
+17:19 <serue> ok the other thing i could do is show a more manual setup of a user ns, but I'm afraid I'll get bogged down in details and not help anything -
+
+17:19 <serue> so if someone wants to see that, pls shout,
+
+17:20 <serue> Meanwhile, this shows that basic user namespace exploitation by containers now works,
+
+17:20 <serue> but there's a next step we want to take,
+
+17:20 <serue> which is to have unprivileged users create and run them
+
+17:21 <serue> There are several issues there - they may all be trivial small steps each, but I haven't started them:
+
+17:21 <serue> 1. unprivileged user somehow has to create the rootfs owned by the uids in the container
+
+17:21 <serue> I don't knwo if just running tar -xvf from inside a mapped userns will suffice
+
+17:21 <serue> (just haven't tried it)
+
+17:22 <serue> 2. hooking the network up at the host end.
+
+17:22 <stgraber> 1) that'd be a nice trick, and on paper, it "should" work :)
+
+17:22 <serue> that will need some way for host admins to dole out a bridge to hook into
+
+17:23 <serue> stgraber: Right, there may be a bootstrapping problem though, I'm nto sure :)
+
+17:23 <serue> also it'd be nice to be able to do something with block devices,
+
+17:23 <stgraber> 2) can we even create a veth pair without privileges? I vaguely assumed you couldn't create a network interface in the host without being uid 0 there
+
+17:23 <serue> but for the moment that's moot as you can't mount anything but ext2 anyway
+
+17:24 <serue> stgraber: right, you'd have to have either a privileged tiny helper on the host create it, or create it in the guest and pass it back somehow
+
+17:25 <serue> The newuidmap/newgidmap shadow model may be one we can follow somewhat
+
+17:25 <serue> have a new file in /etc listing the bridge a user can hook to, and how many veth's he can create/hook up?
+
+17:25 <stgraber> serue: ok, so we'd need /etc/lxc/lxc.conf to store a list of allowed bridges to hook into, then a setuid helper that'll be poked by the unprivileged lxc to create the veth pair, move one into the new netns and hook the other into the bridge
+
+17:25 <serue> Then leave it up to something/someone else to deal with any firewalling they want to do
+
+17:25 <serue> right
+
+17:26 <serue> Another more basic problem we have is discoverability of containers by lxc-ls if they are in per-user locations,
+
+17:26 <serue> and corresponding naming issues
+
+17:26 <serue> maybe we dont' really care, I guess the qeustion becomes,
+
+17:26 <stgraber> set_path was meant to help with that
+
+17:26 <serue> do we want lxc to be more like a host-wide management suite,
+
+17:27 <serue> or a tool that anyone on the system can use/configure as they like
+
+17:27 <serue> perhaps the set_path should be overrideable on command line,
+
+17:27 <serue> and we completely democratize this
+
+17:27 <serue> so I can do lxc-ls --lxcpath=/home/serue/lxcpath1
+
+17:28 <serue> root doesn't see those and has no easy way to discover them, but really is there anything special about containers versus just running 'unshare' by hand
+
+17:28 <serue> if admin wants to throttle me they can either ask me to do it, or just start killing my process trees
+
+17:28 <serue> <shrug>
+
+17:29 <serue> what do you think?  fully democratized versus system-side container listings and system-wide unique container names?
+
+17:30 <stgraber> so my vague plan was to do it the "upstart way" where we now have per-user upstart and per-system upstart
+
+17:30 <stgraber> that'd mean that all commands would grow a new --system and --user option which wouldn't be required by default
+
+17:30 <stgraber> if uid != 0, you default to --user and it uses whatever default path we agree on
+
+17:31 <stgraber> if uid == 0, it defaults to system mode, where it uses /var/lib/lxc (or whatever the path is)
+
+17:31 <serue> that seems potentially limiting,
+
+17:31 <serue> (with no advantage)
+
+17:31 <serue> i.e. I may want separate container lists for juju and for manual lxc
+
+17:31 <serue> I really don't want lxc-ls showing me all that juju crap unless I ask for it
+
+17:31 <serue> with lxc-ls --lxcpath=~/jujulxc
+
+17:32 <serue> heh, rather than stating it so, lemme ask - what is the advantage to trying to enforce a common path?
+
+17:32 <stgraber> so people don't need to pass it on the command line in 90% of the cases
+
+17:32 <serue> (cause I'm talking off the top of my head on this, and have not sufficiently thought it through)
+
+17:32 <serue> sure - we can have a *default*
+
+17:32 <dengen> i've wondered if we need container groups
+
+17:32 <serue> I'm all for sane simple easy defaults :)
+
+17:33 <serue> ah, cgroups,
+
+17:33 <serue> my feeling is we want to have /sys/fs/cgroup/$cgroup/$user anyway,
+
+17:33 <serue> Then lxc cgroups would go into /sys/fs/cgroup/$cgroup/$user/lxc/$container,
+
+17:33 <serue> which belies what I said a few lines ago
+
+17:33 <dengen> but do we want a general facility to group sets of containers?
+
+17:33 <stgraber> so yeah, I suppose we could make sure all the commands grow a --lxcpath which overrides our default (where the default differs if you're root or non-root as we don't want to end up with containers in /root/.something)
+
+17:34 <dengen> $user is certainly one logical grouping
+
+17:34 <serue> dengen: we'd at least have a system (root) group and a group for each user, with what i describe above,
+
+17:34 <stgraber> I suppose we could grow a new container config option to prefix the cgroups, which would give you cgroup grouping
+
+17:35 <serue> yes, and perhaps even group-wide settings
+
+17:35 <stgraber> so if you set lxc.cgroup.prefix = blah, you'd end up with /sys/fs/cgroup/memory/stgraber/lxc/blah/ as the cgroup memory path
+
+17:35 <serue> Note that upstream is working hard to make hierarchy in cgroups more sensible
+
+17:35 <stgraber> well, /blah/containername
+
+17:35 <dengen> yeah it might make use_heirarchy interesting
+
+17:35 <serue> stgraber: I like the idea
+
+17:36 <serue> dengen: would that suffice for what you're thinking, or is there more you'd wnat?
+
+17:36 <dengen> well, i'm wondering if people want to set for instance a memory limit on a set of containers, so how we should group them
+
+17:37 <dengen> i think that would work and you just have to set the limit at the right level of the tree
+
+17:37 <serue> dengen: actually combining stgraber's idea with a per-user libcgroup configuration might work
+
+17:37 <serue> So from libcggroup we would want (assuming we dont' want to roll our own, which I don't think we do)
+
+17:38 <serue> libcgroup-pam being usable, and per-user limits set by libcgroup-pam on first login
+
+17:38 <serue> (The former we've talked about recently and is on jbernard's list, the latter not yet)
+
+17:40 <serue> everyone is happy with that as a starting design?
+
+17:40 <stgraber> can we delegate (chown) cgroups? and if we can, how do we prevent the user raising a limit?
+
+17:40 <serue> hierarchies is how we prevent raising the limits
+
+17:41 <dengen> i think that works for users, i'm wondering if we need to allow for groupings based on other criteria, but i haven't thought it through yet :)
+
+17:41 <serue> dengen: when you think it through some more, can you send an email to the list?
+
+17:41 <dengen> yep
+
+17:41 <serue> stgraber: and yeah we chown cgroups
+
+17:41 <stgraber> serue: right, but then we'd want to set the limit below the one we chown right?
+
+17:41 <serue> but since hierarchies still suck we haven't bothered so far
+
+17:42 <serue> above? :)  <tries to get hsi mental picture straight>
+
+17:42 <stgraber> heh, yeah, above ;)
+
+17:42 <serue> (you can play with that now btw with cgroup-bin, which lets you specify user/group to own a cgroup you create with cgcreate)
+
+17:42 <serue> (then you can enter it unprivileged with cgexec)
+
+17:43 <stgraber> so you have /sys/fs/cgroup/memory/stgraber chowned to me, I can change /sys/fs/cgroup/memory/stgraber/<whatever> so the only way to prevent me from raising the limit is to set it in /sys/fs/cgroup/memory/
+
+17:43 <stgraber> if that's the case, then you need two levels per user, one where you set the limit and one you chown to the user
+
+17:43 <serue> yes
+
+17:44 <serue> in fact that's why we use two levels per container in the cgroup-enabling mounthook
+
+17:44 <stgraber> so in you current plan, you'd only chown /lxc and keep /<user> owned by root?
+
+17:45 <serue> I don't think so, because that's too lxc specific
+
+17:45 <serue> I'd rather do /sys/fs/cgroup/memory/stgraber/user/ or something like that
+
+17:45 <serue> where /sys/fs/cgroup//memory/stgraber has the limits and .../user is chowned
+
+17:45 <serue> then lxc would be under that
+
+17:45 <serue> it's a long name, yes, but we should move toward using cgroup-bin or lxc-cgroup to set things
+
+17:46 <stgraber> that's ugly and long (my cgroup htop column will completely overflow) but yeah, that's the only reasonable way to implement this
+
+17:46 <serue> especially since we're moving toward only one hierarhcy mount per controller,
+
+17:46 <dengen> is there a performance penalty for deep nesting?
+
+17:46 <serue> there is, actually
+
+17:47 <serue> I'm hoping they will work on that
+
+17:47 <serue> we might need to discuss with upstream and get guidance
+
+17:47 <dengen> (particularly with heirarchy i guess)
+
+17:47 <serue> right.  libvirt in fact has recently shortened their depth for that reason
+
+17:48 <serue> Yeah we'll need to ping upstream and see if that is expected to get better or not
+
+17:48 <serue> (for the moment it's moot, until all cgroups respect hierarchy, anyway :)
+
+17:48 <serue> So that brings up a short-term workaround we'll need,
+
+17:48 <stgraber> sounds like a case where you could trade memory for performance and do a bit of caching so you don't need to resolve the whole hierarchy to check the limits
+
+17:49 <serue> well, again i need to think on it more, but we might want a privileged helper to set up the cgroups for now
+
+17:50 <serue> s/might/will/
+
+17:50 <serue> it's not safe to have contaienrs write to cgroups yet, and long as we have to prevent that with LSM anyway,
+
+17:50 <serue> we may as well use a shortened depth and keep it all owned by root
+
+17:50 <serue> so perhaps /sys/fs/cgroup/memory/user.serge.lxc1 ?
+
+17:51 <serue> u.serge.lxc1 ?
+
+17:51 <serue> This means we'd have to have an executable, setuid-root, to set that up for us during lxc-start
+
+17:52 <serue> but that would be more immediately usable than the pie-in-the-sky hierarchy plan :)
+
+17:52 <stgraber> lxc.$USER may make more sense, that way we have /sys/fs/cgroup/memory/lxc for the system one and /sys/fs/cgroup/memory/lxc.$USER for the user ones
+
+17:52 <serue> yeah that's good
+
+17:53 <stgraber> and AFAIK we only had the cgroup paths hardcoded in the python code and that's been fixed with the new get/set_cgroup_item API calls, so we can change the paths without risking breaking anything (in theory ;))
+
+17:53 <serue> I'm also not sure about seccomp - we may not be able to set that without privilege,
+
+17:53 <serue> cool
+
+17:54 <serue> ok, so thus far we will require callouts to setuid-root helpers to do: newuidmap, cgroup setup, and nic hookup,
+
+17:54 <stgraber> serue: I don't care all that much about seccomp as the biggest reason for it was for distros without apparmor or userns trying to make their containers safer
+
+17:55 <stgraber> serue: so lacking seccomp support for userns initially shouldn't really be a problem
+
+17:55 <serue> stgraber: heh, I don't feel quite the same way - I think it's an extra layer still below apparmor, for when some compat_xyz syscall gets 0wned
+
+17:55 <serue> but fact is I don't think anyone is using it, so...
+
+17:55 <stgraber> oh, and once we have the wrapper land, I'd strongly suggest we burn lxc-setcap and lcx-setuid to their death, they've only been a source of problem ;)
+
+17:55 <serue> it shouldn't hold us back fornow.
+
+17:56 <serue> I wouldn't object to dropping those out of the source
+
+17:56 <serue> the idea was nice, but noone has tracked them so I doubth they work, or if they do, i dont think they're safe...
+
+17:56 <stgraber> serue: well, I see seccomp as being mostly useful for an admin who doesn't trust some syscalls and wants to block them, but if it's a multi-user machine with random users being able to login, well they can just as well call those syscalls outside of lxc...
+
+17:57 <stgraber> well, setuid should work, but I don't trust it. I'm pretty sure setcap is broken as nobody really updated it in a while (that I can remember)
+
+17:57 <serue> yes, but what if my user decides to start a container on which to host some service which he announces on freenode :)
+
+17:57 <serue> isn't lxc-setuid just to un-do lxc-setcap? :)
+
+17:57 <serue> oh, no, i guess not
+
+17:58 <serue> Anyway!  is there anything else about userns we should discuss?
+
+17:58 <stgraber> nah, lxc-setuid actually sets the binaries setuid root IIRC :)
+
+17:58 <stgraber> (I intend to drop lxc-setcap and lxc-setuid when we rebase the Ubuntu package on alpha3, other distros can keep them for now if they wish though)
+
+17:59 <serue> ok - I will post a log of this on wiki.ubuntu.com/ somewhere, and post a link to the mailing list.
+
+17:59 <serue> After som ethinking, I/we can come up with a design and plan for enabling unprivielged user-ns inlxc
+
+18:00 <dengen> i think they don't have man pages, so i'm in favor of dropping them :)
+
+18:00 <serue> oh, right, that reminds me, one other thing we'll need to decide is how to specify lxc.uid_map at lxc-create time
+
+18:01 <stgraber> oh, I may end up doing that now then, as I said I'd write manpages for any tool without one, that'd be two less to do ;)
+
+18:01 <serue> it's complicated and verbose enough that just requiring the use of a custom lxc.conf is fine with me, but that does feel like more work
+
+18:01 <serue> so I'd like lxc-create -t ubuntu -n r1 -map 100000:10000 perhaps
+
+18:01 <serue> anyway, go forth and cull dnagerous binaries from the package :)
+
+18:01 <dengen> stgraber: exactly
+
+18:02 <serue> thanks guys, ttyl
+
+18:07 <stgraber> serue: thanks!

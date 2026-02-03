@@ -1,0 +1,184 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+{{{#!IRC
+[19:03] <directhex> okay then
+[19:03] <directhex> MONO PACKAGING. GOOD, BLAH BLAH BLAH.
+[19:03]  * antileet starts tomboy to take notes
+[19:03] <directhex> there are people here with varying degrees of experience, so i'm going to start with the fundamentals, to try and bring everyone up to speed
+[19:03] <pleia2> hehe
+[19:04] <directhex> okay, firstly, a quick discussion of what packaging a Mono app or library means, as compared to a C app
+[19:04] <directhex> Mono apps and libraries are called "assemblies", coming in .exe or .dll files (not to be confused with Windows executables and libraries, which uses .exe and .dll extensions too)
+[19:05] <directhex> assemblies contain cross-platform code, which any Common Language Runtime should be able to execute
+[19:06] <directhex> on Ubuntu, we only have one CLR - Mono. Others include Microsoft Rotor (their shared-source runtime), Microsoft.NET (their proprietary runtime) and dotGNU Portable.NET (FSF's Mono equivalent)
+[19:07] <directhex> Assemblies have properties similar to what we call "native" code (ELF binaries or shared libraries), such as a list of dependencies built in
+[19:07] <directhex> this is handy stuff for packaging, as it means we can automatically build a package's dependencies list based on the real-world dependencies on the library or executable
+[19:08] <directhex> as an example, take a look at "monodis --assemblyref foo.exe" on something like, i dunno, /usr/lib/tomboy/Tomboy.exe
+[19:08] <directhex> you can see 17 entries listed, with a Name, Version, and Public Key as the important factors
+[19:09] <directhex> generally, the "Name" field is the name of the library it needs, e.g. "Name=gnome-sharp" means it uses gnome-sharp.dll
+[19:09] <directhex> the "Version" field determines the ABI version of the assembly, which is a lot like a SONAME version in a native library.
+=== Traveler is now known as emakriya
+[19:11] <directhex> Mono (and .NET) have the ability to use backward-compatible data for libraries, so if an app says "I need GTK# 2.8", and you have 2.12 installed, that's okay - as long as you have the compatibility data required. this compatibility data comes in the form of "policy" files. As another example, try doing "gacutil -l | grep gtk-sharp"
+[19:11] <directhex> and you'll see things like:
+[19:11] <directhex> policy.2.10.gtk-sharp, Version=0.0.0.0, Culture=neutral, PublicKeyToken=35e10195dab3c99f
+[19:12] <directhex> that's a compatibility entry
+[19:12] <directhex> actually, a word on the GAC, since I just used it
+[19:12] <directhex> the GAC is a central repository for Mono libraries which are considered stable enough to be offered system-wide
+[19:12] <directhex> if you ever package a library, you want it in the GAC if you want apps to be able to use it
+[19:13] <directhex> for something to go into the GAC, it needs to be cryptographically signed - hence the "PublicKeyToken" value from gacutil, and the Public Key value from monodis
+[19:13] <directhex> they need to match up!
+[19:14] <directhex> and you can see here that they do
+[19:14] <directhex> gtk-sharp, Version=2.12.0.0, Culture=neutral, PublicKeyToken=35e10195dab3c99f
+[19:14] <directhex> 3: Version=2.12.0.0
+[19:14] <directhex> 	Name=gtk-sharp
+[19:14] <directhex> 0x00000000: 35 E1 01 95 DA B3 C9 9F
+[19:14] <directhex> see, app needs library, library in GAC, no problems!
+[19:14] <directhex> okay, that's MORE than enough background, i think. any questions so far?
+[19:15] <directhex> no?
+=== Traveler is now known as emakriya
+[19:15] <directhex> okay, on with the packaging specifics
+[19:15] <dnielsen> how and when would one in terms of packaging inject random stuff into the gac?
+[19:16] <directhex> dnielsen, if you're packaging a library (which is much more complex than an app), then we have special helpers to handle the GAC for you
+[19:16] <dnielsen> excellent
+[19:17] <antileet> directhex: So you're suggesting relying on assemblies in the gac rather than package them with your app?
+[19:17] <directhex> antileet, if you're packaging a library, you need a good reason not to use the GAC
+[19:18] <directhex> antileet, if you're packaging an app, then generally, you wouldn't use the GAC for app-related things
+[19:18] <directhex> antileet, now, that gets mildly complex if the app bundles a lib
+[19:18] <antileet> Say I use taglib-sharp in a project which I want to package
+[19:18] <directhex> right
+[19:18] <antileet> taglib-sharp is in my app, which I'm sure that Banshee installed
+[19:18] <antileet> *taglib-sharp is in my gac
+[19:19] <antileet> Now do I package my app without taglib-sharp assuming that the user will have it installed too?
+[19:19] <directhex> use the GAC copy, unless you have a very good reason not to. sometimes this may even involve patching your app's build system
+[19:19] <directhex> and rely on the easy peasy packaging data to take care of the dependencies for you
+[19:19] <directhex> which i'll get onto
+[19:19] <antileet> Okay, I think I'll wait till the end of this first
+[19:20] <directhex> dnielsen, in answer to your earlier one, here's an example of a all the extra voodoo required to GAC a library: http://svn.debian.org/wsvn/pkg-cli-libs/packages/mysql-connector-net-5.0/trunk/debian/libmysql6.0-cil.installcligac
+[19:20] <directhex> right. PACKAGING
+[19:20] <directhex> hopefully people went to james westby's DH7 talk. we love dh7 in Mono-land, as it makes life super easy.
+[19:21] <directhex> what dh7 does is basically automatically do everything you might want to do, based on the input it gets given. where that input would be the usual debian packaging paraphenalia like debian/control
+[19:22] <directhex> and dh7 is extensible - so the difference from a packager perspective between a non-mono app and a mono app is just 1 line (!)
+[19:22] <directhex> "include /usr/share/cli-common/cli.make" in debian/rules
+[19:22] <directhex> this tells debhelper to include that file, which is in the cli-common-dev package - and that file basically injects a bunch of our super secret debian mono team into dh7's usual list of operations
+[19:23] <directhex> and those new operations include things like "generate package dependencies based on Assembly chain"
+[19:23] <directhex> so... a real-world example, right?
+[19:23] <directhex> my example for the day is "bansheelyricsplugin" which is a simple enough package, prepared by the lovely hyperair here, which still includes a few things for packagers to be aware of
+[19:24] <directhex> http://git.debian.org/?p=pkg-cli-apps/packages/bansheelyricsplugin.git;a=tree;f=debian;h=936154ed82960f01961d4a760fe90bb81c9008ac;hb=HEAD is the url to click to see the packaging data for this
+[19:24] <directhex> it's a super-minimal example, so you'll see there are only 6 files here.
+[19:24] <directhex> changelog is boring, you should know about that already
+[19:24] <directhex> compat is just "7" because we're using dh7
+[19:25] <directhex> copyright is even more boring than changelog, although you might want to take a peek here as it uses an approximation of the new machine-readable DEP5 format that the debian folks keep going on about
+[19:25] <directhex> this leaves three interesting files - watch, rules, and control
+[19:26]  * hyperair waves
+[19:26] <directhex> now, the watch file here isn't mono-specific, but as a team, we're HUGE fans of them within the debian mono teams - and this is an interesting one, as it performs magic to make version 0.6 higher than version 1 (stupid upstreams)
+[19:27] <directhex> if you want to get a mono-related package into debian (and the ubuntu mono folks do all the work we can in debian primarily, so more people can benefit from the work), then a watch file is mandatory
+[19:27] <directhex> next, control, which is the first file with any mono specifics you need to know
+[19:28] <directhex> click on it (raw for those using the web interface), and you should see the list of build-depends on the source package, and the depends on the resultant binary package
+[19:29] <directhex> the latter first - notice how as well as the ${misc:Depends} entry you should be used to from other packaging systems, we have a ${cli:Depends} entry. this is the entry which we auto-populate with the real deps.
+[19:29] <directhex> things like libmono-system2.0-cil and so on
+[19:30] <directhex> and, here's part of the magic - if we ever move anything around (as we often do, in our never-ending quest to save space), then all your package needs is a recompile, and it'll pick up the new deps
+[19:30] <directhex> simple, easy, yay.
+[19:30] <directhex> now, the build-depends
+[19:31] <directhex> first thing you need to notice is the debhelper dependency. the version here, 7.0.50, is needed to use some of the features in debian/rules which we'll get to in a bit. i'll explain why when we get there
+[19:31] <directhex> cli-common-dev is needed for all the magic we use to do the dep auto-completion
+[19:32] <directhex> mono-devel is the "master" package which pulls in things like our current preferred compiler, and other assorted tools that mono builds use. this is the mono equivalent of build-essential or default-jdk or something - just pull it in to build things
+[19:33] <directhex> lastly we have some libraries specific to this app - in this case it needs banshee (as it's a banshee plugin), gconf# (for storing settings) and gtkhtml# (for displaying html). generally, when packaging an app or lib, you just need to list the things your lib needs to build here.
+[19:33] <directhex> so, what ties this all together? debian/rules - the debian package's makefile. take a look at the rules file now
+[19:33] <directhex> ( http://git.debian.org/?p=pkg-cli-apps/packages/bansheelyricsplugin.git;a=blob_plain;f=debian/rules;hb=HEAD )
+[19:33] <directhex> so. this is a reasonably simple dh7 file, with some special features.
+[19:34] <directhex> firstly, you'll notice the include at the top - like i said, this include is what makes a dh7 file a mono-specific dh7 file
+[19:34] <directhex> next is a bunch of scri[ting to fill in version number details. this is used by the get-orig-source rule, another thing we insist on as a team
+[19:35] <directhex> when we come to sponsor a package, we want to just say "okay, download the upstream source for me" and get an orig tarball ready for use - so we want a get-orig-source rule to do it. if you look closely you'll see that most of this rules file is actually taken up with get-orig-source things
+[19:36] <directhex> next, the dh7 "magic rule" which James will have covered earlier - that's the "%: dh $@" rule
+[19:36]  * meebey mumbles: only the packagers prefere it super easy, some sponsors like that too ^^
+[19:36] <meebey> +not
+[19:36] <directhex> what that means is whenever the build server says "debian/rules foobar", then this rule means "dh foobar" gets executed, and dh will use its big list of operations to run everything associated with the foobar task
+[19:37] <directhex> things like "build" or "install" or "configure"
+[19:37] <directhex> lastly, we have something found only in recent dh7, i.e. the reason for the 7.0.50 requirement - we have some overrides
+[19:38] <directhex> the latest dh7 allows you to have a "override_dh_somecommand" rule, and it'll run your rule instead when it would normally run the named command
+[19:39] <directhex> in this case, we have two - dh_installchangelogs is being overridden to not include the ChangeLog file it would normally include, and dh_auto_configure is being overridden to change the MCS variable passed to ./configure
+[19:40] <directhex> that's one last thing we insist on as a team - we've been trying to work towards a situation where you can have a "default" c# compiler, the way you have "cc" for C or "c++" for C++
+[19:40] <dnielsen> I assume the latter is part of the much touted space savings feature
+[19:40] <directhex> a build system which hard-codes, say, gcc-4.2 for not good reason is broken - it should use your system's preferred C compiler. we're trying to enforce the same thing
+[19:41] <dnielsen> ah
+[19:41] <directhex> in the future this should make it much easier to use Portable.NET if you so wish, as it'll offer an alternative for the csc (C# compiler) command
+[19:42] <directhex> right, so that's pretty much it for packaging an app (!)
+[19:42] <directhex> there's the question of patching, of course
+[19:42] <directhex> I'd suggest you look at http://svn.debian.org/wsvn/pkg-cli-apps/packages/themonospot/trunk/debian/#_packages_themonospot_trunk_debian_ in your own time for an example of dh7+mono+patching
+[19:43] <directhex> that just leaves libraries, really.
+[19:43] <directhex> and the specifics for libraries are pretty much as I told dnielsen earlier - see http://svn.debian.org/wsvn/pkg-cli-libs/packages/taglib-sharp/trunk/debian/#_packages_taglib-sharp_trunk_debian_ for an example
+[19:44] <directhex> there's a .install file (which says which files should be installed where), and a .installcligac file (which says "put the named files into the GAC)
+[19:44] <meebey> oldschool packaging! :)
+[19:45] <directhex> and that's more or less all there is to it, until you need to patch things up the wazoo to get them to be signed, or need to build your own policy files because upstream are stupid, and so on
+[19:45] <directhex> if you're feeling insane, look at ikvm's packaging for a journey into madness
+[19:45] <directhex> or feel free to update our db4o packaging, as nobody's been brave enough yet
+[19:45] <directhex> but I think that's all the topics covered in mind-numbing detail, with 15 minutes left over for Q&A
+[19:45] <directhex> so. any questions on mono packaging?
+[19:46] <meebey> how come the mono packages are the most awesome?
+[19:47] <directhex> well, we have a very sexy person in charge of the debian mono group. it's all their doing
+[19:47] <antileet> meebey: I've never packaged anything for debian before, can you point me to a document where I can start?
+[19:47] <dnielsen> looking at the example packages it seems a lot of the hackarounds are for upstream insanity. Would it maybe be prudent to have documentation for upstreams on how to making packaging easier. It seems to me that there is a trend of common mistakes
+[19:47] <directhex> that and we have lots of things at our disposal which make life much easier than other guys - e.g. i'd be amazed if the java folks wouldn't go mad for things like assembly reference lists & policy versioning in libraries
+[19:48] <meebey> dnielsen: from time to time we try to educate upstream, but its very time consuming task
+[19:48] <directhex> and some upstreams can be hostile
+[19:48] <directhex> or uninterested
+[19:48] <directhex> or lazy
+[19:48] <directhex> or drunk
+[19:49] <directhex> so we try not to be pushy with upstreams
+[19:49] <meebey> antileet: for deb packaging or especially debian?
+[19:50] <antileet> meebey: The basics of deb packaging please
+[19:50] <meebey> new maintainer guide should be a good start I guess
+[19:50] <directhex> oh, and whilst they're here: meebey is head of the debian mono group, and essentially "the boss" for all this stuff. Laney is my peer within MOTU who does general mono nonsense too, amongst other things (e.g. he does haskell too, the poor fool). hyperair is the ubuntu banshee packager, mainly. sebner packages assorted mono things he finds fun, and is also from ubuntuland.
+[19:50] <meebey> antileet: http://www.debian.org/doc/maint-guide/
+[19:50] <directhex> anyone i missed, /trout me at will
+[19:51] <directhex> antileet, and see http://pkg-mono.alioth.debian.org/cli-policy/ for the group policies in painful detail
+[19:51] <directhex> okay. no more packaging questions?
+[19:51] <Laney> how can I best get involved with the team?
+[19:52] <directhex> Laney, why, you'd come to #debian-cli on OFTC, and make a nuisance of yourself for a while!
+[19:52] <antileet> meebey: Okay, seems detailed enough. I want to initially try and package MD trunk for ubuntu. I'll let you know if I find any trouble
+[19:52] <directhex> that's where most of what we do is coordinated - there's also a mailing list somewhere
+[19:53] <Laney> but aren't debian developers scary and mean ubuntu-haters?
+[19:53] <directhex> aha, http://lists.debian.org/debian-cli/
+[19:53] <meebey> antileet: MD is a bitch ,) as little advance warning :-P
+[19:53] <sebner> directhex: tell about git!
+[19:53] <antileet> meebey: there are like seven or eight assemblies that I see
+[19:54] <dnielsen> the MD fedora spec made me cry.. I definitely do not recommend using MD as a first anything.. not without ample amounts of drugs handy
+[19:54] <directhex> Laney, the debian folks are all lovely ubuntu lovers (*cough*), who have been shown that we're not all useless layabouts. more importantly, #debian-cli is full of people who know their stuff, so package quality will be best if you coordinate with the clever folks in there
+[19:54] <directhex> remember, a package in debian is a package in debian AND ubuntu. everybody wins
+[19:54] <antileet> dnielsen: Okay, I package something simple then.
+[19:55] <Laney> *and* a better package from being gazed at lovingly by people who care for its area
+[19:55] <meebey> antileet: the bad part is the build system, upstream is buggy there
+[19:55] <meebey> antileet: see the patches I have to apply/update with each release: http://svn.debian.org/wsvn/pkg-cli-apps/packages/monodevelop/trunk/debian/patches/00list
+[19:55] <directhex> indeed. MOTU is great, but generalists might not know about specifics of mono packaging, and might miss, say, bad policy data breaking transitions, or something
+[19:55] <sebner> Laney: debian with bugs meebey says *cough* *cough*
+[19:56] <antileet> meebey: why don't you just get the patches into the trunk?
+[19:56] <directhex> sebner, it is though!
+[19:56] <Laney> the magic "just" ;)
+[19:56] <directhex> ANY OTHER MONO QUESTIONS WHILST WE'RE HERE? WHEEEEE!
+[19:57] <meebey> antileet: because upstream preferes being broken in some cases
+[19:57] <sebner> directhex: debian with cool bleeding edge software ftw! :P
+[19:57] <dnielsen> thank you directhex for this enlightening hour
+[19:57] <sebner> \o/ directhex
+[19:57] <directhex> dnielsen, well, most of it is only possible thanks to meebey, so round of applause for meebey
+[19:57] <sebner> \o/ meebey
+[19:58] <meebey> :-P
+[19:58]  * sebner is meebey's only fanboy evidently :P
+[19:58] <directhex> he's also the mad person who sponsors 99% of mono package uploads in debian, and takes care of the "mono" and "monodevelop" source packages all by himself
+[19:58] <directhex> 2 minutes! no last-minute heckles?
+[19:58] <meebey> and smuxi *cough* *cough* a very cool next generation IRC client (compared to irssi at least)
+[19:59] <directhex> yes, he's upstream for smuxi. cross-platform irc client!
+[20:00] <directhex> ding ding, time's up!
+[20:00] <directhex> anyone who cares, or has more questions, #debian-cli is that way -->
+[20:00] <directhex> peace out, y'all
+[20:01] <meebey> watch out for the network bumps, it's on OFTC
+}}}
+----
+CategoryPackaging

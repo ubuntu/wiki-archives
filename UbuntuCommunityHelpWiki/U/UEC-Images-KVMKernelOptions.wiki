@@ -1,0 +1,102 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+=== Advanced usage of UEC Images ===
+
+You can customize the way UEC Images boot under a local KVM instance by passing certain kernel command line variables. This approach enables you to pass custom cloud-init data-sources, set the instance's password, hostname, instance-id ...etc
+
+Here is a description of command line parameters used by 'cloud-init' and 'uncloud-init'. By modifying the kernel command line, you can change the behavior of those 2 programs that affect the early boot stage
+
+* ubuntu-pass=[password|random]<<BR>>On first boot, uncloud-init will set the password to be 'password'.  If the string provided is literally the string 'random' then a random pass will be created and written to the console.
+ This is not true on images from 12.10 and above (image would have to be booted twice as Ubuntu user won't be present for first uncloud-init run).  Recommenedation is to seed the image like so <nowiki>[[http://ubuntu-smoser.blogspot.fr/2013/02/using-ubuntu-cloud-images-without-cloud.html]]</nowiki>
+* ds=nocloud;[key=val] or ds=nocloud-net;[key=val]<<BR>>ds=nocloud<<BR>>Means the instance is booting on a plain hypervisor with no cloud metadata service to be expected<<BR>>ds=nocloud-net<<BR>>Means the instance is booting on a cloud of some sort, however do not expect the cloud metadata service to be available! This helps cloud-init not wait for the metadata service to appear. You can pass a custom metadata network service by passing the s= parameter
+** s=<seedlocation> | seedfrom=<seedlocation> [default=""]<<BR>>This allows you to set the 'seed location'.  The value can be a url of 'file:///' format, or of 'http://' format.  If you want to use http or another network based seed, then 'nocloud-net' must be used as the data source, rather than 'nocloud'.  meta-data and user-data will be read from <seedlocation>meta-data and <seedlocation>user-data respectively.<<BR>>For example I set up the tiny urls http://tinyurl.com/sm-user-data and http://tinyurl.com/sm-meta-data .  These redirect to pages on my hosted system, the tinyurl is only used to make the urls shorter.  Then, I can boot with a command line like:<pre>
+ "ro init=/usr/lib/cloud-init/uncloud-init root=LABEL=uec-rootfs ds=nocloud-net;s=http://tinyurl.com/sm- ubuntu-pass=random"
+</pre> in , and the user-data and meta-data are pulled from the respective URLs.  The format of user-data and meta-data is described in cloud-init's documentation <nowiki>[[http://bazaar.launchpad.net/~cloud-init-dev/cloud-init/trunk/files/head%3A/doc/examples/seed/|doc/examples/seed]]</nowiki>.
+** h=hostname | local-hostname=hostname [default="ubuntuhost"]<<BR>>Set the local hostname for this instance.
+** i=id | instance-id=id [default="nocloud"]<<BR>>This sets the the 'instance-id' for the boot.  In EC2 or Eucalyptus, this would be something like 'i-abcdefg' and changes for each instance.  The cloud-init code uses 'instance-id' to indicate whether this is the first boot.  What this means is that, by default, the constant string 'nocloud' as an instance id will on ever initialize once.  If youwant to test initialization again, you would have to remove files in /var/lib/cloud/sem or change this string.
+* boot with kvm '-kernel' command line arguments rather than with the boot floppy: <pre>
+kvm -drive file=disk.img,if=virtio,boot=on \
+   -kernel "${kernel}" \
+   -append "root=/dev/vda ro init=/usr/lib/cloud-init/uncloud-init ds=nocloud ubuntu-pass=ubuntu"
+</pre>
+* Import the virtual machine into libvirt (replace PATHTO). Import the following xml with <pre>
+virsh "create ./maverick-server-uec-i386.xml"
+</pre> <pre>
+<domain type='kvm'>
+  <name>maverick-server-uec-i386</name>
+  <memory>131072</memory>
+  <currentMemory>131072</currentMemory>
+  <vcpu>1</vcpu>
+  <os>
+    <type arch='i686' machine='pc'>hvm</type>
+    <boot dev='hd'/>
+    <kernel>/PATHTO/maverick-server-uec-i386-vmlinuz-virtual</kernel>
+    <cmdline>root=/dev/vda ro init=/usr/lib/cloud-init/uncloud-init ds=nocloud ubuntu-pass=ubuntu</cmdline>
+  </os>
+  <features>
+    <acpi/>
+  </features>
+  <clock offset='utc'/>
+  <on_poweroff>destroy</on_poweroff>
+  <on_reboot>restart</on_reboot>
+  <on_crash>destroy</on_crash>
+  <devices>
+    <emulator>/usr/bin/kvm</emulator>
+    <disk type='file' device='disk'>
+      <source file='/PATHTO/disk.img'/>
+      <target dev='vda' bus='virtio'/>
+    </disk>
+    <interface type='network'>
+      <source network='default'/>
+    </interface>
+    <input type='mouse' bus='ps2'/>
+    <graphics type='vnc' port='-1' autoport='yes' listen='127.0.0.1'/>
+    <video>
+      <model type='cirrus' vram='9216' heads='1'/>
+    </video>
+  </devices>
+</domain>
+</pre>
+* By providing user-data and meta-data via the seed, you can avoid the need for uncloud-init. Note that in this case, you will not be able to login to the instance over the console: <pre>
+kvm -drive file=disk.img,if=virtio,boot=on \
+   -kernel "${kernel}" \
+   -net nic,model=virtio -net "user,hostfwd=tcp::5555-:22" \
+   -append "root=/dev/vda ro ds=nocloud-net;s=http://tinyurl.com/sm-" \
+   -curses
+</pre> Given the above, which sets up redirections on localhost port 5555 to the guest's port 22, and suitable data in the referenced metadata and user-data, I can then ssh into the system with <pre>
+ssh -p 5555 ubuntu@localhost
+</pre>
+Read More about running <nowiki>[[http://foss-boss.blogspot.com/2010/12/cloud-instance-with-cloud-init-on-kvm.html|UEC image with cloud-init on a local KVM]]</nowiki>
+
+* Use uncloud's "xupdate" mechanism to seed or update the filesystem: <pre>
+$ sdir="var/lib/cloud/data/cache/nocloud"
+$ ud=overlay
+$ mkdir -p "${ud}/updates/${sdir}"
+
+$ b="http://bazaar.launchpad.net/%7Ecloud-init-dev/cloud-init/trunk/download/head%3A/preseedmetadata.txt-20100811204932-d0e2s9pcebnirj8p-1/"
+$ wget "${b}/meta-data" -O "${ud}/updates/${sdir}/meta-data"
+$ wget "${b}/user-data" -O "${ud}/updates/${sdir}/user-data"
+
+$ cat > "${ud}/updates.script" <<EOF
+echo ==== HELLO WORLD =====
+sleep 3
+EOF
+$ chmod 755 "${ud}/updates.script"
+
+$ genisoimage -rock --output updates.iso "${ud}"
+
+$ qemu-img create -f qcow2 -b ${img} disk.img
+
+$ kvm -kernel "${kernel}" \
+   -drive file=disk.img,if=virtio -drive file=updates.iso,if=virtio \
+   -append "root=/dev/vda ro init=/usr/lib/cloud-init/uncloud-init ds=nocloud ubuntu-pass=ubuntu xupdate=vdb:mnt" \
+   -curses -net nic,model=virtio -net "user,hostfwd=tcp::5555-:22"
+</pre>

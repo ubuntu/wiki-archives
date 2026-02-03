@@ -1,0 +1,149 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+This page is for Importer admins to document how to perform various tasks
+with the installer in production.
+
+=== Overview ===
+
+The importer is a few separate processes:
+
+** mass-import: the controller daemon that dispatches jobs to workers.
+** import_package.py: the worker that acts on a single package.
+** add_import_jobs.py: run from cron to add jobs for new uploads.
+** list_packages.py: run infrequently from cron to keep our list of all packages up to date for the idle tasks.
+
+and a few helper scripts:
+
+** requeue_package.py: retry failed packages, change priority of jobs, set spurious failure types.
+** show_failure.py: command line way to view the current failure for a package if any.
+** categorise_failures.py: run from cron to update the status page every 5 minutes. Can be run by hand if desired.
+
+=== Architecture ===
+
+mass-import runs all the time to do the dispatching, for which it starts up new processes to get a process boundary to catch all types of failures (it can notice a python segfault). It is looping and when there is a free slot it either starts the highest priority job, or runs an idle task, or sleeps. import_package.py then works out what it has to do on a package, and performs anything it has to do, if anything.
+
+mass-import uses a lock to ensure it is single instance, and import_package.py uses locks to ensure only one is running
+at any moment for any package.
+
+They are designed to recover from complete failure, so it is safe to kill them at any time. When restarted mass-import will start jobs for any packages it was part-way through when killed. Every time import_package.py is run for a package it checks for half-finished imports on the local disk, and either blows them away, or continues them, depending on what stage was reached. It uses a three-phase commit procedure to allow this.
+
+The only problem with this comes when e.g. bzr makes half a .bzr on LP and is then killed. In those cases some manual
+intervention will be required when the package later fails with an error pointing to that.
+
+There is a polite way to stop the processes though, see below.
+
+=== Getting in ===
+
+The importer runs on jubany, under the pkg_import user (sudo su - pkg_import).
+
+It is rooted in /srv/package-import.canonical.com/new/, with the scripts imaginatively placed in the "scripts" directory.
+
+=== Tasks ===
+
+==== Starting and stopping ====
+
+** To start have a LOSA run "/etc/init.d/mass-import start"
+** To gracefully stop have a LOSA run "/etc/init.d/mass-import graceful-stop" and wait until the mass_import.py process exits.
+** To kill have a LOSA run "/etc/init.d/mass-import stop"
+** To restart (e.g. after an update to mass_import.py) have a LOSA run "/etc/init.d/mass-import restart"
+
+'''NOTE''': there are currently some issues with stopping when requested, due to children hanging and not being killed. If that happens then killing the children (import_package.py processes) should fix it, and if the main process still runs it can be killed directly.
+
+==== Retrying failures ====
+
+** To retry failures ./requeue_package.py <package names>
+** To retry with high priority add --priority
+** To retry and automatically retry subsequent failures with the same trace (don't use as a workaround for retrying all with the same trace if it is not a transient error) add --auto.
+    - Note that --priority isn't remembered with --auto.
+
+==== Bumping priority ====
+
+** To bump the priority of something waiting in the queue ./requeue_package.py --force --priority <package names>
+
+==== Catching missed uploads ====
+
+** To cause an import of a package that hasn't failed and isn't in the queue ./requeue_package.py --force <package name>
+
+==== Updating the code ====
+
+** Run "bzr pull" in the scripts directory to update from the LP branch. Remember to restart mass-import if you modified its code. Changes to other scripts will be picked up without intervention.
+
+==== Investigating collisions ====
+
+If there is a collision that you believe is spurious you will have the following things:
+
+** The freshly imported branch at lp:distro/package
+** The saved branch linked in the bug report/merge proposal
+** The log file at /srv/package-import.canonical.com/new/logs/package on jubany.
+
+Looking at where the branches diverged and the last revision on the saved branch you can infer what state the branches were in when the collision happened. You can cross reference this with the log file to see the trace of what happened. Search for "Collision for <version number> <suite>" in the log file to find where it reported the problem.
+You can also search for "import .*<version number>" to see all the times it tried to import that version.
+
+The line that tells you about the collision will tell you what revids it expected the tags to be at, and working
+from that you can get some idea of where the mistake may have happened.
+
+There's no fixed way to work out what went wrong, as it is usually a new bug that causes spurious collisions, and
+often that bug was in the way the data was stored, rather than the way it is being interpreted now.
+
+==== Setting a branch as official ====
+
+Sometimes you want to set another branch as official (e.g. where it is a packaging branch that predates UDD) this process is currently rather convoluted (but should be a rare operation.
+
+First remove all the links for the package
+
+  ./set_official.py --reset <package>
+
+(set_official.py is in lp:udd)
+
+Then set the new branch:
+
+  ./set_official.py <package> <branch>
+
+Then ssh to the import machine and clear the audit information in the db, as it will all be invalid now:
+
+  sqlite3 meta.db
+
+  select * from revids where package="<package>";
+  select * from revids_working where package="<package>";
+
+If nothing looks amiss:
+
+  delete from revids where package="<package>";
+  delete from revids_working where package="<package>";
+
+Kick off an import to have the importer make friends with the new branch
+
+  requeue_package.py --force <package>
+
+Then watch for the result to see what happens.
+
+==== Adjusting number of parallel imports ====
+
+To adjust the number of parallel imports at runtime you can change the number in a file
+
+  echo N > /srv/package-import.canonical.com/new/max_threads
+
+where N is the number of threads that you want. Going much above 8 is not advised as it has been known to cause
+issues for Launchpad codehosting (though that may have been due to a bug in the importer causing it to not re-use existing connections). Obviously 0 is not a good number of threads to request. -1 would be even worse.
+
+This will not kill any imports in progress, just avoid starting any new ones until there is a free slot, so it may take some time before you see the effect
+==== Getting some numbers and timing from the logs ====
+
+The ``progress_log[.N]`` files contains a lot of output from the imports and since they run in parallel it may be hard to analyse for some sort of analysis at least
+
+  /analyze_log.py <log>
+
+will gives some overall timings for the importer driver/controller and the individual imports. If some process crosses the log file boundary, the times are approximated and prefixed with '<' or '>'.
+
+=== Common Issues ===
+
+When maintaining the importer, there are some failures that are known, and how you should handle them.
+<nowiki>[[DistributedDevelopment-UnderTheHood-Importer-CommonFailures]]</nowiki>

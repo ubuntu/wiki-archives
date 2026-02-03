@@ -1,0 +1,121 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+* '''Launchpad Entry''': UbuntuSpec:mozilla-karmic-firefox-wifi-scanning
+* '''Affected Packages''': wpasupplicant, firefox-3.5+
+* '''Creator''': Alexander Sack
+''please don't edit this spec without contacting the author or the approver first''
+
+=== Intro ===
+
+Firefox 3.5 will ship a new feature that supports geolocation services based on wifi APs found during scans. This spec only covers system setups that use a dbus enabled wpasupplicant for their wifi connectivity (e.g. NetworkManager, connman, ifupdown). This spec has three parts:
+* suggest changes required to the wpasupplicant default dbus access policies to allow applications to leverage its scan results.
+* outline best practices for applications in general that need to access wifi scan results.
+* outline a patch for the mozilla code base to support wpasupplicant scan result instead of the current wireless extension approach
+
+=== Use-Case ===
+Application F (like Firefox 3.5) wants to provide geolocation based services to the user and needs recent wifi scan results to leverage a geolocation service provider (such as google).
+
+=== Design ===
+
+'''Problem''': Using wireless extensions from unprivileged user-space programs to obtain scan result has deficiencies:
+ 1. iwlist scan does not trigger a real scan
+ 2. iwlist scan list results age and even get consumed by other apps; this will cause the scan result list to be regularly empty and unreliable.
+
+'''Solution''': use wpasupplicant to access a better AP cache.
+
+'''Details''': On wpasupplicant enabled systems you can (in theory) listen to wpasupplicant ScanResultsAvailable dbus signal and then get details using the appropriate wpasupplicant intefaces and members
+
+It might also make sense to allow users at the console to trigger scans in wpasupplicant; this will prevent outdated lists for users that don't use a connection manager performing background scanning.
+
+=== Implementation ===
+
+==== changes to wpasupplicant dbus policy ====
+ 1. grant access for <code>default</code> to
+** <code>scanResults</code> member of the <code>fi.epitest.hostap.WPASupplicant.Interface</code> interface
+** <code>properties</code> member of the <code>fi.epitest.hostap.WPASupplicant.BSSID</code> interface
+** Example dbus policy section to grant those privileges (based on current wpasupplicant policy): <pre>
+<!DOCTYPE busconfig PUBLIC
+ "-//freedesktop//DTD D-BUS Bus Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
+<busconfig>
+        <policy user="root">
+                <allow own="fi.epitest.hostap.WPASupplicant"/>
+
+                <allow send_destination="fi.epitest.hostap.WPASupplicant"/>
+                <allow send_interface="fi.epitest.hostap.WPASupplicant"/>
+        </policy>
+        <policy group="netdev">
+                <allow send_destination="fi.epitest.hostap.WPASupplicant"/>
+                <allow send_interface="fi.epitest.hostap.WPASupplicant"/>
+        </policy>
+        <policy context="default">
+                <deny own="fi.epitest.hostap.WPASupplicant"/>
+                <deny send_destination="fi.epitest.hostap.WPASupplicant"/>
+                <deny send_interface="fi.epitest.hostap.WPASupplicant"/>
+
+                <!-- extra privileges to access scan result details for unprivileged users -->
+                <allow send_interface="fi.epitest.hostap.WPASupplicant.Interface"
+                       send_member="scanResults"/>
+                <allow send_interface="fi.epitest.hostap.WPASupplicant.BSSID"
+                       send_member="properties"/>
+        </policy>
+</busconfig>
+</pre>
+** same as above, but just the diff -u: <pre>
+--- /etc/dbus-1/system.d/wpa_supplicant.conf.orig	2009-06-16 16:01:39.000000000 +0200
++++ /etc/dbus-1/system.d/wpa_supplicant.conf	2009-06-16 16:03:32.000000000 +0200
+@@ -16,5 +16,9 @@
+                 <deny own="fi.epitest.hostap.WPASupplicant"/>
+                 <deny send_destination="fi.epitest.hostap.WPASupplicant"/>
+                 <deny send_interface="fi.epitest.hostap.WPASupplicant"/>
++                <allow send_interface="fi.epitest.hostap.WPASupplicant.Interface"
++                       send_member="scanResults"/>
++                <allow send_interface="fi.epitest.hostap.WPASupplicant.BSSID"
++                       send_member="properties"/>
+         </policy>
+ </busconfig>
+</pre>
+
+==== Best practices for tracking wpasupplicant scan results ====
+ 1. listen to scanResults; the dbus signal that matters is <pre>
+signal sender=:1.8 -> dest=(null destination) serial=11608 path=/fi/epitest/hostap/WPASupplicant/Interfaces/6; interface=fi.epitest.hostap.WPASupplicant.Interface; member=ScanResultsAvailable
+</pre>
+ 1. to obtain current list of scanResults call the dbus <code>scanResults</code> member method <pre>
+$ dbus-send --print-reply --dest="fi.epitest.hostap.WPASupplicant" --system "/fi/epitest/hostap/WPASupplicant/Interfaces/6" "fi.epitest.hostap.WPASupplicant.Interface.scanResults"
+method return sender=:1.8 -> dest=:1.643 reply_serial=2
+   array [
+      object path "/fi/epitest/hostap/WPASupplicant/Interfaces/6/BSSIDs/00227532243f"
+      object path "/fi/epitest/hostap/WPASupplicant/Interfaces/6/BSSIDs/0012bfdea08e"
+      object path "/fi/epitest/hostap/WPASupplicant/Interfaces/6/BSSIDs/0012bf7a07c9"
+      object path "/fi/epitest/hostap/WPASupplicant/Interfaces/6/BSSIDs/00150c53e790"
+      object path "/fi/epitest/hostap/WPASupplicant/Interfaces/6/BSSIDs/00184d19b334"
+      object path "/fi/epitest/hostap/WPASupplicant/Interfaces/6/BSSIDs/00146c43ca4a"
+      object path "/fi/epitest/hostap/WPASupplicant/Interfaces/6/BSSIDs/00230801d407"
+      object path "/fi/epitest/hostap/WPASupplicant/Interfaces/6/BSSIDs/0013494e13c1"
+      object path "/fi/epitest/hostap/WPASupplicant/Interfaces/6/BSSIDs/001d19b62e15"
+      object path "/fi/epitest/hostap/WPASupplicant/Interfaces/6/BSSIDs/001b2fe8e05e"
+      object path "/fi/epitest/hostap/WPASupplicant/Interfaces/6/BSSIDs/001b119cec36"
+      object path "/fi/epitest/hostap/WPASupplicant/Interfaces/6/BSSIDs/000124f4831c"
+   ]
+</pre>
+ 1. to obtain details for each scan result, use: <pre>
+dbus-send --print-reply --dest="fi.epitest.hostap.WPASupplicant" --system "/fi/epitest/hostap/WPASupplicant/Interfaces/6/BSSIDs/0012bfdea08e" "fi.epitest.hostap.WPASupplicant.BSSID.properties"
+... (result)
+</pre>
+
+==== Firefox changes ====
+Firefox implementation nsWifiScannerUnix.cpp should provide xpcom hook to plug in toolkit/unix shipped scanners; unix scanner should fallback to current iw implementation if the toolkit/unix scanner fails.
+
+toolkit/unix scanner needs to listen to ScanResultsAvailable signals on the dbus. From those signals it can track active interfaces and query those for scanResults.
+
+Main action on firefox from this spec is filing an upstream bug and working together with upstream. Once there is a trunk fix, consider to backport for 1.9.1 branch and consider to initiate major change request.
+
+=== Comments ===

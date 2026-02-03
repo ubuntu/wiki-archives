@@ -1,0 +1,546 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+Ubuntu 9.04 and later use a new notification server, <nowiki>[[https://launchpad.net/notify-osd|Notify OSD]]</nowiki>, to present notification bubbles that follow the freedesktop.org <nowiki>[[http://www.galago-project.org/specs/notification/0.9/|Desktop Notifications Specification]]</nowiki>. These are the notifications produced using the `org.freedesktop.Notifications` DBus interface, or by using the terminal command `notify-send`.
+
+Notify OSD takes the place of `notification-daemon`, and its presentation of notification bubbles differs in several ways. So if you have written software that assumes notifications will always be presented by `notification-daemon`, you may need to adjust your code to be more compatible with Notify OSD and with the Desktop Notifications Specification in general. This guide covers common issues you may have with notifications in Notify OSD, as well as how to concatenate related bubbles.
+
+=== If a notification is showing up as an alert box ===
+
+Notify OSD presents a notification as an alert box if it uses `actions`, or has `expire_timeout` set to `0`, or both.
+
+==== Avoiding actions ====
+
+Because notification bubbles float on top of all other windows, and usually appear without warning, Notify OSD allows ''click-through''. Hovering over a bubble makes it transparent, and you can click — or drag to or from — anything underneath the bubble. This avoids accidental clicks on bubbles or items inside them, and removes the need to close a bubble manually before working with anything underneath it (two problems common to notification balloons in Windows and Growl notifications in Mac OS X).
+
+{| class="wikitable"
+|-
+| <tablestyle="clear: right; float: right; margin: 0 0 1em 1em;" style="border: none;"><nowiki>[[File:alert-box.png]]</nowiki>
+|}
+
+So Notify OSD bubbles cannot be clicked on themselves, nor can they contain buttons that can be clicked: in the terminology of the Desktop Notifications Specification, they do not accept `actions`. (This also means you no longer need to rush to click on something in a notification bubble before the bubble disappears.) This is <nowiki>[[http://www.galago-project.org/specs/notification/0.9/x408.html#signal-action-invoked|explicitly allowed by the specification]]</nowiki>: “Some servers may not support user interaction at all, or may not support the concept of being able to ‘invoke’ a notification.” But to avoid breaking software that has assumed and relies on the existence of `actions`, Notify OSD presents any notification that uses them as an alert box instead of a bubble.
+
+There are several ways to avoid `actions` producing unwanted alert boxes with Notify OSD. Which approach is best for you depends on what you are using the buttons for.
+
+* If the only button is “Do not show me this again” or similar, consider eliminating the notification entirely, or making it more obvious how to turn notifications on or off within the application’s interface.
+
+* If the actions are for letting you read or reply to a human message (for example, an instant message or a status update), consider integrating your application with Ubuntu’s messaging menu. (Guidelines for doing this will be available soon.)
+
+* If the buttons are for acting on a recurring type of event (such as a download), consider instead using a window that lists the events, possibly with the date and time of each. Depending on their urgency, this window may request attention when one of these events happens.
+
+* If the notification exists only to invite you to open another window, consider opening that window <nowiki>[[http://library.gnome.org/devel/gtk/unstable/GtkWindow.html#gtk-window-set-focus-on-map|unfocused]]</nowiki> directly, instead of showing the notification.
+
+* If the notification provides an extra access point for a function that is already easy to access from elsewhere in the software, consider making the `actions` conditional on whether the notification server advertises that it accepts `actions` in general.
+
+See the <nowiki>[[NotificationDesignGuidelines|notification design guidelines]]</nowiki> for more detailed advice about choosing between notification bubbles and other notification mechanisms.
+
+To detect whether a server accepts `actions` in general, use the <nowiki>[[http://www.galago-project.org/specs/notification/0.9/x408.html#command-get-capabilities|org.freedesktop.Notifications.GetCapabilities]]</nowiki> command. In this example, “Previous” and “Next” actions are added to a notification if the notification server accepts `actions`.
+
+'''C example code:''' <pre>
+capabilities = notify_get_server_caps();
+if(capabilities != NULL) {
+    for(c = capabilities; c != NULL; c = c->next) {
+        if(strcmp((char*)c->data, "actions") == 0 ) {
+            accepts_actions = TRUE;
+            break;
+        }
+    }
+    g_list_foreach(capabilities, (GFunc)g_free, NULL);
+    g_list_free(capabilities);
+}
+
+/* Adds "Previous" and "Next" buttons in the notification if allowed. */
+if(accepts_actions) {
+    notify_notification_add_action(
+        notification, "previous", _("Previous"), Prev, (gpointer*) p_intf, NULL);
+    notify_notification_add_action(
+        notification, "next", _("Next"), Next, (gpointer*) p_intf, NULL );
+}
+</pre>
+
+'''Python example code:'''
+<pre>
+caps = pynotify.get_server_caps()
+
+if caps and 'actions' in caps:
+### Adds "Previous" and "Next" buttons in the notification if allowed.
+    notification.add_action("previous", "Previous", Prev)
+    notification.add_action("next", "Next", Next)
+</pre>
+
+'''C# example code:'''
+<pre>
+bool accepts_actions = Notifications.Global.Capabilities != null &&
+                       Notifications.Global.Capabilities.Contains("actions");
+if (accepts_actions) {
+    nf.AddAction ("previous", Catalog.GetString("Previous"), OnSongPrevious);
+    nf.AddAction ("next", Catalog.GetString("Next"), OnSongPrevious);
+}
+</pre>
+
+==== Avoiding non-expiring notifications ====
+
+Because there is nothing in a Notify OSD bubble that responds to clicks or keypresses, there is no way it can be closed manually. Therefore, every bubble closes by itself after a timeout. This timeout is based on the length of the bubble’s text; Notify OSD does not use the `expire_timeout` parameter.
+
+Some programs specify an `expire_timeout` of `0` to produce notifications that never close by themselves, assuming that they can be closed manually as they can in `notification-daemon`. Because this is usually done for a message that requires response or acknowledgement, Notify OSD presents it as an alert box rather than as a bubble.
+
+* If a notification does not actually need response or acknowledgement, you can avoid it appearing as an alert box by setting the `expire_timeout` to the default value of `-1`.
+
+* If a notification does need response or acknowledgement, consider presenting it using another mechanism, such as a more carefully designed alert box, or a placard embedded into a relevant window. See the <nowiki>[[NotificationDesignGuidelines|notification design guidelines]]</nowiki> for more detailed advice about choosing between notification bubbles and other notification mechanisms.
+
+=== If a notification bubble isn’t pointing at part of the screen as expected ===
+
+Notify OSD does not use the `x` and `y` hints defined in the Desktop Notifications Specification for making notification bubbles point at a particular place on the screen.
+
+If your program was using these hints to point a notification bubble at an icon in the panel, consider replacing the icon and bubble with a more straightforward mechanism for attracting the user’s attention. See the <nowiki>[[NotificationDesignGuidelines|notification design guidelines]]</nowiki> for more detailed advice about choosing notification mechanisms.
+
+=== If a notification’s icon looks blurry or jagged ===
+
+To ensure resolution independence, and consistent layout of any notification bubble using an icon, Notify OSD scales any icon to fit inside a 3-em square. Here, an em is the height of one line of text in the user’s application font. This means that the exact pixel size of the icon depends on the display’s pixel density and the user’s font preferences. If the bitmap is small, the scaling may make it appear blurry or jagged.
+
+There are two ways to avoid this problem:
+* Whenever appropriate, use the `app_icon` parameter to supply an SVG icon instead of a bitmap. Design the icon to work well at any size; for example, use as much detail as desired, but do not make fine details essential to understanding what the icon represents.
+* If an SVG icon is not available (for example if presenting music album art, or an IM buddy icon), provide a large bitmap if possible, ideally at least 128 pixels in either width or height, to minimize the appearance of artifacts when it is scaled. Beware, however, that `notification-daemon` currently displays any icon at a 1-to-1 scale regardless of how large it is. So if you wish to support `notification-daemon` as well, consider serving a pre-scaled bitmap to `notification-daemon` while serving the full-size bitmap to any other notification server.
+
+This example code shows how to get the notification server’s name, and how to scale down an icon if it is being sent to `notification-daemon`.
+
+'''C example code:''' <pre>
+
+static GdkPixbuf *
+scale_pixbuf_preserve_aspect_ratio (GdkPixbuf *pixbuf,
+                                    gint size)
+{
+    GdkPixbuf *new_icon;
+    gdouble w, h, new_width, new_height, max_edge;
+
+    w = gdk_pixbuf_get_width (pixbuf);
+    h = gdk_pixbuf_get_height (pixbuf);
+    max_edge = MAX (w, h);
+    new_width = size * (w / max_edge);
+    new_height = size * (h / max_edge);
+
+    /* Scale the image down, preserving the aspect ratio */
+    new_icon = gdk_pixbuf_scale_simple (pixbuf, (gint)new_width, (gint)new_height, GDK_INTERP_HYPER);
+
+    return new_icon;
+}
+
+static gboolean
+send_notification (const gchar *title,
+                   const gchar *content,
+                   const GdkPixbuf *pixbuf,
+                   GtkWidget *status_widget)
+{
+    gchar *name = NULL;
+    GdkPixbuf *icon = NULL;
+    gboolean free_icon = FALSE;
+    gboolean ret = FALSE;
+    NotifyNotification *notification = NULL;
+
+    notify_get_server_info (&name, NULL, NULL, NULL);
+
+    if (!g_strcmp0 ("notification-daemon", name)) {
+        icon = scale_pixbuf_preserve_aspect_ratio ((GdkPixbuf *)pixbuf, 48);
+        free_icon = TRUE;
+    } else {
+        icon = (GdkPixbuf *)pixbuf;
+    }
+
+    notification = notify_notification_new (title, content, NULL, status_widget);
+    notify_notification_set_icon_from_pixbuf (notification, icon);
+
+    ret = notify_notification_show (notification, NULL);
+
+    g_free (name);
+    if (free_icon) {
+        g_object_unref (G_OBJECT (icon));
+    }
+
+    return ret;
+}
+</pre>
+
+'''Python example code:'''
+<pre>
+}}}
+[This example code will be provided soon.]
+
+'''C# example code:'''
+{{{
+if (Notifications.Global.ServerInformation.Name == "notification-daemon") {
+### ...
+}
+</pre>
+[This example code will be completed soon.]
+
+=== If a notification uses a hyperlink or text formatting, but it’s showing up as plain text ===
+
+Because there is nothing in a Notify OSD bubble that can be clicked, Notify OSD presents hyperlinks in notification messages as plain text. For consistency of appearance, Notify OSD also presents other text formatting (such as bold and underlining) as plain text. For example, the text “`<b>Please</b> read the <a href="http://example.com/relnote">release notes</a>.`” will appear as “Please read the release notes.”
+
+You can use `org.freedesktop.Notifications.GetCapabilities` to tell whether a notification server allows hyperlinks: a server that does will include “`body-hyperlinks`” in the array it returns. Notify OSD does not.
+
+* If your program generates the text containing the hyperlink itself (for example, if it is hard-coded into the program), consider using a button in an alert box or other window instead.
+
+* If the program is passing on messages from other sources and those messages may contain hyperlinks, ensure that the messages are also presented somewhere else where the links can be followed. For example, in an instant messaging program, any hyperlinks in messages you receive can be followed from inside the relevant chat window.
+
+=== If a notification uses a “<” or “&” character, and it has missing or wrong text ===
+
+The Desktop Notifications Specification allows some HTML markup in notification text, but is ambiguous about how markup should be handled if a notification server does not advertise that it accepts markup. `notification-daemon` assumes that all “<”, “>”, and “&” characters are HTML markup, and if they are not, it usually fails to display any text at all. Notify OSD is more forgiving, but may still produce unexpected results.
+
+To avoid this problem, if the notification server advertises that it accepts “`body-markup`” (as `notification-daemon` and Notify OSD both do), escape all “`<`”, “`>`”, and “`&`” characters in notification text as “`&lt;`”, “`&gt;`”, and “`&amp;`” respectively. This table shows examples of :( unescaped and B) escaped notification text, and how they are presented by `notification-daemon` and Notify OSD.
+
+{| class="wikitable"
+|-
+| <style="border: none;">
+| '''Example notification text'''
+| '''As displayed by `notification-daemon` 0.3.7'''
+| '''As displayed by Notify OSD'''
+|-
+| :(
+| `J & H Productions`
+| <style="color: #ccc;">''no text displayed''
+| J & H Productions
+|-
+| B)
+| `J &amp; H Productions`
+| J & H Productions
+| J & H Productions
+|-
+| :(
+| `&amp; and other HTML code`
+| & and other HTML code
+| & and other HTML code
+|-
+| B)
+| `&amp;amp; and other HTML code`
+| &``amp; and other HTML code
+| &``amp; and other HTML code
+|-
+| :(
+| `If x<y then y is greater than x`
+| <style="color: #ccc;">''no text displayed''
+| If x<y then y is greater than x
+|-
+| B)
+| `If x&lt;y then y is greater than x`
+| If x<y then y is greater than x
+| If x<y then y is greater than x
+|-
+| :(
+| `If x < y then y > x`
+| <style="color: #ccc;">''no text displayed''
+| If x < y then y > x
+|-
+| B)
+| `If x &lt; y then y &gt; x`
+| If x < y then y > x
+| If x < y then y > x
+|-
+| :(
+| `If x<y then y>x`
+| <style="color: #ccc;">''no text displayed''
+| If xx
+|-
+| B)
+| `If x&lt;y then y&gt;x`
+| If x<y then y>x
+| If x<y then y>x
+|}
+
+This example code shows how to detect whether the notification server accepts “`body-markup`”, and if it does, how to escape the notification text before emitting it.
+
+'''C example code:''' <pre>
+}}}
+[This example code will be provided soon.]
+
+'''Python example code:''' {{{
+caps = pynotify.get_server_caps()
+
+if caps and 'body-markup' in caps:
+    text = text.replace('&', '&amp;')
+    text = text.replace('<', '&lt;')
+    text = text.replace('>', '&gt;')
+notification = pynotify.Notification(name, title, text)
+</pre>
+
+'''C# example code:''' <pre>
+}}}
+[This example code will be provided soon.]
+
+=== If notification text is truncated with “…” ===
+
+To prevent a notification bubble from obscuring too much of the screen, Notify OSD limits a bubble’s width to 18 ems, its title text to three lines, and its body text to ten lines. Text longer than this is elided, indicated by an ellipsis (“…”) at the end of the title text or before the last eight lines of body text.
+
+If your program frequently sends notifications with more text than this, consider either reducing the length of the notifications, or using a different mechanism to present them (such as a window that lists them and allows browsing and search).
+
+=== If a notification uses an inline image, but the image does not appear ===
+
+Notify OSD allows and encourages high-quality icons for notifications, but it does not allow images embedded inline into the notification text. For example, the text “`ZYDN: <img alt="" src="~/.cache/stock-charts/zydn.png" /> 2390, up 4`” will appear as “ZYDN: 2390, up 4”.
+
+If you have been using an image in a notification, and the image is important to understanding the notification, ensure that the `alt=` text for the `<img>` element conveys equivalent meaning as the image itself. This will make the notification more useful to people with vision difficulties, regardless of which notification server they use.
+
+If the image is not important to understanding the notification, but is of roughly square proportions and would be useful at icon size, consider using it as the icon for the notification.
+
+You can use `org.freedesktop.Notifications.GetCapabilities` to tell whether a notification server allows inline images. A server that does will include “`body-images`” in the array it returns. Notify OSD does not.
+
+=== Concatenating related notification bubbles ===
+
+[This section will be written soon.]
+
+=== More examples ===
+
+* C code-fragments for querying capabilities
+{{{
+gboolean g_capabilities[CAP_MAX] = {FALSE, /* actions         */
+				    FALSE, /* body            */
+				    FALSE, /* body-hyperlinks */
+				    FALSE, /* body-imges      */
+				    FALSE, /* body-markup     */
+				    FALSE, /* icon-multi      */
+				    FALSE, /* icon-static     */
+				    FALSE, /* sound           */
+				    FALSE, /* image/svg+xml   */
+				    FALSE  /* append-hint     */};
+...
+void
+set_cap (gpointer data,
+	 gpointer user_data)
+{
+	/* test for "actions" */
+	if (!g_strcmp0 ("actions", (gchar*) data))
+		g_capabilities[CAP_ACTIONS] = TRUE;
+
+	/* test for "body" */
+	if (!g_strcmp0 ("body", (gchar*) data))
+		g_capabilities[CAP_BODY] = TRUE;
+	...
+	/* test for "append" */
+	if (!g_strcmp0 ("append", (gchar*) data))
+		g_capabilities[CAP_APPEND] = TRUE;
+}
+...
+void
+walk_caps_list ()
+{
+	GList* caps_list;
+
+	caps_list = notify_get_server_caps ();
+	if (caps_list)
+	{
+		g_list_foreach (caps_list, set_cap, NULL);
+		g_list_foreach (caps_list, (GFunc) g_free, NULL);
+		g_list_free (caps_list);
+	}
+}
+...
+int
+main (int    argc,
+      char** argv)
+{
+	...
+	walk_caps_list ();
+	...
+	if (g_capabilities[CAP_APPEND])
+	{
+		/* you're save to make use of the append hint */
+		...
+	}
+	else
+	{
+		/* do _not_ use the append hint */
+		...
+	}
+	...
+}
+</pre>
+
+* Python code-fragments for querying capabilities
+<pre>
+caps = pynotify.get_server_caps()
+if caps is None:
+	raise Exception("Failed to receive server caps.")
+...
+
+if 'append' in caps:
+# it's safe to use append-hint
+	...
+else:
+# do _not_ use append-hint
+	...
+</pre>
+
+* C# code-fragments for querying capabilities
+<pre>
+enum Capability {
+	CAP_ACTIONS = 0,
+	CAP_BODY,
+	CAP_BODY_HYPERLINKS,
+	CAP_BODY_IMAGES,
+	CAP_BODY_MARKUP,
+	CAP_ICON_MULTI,
+	CAP_ICON_STATIC,
+	CAP_SOUND,
+	CAP_IMAGE_SVG,
+	CAP_APPEND,
+	CAP_MAX}
+
+static bool[] m_capabilities = {false,  // actions
+				false,  // body
+				false,  // body-hyperlinks
+				false,  // body-imges
+				false,  // body-markup
+				false,  // icon-multi
+				false,  // icon-static
+				false,  // sound
+				false,  // image/svg+xml
+				false}; // append-hint
+
+if (Global.Capabilities == null)
+	return;
+
+if (Array.IndexOf (Global.Capabilities, "append") > -1)
+	m_capabilities[(int) Capability.CAP_APPEND] = true;
+...
+if (Array.IndexOf (Global.Capabilities, "append") > -1)
+	m_capabilities[(int) Capability.CAP_APPEND] = true;
+
+if (m_capabilities[(int) Capability.CAP_APPEND])
+{
+	// you're save to use the append-hint
+	...
+}
+else
+{
+	// do _not_ use the append-hint
+	...
+}
+</pre>
+
+=== Layout cases (with examples in C, Python and C#) ===
+Everything not listed as a valid layout will lead to a "no-layout"-case (results in an empty notification-bubble). Also using non-existing (stock-)icon-names results in empty notification-bubbles. Common caues for the latter could be that the user has not set "Human" as the icon-theme and a notification is trying to use one of the new icon-name (see <nowiki>[[#icons|icons]]</nowiki>). The comment header of each sourcecode example contains compilation and run instructions. NOTE: The C#-examples don't format and display in thie MoinMoin wiki. You can only download them directly to your harddisk. Sorry for the inconvenience! 
+
+==== Icon-Summary-Body ====
+<nowiki>[[File:icon-summary-body.png]]</nowiki><<BR>>
+example: IM-message
+* <nowiki>[[attachment:icon-summary-body.c|example in C]]</nowiki>
+* <nowiki>[[attachment:icon-summary-body.py|example in Python]]</nowiki>
+* <nowiki>[[attachment:icon-summary-body.cs|example in C#]]</nowiki>
+
+==== Icon-Summary ====
+<nowiki>[[File:icon-summary.png]]</nowiki><<BR>>
+example: Wifi connection lost
+* <nowiki>[[attachment:icon-summary.c|example in C]]</nowiki>
+* <nowiki>[[attachment:icon-summary.py|example in Python]]</nowiki>
+* <nowiki>[[attachment:icon-summary.cs|example in C#]]</nowiki>
+
+==== Summary-Body ====
+<nowiki>[[File:summary-body.png]]</nowiki><<BR>>
+example: a very simple notification-bubble
+* <nowiki>[[attachment:summary-body.c|example in C]]</nowiki>
+* <nowiki>[[attachment:summary-body.py|example in Python]]</nowiki>
+* <nowiki>[[attachment:summary-body.cs|example in C#]]</nowiki>
+
+==== Summary-only ====
+<nowiki>[[File:summary-only.png]]</nowiki><<BR>>
+This layout-case works, but is strongly discouraged. Avoid it if you can.
+* <nowiki>[[attachment:summary-only.c|example in C]]</nowiki>
+* <nowiki>[[attachment:summary-only.py|example in Python]]</nowiki>
+* <nowiki>[[attachment:summary-only.cs|example in C#]]</nowiki>
+
+=== How to use the append-hint ===
+<<BR>>
+(Gee, I cannot get this ogg/theora-screencast correctly embedded. So much for supporting open standards.)<<BR>>
+<nowiki>[[<nowiki>[[File:append-hint-example.ogg]]</nowiki></nowiki>|<nowiki>[[File:small_append-hint-example_ogg.png]]</nowiki>]]<<BR>>
+For IM-clients (like pidgin) you can use the append-hint ("append"). For code examples in C, C# and Python please see notify-osd trunk (bzr branch lp:notify-osd). You will find the append-hint-example in notify-osd/examples. The Python one is the most current.
+
+=== How to update an existing notification-bubble ===
+<<BR>>
+<nowiki>[[<nowiki>[[File:update-notifications.ogg]]</nowiki></nowiki>|<nowiki>[[File:small_update-notifications_ogg.png]]</nowiki>]]<<BR>>
+If you need to update the contents of an existing notification (remember the notification could have been not displayed yet or already been shown and closed) you can to that by keeping the object of you inital notification around and just use the update functionality of libnotify. For code examples in C, C# and Python please see notify-osd trunk (bzr branch lp:notify-osd). You will find the update-notifications in notify-osd/examples. The Python one is the most current.
+
+=== How do I get these slick icons ===
+The user has to be using the Human icon-theme. Have a look at the <nowiki>[[https://wiki.ubuntu.com/NotifyOSD#Icon|icon-matrix]]</nowiki>. Or if a different icon-theme is selected, default icons satisfying the new icon-names are used. These will look different of course. The available icon-names are...
+* notification-audio-next
+* notification-audio-play
+* notification-audio-previous
+* notification-audio-volume-high
+* notification-audio-volume-low
+* notification-audio-volume-medium
+* notification-audio-volume-muted
+* notification-audio-volume-off
+* notification-battery-low
+* notification-device-eject
+* notification-device-firewire
+* notification-display-brightness-full
+* notification-display-brightness-high
+* notification-display-brightness-low
+* notification-display-brightness-medium
+* notification-display-brightness-off
+* notification-GSM-3G-full
+* notification-GSM-3G-high
+* notification-GSM-3G-low
+* notification-GSM-3G-medium
+* notification-GSM-3G-none
+* notification-GSM-disconnected
+* notification-GSM-EDGE-full
+* notification-GSM-EDGE-high
+* notification-GSM-EDGE-low
+* notification-GSM-EDGE-medium
+* notification-GSM-EDGE-none
+* notification-GSM-full
+* notification-GSM-H-full
+* notification-GSM-H-high
+* notification-GSM-high
+* notification-GSM-H-low
+* notification-GSM-H-medium
+* notification-GSM-H-none
+* notification-GSM-low
+* notification-GSM-medium
+* notification-GSM-none
+* notification-keyboard-brightness-full
+* notification-keyboard-brightness-high
+* notification-keyboard-brightness-low
+* notification-keyboard-brightness-medium
+* notification-keyboard-brightness-off
+* notification-message-email
+* notification-message-IM
+* notification-network-ethernet-connected
+* notification-network-ethernet-disconnected
+* notification-network-wireless-disconnected
+* notification-network-wireless-full
+* notification-network-wireless-high
+* notification-network-wireless-low
+* notification-network-wireless-medium
+* notification-network-wireless-none
+* notification-power-disconnected
+... and are located under <nowiki>[[file:///usr/share/icons/Human/scalable/status|/usr/share/icons/Human/scalable/status]]</nowiki>. Until symlinks or updated icons for other icon-themes are installed (provided by updated packages) using these without the icon-theme being set to Human will fail to display the intended icon. The result is an empty notification-bubble. You can still of course use full file paths to .svg/.png/.jpg icons.
+
+=== Help! No libnotify bindings for language X ===
+If your program is not in written in C, Python or C# and there are no language bindings for libnotify available for your language of choice, you can still fall back to using the command-line tool "notify-send" (provided by the package: libnotify-bin) to trigger a notification. But be aware that you do not have access to all available features (e.g. you cannot make use of the append-hint or simply update an existing bubble). Furthermore your language does need to provide some system() call or method, which allows you to spawn external commands.<<BR>>
+
+Here's a list of the four layout-cases you can achieve by just using the command-line tool "notify-send":
+* Icon-Summary-Body
+<pre>
+notify-send "Cole Raby" "Hey pal, what's up with the party next weekend? Will you join me and Anna?" -i notification-message-im
+</pre>
+* Icon-Summary
+<pre>
+notify-send "WiFi connection lost" -i notification-network-wireless-disconnected
+</pre>
+* Summary-Body
+<pre>
+notify-send "Totem" "This is a superfluous notification"
+</pre>
+* Summary-only
+<pre>
+notify-send "Summary-only"
+</pre>
+
+See <nowiki>[[#examples|examples]]</nowiki> for screenshots of each layout-case.

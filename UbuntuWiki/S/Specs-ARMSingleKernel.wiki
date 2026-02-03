@@ -1,0 +1,401 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+* '''Launchpad Entry''': UbuntuSpec:kernel-maverick-arm-single-zimage
+* '''Created''': 2010-04-29
+* '''Contributors''': EricMiao, NicolasPitre
+* '''Packages affected''': kernel
+
+=== Summary ===
+
+We wish to provide the ability to build as many ARM platforms as
+possible into a single kernel binary image.  This will greatly simplify
+the archive packaging and maintenance effort by having only one kernel that
+could be built and booted on multiple ARM targets.
+
+=== Rationale ===
+
+Unlike for X86, what we generally refer to when mentioning "ARM" is pretty
+eclectic. While ARM Ltd has defined and standardized the ARM instruction set,
+the ARM licensees (aka vendors i.e. those who actually produce chips) have
+integrated that technology into wildly different SOCs. Therefore, there
+isn't such thing as a "common ARM architecture" as we mean it when talking
+about the "X86 architecture".
+
+Those different ARM vendors have used their own set of IP blocks around the
+ARM CPU core, such as timers, interrupt controllers, memory controllers,
+IO peripherals, etc. Even the MMU architecture has seen some variations
+between different vendors and different revisions of the ARM architecture.
+There is some on-going work at ARM Ltd to standardize more pieces of an
+ARM system into a common specification. But the ARM systems we have to deal
+with today come from different vendors with considerable differences,
+almost like different architectures when it comes to software support.
+
+Due to the number of different ARM cores, and different ARM SoCs, it is
+currently not possible to build all ARM platforms into a generic kernel
+as can be done in the PC world.  The ARM support in the Linux kernel is
+already structured to allow multiple machines based on the same SoC family
+to coexist in the same compiled binary.  And to some extent, the support
+for multiple CPU flavours may also be compiled in and selected at run time.
+But the possible combinations still have significant limitations that
+require multiple kernel binaries to be separately configured and built to
+cover all the ARM platforms we want to support.
+
+Lifting those limitations means we could have a single ARM kernel
+configuration, a single kernel build, and a single kernel package
+to carry in the Ubuntu distribution archive that would work for all the
+platforms we wish to support.  This also means that fixes for generic kernel
+bugs and the associated kernel update would have to be carried only once
+instead of duplicating that work for each platform.
+
+=== User stories ===
+
+Bryan has implemented a new cool feature on Freescale i.MX51, and would
+like to verify that feature on other ARM platforms, such as Marvell Dove.
+Now he has to switch to another branch due to different config options,
+upload, wait for the package to be built. Install that to Marvell Dove
+platforms, and verify. Should there be a bug, now he also has to exclude
+the cause due to different branches. And later he found bug in the
+package, and fixed it for Dove, now he also has to provide a fix for
+i.MX51 as well. This will be difficult to manage when the number of
+platforms increases.
+
+=== Assumptions ===
+
+=== Design ===
+
+What we already have:
+* Structural directories (arch/arm/mach-*, arch/arm/plat-*).
+* Support for platforms from the same ARM machine class can be built into
+ the same kernel, and selected at run time through the machine_desc structure
+ (see linux/arch/arm/include/asm/mach/arch.h).
+* Multiple CPU core (MMU/TLB/cache) support can be built into the same
+ kernel, and selected at run time through:
+** struc processor (linux/arch/arm/include/asm/cpu-multi32.h),
+** struct cpu_cache_fns (linux/arch/arm/include/asm/cacheflush.h), and
+** struct cpu_tlb_fns (linux/arch/arm/include/asm/tlbflush.h).
+* irq_chip, gpio_chip, …
+* platform_device for most other peripherals.
+
+What needs to be done:
+* Runtime determined PHYS_OFFSET (where physical memory starts).
+* Runtime determined TEXT_OFFSET (where the kernel is placed)
+ [this might not be necessary?].
+* A unified and optimized virt_to_phys()/phys_to_virt().
+* Runtime selection of the appropriate hardware IRQ controller support.
+* Removal of the build-time constant for total number of IRQs (NR_IRQS).
+* Replacement of the machdirs and platdirs variables to allow multiple
+ mach-* and plat-* directories to be built.
+* Fix the symbol clashes between different machine classes, like duplicated
+ defines with different values that would need to be runtime defined.
+* Multiple clk API implementation and runtime selection.
+* Handling of incompatible instruction set issues (maybe with runtime patching)
+ [might be necessary for UP versus SMP].
+* Other code abstraction and code re-structuring.
+
+=== Implementation ===
+
+==== What to do about ZRELADDR ====
+
+There is a problematic relation between ZRELADDR and PHYS_OFFSET, especially
+if we wish to make PHYS_OFFSET into something variable.
+
+We could get rid of zreladdr entirely (and the various
+Makefile.boot at the same time) as a nice cleanup, regardless of the
+variable phys offset.  Instead of having boot/compressed/head.S load
+zreladdr into r4, it could simply do:
+
+`        @ determine final kernel image address ` <<BR>>
+`        and     r4, pc, #0xf0000000            ` <<BR>>
+`        add     r4, r4, #TEXT_OFFSET           ` <<BR>>
+
+We need to find out what bits should be kept according to all the
+PHYS_OFFSET definitions currently in the tree.  If anything, having a
+CONFIG_ZRELADDR in the Kconfig system instead of having this ad-hoc
+Makefile.boot would certainly be better.  Then
+
+`#ifdef CONFIG_ZRELADDR                         ` <<BR>>
+`        @ this is determined by Kconfig        ` <<BR>>
+`        ldr     r4, =CONFIG_ZRELADDR           ` <<BR>>
+`#else                                          ` <<BR>>
+`        @ determine final kernel image address ` <<BR>>
+`        and     r4, pc, #0xf0000000            ` <<BR>>
+`        add     r4, r4, #TEXT_OFFSET           ` <<BR>>
+`#endif                                         ` <<BR>>
+
+And finally, the Kconfig rule could be:
+
+`config DYNAMIC_PHYS_OFFSET                     ` <<BR>>
+`        depends on !ZRELADDR                   ` <<BR>>
+
+Then, any machine with special requirements (such as SA1100 with
+neponset) could explicitly define ZRELADDR directly in the Kconfig file.
+
+==== Optimized virt_to_phys() with a runtime determined PHYS_OFFSET ====
+
+Currently we have
+
+`#define __virt_to_phys(x)       ((x) - PAGE_OFFSET + PHYS_OFFSET)` <<BR>>
+
+This normally translates into the following assembly instruction:
+
+`        add     rx, rx, #(PHYS_OFFSET - PAGE_OFFSET)` <<BR>>
+
+The immediate value of the add instruction is encoded in the low 12
+bits, where 8 bits are used for the actual value, and 4 bits are used as
+a shift value.  So you can effectively have a 8-bit value that may be
+shifted/rotated to any even position within the 32 bit space.
+
+In the context of virt_to_phys(), we can assume that the difference
+between PHYS_OFFSET and PAGE_OFFSET will always fit into 8 bits shifted
+to the MSBs.  This is like saying that phys and virt offsets will always
+be at least 1 MB aligned which is a pretty safe assumption.
+
+So the idea is to create a table of pointers to all those add
+instructions, and have the early boot code to walk and patch up the 
+referenced low 12 bits according to the actual PHYS - VIRT offset value.
+
+This table can be created into a separate section, a bit like the .fixup
+section used with the ldrt/strt instructions, but which gets discarded
+with the rest of the _''''''_init stuff at the end of the boot.  The
+_''''''_get_user_asm_word() macro is therefore a good example of how
+_''''''_virt_to_phys() could be done.
+
+In the Thumb2 case the fixup would be different as the add.w instruction
+is encoded differently, but the idea is the same.  Ditto for phys_to_virt().
+
+==== Runtime determined TEXT_OFFSET ====
+
+That might not be worth trying to support a variable TEXT_OFFSET.
+That would require building the whole kernel with -fPIC which is not
+without any overhead.  Furthermore there are quite few platform needing
+to change the location of the kernel in  virtual memory.
+
+==== Runtime selected IRQ controller support code ====
+
+Using an extra pointer in the machine_desc structure to replace the
+get_irqnr_and_base macro should solve this issue.
+
+==== Replacement of the machdirs and platdirs variables ====
+
+In linux/arch/arm/Makefile, those variables are used to select which
+directory is to be built depending on some CONFIG_ARCH_* and CONFIG_PLAT_*
+config symbols.  The first step would be to convert those into standard Kbuild
+rules like:
+
+`obj-$(CONFIG_ARCH_FOO)          += mach-foo/        ` <<BR>>
+`obj-$(CONFIG_PLAT_BAR)          += plat-bar/        ` <<BR>>
+
+The next step is to change the "ARM system type" choice menu in
+arch/arm/Kconfig so individual system types can be turned ON or OFF.
+
+This is where the symbol clash party begins.
+
+==== Header file dependency cleanup ====
+
+Currently, machine specific header file could be included in a more
+generic header file, and in turn included by other common code. This
+prevents multiple machines being built together. It will be a massive
+cleanup, a preliminary analysis is as below:
+
+`    $ git grep "#include <mach" arch/arm/include/asm/` <<BR>>
+`    arch/arm/include/asm/dma.h:#include <mach/isa-dma.h>` <<BR>>
+`    arch/arm/include/asm/floppy.h:#include <mach/floppy.h>` <<BR>>
+`    arch/arm/include/asm/gpio.h:#include <mach/gpio.h>` <<BR>>
+`    arch/arm/include/asm/hardware/dec21285.h:#include <mach/hardware.h>` <<BR>>
+`    arch/arm/include/asm/hardware/iop3xx-adma.h:#include <mach/hardware.h>` <<BR>>
+`    arch/arm/include/asm/hardware/iop3xx-gpio.h:#include <mach/hardware.h>` <<BR>>
+`    arch/arm/include/asm/hardware/sa1111.h:#include <mach/bitfield.h>` <<BR>>
+`    arch/arm/include/asm/io.h:#include <mach/io.h>` <<BR>>
+`    arch/arm/include/asm/irq.h:#include <mach/irqs.h>` <<BR>>
+`    arch/arm/include/asm/mc146818rtc.h:#include <mach/irqs.h>` <<BR>>
+`    arch/arm/include/asm/memory.h:#include <mach/memory.h>` <<BR>>
+`    arch/arm/include/asm/mmzone.h:#include <mach/memory.h>` <<BR>>
+`    arch/arm/include/asm/mtd-xip.h:#include <mach/mtd-xip.h>` <<BR>>
+`    arch/arm/include/asm/pci.h:#include <mach/hardware.h> /* for PCIBIOS_MIN_* */` <<BR>>
+`    arch/arm/include/asm/pgtable.h:#include <mach/vmalloc.h>` <<BR>>
+`    arch/arm/include/asm/smp.h:#include <mach/smp.h>` <<BR>>
+`    arch/arm/include/asm/system.h:#include <mach/barriers.h>` <<BR>>
+`    arch/arm/include/asm/timex.h:#include <mach/timex.h>` <<BR>>
+`    arch/arm/include/asm/vga.h:#include <mach/hardware.h>` <<BR>>
+
+** <mach/floppy.h> is no longer necessary
+
+===== memory.h =====
+
+`arch/arm/include/asm/memory.h:#include <mach/memory.h>`
+
+ 1. PHYS_OFFSET
+
+** can be ignored if RUNTIME_PHYS_OFFSET is doable
+** should be removed from <mach/memory.h>
+** but we need this somewhere to allow the usage of a hardcoded constant
+  [a config option?]
+
+ 1. ISA_DMA_THRESHOLD and DMA_MAX_ADDRESS
+
+** make them into variables and encode them in machine_desc
+
+ 1. arch_adjust_zones()
+
+** can be moved into machine_desc
+** this depends on CONFIG_ZONE_DMA
+** what to do with CONFIG_ZONE_DMA?
+
+ 1. NODE_MEM_SIZE_BITS, SECTION_SIZE_BITS, MAX_PHYSMEM_BITS, ...
+
+ 1. CONFIG_SPARSEMEM
+
+** N/A
+
+===== dma.h =====
+
+`arch/arm/include/asm/dma.h:#include <mach/isa-dma.h>`
+
+** depends on CONFIG_ISA_DMA_API, which is only needed for floppy support and equally outdated drivers
+** currently only the machines below:
+*** arch/arm/mach-h720x/include/mach/isa-dma.h
+*** arch/arm/mach-footbridge/include/mach/isa-dma.h
+*** arch/arm/mach-shark/include/mach/isa-dma.h
+*** arch/arm/mach-rpc/include/mach/isa-dma.h
+** the most important definition is MAX_DMA_CHANNELS, which can be
+  converted to a variable or just defined to the maximum (10) after trivial code changes.
+** some other machine specific definitions, most of which can be moved into platform specific code.
+
+===== gpio.h =====
+
+`arch/arm/include/asm/gpio.h:#include <mach/gpio.h>`
+
+** gpio_to_irq() and irq_to_gpio(), need to make this generic but
+  could hurt performance
+** inlined version of gpio_{get,set}_value(), gpio_direction_*()
+  and others will conflict with each other, unless CONFIG_GPIOLIB is used
+** some other definitions like GPIO registers
+
+===== hardware.h =====
+
+`arch/arm/include/asm/hardware/dec21285.h:#include <mach/hardware.h>` <<BR>>
+`arch/arm/include/asm/hardware/iop3xx-adma.h:#include <mach/hardware.h>` <<BR>>
+`arch/arm/include/asm/hardware/iop3xx-gpio.h:#include <mach/hardware.h>` <<BR>>
+`arch/arm/include/asm/vga.h:#include <mach/hardware.h>` <<BR>>
+
+** <mach/hardware.h> is really machine specific and could possibly contain
+  anything
+** consider renaming them after the actual machine class
+** some machines define different contents depending on CONFIG_* symbols, which might need to be turned into runtime options (e.g. arch/arm/mach-at91/include/mach/hardware.h)
+** important definitions include
+** * pcibios_assign_all_busses
+** * PCIBIOS_MIN_IO/MEM
+
+===== io.h =====
+
+`arch/arm/include/asm/io.h:#include <mach/io.h>`
+
+** IO_SPACE_LIMIT (actually IO_SPACE_LIMIT for _all_ machines are now
+  0xffff_ffff), if no exception could just be removed and make it a
+  default
+** definitions of _''''''_io(), this is defined as _''''''_typesafe_io(a) on most
+  platforms; on other platforms, it can be abstracted as <<BR>>
+  `    ((void __iomem *)(BASE + (a)))` <<BR>>
+  as long as we can make BASE a variable, this can be removed
+** definitions of _''''''_mem_pci(a), defined as (a) on all platforms, can
+  be removed and make a default
+** ixp4xx is especially complex, depending on INDIRECT_PCI and PCI
+** how to handle different definitions of {in,out}{b,w,l}()
+** _''''''_arch_ioremap() and _''''''_arch_iounmap()
+
+===== irqs.h =====
+
+`arch/arm/include/asm/irq.h:#include <mach/irqs.h>`
+
+** what <asm/irq.h> needs is NR_IRQS (can be solved by SPARSEIRQ)
+** <mach/irqs.h> can be made internal to machine specific code _only_
+
+===== mtd-xip.h =====
+
+`arch/arm/include/asm/mtd-xip.h:#include <mach/mtd-xip.h>`
+
+** currently, only omap1, pxa, sa1100 supports this
+** a XIP kernel fundamentally cannot be multi machine class capable anyway,
+  and even if it could that wouldn't make sense
+
+===== pci.h =====
+
+`arch/arm/include/asm/pci.h:#include <mach/hardware.h> /* for PCIBIOS_MIN_* */`
+
+** need to make PCIBIOS_MIN_* variables
+
+===== vmalloc.h =====
+
+`arch/arm/include/asm/pgtable.h:#include <mach/vmalloc.h>`
+
+** mainly for VMALLOC_END; could be made into a machine specific variable
+
+===== smp.h =====
+
+`arch/arm/include/asm/smp.h:#include <mach/smp.h>`
+
+** smp_cross_call()
+** hard_smp_processor_id()
+
+===== barriers.h =====
+
+`arch/arm/include/asm/system.h:#include <mach/barriers.h>`
+
+** currently no machine defines barriers.h
+
+===== timex.h =====
+
+`arch/arm/include/asm/timex.h:#include <mach/timex.h>`
+
+** CLOCK_TICK_RATE, can actually be removed, need to add common PIT_TICK_RATE to build tty code.
+
+=== Test/Demo Plan ===
+
+Find two or more platforms we are going to support, and have a single kernel
+booting on both(all) of them.
+
+=== BoF agenda and discussion ===
+
+(from UDS-M by DaveMartin)
+
+Need to look at:
+* runtime determination of {PHYS,TEXT}_OFFEST
+* handing of virt_to_phys and phys_to_virt
+** sparsemem?
+
+* IRQ numbering
+** solvable with sparseirqs and dynamic irqs?
+
+* build system
+** no multiple machinedirs possible at the moment, this should be
+    selectable via Kconfig instead
+
+* instruction set issues
+** dynamic patching?
+
+* fixing symbol clashes
+** more of an effort of turning macros into variables
+
+* clock API
+** expand on this at the DT session later today
+
+* other code abstractions, code restructuring
+** on an as-needed basis
+
+Action Items:
+* [ericm] look at the powerpc virq infrastructure
+* [martinbogo] various macro-reduction efforts
+* [nico] physical offset and text offset patches
+* [nico] boot interface specification for decompressed kernel placement
+
+----
+CategorySpec

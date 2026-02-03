@@ -1,0 +1,148 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+* '''Launchpad Entry''': UbuntuSpec:desktop-lucid-startup-speed
+* '''Created''': 2009-11-25
+* '''Contributors''': 
+* '''Packages affected''': compiz, gnome-menus, gnome-panel, gnome-session, gvfs, nautilus, pulseaudio, ubuntuone-client and probably quite some others
+
+=== Summary ===
+
+GNOME login needs to become much faster, the spec describes how we will achieve that.
+
+=== Release Note ===
+
+TODO
+
+=== Design ===
+
+* Review the current login chart, determine what is slow and make it faster for lucid
+* Backup plan if speed is not good enough: don't use compiz by default, turn nautilus desktop rendering off by default, ... 
+
+=== Implementation ===
+
+See blueprint work items. 
+
+=== BoF agenda and discussion ===
+
+* compiz
+** large number of plugins, reading all different files
+** some 75 plugins in total
+** drop shell script wrapper, done in compiz.real now
+** split package, don't install optional ones
+** investigate "everything linked in"
+  
+* gnome-panel
+** reading all desktop file and gettext()ing it (one .mo file for each application)
+** create per-language cache file for all applications in a dpkg trigger, and change gnome-menus to read it if present
+** test without app menu, and test without any applets
+ 
+* nautilus
+** thumbnails all files during startup each time, even if it's not meant to (should use the cache)
+** when moving the plugins away, startup time reduced to a third
+** totem-properties: lazily initialize gstreamer, do nothing at startup
+** investigate other plugins accordingly
+** delayed by gnome-panel, to determine final nautilus screen area; could change to start both at the same time, and send a signal when nautilus shoudl render its icons (done by setting a property on the root window)
+ 
+* ubuntuone-client
+** applet will go away
+** defer startup of the sync daemon, and move the token check into the autostart .desktop file instead of checking within the Python daemon
+ 
+* gnome-settings-daemon
+** forks a process which does a lot of writes
+ 
+* pulseaudio wrapper: should be able to go away (for autolaunch)
+ 
+* gvfsd-trash
+** thumbnails the trash -> to be investigated
+
+=== Reviews ===
+
+==== gnome-session ====
+
+* gnome-session exhibits a slightly greater than 1 second delay before starting gnome-settings-daemon on the reference hardware
+* The greatest contributors to this delay are detailed below:
+
+{| class="wikitable"
+|-
+| '''Task'''
+| '''Time'''
+| '''Comment'''
+|-
+| Preloading GConf keys
+| 500ms
+| GConf keys currently used for required components list, default components, idle timeout setting and monitoring autostart conditions for session clients (such as vino-server)
+|-
+| Setting up DkpClient
+| 150ms
+| Calling dkp_client_new() when DK-Power is not running (which is the case with auto-login) takes a long time as DK-Power is activated
+|-
+| gtk_init_with_args()
+| 80ms
+| Does option parsing and initializes GTK
+|-
+| GConf check
+| 60ms
+| gnome-session spawns gconf-sanity-check-2, and then waits for it to finish after setting up the XSMP server
+|-
+| Loading desktop files
+| 50ms
+| 
+|}
+
+===== Ideas / suggestions =====
+* Delays due to reading GConf keys
+** Investigation work has demonstrated that the first GConf call in a session always seems to take a long time (whether it is to read a single key or preload a directory.
+** Should aim to delay reading any GConf keys in gnome-session before starting the core session components (g-s-d, WM, panel, nautilus)
+** Read default session / required components from a keyfile rather than GConf.
+** Delay reading of idle timeout value until session has loaded.
+** Some applications have autostart conditions based on GConf values (eg, vino-server). gnome-session currently sets up the monitors when loading the desktop files. This should be delayed until the phase where the application is ready to run
+** These steps work, but only really shift the delay later in to the session (testing shows that g-s-d takes a longer time to load with these changes in gnome-session, which delays the INITIALIZATION -> WINDOW_MANAGER phase transition. There are other steps to try which might improve this though
+
+* Setting up DkpClient
+** Calling dkp_client_new() when gnome-session is initialized from auto-login can take a long time, as it activates the DK-Power daemon.
+** This should be deferred until it is actually needed by gnome-session (ie, when calling the session dialog).
+** Deferring it will mean that g-p-m will activate the daemon when it loads later in the session, but we should have a usable session by then (and that won't block other components loading).
+
+* gtk_init_with_args()
+** There's not really any easy way to avoid this.
+** Perhaps it may be possible to move GTK related stuff in to a separate helper (out of the main daemon). That would be a lot of work though.
+
+* GConf check
+** The delay due to waiting for gconf-sanity-check-2 to exit can be minimized by starting it earlier in the session
+
+===== Other observations =====
+
+* On a machine with a rotary disk, it can take ~200ms to read the autostart desktop files.
+* In a VirtualBox guest, it took ~100ms to query ConsoleKit over D-Bus for the session type. The session type is used to determine whether to restore a saved session (if one exists).
+** The delay wasn't observed on the reference hardware (might be because the VBox guest is single-core)
+** Can be avoided anyway by checking if there is a saved session to restore from
+
+==== gnome-panel ====
+
+* empty gnome-panel takes around 1 second full cpu use to start
+* seems there is quite some non busy time during loading, why?
+* the stock applets (notification area, tasks list, workspace switcher) don't add too much use
+  
+* menu applet:
+** the bootchart with only this applet shows light cpu use for several seconds, is that due to idle callback loading?
+
+* clock applet
+** delay the e-d-s init to be done later (either after loading or in a mouseover callback for example)?
+** need to investigate why the temperature and weather icon options add activity when there is no location configured
+
+==== gnome-settings-daemon ====
+ 
+* the 1 second delay between g-s-d and next components is mostly due to xrandr, to investigate
+* don't call xrdb: https://bugzilla.gnome.org/show_bug.cgi?id=586276
+
+----
+CategorySpec

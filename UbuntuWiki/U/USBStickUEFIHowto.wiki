@@ -1,0 +1,189 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+The hybrid ISO/USB images currently created by Ubuntu as official images can be written to either a CD or a USB stick, and they support both BIOS and EFI booting.  However, EFI booting is only supported on CDs, because the images include an EFI El-Torito CD boot block but do ''not'' include the EFI system partition required for EFI booting of hard drives.  This wiki page provides instructions on converting an image so that it can also be used for booting on a hard drive.
+
+Note that this process may render the image ''un''bootable as a CD image.
+
+* Install the gdisk, parted, and kpartx packages: <code>sudo apt-get install gdisk parted kpartx</code>
+* Extend the image so that there's room to add a new partition to it.  100MB should be sufficient. <code>dd if=/dev/zero bs=1024 count=102400 >> /path/to/usb.img</code>
+* Initialize the GPT from the MBR partition table using gdisk. <pre>
+$ gdisk /path/to/usb.img
+GPT fdisk (gdisk) version 0.8.5
+
+Partition table scan:
+  MBR: MBR only
+  BSD: not present
+  APM: not present
+  GPT: not present
+
+* **************************************************************
+Found invalid GPT and valid MBR; converting MBR to GPT format.
+THIS OPERATION IS POTENTIALLY DESTRUCTIVE! Exit by typing 'q' if
+you don't want to convert your MBR partitions to GPT format!
+* **************************************************************
+
+Command (? for help): w
+
+Final checks complete. About to write GPT data. THIS WILL OVERWRITE EXISTING
+PARTITIONS!!
+
+Do you want to proceed? (Y/N): y
+OK; writing new GUID partition table (GPT) to /path/to/usb.img.
+The operation has completed successfully.
+$
+</pre>
+* Next, create the EFI system partition using gdisk again.  You can accept the defaults for most options, except for the partition type and name.
+<pre>
+$ gdisk /path/to/usb.img
+GPT fdisk (gdisk) version 0.8.5
+
+Partition table scan:
+  MBR: protective
+  BSD: not present
+  APM: not present
+  GPT: present
+
+Found valid GPT with protective MBR; using GPT.
+
+Command (? for help): n
+Partition number (2-128, default 2): 
+First sector (34-489438, default = 284736) or {+-}size{KMGTP}: 
+Last sector (284736-489438, default = 489438) or {+-}size{KMGTP}: 
+Current type is 'Linux filesystem'
+Hex code or GUID (L to show codes, Enter = 8300): EF00
+Changed type of partition to 'EFI System'
+
+Command (? for help): c
+Partition number (1-2): 2
+Enter name: EFI SYSTEM PARTITION
+
+Command (? for help): p
+Disk /path/to/usb.img: 489472 sectors, 239.0 MiB
+Logical sector size: 512 bytes
+Disk identifier (GUID): CE5F7FAD-201D-4970-8FC5-72544956CD28
+Partition table holds up to 128 entries
+First usable sector is 34, last usable sector is 489438
+Partitions will be aligned on 64-sector boundaries
+Total free space is 31 sectors (15.5 KiB)
+
+Number  Start (sector)    End (sector)  Size       Code  Name
+   1              64          284734   139.0 MiB   0700  Microsoft basic data
+   2          284736          489438   100.0 MiB   EF00  EFI SYSTEM PARTITION
+
+Command (? for help): w
+
+Final checks complete. About to write GPT data. THIS WILL OVERWRITE EXISTING
+PARTITIONS!!
+
+Do you want to proceed? (Y/N): y
+OK; writing new GUID partition table (GPT) to /path/to/usb.img.
+Warning: The kernel is still using the old partition table.
+The new table will be used at the next reboot.
+The operation has completed successfully.
+$
+</pre>
+* Create loopback devices for the partitions on the image using '''kpartx''', so we can create a filesystem.  (Note that you could also use '''parted''' to create the filesystem, but we will need to loop-mount the filesystem later anyway, so just use kpartx now.)
+<pre>
+$ sudo kpartx -a /path/to/usb.img
+$ sudo kpartx -l /path/to/usb.img
+loop0p1 : 0 284671 /dev/loop0 64
+loop0p2 : 0 204703 /dev/loop0 284736
+$
+</pre>
+* Create a filesystem on the new second partition.
+<pre>
+$ sudo mkfs.vfat /dev/mapper/loop0p2 
+mkfs.vfat 3.0.12 (29 Oct 2011)
+unable to get drive geometry, using default 255/63
+$
+</pre>
+* Mount the partition.
+<pre>
+$ sudo mount /dev/mapper/loop0p2 /mnt
+$
+</pre>
+* Copy your chosen bootloader to the correct location on the partition.
+<pre>
+$ sudo mkdir -p /mnt/efi/boot
+$ sudo cp /usr/lib/efilinux/efilinux.efi /mnt/efi/boot/bootx64.efi
+</pre>
+* If you are using efilinux, you will also need to create an <code>efilinux.cfg</code> with information about which kernel to boot.  Here is a sample efilinux boot menu that will work with the efilinux in Ubuntu quantal (menu support not yet included upstream):
+<pre>
+Ubuntu EFILINUX test
+Try Ubuntu without installing
+\casper\vmlinuz file=/cdrom/preseed/ubuntu.seed boot=casper quiet splash initrd=\casper\initrd.lz
+Install Ubuntu
+\casper\vmlinuz file=/cdrom/preseed/ubuntu.seed boot=casper only-ubiquity quiet splash initrd=\casper\initrd.lz
+Check disc for defects
+\casper\vmlinuz file=/cdrom/preseed/ubuntu.seed boot=casper integrity-check quiet splash initrd=\casper\initrd.lz
+</pre>
+* You will also need to copy your kernel and initrd to the partition where efilinux will be able to see them.
+<pre>
+$ sudo mkdir -p /media/main-partition
+$ sudo mount /dev/mapper/loop0p1 /media/main-partition
+$ sudo mkdir -p /mnt/casper
+$ sudo cp -a /media/main-partition/casper/initrd.lz /media/main-partition/casper/vmlinuz /mnt/casper
+$ sudo umount /media/main-partition
+$ sudo rmdir /media/main-partition
+</pre>
+* Unmount the partition and tear down the kpartx loop devices:
+<pre>
+$ sudo umount /mnt
+$ sudo kpartx -d /path/to/usb.img
+</pre>
+* And your image should now be ready to burn to a USB stick!
+''' Please note do not use USB image creator to copy to usb stick, the Ubuntu images are hybrid images and you can just dd the image to the USB stick.'''
+
+=== Corner cases ===
+==== No room for GPT ====
+In some cases, the partition layout on the image may not have left room for the GPT.  In this case, when running disk you will see an error like this: <pre>
+Warning! Main partition table overlaps the first partition by 33 blocks!
+You will need to delete this partition or resize it in another utility.
+</pre>
+
+You can use parted to move the partition.  We want the new partition to start at sector 64, so add 63 to both the beginning and ending sectors, and call the resize command.. <pre>
+$ parted /path/to/usb.img
+GNU Parted 2.3
+Using /path/to/usb.img
+Welcome to GNU Parted! Type 'help' to view a list of commands.
+(parted) unit s                                                           
+(parted) p                                                                
+Model:  (file)
+Disk /path/to/usb.img: 489472s
+Sector size (logical/physical): 512B/512B
+Partition Table: msdos
+
+Number  Start  End      Size     Type     File system  Flags
+ 1      1s     284671s  284671s  primary  fat16        boot
+
+(parted) resize 1 64s 284734s
+WARNING: you are attempting to use parted to operate on (resize) a file system.
+parted's file system manipulation code is not as robust as what you'll find in
+dedicated, file-system-specific packages like e2fsprogs.  We recommend
+you use parted only to manipulate partition tables, whenever possible.
+Support for performing most operations on most types of file systems
+will be removed in an upcoming release.
+Warning: File system doesn't have expected sizes for Windows to like it.  
+Cluster size is 4k (4k expected); number of clusters is 35542 (35544 expected);
+size of FATs is 144 sectors (139 expected).
+Ignore/Cancel? i
+(parted) p                                                                
+Model:  (file)
+Disk /path/to/usb.img: 489472s
+Sector size (logical/physical): 512B/512B
+Partition Table: msdos
+
+Number  Start  End      Size     Type     File system  Flags
+ 1      64s    284734s  284671s  primary  fat16        boot
+
+(parted) q                                                                
+$
+</pre>

@@ -1,0 +1,252 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+=== A Summary of charset/encoding problems for Chinese ===
+
+There are a bunch of charset/encoding issues related to Chinese,
+which mostly resulted in Chinese text being displayed as garbage.
+The major root cause is, as most of us know, the overlapping of
+non-unicode charset encodings. As we do have a strong preference
+of UTF-8 over other local encodings, this makes it ambigous when
+doing encoding conversions. Moreover and needless to say, Windows
+plays a very bad part in this, as it's still using largely non-unicode
+encodings in their local versions.
+
+I spent a few days trying to get a summary of the related problems.
+Note this doesn't happen with Chinese only, but other non-English
+languages as well, however, I did only review those Chinese specific
+ones.
+
+==== A bit background on simplified Chinese charset encodings ====
+
+GB2312 was the standard since 1980s', and later superceded by GBK,
+which has a larger number of characters, Windows calls it CP936,
+which is equivalent to GBK. And most recently GB18030, which is
+the superset of all. GB18030 has such a large character set, that it
+has to use 4 bytes in some cases, but still remains as backward
+compatible with GBK and GB2312. So we only need to focus on
+GB18030 _only_. In the text below, "locally encoded" Chinese text
+means text encoded in any of GB2312, GBK or GB18030.
+
+==== Bugs/Issues related ====
+
+1. GEdit
+
+ (bug #819714)
+
+Gedit actually supports charset conversion very well in several ways:
+* Support to explicitly select charset in "Open File" dialog window
+* Charset defaults to be "Automatically Detected"
+
+While "Automatically Detected" isn't purely charset auto detection, it's
+based on a list of candidate charset encodings, and based on whether
+the candidate charset can be successfully converted to utf-8, which is
+used internally. This list can be found in:
+
+  /usr/share/glib-2.0/schemas/org.gnome.gedit.gschema.xml
+
+And the list is under key named "auto-detected", and defaults to:
+
+  ['UTF-8', 'CURRENT', 'ISO-8859-15', 'UTF-16']
+
+The trial conversions will be based on the order above. CURRENT is
+the charset of the current locale, so most likely UTF-8. Thus by default,
+locally encoded Chinese text will be converted to UTF-8 as ISO-8859-15.
+And to correctly edit Chinese text, a user has two options:
+
+* Add GB18030 explicitly in the Open Files dialog window
+* Add GB18030 to the "auto-detected" before ISO-8859-15
+
+The 2nd option can be automatically done by the system as a workaround
+so an average Chinese user doesn't have to know all about these encoding
+stuffs.
+
+There is - of course - a third option, for gedit to "really" detect the encodings
+automatically by using other library (libuchardet being one). The problem is
+this doesn't work 100% of the times. See charset detection section below.
+
+2. gvim
+
+(bug #617761)
+
+gvim has a good reputation of handling multibyte characters well since
+6.0. However, there are some confusions with the latest versions, one
+of them is 'set encoding' doesn't seem to behave the same way. The likely
+cause is that gvim now converts the text into unicode internally, once
+the conversion is done, it seems to lost the connection with the original
+text.
+
+There is, however, a similar mechanism as Gedit's so called "Automatically
+Detected" way, which is called 'fileencodings' list, with the default being
+
+  fileencodings=ucs-bom,utf-8,default,latin1
+
+This works the same way as Gedit by converting to utf-8 from this list of
+candidates, and the default does not support Chinese encoded text very well,
+the same reason as with Gedit. One solution is to set it as:
+
+  set fileencodings=ucs-bom,utf-8,gb18030,default,latin1
+
+3. rhythmbox id3 tags
+
+I cannot seem to find relevant bugs on launchpad, but this is being
+reported a lot on some Chinese ubuntu user forums. I didn't have a
+chance to look into banshee, but rhythmbox is using gstreamer, and
+fully depends on gstreamer to provide the metadata of the media
+streams. Gstreamer is smart enough to return the metadata in utf-8
+encoding, the conversion is largely based on a bit simple guess (which
+doesn't work well for CJKV encodings) plus three environment variables:
+
+* GST_ID3V1_TAG_ENCODING
+* GST_ID3_TAG_ENCODING
+* GST_TAG_ENCODING
+
+(in source code gst-plugins-base/gst-libs/gst/tag/gstid3tag.c if some
+one is intrested)
+
+Setting GST_TAG_ENCODING to 'GB18030' seems to solve the issue in
+some cases for Chinese (up to the time of writing, there are still many
+files on my local storage cannot simply be correctly decoded, but that
+could be rhythmbox issue, which I'll spend a bit more investigation time)
+
+There are several ways to workaround this without introducing the
+need to explicitly setting some environment variables:
+
+* purely automatic charset detection - this however, won't work very
+   well as the characters in the metadata are normally too few for a
+   confident detection
+
+* or a file manager plugins (nautilus) to automatically detect and
+   convert the metadata encodings in a batch with some or none of
+   the user's intervention
+
+4. Filenames
+
+Incorrect Chinese filenames happen in several cases being reported:
+
+ - file names being incorrectly displayed in file manager
+
+   This issue becomes less significant as long filenames on VFAT/NTFS are
+   in unicode, and Windows/DOS before Windows2000 are insignificant.
+   However, this still happens sometimes.  One way to solve this is by
+   setting G_FILENAME_ENCODING to correct one.
+
+ - firefox saving chinese filename to local, garbage code
+
+   This was reported several times on some Chinese ubuntu users' forum,
+   most of them were found to be issues of incorrectly written web pages.
+   This is less significant as well, browsers like chrome and firefox has
+   rather good support of different charsets now. But to solve those corner
+   cases could be a bit brain damaging.
+
+ - file names being incorrectly displayed in archive managers (this is
+   different from other filename issues, which I will list separately)
+
+5. Archives (specially zip, rar) with garbaged Chinese filename
+
+(search on launchpad will result in a long list of duplicate bugs of this issue)
+
+This happens mostly with zip, rar. The issue has two parts: a) the filename
+encoding issue as mentioned, and b) the compression tools themselves.
+
+To solve the problem caused by b) doesn't seem to be trivial. I did
+a rough code review of unzip and p7zip (haven't spent time on rar
+so far).
+
+* unzip - there is a patch to add a command line switch to specify the
+   filename encoding, however, there are still issues this is usable, a)
+   this is not automatically detected, so the user or application (file-roller
+   in most cases) has to specificy explicitly, and b) listing of archives
+   still in filtered results (un-printable characters being displayed as "?")
+
+* p7zip - it uses unicode string internally, however, there doesn't seem
+   to be a switch to specify the filename encoding, although the manual
+   page says so, at least no actual evindence in the source code. 
+
+The problem with the source code of these tools is really they were mostly
+written in last century and had to consider porting issues amongst so many
+OSes. To even make the code a bit readable will be huge effort.
+
+The solution of this issue can be made in two places IMHO:
+
+* archiving tools like unzip/p7zip, make them to accept at least command
+   line switches to specify filename encodings, and detection being made in
+   front-end tools like file-roller, and 
+
+* or make heavy modifications to these archiving tools, unzip/p7zip/rar to
+   make them unicode aware and charset being automatically detected, or
+   at least some configuration available for user to tune the order of charset
+   detection
+
+Either will be not trivial.
+
+6. amule/bittorrent, etc.
+
+There are many reported issues of this in some Chinese ubuntu user's forums.
+Not enough time for this, leave for further investigation.
+
+==== Automatic detection of charset encodings ====
+
+There is not much work done here, the most famous one is the uchardet
+done by Mozilla project. More work can be found below:
+
+  http://www.mozilla.org/projects/intl/UniversalCharsetDetection.html
+
+The resulting code is part of mozilla project, someone made it available as
+a separate library, called libuchardet:
+
+  http://code.google.com/p/uchardet
+
+Which is already available in ubuntu archive. The detection is based on
+
+1) encoding rules e.g. some byte value is invalid in some charset encodings
+
+and
+
+2) language specific statistical characteristics, e.g. the ratio of frequently
+used characters and less-frequently used ones is quite language specific and
+can be used for detection.
+
+As it's based on statisical effect, it works well only when sufficient characters
+are provided. When there are fewer samples, e.g. the MP3 tags, uchardet doesn't
+work very well. There are, of course, other ways to identify the possible charset
+when samples are few, e.g. spelling checking, but those will require more
+computation/memory resources and are supposedly to take longer time.
+
+==== Summary and Ways out ====
+
+Regarding system wise language/locale settings, there are likely three
+normal cases for Chinese users:
+
+ a) default en_US.UTF-8 but wishes to have some preference over Chinese
+   when charset encoding becomes a ambiguous
+ b) zh_CN.UTF-8 but doesn't apply this locale to system wide, only specific
+   to the user, this is normally the case when the user change the language
+   order after a default installation
+ c) zh_CN.UTF-8 and applied system wide, this is normally the case when
+   Chinese is specified when install, or that the user explicitly click the
+  "Apply System Wide" button in language selector
+
+An ideal solution will have to work with any of the above cases. Considering
+only those cases where encoding detection can be specified somewhere in
+configuration, a mechanism similar to fontconfig-voodoo could possibly
+work very well. In case c) and possibly case b), the charset conversion
+preference could be inferred easily. However, for the system to know the
+charset preference in case a) would be a bit tricky unless we introduce
+another list, e.g. prefered encoding. Windows has one such "Language for
+non-Unicode programs" in their Regional and Language Options, however,
+Windows doesn't have a language list for menus as it's selling localized
+copies separately.
+
+To make it further, some conversion API could be made generic and pushed
+to libraries such as glib. glib already has g_convert_* functions, which can
+be augmented, let's say, g_convert_from_preferred(). An even ideal solution
+would be a highly accurate charset detection algorithm, and ultimately some
+API like g_convert_from_detect().

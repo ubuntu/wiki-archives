@@ -1,0 +1,106 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+/!\ You might want to read the <nowiki>[[https://wiki.ubuntu.com/QATeam/AutomatedTesting/UnderstandingJenkins|general presentation]]</nowiki> to understand jenkins first.
+
+== Introduction ==
+Automated upgrade tests are run daily in the QA Lab for a set of profiles. This page describe how to debug/troubleshoot  failures found with this testing.
+
+Refer to the <nowiki>[[https://wiki.ubuntu.com/QATeam/UpgradeTestingSetup|Setup documentation]]</nowiki> if you wish to deploy a testing environment on your own infrastructure.
+
+== Profiles and tests ==
+
+The current profiles being tested for Ubuntu are:
+* Latest Stable to Development release:
+** Ubuntu Desktop: ubuntu-desktop task
+** Ubuntu Server: ubuntu-standard
+** Ubuntu Server Tasks: Ubuntu Server and the following additional packages dns-server, lamp-server, mail-server, openssh-server, postgresql-server, print-server, samba-server
+** Main All: All of main
+** Universe: All the packages from Universe with a desktop file in app-install-data (desktop files are listed in /usr/share/app-install/desktop)
+   
+These profiles are created for the latest stable release, latest LTS release on i386 and amd64.
+
+Tests are run post-upgrade. The current tests are:
+* conffiles_test.sh : Check for existence of *.dpkg-dist files post upgrade, which means that the user was prompted for a configuration change. This shouldn't happen since the base image is a fresh installation and configuration files are untouched.
+* debconf_test.py : Check if debconf prompts have been displayed during upgrade. There should be none.
+* kernel_test.py : Check that 2 kernel are installed: one from the previous release, and one from the latest release
+* python_import_test.py : Import all the python modules installed on the system
+* test_lts_upgrade_system.py : Check that various system settings are correctly migrated. Currently the only test is that autologin is preserved on upgrade from LTS to LTS
+* test_lts_upgrade_user.py : Check that various user settings are correctly migrated (background, theme, keyboard, launchers, ...)
+* xserver_test.py : Check that X is running
+
+== Upgrade Testing in Jenkins ==
+In our jenkins instance, upgrade jobs are split in 3 categories to balance the load across nodes without wasting too much disk space (each requires a base image and a result image)
+* Upgrades from latest stable on i386
+* Upgrades from latest stable on amd64
+* Upgrades from latest LTS on amd64 and i386
+<nowiki>[[File:jobs_list.jpeg]]</nowiki>
+
+Clicking on one of the job shows the list of profiles (jenkins jobs) that are run as shown below:
+<nowiki>[[File:job_details.jpeg]]</nowiki>
+
+The job are run daily.
+
+== Test Results ==
+
+After the run the results are published to Jenkins and log files are attached as build artefacts. To see the results, click on the job then on the number of the build you want to see.
+
+<nowiki>[[File:job_results.jpeg]]</nowiki>
+
+In case of an infrastructure failure or a system upgrade failure the bullet in front of the test will be red. If it's a post-installation failure the bullet will be yellow and green otherwise (pass)
+
+=== Test Artefacts ===
+
+* Bootstrap.log is always attached unless there has been a problem with the testing infrastructure. It contains the output of stdout and stderr.
+
+Upgrade tests is the result of the command: 'do-release-upgrade -d' on an up-to-date base release. For a distribution upgrade, in <code>/var/log/dist-upgrade/</code> there are three log files that are helpful in debugging an upgrade issue:
+
+ 1. 'main.log'
+** contains the version of the release upgrader and the lsb-release (version of Ubuntu)
+** contains information on how <code>/etc/apt/sources.list</code> was handled and updated
+** contains log information regarding the free space calculation 
+** contains an overview of the whole process
+** may contain python back traces
+** this is the first place to search for a failure
+ 1. 'apt.log'
+** contains a dump of the package problem resolver
+** it is useful when update-manager says it can not upgrade
+** it is also useful for identifying 3rd party repositories that are problematic
+** it usually reveals information about incorrect dependencies
+** This is the place to search when an error 'Failed to calculate the upgrade' occurs
+ 1. 'apt-term.log'
+** is a subset of <code>/var/log/apt/term.log</code> 
+** contains detailed informations about the failure found in main.log
+** errors can be found by looking for the string 'dpkg: error'
+# 'apt-clone_system_state.tar.gz' is not a log file but an archive of all the necessary file to restore the state of the system prior to the upgrade with the command '''apt-clone'''. You can also uncompress this archive to search which packages and versions were installed on the system before the upgrade.
+# 'history.log' is the history of apt commands run on the system before the upgrade. It helps to know which package have been installed/removed/upgraded before the upgrade.
+# 'result.xml' contains the result of the test in jUnit XML format. This file is used by jenkins to report the results in the shiny graph.
+# *.FAIL files are created when a test fails but contains no information excepted indicating that a test failed.
+# Other files are test results used for troubleshooting a failure
+### debconf_*: are debconf prompts displayed during upgrade. debconf.log includes all the prompts but some of them may have been whitelisted and won't generate a debconf_*.log file.
+### *.dpkg-dist are configuration change prompts
+### *crash are apport crash files collected from /var/crash 
+
+== How to troubleshoot and report a bug ==
+The first thing to do is to look in 'bootstrap.log' for an error. The error can happen at any point in the upgrade process. It can be an infrastructure problem (failed to connect to the testbed, server error, network/dns error, ...) a system upgrade failure or a post-upgrade failure. Actions will depend on the type of failure.
+
+If it is an infrastructure error, then contact the QA Team (ubuntu-qa AT lists DOT ubuntu DOT com for the mailing list or on IRC #ubuntu-testing) 
+
+If the problem is an upgrade issue, start by looking for the string ' ERROR' in main.log. If the log shows that the 
+problem is a error from dpkg when processing a package then search apt-term.log for details about the failure.
+In the case of a package failure, copy the name of the package that failed the main.log, open term.log and search for that name until you find a line like 'dpkg: error' (it may differ if the logs are not in english)
+If the log shows a dependency error then look into apt.log to understand how the resolver calculated the upgrade. This might be a transient error (e.g ABI breakage and all packages are not yet uploaded to the dev release) or a real error (wrong dependency, version, conflict/break, unhandled transition, ...)
+
+If the problem is a post-upgrade failure (yellow bullet) '''bootstrap.log''' will contains the details of the failure and the corresponding files will be attached as artefacts.
+
+Eventually, it may help to reproduce the error even by starting the base VM or restoring it from the apt-clone archive, connecting to it and doing the upgrade again manually.
+
+Happy upgrades!

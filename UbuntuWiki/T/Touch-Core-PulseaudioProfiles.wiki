@@ -1,0 +1,204 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+{| class="wikitable"
+|-
+| <tablebgcolor="#F1F1ED" tablewidth="40%" tablestyle="float:right;font-size:0.9em;margin:0 0 1em 1em;"style="padding:0.25em;"><<BR>>
+|}
+
+== Introduction to PulseAudio profiles and ports ==
+
+For controlling audio volume and mute, <nowiki>[[http://pulseaudio.org|PulseAudio]]</nowiki> provides an abstraction layer over ALSA. ALSA often exposes a bewildering list of mixer controls, and the end user probably just wants to control the main volume, not several volumes.
+
+However, which volume to control, depend on the currently active output (or input). Some ALSA volume control might be necessary for controlling Headphones volume, and another for Speaker volume. There might be additional controls needed to be set for audio to be output at all.
+
+To describe what mixer controls !PulseAudio needs to set for a particular output, !PulseAudio uses path files. There is also a profile-set file that describes which path files to look for, and an udev rule to determine which profile-set file will be used for a particular hardware.
+
+The upstream documentation for how to write profile and path files is <nowiki>[[http://www.freedesktop.org/wiki/Software/PulseAudio/Backends/ALSA/Profiles|here]]</nowiki>. There is also documentation inside these files.
+
+== Android also has mixer files ==
+
+Android devices, at least some of them, have mixer files in an xml format. These can provide very good hints of how to write your paths.
+<nowiki>[[https://github.com/CyanogenMod/android_device_asus_grouper/blob/jellybean/mixer_paths.xml|Here]]</nowiki> is how the mixer xml file looks for Nexus7, which will be used as an example in this guide.
+
+=== Path files ===
+
+In my example, I have the following paths defined in the Android mixer file:
+<pre>
+<path name="speaker"></path>
+<path name="headphone"></path>
+<path name="main-mic-top"></path>
+<path name="main-mic-left"></path>
+<path name="headset-mic"></path>
+</pre>
+
+This would typically correspond to similar path files in !PulseAudio. I chose to create paths for
+* Speaker
+* Headphone
+* Mic (built-in)
+
+!PulseAudio does not support switching port depending on current rotation, and the headset-mic path present is probably bogus, because Nexus7 does not support headset mics (at least so I've been told).
+
+=== Volumes and mutes ===
+
+Typically a number of switches need to be set up correctly for audio to be output. If your mixer file looks like this:
+
+<pre>
+  <ctl name="Speaker Playback Switch" value="0" />
+  <ctl name="Int Spk Switch" value="0" />
+  <path name="speaker">
+    <ctl name="Speaker Playback Switch" value="1" />
+    <ctl name="Int Spk Switch" value="1" />
+  </path>
+  <path name="headphone">
+  </path>
+</pre>
+
+Then you can figure out that both of "Speaker Playback Switch" and "Int Spk Switch" need to be turned on for audio to be output on the Speaker.
+
+Here's how the corresponding section would look like in !PulseAudio's speaker path file:
+<pre>
+[Element Int Spk]
+switch = mute
+
+[Element Speaker]
+switch = mute
+</pre>
+
+And here's how it would look in !PulseAudio's headphone path file:
+
+<pre>
+[Element Int Spk]
+switch = off
+
+[Element Speaker]
+switch = off
+</pre>
+
+In short; "Speaker Playback Switch" is transformed into "Element Speaker", "switch = off" or "switch = mute". If switch is set to "off", it will always be off when that path is active. If it is set to "mute", it will toggle depending on whether audio is currently muted or not.
+
+For volumes, my mixer xml file did not give me any hint. But "Master", "Speaker" are usually safe bets. Try and see if you get the desired results. A "Speaker" playback volume would typically be coded as:
+
+Speaker path:
+<pre>
+[Element Speaker]
+volume = merge
+override-map.1 = all
+override-map.2 = all-left,all-right
+</pre>
+
+(Just copy-paste the override-map rows as the above.)
+
+Headphone path:
+<pre>
+[Element Speaker]
+volume = off
+</pre>
+
+If you have more than one ALSA volume control set to "merge", !PulseAudio will merge them in order to create a main volume control with a range that corresponds to all of the ALSA volume controls combined.
+
+=== Enumerations ===
+
+Sometimes a mixer control needs to be set to a specific enumeration value, rather than just on/off. E g, if the "DMIC Switch" needs to be set to "DMIC1", this would be specified in the Android mixer file like this:
+
+<pre>
+<ctl name="DMIC Switch" value="DMIC1" />
+</pre>
+
+In the !PulseAudio path file, the corresponding section would be:
+
+<pre>
+[Element DMIC]
+enumeration = select
+
+[Option DMIC:DMIC1]
+name = analog-input-internal-microphone
+</pre>
+
+In this case, you will only have one option per element, so just pick the same name as the entire path for the option's name.
+
+== Switching port on device plugin ==
+
+One problem remains though: When headphones are plugged in, we want the headphones path to be activated (which will, in turn, mute the speaker). 
+On desktop machines, this is done through monitoring read-only mixer controls, and writing corresponding sections in the path files. If you have a mixer control named "Headphone Jack", here's how it would look like: 
+
+Speaker path:
+<pre>
+[Jack Headphone]
+state.unplugged=unknown
+state.plugged=no
+</pre>
+
+Headphone path:
+<pre>
+[Jack Headphone]
+state.unplugged=no
+state.plugged=yes
+</pre>
+
+The main point being that headphones are unavailable when they are not plugged in, and speakers are unavailable when headphones are plugged in. For this example, the difference between "unknown" and "yes" can be disregarded.
+
+However; on Android, things might not look like this, as Android usually uses its own extcon/switch interface, for which there is no support in !PulseAudio. However, you can write a kernel patch that exposes a mixer control similar to what is done on desktop machines. <nowiki>[[http://kernel.ubuntu.com/git?p=ubuntu/ubuntu-nexus7.git;a=commitdiff;h=2f808a19bd4913c0391321c58c7b29cb4da7aadc|Here]]</nowiki> is an example of this being done for Nexus 7, which uses a 3.1 kernel. On 3.3+ kernels, this requires slightly less code as you can use the snd_kctl_jack_new and snd_kctl_jack_report functions instead.
+
+Also note that these jack detection mixer controls are not shown in alsamixer. "amixer contents" (not scontents!) will show them.
+
+== Fitting the pieces together ==
+
+Now that you have some good looking path files, how do you make !PulseAudio use them?
+First, you need a profile-set file that points to the path files. It also tells whether to try opening the device in mono, stereo, 5.1 surround, etc.
+
+Here's how it looks like on the Nexus7:
+
+<pre>
+[General]
+auto-profiles = yes
+
+[Mapping analog-stereo]
+device-strings = front:%f hw:%f plughw:%f
+channel-map = left,right
+paths-output = tegra-nexus7-speaker tegra-nexus7-headphone
+paths-input = tegra-nexus7-intmic
+priority = 10
+</pre>
+
+I'm only interested in stereo input/output, so that's the only mapping section specified. And as you can see, the "paths-output" and "paths-input" points to the paths files. 
+
+Second, you need a udev rule to match your hardware. How to write udev rules is beyond this howto, so I'll just quote the Nexus7 example:
+
+<pre>
+SUBSYSTEM!="sound", GOTO="tegra_rt5640_end"
+ACTION!="change", GOTO="tegra_rt5640_end"
+KERNEL!="card*", GOTO="tegra_rt5640_end"
+
+ATTRS{id}=="tegrart5640", ENV{PULSE_PROFILE_SET}="tegra-nexus7.conf"
+
+LABEL="tegra_rt5640_end"
+</pre>
+
+Here's where to put the files:
+* Udev file: /lib/udev/rules.d/
+* Profile-set file: /usr/share/pulseaudio/alsa-mixer/profile-sets/
+* Path files: /usr/share/pulseaudio/alsa-mixer/paths/
+
+You can also look at existing files in these directories for inspiration.
+
+After updating udev rules, you need to reboot your phone/tablet/computer for changes to take effect. After updating profile-sets or paths, you need to restart !PulseAudio (easiest done by executing "pulseaudio -k", then starting a program that requires !PulseAudio).
+
+== What about UCM? ==
+
+UCM is another abstraction layer for mixer controls. It was meant to work well with embedded devices, such as phones and tablets, but its implementation in !PulseAudio is still immature (as of Ubuntu 13.04), as it does not support, e g, mapping an ALSA mixer control to the main !PulseAudio volume.
+There is also no way to express jack detection (or at least no way that !PulseAudio supports).
+
+== Resources / Links ==
+
+* <nowiki>[[http://www.freedesktop.org/wiki/Software/PulseAudio/Backends/ALSA/Profiles|PulseAudio's documentation for how to write profiles and paths]]</nowiki>
+* <nowiki>[[http://www.reactivated.net/writing_udev_rules.html|How to write udev rules]]</nowiki> (slightly outdated)
+* <nowiki>[[https://launchpad.net/~ubuntu-nexus7/+archive/ppa|The ubuntu-defaults-nexus7 package]]</nowiki> has the nexus7 files (udev rule, profile set, paths) in their complete form.

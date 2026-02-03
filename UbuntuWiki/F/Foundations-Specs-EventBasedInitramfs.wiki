@@ -1,0 +1,346 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+'''NB! brain dumps need re factoring and integration from UDS-Q braindump'''
+
+* '''Launchpad Entry''': UbuntuSpec:foundations-q-event-based-initramfs
+* '''Created''':
+* '''Contributors''': 
+* '''Packages affected''': initramfs-tools, upstart
+
+=== Summary ===
+Discuss if an upstart based initramfs will make the early userspace simple, robust and more elegant. Discuss the timeline by which this can be materialized. 
+
+=== Release Note ===
+* To-be-done-soon!
+
+(This section should include a paragraph describing the end-user impact of this change.  It is meant to be included in the release notes of the first release in which it is implemented.  (Not all of these will actually be included in the release notes, at the release manager's discretion; but writing them is a useful exercise.)
+
+It is mandatory.
+
+=== Rationale ===
+
+Initramfs is used for getting the root filesystem mounted and passing control the real init on the real root fs. Once the kernel boots, it passes control to the init in the initramfs. This init then runs scripts that are responsible for checking if the root device is configured properly and capable of mounting the root fs on it. In parallel, behind the scenes, udev runs and uses the help of blkid to run "admin" scripts like "mdadm", "lvm", "cryptsetup" to configure the root device. This is all event based, i.e the devices are configured as and when they become available. However the exception to this is configuring the LUKS devices, which are configured using cryptsetup. The script that runs cryptsetup, first checks up if the device which is to be configured as an encrypted device, is available. If not then it waits for some time and then it checks again if the device is available or not. If not then it will simply give up and get the user to a busybox prompt. If the device is available, then cryptsetup is called and the device is configured as a LUKS device. Once the device is available a udev event is generated and again, udev runs blkid and calls whatever admin script needs to be called if any other subsystem is stacked on top of this LUKS device. While all this is good, there are two observations to be made here:
+
+a. The invocation of cryptsetup is procedural and not completely event based.
+
+b. There is a repetition of code for mounting, checking filesystems, crypt devices, LVM devices and so on - one code path is found in upstart jobs and the other in initramfs.
+
+So one idea that lets you remove this duplication and at the same time enables the LUKS devices in an event based fashion, is to make the initramfs event based in the true sense, by bringing in upstart in initramfs. This means that we copy the jobs in /etc/init/ in initramfs and run them at boot time. This brings in the simplicity, elegance and robustness of upstart in initramfs and also gives you more flexibility to handle the events in a way that you want!
+
+=== User stories ===
+* To-be-done-soon!
+=== Assumptions ===
+* To-be-done-soon!
+=== Design ===
+* To-be-done-soon!
+You can have subsections that better describe specific parts of the issue.
+
+=== Implementation ===
+
+===== Code Changes: =====
+
+* new events should be added to indicate a "during-boot" event for mounting the real rootfs. The other fs should be mounted only after the real root fs is mounted. This is similar to the "JOB_START" event in upstart, but indicates jobs that should be invoked before that. 
+
+* Something like mountall:
+    a. that starts the raid arrays in a degraded mode if needed, after seeking user permission or simply starts the ready array. It then creates a "event" after which the stacked subsystems on the device[s] are activated. 
+    a. configures the LUKS devices after the underlying RAID devices (if any) are started (in degraded/non degraded mode). This same job should also configure the device, once the other devices of a degraded raid array are added as and when they become available. If the array was started in a non degraded mode to begin with then LUKS should be set up on this active array.
+
+* A new job needs to be introduced which should be invoked at the end of the initramfs init. This job will save state, exec the new init and load the state of the running jobs and reload them after the real init is executed and the initramfs -fs is unpopulated/deleted.
+
+==== Migration ====
+At first we will offer event-based initramfs as an opt-in, if and only if the rootfs is local, i.e. not network based.
+
+The plan for the event-based initramfs is roughly this:
+The initramfs::init shall exec upstart::init. The initramfs::init scripts shall handle initialization and modprobe required modules. 
+upstart::init would emit the "startup" event and then mountall shall mount the rootfs readonly. At some point, if the rootfs mounting goes well, then some upstart job shall rotate the root from the initramfs::rootfs to the realrootfs and shall exec the upstart::init in the realrootfs. Meanwhile the initramfs based upstart::init shall save the state of processes in upstart that it wants to restart after rotating root to the realrootfs. 
+
+The network based and iscsi based booting shall be supported later. This shall be followed by support for Casper.
+
+Eventually, when full support is available a decision can be made whether upstart::init shall be the first the userspace program to get control. All the initialization shall be done as upstart jobs. This is when every case should be supported as being event based.
+
+=== Test/Demo Plan ===
+* To-be-done-soon!
+It's important that we are able to test new features, and demonstrate them to users.  Use this section to describe a short plan that anybody can follow that demonstrates the feature is working.  This can then be used during testing, and to show off after release. Please add an entry to http://testcases.qa.ubuntu.com/Coverage/NewFeatures for tracking test coverage.
+
+This need not be added or completed until the specification is nearing beta.
+
+=== Unresolved issues ===
+* To-be-done-soon!
+This should highlight any issues that should be addressed in further specifications, and not problems with the specification itself; since any specification with problems cannot be approved.
+
+=== BoF agenda and discussion ===
+
+Use this section to take notes during the BoF; if you keep it in the approved spec, use it for summarising what was discussed and note any options that were rejected.
+
+=== Brain Dump ===
+Read about current implementation at <nowiki>[[Initramfs]]</nowiki> page.
+
+So what is done?
+
+*** getting upstart in initramfs  - added a pivot event handler which chroots to the real rootfs kept in /root and then executes the init kept on it. (Yet to get an ack on this patch by Scott)
+*** getting mountall in initramfs - added a timeout option to it (merged in Natty) - wait only for a rootdelay time for the device to appear (fstab option “timeout” uses the default timeout but this can be changed via mountall command line options)
+*** Added interfaces to start and stop the timeout in mountall:  helps in case of a cryptsetup where user needs to input the password and that means the time cannot be bound (This is yet to be merged - should be merged for oneiric) - Problem - how do you know that the timeout is stopped and started by regular scripts. The only thing that you can really do is that expose this interface only if you are in the initramfs. This needs a little more work.
+*** creating jobs out of various initramfs scripts.
+*** upstart is exec-ed by initramfs::init right now. (This should change in the future)
+*** All the initramfs scripts are executed parallely as jobs by upstart - this definitely needs to change slowly.
+*** On an error - user is presented a console - this needs more testing and perhaps better handling.
+*** Added the extra copying of upstart, mountall and other needed binaries to the mkinitramfs script
+*** Added code for creating a new fstab continaing your root device depending on the /etc/fstab in your rootfs. This shall happen at the mkinitramfs time.
+*** Also added a script to change the fstab at boot time - with the user specified request if any.
+*** Tested on md,lvm,crypt stacked root device and md,lvm - stacked root device
+*** http://bazaar.launchpad.net/~csurbhi/initramfs-tools/event-driven.rough/revision/229 
+
+What needs to be done:
+
+*** Tear down the initramfs scripts and execute unrelated scripts in parallel
+*** Execute upstart init as the real init
+*** Add upstart job for starting a non root raid array in degraded mode - give information to the user via task bar or some visual of the sort ?
+*** Test loads - casper, multipath, cryptsetup, md devices, lvm , stacked configurations etc.
+
+Here are some details of the scripts currently seen:
+init-top:
+1) plymouth: starts plymouthd
+2) bootchart:  need /dev/ mounted. creates a jail dir to get the statistics for bootchart.
+3) brltty: provides a brail terminal. this one sets it up. calls brltty-setup
+4) console-setup: calls loadkeys for setting up the console
+5) olpc_x01-hw: modprobe redboot
+6) usplash: prereq: framebuffer, console-setup, brltty. This starts usplash
+
+init-premount
+1) brltty: brltty setup is called in init-top. Now we call brltty to start it
+2) dropbear: (ssh server-client with small memory footprint) mounts devpts on /dev/pts
+3) live-initramfs: takes care of a net boot
+4) ltsp: (linux terminal server project) handles the network configuration
+5) mandos-client: should run before cryptsetup and set the keyscript to mados/plugin-runner.
+
+1) brltty:
+initramfs/scripts/brltty - /sbin/brltty -eqN 2>/dev/tty2
+    prereq: udev
+Comment: Could be removed from init-premount and put as a upstart job started on udev.
+mountall emits virtual-filesystem after which udev is started.
+“start on starting udev”
+2) dropbear:
+
+a) premount-devpts -
+
+    mounts devpts on /dev/pts
+
+“start on virtual-filesystem”
+
+b) premount-dropbear -
+
+    . conf/initramfs.conf
+
+    configure_networking
+
+    /sbin/dropbear
+
+Comment: Probably the above scripts need /dev/pts. So we need to start after premount-devpts has finished its job
+
+“start on started premount-devpts”
+3) live-initramfs -
+scripts/init-premount/select_eth_device :
+if boot is over the network then:
+    modprobe af_packet
+    finds out the ethernet device over which a carrier signal is found. Notes this device in     conf/param.conf
+Comment:
+If your boot is over the network, then you want to configure the network before root is mounted. However since this is a necessary condition for mount, mountall shall wait! Hence you can afford to start this with mountall! So you could go about saying
+“start on starting mountall” or
+“start on starting udevd” (for getting the network devices up??)
+
+4) ltsp -
+    client/initramfs/scripts/init-premount/udhcp -
+
+1) bringup_interfaces
+
+2) process_kernel_parameters
+
+3) sanitize_configuration
+
+4) apply_configuration
+
+5) export_configuration
+basically takes care of the networking needed for ltsp.
+Comment:
+
+prereq: could be udev (read in one of the comments in this script)
+If your boot is over the network, then you want to configure the network before root is mounted. However since this is a necessary condition for mount, mountall shall wait! Hence you can afford to start this with mountall! So you could go about saying
+“start on starting mountall”
+“start on starting udevd” (for getting the network devices up??)
+
+5) mandos-client:
+    prereq: udev
+needs to run before cryptroot
+cryptroot needs to run before mountall if rootdevice is crypted.
+
+start on starting udevd
+
+6) cryptroot:
+“start on started mandos-client”
+what happens if mandos-client is not present? you can always have a upstart job script which checks if cryptroot is present or not and if not then exit!  Work this out properly!
+
+local-top:
+1) dmraid: activates the dm-raid devices which were not activated by udev. This needs more researching. “start on started udevd”
+2) loop-aes-utils:Side note:
+param.conf is needed by local-premount. local-top in loop-aes-utils, modifies this param.conf. Certainly this is needed before executing the local-premount. Note that this is also needed by init-premount. But this file is modified after executing init-premount in some cases. So init-premount needs to work on the older version or unmodified version whereas local-premount  needs to work on the newer one? Research this in detail. Can you do this in a better way
+execute before cryptroot! ?
+3) multipath-tools-boot:  basically: modprobe dm-emc and dm-multipath.s:  “start on started udevd”
+4) nbd-client: sets up networking needed for setting up the network block device. you can start this early on - so as to get a good boot speed? try different places to see if you get benefit! (from bootchart later)
+“start on started udevd” (say - could be anything from - started mountall, starting mountall, started etc)
+
+5) open-iscsi: calls the iscsi commands for setting up iscsi.  but networking needs to be configured for this. You could do this as soon as is possible. Perhaps, after starting udevd? needs testing, confirmation!
+
+6) cryptroot is executed last in this series.
+
+-------
+local-premount:
+1)  lupin : local/scripts/local-premount/root_locale - modifies the ROOTFLAGS for mounting the rootfs.
+* ** Definitely needs to be executed before mountall mounts the rootfs! Need to read the FSTYPE flag
+* *** however blkid needs that udev has to be discover the device first!
+* ** So mountall has to start and start udevd.
+* *** However we want mountall to stop before it can mount the rootfs in case of ntfs. The only way to stop it is if the ntfs module is not found!! But will be problematic when a user uses a fuse module compiled in the kernel! In that case we can use the alternative:
+Alternative we can remount the rootfs if it is already mounted
+Find a better solution
+casper/scripts/caseper-premount/20iso_scan: can be executed on startup!
+casper/scripts/caseper-premount/30custom_installation: can be executed on startup
+
+2) ntfs-3g: debian/ntfs-3g.initramfs-premount - “start on stopped lupin”
+this should do the trick!
+ntfs: modprobe fuse. This also needs to be called before mounting the rootfs
+But will be problematic when a user uses a fuse module compiled in the kernel! In that case!
+
+3) splashy:
+local-premount/libslashy:
+    needs /dev. So “start on virtual-filesystem”
+local-premount/splashy:
+
+prereq: libsplashy uswsusp
+
+start on stopping libsplashy and stopping uswsusp
+4) uswsusp:
+    needs /dev in place
+So “start on started virtual-filesystem”
+
+5) fixrtc: comes from initramfs-tools. This strictly needs to be called BEFORE mountall attempts to mount the rootfs and user specifies fixrtc on the command line. So we need to make a change to call this explicitly before mountall
+sets the hwclock to the date of the last mount in the fs to avoid fsck to get confused by the superblock being in the future.
+This one certainly needs to be executed _before_ the fs mount is tried.
+So certainly:
+“start on starting mountall”
+
+------------------------------------------
+Some more analysis:
+A) param.conf contains the root device specific flags which are created on the fly as you boot. Scripts that create these parameters and put them in param.conf are:
+
+1) ltsp-client-core: init-premount
+
+2) live-initramfs: init-premount
+
+3) lupin: local-premount
+
+4) loop-aes-utils: local-top
+
+B) used by:
+
+1)  mandos-client: init-premount
+
+C) standard use: before executing every scripts in:
+
+1) init-premount
+
+2) local-premount
+
+3) local-bottom
+
+* local-premount has to run after init-premount but before the mounting of rootfs!
+
+Analysis of the bottom scripts:
+
+local-bottom:
+
+1) fsprotect: initramfs-tools/scripts/local-bottom/fsprotect
+if / is aufs then
+    1) modprobe aufs
+    2) find out the fsprotect size mentioned at the command line prompt
+    3) sets up the fsprotect aufs:
+        a) bind a rootfs to /fsprotect/system
+        b) mount a tmpfs to /fsprotect/tmp
+        c) create an aufs of /fsprotect/system and /fsprotect/tmp
+        d) unmount old ${rootmnt}
+        e) bind our aufs to ${rootmnt}
+        f) unmount aufs
+        g) move /fsprotect/system and /fsprotect/tmp inside the aufs
+        h) touch $rootmnt/fastboot - to prevent fsck!
+Comment:
+* this mounting of selinux would invoke the “mountinfo_watcher” in mountall
+
+2) ntfs-3g: debian/ntfs-3g/ntfs-3g.initramfs-bottom:
+if the rootfstype or loopfstype is ntfs or ntfs-3g then:
+
+a) mkdirp -p /dev/.initramfs/varrun
+
+b) pidof mount.ntfs >> /dev/.initramfs/varrun/sendsigs.omit
+
+c) pidof mount.ntfs >> /dev/.initramfs/varrun/sendsigs.omit
+
+This can be executed immediately after mounting the rootfs
+“start on mounted mountpoint=/root”
+
+3) cryptsetup:
+starts the pscd daemon
+
+init-bottom:
+
+1) kexec: debian/kdump.initramfs:
+make sure that  this is a kexec kernel by checking for “kdump_needed” in /proc/cmdline.
+This shell script remounts the rootfs as -o “rw” and later again as “ro”. After mounting “rw” it creates a dumpfile!
+BEWARE: This is capable of removing the user requested ROOTFLAGS!!!!
+Also this script will invoke “mountinfo_watcher” See what side effect this will have on “needs_remount” and stuff!!!
+This definitely needs better handling:
+1) eg: if kdump_needed is specified on command line, then you mount the rootfs “rw”
+2) then you create the dumpfile
+3) remount the rootfs “ro”
+4) reboot!!!
+Please check if this is absolutely necessary to be done in the initramfs. Why cant you do this in the real rootfs?
+
+2) plymouth: debian/initramfs-tools/scripts/init-bottom/plymouth - this does the following:
+/bin/plymouth update-root-fs --new-root-dir=/root
+Comment
+Please change the $rootmnt to /root (is it possible to find this out with a script?)
+
+3) dropbear: debian/initramfs/bottom-dropbear:
+kills the dropbear process.
+This can be done after the rootfs is mounted
+
+4) selinux: load_policy:
+    a) mkdir /selinux
+    b) mkdir /root/selinux
+    c) set +e
+    d) chroot    /root   /sbin/load_policy   -i
+    e) mount -t selinux none /selinux
+
+Comment:
+* This will need some reconsideration
+* definitely needs to be done before we move our /proc to /root/proc.
+* definitely needs to be done after mounting the rootfs
+“start on mounted MOUNTPOINT=/root and starting move-virtual-fs”
+* this mounting of selinux would invoke the “mountinfo_watcher” in mountall
+See what effect this has on the normal execution
+
+5) splashy: scripts/initramfs-tools/splashy
+/sbin/splashy_update “chroot $rootmnt”
+
+Comments:
+* modprobe fails then mount may not be able to mount the root filesystem. So the device IS ready in this case, but the mount is not actually happening and then you are stuck waiting for the mount which will never happen, because your module is not inserted!!! You need to take care of this!!!!!!!!
+
+* Anything that  can be done early should be done early.
+
+----
+CategorySpec

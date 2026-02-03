@@ -1,0 +1,151 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+== Using KVM directly ==
+
+While the rest of this documentation focuses on using KVM through libvirt, it is also possible to work with KVM directly.  This is not the recommended way due to it being cumbersome but can be very useful at times.
+
+KVM is very similar to Qemu and it is possible to run machines from the command line.
+
+The basic syntax is :
+
+<pre>
+kvm -m 512 -hda disk.img -cdrom ubuntu.iso -boot d -smp 2
+</pre>
+
+* -m = memory (in MB)
+* -hda = first hard drive
+** You can use a number of image file types including .img, .cow
+** You can also boot a hard drive. '''Be careful with this option as you do not want to boot the host root partition'''
+** Syntax -hda /dev/sda
+** This will call your grub menu from your MBR when you boot kvm.
+* -cdrom can be an iso image or a CD/DVD drive.
+* -boot [a|c|d|n] boot on floppy (a), hard disk (c), CD-ROM (d), or network (n)
+* -smp = number of CPU
+* -alt-grab change Ctrl-Alt mouse grab combination for Ctrl-Alt-Shift (very practical if you often use some control key combinations like Ctrl-Alt-Del or Windows-E)
+
+There are many other options.  Help is available with:
+
+<pre>
+kvm --help
+</pre>
+
+=== Bridged Networking ===
+
+In order to run KVM using bridged networking as a user we need to perform some configuration.
+
+1. First bridge your network card as above <nowiki>[[KVM-Networking#Creating a network bridge on the host]]</nowiki>
+
+2. Install uml-utilities
+
+ <pre>
+ sudo apt-get install uml-utilities
+ }}}
+
+3. Set permissions on your tun device. Using any editor, edit ''/etc/udev/rules.d/40-permissions.rules'', add this line at the bottom of the file :
+
+ {{{
+ KERNEL=="tun", GROUP="kvm", MODE="0660"
+ }}}
+
+4. Reboot (to bring up your bridge and tun device).
+
+5. Edit ''/etc/kvm/kvm-ifup'' adding sudo in front of the ip and brctl commands
+
+ {{{
+# !/bin/sh
+
+ switch=$(ip route ls | awk '/^default / { for(i=0;i<NF;i++) { if ($(i) == "dev") print $(i+1) }}')
+ '''sudo''' /sbin/ip link set dev "$1" up
+ '''sudo''' /usr/sbin/brctl addif ${switch} $1
+ exit 0
+ }}}
+
+6. We need a wrapper script for launching kvm. I put this script in ~/bin and call it '''kvm-bridge'''. If ~/bin is on your path you can call the command directly with '''kvm-bridge'''. This script was modified from a number of sources
+
+ {{{
+# !/usr/bin/env bash
+# script to manage tap interface allocation
+# for linux kernels >= 2.6.18
+
+# modified by bodhi.zazen from :
+# http://calamari.reverse-dns.net:980/cgi-bin/moin.cgi/FrequentlyAskedQuestions#head-2511814cb92c14dbe1480089c04f83c281117a86
+# http://ubuntuforums.org/showthread.php?t=528046
+# http://www.howtoforge.com/using-kvm-on-ubuntu-gutsy-gibbon
+
+# set up a tap interface for qemu
+# USERID - uid qemu is being run under.
+ USERID=`whoami`
+
+# generate a random mac address for the qemu nic
+# shell script borrowed from user pheldens @ qemu forum
+
+ ranmac=$(echo -n DE:AD:BE:EF ; for i in `seq 1 2` ; \
+ do echo -n `echo ":$RANDOM$RANDOM" | cut -n -c -3` ;done)
+
+# specify which NIC to use - see qemu.org for others
+# model=r8169
+# Set model based on this how-to
+# http://www.howtoforge.com/using-kvm-on-ubuntu-gutsy-gibbon
+
+ model=rtl8139
+ iface=`sudo tunctl -b -u $USERID`
+
+# start kvm with our parameters
+# echo "Bringing up interface $iface with mac address $ranmac"
+# nohup added to allow kvm to run independent of the terminal
+ nohup kvm -net nic,vlan=0,macaddr=$ranmac -net tap,vlan=0,ifname=$iface $@
+
+# kvm has stopped - no longer using tap interface
+ sudo tunctl -d $iface &> /dev/null
+ }}}
+
+7. Set the executable bit on the new script you just created:
+
+ {{{
+ chmod 0755 ~/bin/kvm-bridge
+ }}}
+
+8. Modify sudoers to allow members of the kvm group to run the wrapper kvm-bridge and create a bridged network interface without running KVM as root.
+
+ {{{
+ visudo
+ }}}
+
+Add these line at the end of the file :
+ {{{
+# Allow members of the kvm group to configure a bridged virtual network interface
+ %kvm ALL=(ALL) NOPASSWD: /sbin/ip, /usr/sbin/brctl, /usr/sbin/tunctl
+ }}}
+
+9. Now start kvm from the command line. '''You do not need to declare a network interface'''
+
+ {{{
+ kvm-bridge -m 512 -hda disk.img -cdrom ubuntu.iso -boot -d -smp 2
+ }}}
+
+=== iptables ===
+
+Add these rules to iptables :
+
+{{{
+IPTABLES -A FORWARD -d $IPADDR_FROM_GUEST_OS -j ACCEPT
+IPTABLES -A FORWARD -s $IPADDR_FROM_GUEST_OS -j ACCEPT
+</pre>
+
+Change "$IPADDR_FROM_GUEST_OS" to the actual ip address of the kvm guest (I advise you configure your guests to have a static IP address).
+
+If you use ufw, add these rules to ''/etc/ufw/before.rules''
+
+* See <nowiki>[[https://help.ubuntu.com/lts/serverguide/firewall.html | Ubuntu Server Guide Firewall]]</nowiki>
+
+----
+CategoryVirtualization

@@ -1,0 +1,117 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+== Why use a custom kernel? ==
+
+It's definitely best NOT to use a custom kernel if you can avoid it.  However, you may find that you need a feature not available in the ubuntu stock kernel, or that a certain driver is buggy with your hardware.  A common reason to build custom kernels is to enable the <nowiki>[[Suspend2ForFeisty|suspend2 patch]]</nowiki>.  
+
+== Why use Restricted Modules? ==
+
+Linux-Restricted-Modules (l-r-m) provides additional functionality which you may need for your broken hardware, e.g. wireless and video cards.  In Ubuntu, these restricted modules are bundled together in a companion-package for the linux-image packages.  This is great so long as you're using ubuntu's own kernels however, if you switch to a custom kernel, the bundling makes it much harder to get all the functionality you need. L-R-M is designed for developers to build and provide to users, not for users to modify and re-use.  l-r-m is not set up to make it easy to work with yourself, and there is no version control system set up to help you contribute back patches.  This can be frustrating, but if you're willing to patch a few files it will usually be possible to make your own l-r-m package.  This page explains a bit about the way l-r-m is built, and suggests some strategies for getting your l-r-m package built.
+
+== Getting Ready ==
+
+Before you start, take careful note of a few things:
+* What are the current versions of linux-image, linux-headers, and linux-restricted-modules for your architecture and flavour?  The name of an image id divided into a stem (''linux-image''), a kernel version number (''2.6.20''),  an '''abi number''' (''8'') and a flavour name (''generic'') all connected by dashes.  So as of this writing the current default kernel on the 386 distribution is '''linux-image-2.6.20-8-generic'''.
+* What are the version, abi, and flavour of your custom kernel?  Depending on what method you used, your kernel name might look like "linux-image-2.6.20-ubuntu1-suspend2" or like "linux-image-2.6.20-8-ref-generic".  The crucial thing for this purpose is that your abi MUST match the abi of the default kernel, or the build process will likely fail.  
+
+== Compiling linux-restricted-modules ==
+
+Note: this will only work if you have created AND installed linux-image and linux-header or linux-source packages.  If you just installed an upstream kernel purely by hand, then you're sort of on your own.  
+
+First, download the source package:
+<pre>
+mkdir ~/src
+cd ~/src
+apt-get source linux-restricted-modules-common # -common should always pull the latest version
+apt-get build-dep linux-restricted-modules-common
+cd linux-restricted-modules-2.6.20-8 # directory name may be different...
+</pre>
+
+Now we make a few minor changes in the control files for the package.  Explaining what's going on here is beyond the scope of this howto (though if you want to add more info go ahead!), but basically we are tricking the l-r-m into building for an unofficial kernel package.  If you find that the changes suggested here don't work for you, you may need to experiment on your ownto make sure that the right packages are generated. 
+
+=== Modify debian/rules ===
+
+debian/rules is a special modified makefile for building debian packages; every debian package has one, and each isdifferent.  The ones in the linux-image and l-r-m packages are fairly complex and use an automated system to generated a list of packages to be built and dependencies for building them.  We need to change a few lines to make sure that we can build our package.  
+
+So open the file in a text editor:  
+<pre>
+gedit debian/rules  # or use whatever editor you like
+</pre>
+Now we need to set which flavours will be built, and to note the abi_version.   note the line 
+<pre>
+abi_version=8
+</pre>
+Make sure that this is the abi_version from your self-built package, and also make sure that the linux-headers-2.6.20-x-flavour packages are available in your repository.  In fact check that they are by issueing:
+<pre>
+sudo apt-get build-dep linux-restricted-modules-2.6.20-xxx
+</pre>
+where "xxx" is your abi_version.  All the packages you're going to need will be downloaded.  
+
+Now we need to edit the "flavors" line.  This is not hard.  Look for a stanza starting 
+<pre>
+ifeq "$(DEB_HOST_ARCH)" 
+</pre>
+and including your ARCH (probably i386 or amd64).  within it is a line like this:
+<pre>
+flavours := $(addprefix $(kernel_abi_version)-,generic 386 lowlatency) 
+</pre>
+change it to this:
+<pre>
+flavours := $(addprefix $(kernel_abi_version)-,generic 386 lowlatency suspend2)}}} 
+or whatever the &ndash;append-to-version string was when you made your kernel package.   While we're editing this file, make one more change, replacing:
+{{{
+binary-arch: install build-udebs 
+</pre>
+with
+<pre>
+binary-arch: install # build-udebs 
+</pre>
+This ensures that make doesn't try to build the udeb packages for your kernel, which you probably don't need and which generally give errors anyway...
+
+...unless, like me, you happen to need something like the Intel ipw3945 wireless driver, which is packaged as -- you guessed it -- a udeb.  I hope to update this page with a more complete set of edits for gutsy, but in the meantime the short story is that you have to comment out all the lines in debian/d-i/kernel-versions.in except the one that describes your custom flavour, or it will try to build udebs for flavours of l-r-m that you haven't built the other parts of.  Also I had to explicitly install libgl1-mesa-dev in order to satisfy the dependencies for fireglcontrol. 
+
+=== Modify control.stub.in ===
+
+debian/control is a file used by the debian tools to identify specific packages to build.  We need to include our new package, which will be linux-restricted-modules-kernelversion-abi-flavour.  So we need to add a stanza to custom.stub.in and then regenerate the debian/control file.  If your custom flavour is "suspend2" then find the stanza for linux-restricted-modules-xx-generic.  It will look something like this:
+
+<pre>
+Package: linux-restricted-modules-@@ABIVER@@-generic
+Architecture: amd64 i386
+Priority: optional
+Provides: nvidia-kernel-@@NV_VERSION@@, nvidia-kernel-@@NV_LEGACY_VERSION@@
+Depends: linux-image-@@ABIVER@@-generic, linux-restricted-modules-common (>= @@KVERSION@@), module-init-tools, nvidia-kernel-common
+Suggests: nvidia-glx | nvidia-glx-legacy, avm-fritz-firmware-@@ABIVER@@
+Description: Non-free Linux @@KVERSION@@ modules on x86/x86_64
+ This package provides restricted modules for Linux version @@KVERSION@@ on
+ x86/x86_64.
+ .
+ Currently the following modules are included:
+  - madwifi (Atheros)
+  - fglrx (ATI)
+  - nvidia
+  - fcdsl2, fcdslsl, fcdslslusb, fcdslusb, fcdslusb2, fcpci (AVM ISDN)
+ . 
+ These modules are "restricted" because they are not available under a
+ completely Free licence.
+</pre>
+
+copy the stanza and replace every instance of -generic with -suspend2 (or whatever the name of your flavour is).  Now the debian build process will understand how to build the package you need.  
+
+At this point you should hopefully be able to just build the package:
+<pre>
+fakeroot debian/rules debian/control            # this rebuilds debian/control
+fakeroot debian/rules binary-indep binary-arch  # this actually builds the packages
+</pre>
+Install the resulting packages and you're done.  
+
+----
+<nowiki>[[PageDiscussion|Discuss this page.]]</nowiki>

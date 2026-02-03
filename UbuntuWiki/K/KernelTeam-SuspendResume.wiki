@@ -1,0 +1,145 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== Improving Suspend Resume ==
+
+One of the Jaunty UDS goals was to do what we can to improve detection,
+reporting, and diagnosis of suspend/resume failures.  We have split this
+into two independant segments:
+
+# the detection and report of suspend/resume failures in normal operation, and
+# providing infrastructure to automate suspend/resume testing.
+
+=== Detection and Reporting ===
+
+We want to monitor the system for all suspend/resume and hibernate/resume
+cycles, detecting any failure to resume from those generating a report
+and where applicable a launchpad bug.
+
+==== Detecting Failures ====
+
+A suspend/resume or hibernate/resume can fail in one of three main ways:
+
+# the suspend/hibernate is unable to quiesce the system, and
+# the system never resumes from the suspend/hibernate.
+# the system resumes but has non-functional subsystems (display, wifi)
+
+The first version of this tool will concentrate on the second of these.
+To detect these we will simply add an up/down script to <code>/etc/pm/sleep.d</code>
+which will create a flag file <code>/var/lib/pm-utils/status</code> which will
+contain either <code>suspend</code> or <code>hibernate</code> as the first word on the
+first line of the file to flag both the existence of the event and its type.
+  Additional information may be placed in this file as needed. When the
+system returns from the suspend/hibernate this will be simply removed.
+  It is highly desirable that the up/down tool and perhaps the apport init
+script cooperate to measure the resume time of the system.
+
+   <pre>
+. "${PM_FUNCTIONS}"
+
+recorddir="/var/lib/pm-utils"
+record="$recorddir/status
+mkdir -p "$recorddir"
+case "$1" in
+	hibernate|suspend)
+		echo "$1" >"$record"
+		;;
+	thaw|resume) 
+		rm -f "$record"
+		;;
+* )
+		;;
+esac
+</pre>
+
+Now if we are booting normally and we detect this record file as present
+we know that the resume from suspend/hibernate has failed and we can
+generate a failure report.
+
+==== Reporting Failures ====
+
+Having detected a failure we want to generate an error report and if
+permitted file a bug in launchpad corresponding to it.  For this we
+leverage the existing apport infrastructure. From the apport init script
+we call a new script <code>/usr/share/apport/checkresume</code> which will check
+for the failed resume marker and initiate the report.
+
+The report contains at least:
+# the contents of the <code>/var/lib/pm-utils/status</code> file,
+# the contents of the stress test mode log file (see below),
+# the system dmesg output (see below), and
+# general system and hardware information.
+
+The script which generates the report (if needed) will apply a set of
+tags that make it easy to differentiate these from other kernel bugs.
+
+Once the user has logged in apport will notify them of the existance of
+the resume failure report and offer them the opportunity to report it to
+launchpad in the normal manner.  No report will be made without the users
+consent.
+
+=== Stress Testing ===
+
+Regular testing of suspend/hibernate/resume functionality can only help
+capture regressions long before they hit the widest user base.  To this
+end it is helpful for users to specifically stress test suspend/resume on
+their systems and report this back to us.  For example some systems will
+only fail on the second resume, or are unreliable and fail one time in 10.
+
+To make this testing consistent it makes sense to automate this process.
+To this end we are recommending regular testing using the script at the
+URL below:
+
+    <pre>
+http://people.ubuntu.com/~apw/suspend-resume/test-suspend
+</pre>
+
+This script will perform a number of suspend resume cycles (20 by default)
+and report back on these.  This script is run as below:
+
+    <pre>
+sudo ./test-suspend
+</pre>
+
+This script requires the powermanagement-interface package to be installed
+before it will run.
+
+==== Testing Strategy ====
+
+The test script utilised the ACPI timer wakeup system to automatically
+resume us from a suspend.  In each iteration we will schedule an ACPI
+wakeup 10s out in the future and then suspend the system using
+<code>pms suspend</code>.  On successful resume we then sleep a further 10 seconds
+and then repeat the test.
+
+When suspend/resume is working normally the system will eventually
+reach the end of the testing and the script will complete normally.
+
+==== Detecting and Reporting failures ====
+
+If suspend/resume fails the user should hard reset their system (power
+off and on, or reset) and the apport reporting system will detect and
+report this.  The user will get the option to report this back to launchpad
+as normal.
+
+To tidy up after the test the script should be re-run without any
+arguments.  This allows the script to detect and correct the system clock
+should it have been modified.
+
+=== TODO ===
+
+# agree the stress testing logfile name.
+# ensure the contents of the $record file should be used to influence the titles of the bug and the tags applied to it.
+# confirm the name of the testing script included with the kernel.
+# having got the name replace it in the above description.
+# do we want to report successful completion of a stress test cycle?.
+# how do we detect unusable screen (blinking cursor, etc)?
+# can we detect failed wifi resume?
+# should RTC mashing up be an opt-in thing (apw: I lean to yes).

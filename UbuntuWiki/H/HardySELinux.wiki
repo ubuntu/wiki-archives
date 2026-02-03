@@ -1,0 +1,275 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+== HardySELinux ==
+
+* '''Launchpad Entry''': UbuntuSpec:selinux-support
+* '''Created''': 2007-10-25
+* '''Contributors''': ChadSellers, CalebCase
+* '''Packages affected''': selinux-policy-*, policycoreutils
+
+=== Summary ===
+
+Provide SELinux as an option for Ubuntu. Much of the support necessary is already inherited from Debian. The remaining pieces include turning on SELinux when loading the kernel, logic for loading the SELinux policy on boot, and tailoring a default SELinux policy.
+
+Source packages: <nowiki>[[https://code.launchpad.net/~calebcase/+junk/selinux-support]]</nowiki>
+
+Binary packages: <nowiki>[[https://launchpad.net/~ubuntu-hardened/+archive]]</nowiki>
+
+=== Rationale ===
+
+SELinux provides security features that are extremely useful for locking down machines, particularly servers. It provides the ability to isolate processes into domains and create security policy defining what those domains can do. This capability enables users to enforce a large number of security goals, including limiting privilege, containing exploits, preventing privilege escalation, enforcing application security architecture, controlling information flow, and many others.
+
+SELinux is sometimes preferred over AppArmor for a number of reasons. Often, this is due to user preference of its inode-based labeling instead of AppArmor's use of pathnames. Also, customers with more stringent security requirements use SELinux. In the past, this has included users such as those from government, financial institutions, embedded systems, and others. For instance, users concerned with information flow often choose SELinux.
+
+=== Use Cases ===
+
+* Sylar wants to learn more about how SELinux works.  He installs the SELinux packages, and they handle switching from AppArmor to SELinux, and provides a targeted policy by default.
+* Issac was using SELinux but wants to switch back to AppArmor.  He uninstalls the SELinux packages and reinstalls the AppArmor ones.
+* Claire wants to contribute to the development of a strict SELinux policy.  She installs SELinux's development packages and is able to build, test, and share new policies.
+* Jan has an SELinux system and wants to install a custom policy module to be used in conjunction with the standard targeted policy.
+
+=== Design ===
+
+==== Security Policy ====
+
+There are a few SELinux policies in universe (selinux-policy-default, selinux-policy-refpolicy-targeted, selinux-policy-refpolicy-strict) which are all geared toward Debian systems and need tweaking to work with Ubuntu. These policies are quite complex and have a tendency to require expert user intervention to use them. This is probably not the right direction for Ubuntu's default policy, though these policies can definitely continue to exist in universe for expert users wishing to use them. We plan to follow the general targeted model of leaving most things unconfined and offering the ability to confine network daemons, but plan to modify this to ensure that SELinux breaks user systems as infrequently as possible.
+
+The proposed SELinux security policy should be fairly simple and modular. The idea here is to do everything we can to avoid breaking things on the system while at the same time adding some basic security controls. This would mean that all daemons would be unconfined unless the user/admin elected to confine them.
+
+==== Enabling SELinux ====
+
+Make SELinux an install-time and/or run-time configuration option. We do not want to replace AppArmor, but rather offer users the choice of SELinux.
+
+=== Implementation ===
+
+==== UI Changes ====
+
+The only UI changes necessary will likely be those necessary to provide the user with the ability to choose to enable SELinux. This could come in two forms.
+
+===== Installer Choice =====
+
+The installer can provide the user with a choice of SELinux, AppArmor, or no security module. This may be an Advanced Option in the LiveCD installer.
+
+===== Runtime Choice =====
+
+A new Preferences UI would provide for choosing Security mechanisms. This would be similar to the UI provided by the installer.
+
+==== Code Changes ====
+
+===== Loading SELinux Policy on Boot =====
+
+SELinux requires the policy to be loaded into the kernel as early in the boot process as possible. SysVInit has been patched in other distros (Fedora, Red Hat, Debian) to do this. Basically, init loads the policy then re-exec's itself so init has the correct label. As Ubuntu uses upstart, there is no SELinux support.
+
+Rather than modify upstart, we will add the SELinux policy load to the initramfs. This will require a few code changes:
+
+# A patch to load_policy to add a flag for doing an initial policy load.
+# Create the scripts for use in the initrd.
+
+Note that one downside to this approach is that the initrd image in /boot must be updated after installing the SELinux packages (unless the SELinux initrd package is installed by default).
+
+The policy loading script installation and the process of updating initramfs will be handled by the selinux package.
+
+===== SELinux Policy =====
+
+Create a new SELinux policy configuration that is less restrictive by default than those found in Fedora, Debian, or Gentoo. This policy will prevent very little, reducing the chances of breaking unsuspecting users' systems. Users will then be able to select (potentially through apt) policies for their applications that they wish to confine. Additionally, this will provide the foundation for higher-level user-friendly SELinux policy management UIs to be developed in the future.
+
+The list of daemons for which confinement policies will be available for user selection is still to be determined, but will at least include cups. Confining cups is necessary to ensure that no protection is lost by turning off AppArmor, which currently only confines cups by default.
+
+The breakdown of the policy would be as follows:
+
+{| class="wikitable"
+|-
+| Debian Package
+| Reference Policy Module
+| Description
+|-
+| selinux-policy-refpolicy
+| base.pp
+| This contains the base policy module. The base policy module contains essential policy mainly from the kernel layer (core policy for executables, networking, devices, domains (processes), filesystems, etc).
+|-
+| selinux-policy-refpolicy-unconfined
+| unconfined.pp
+| This contains the unconfined policy module. The unconfined policy is a catch all policy that applies to everything that isn't explictly covered in the base module (base.pp) or another specific module (e.g., cups.pp). As the name implies, this module doesn't limit activities of the programs or users that it covers.
+|-
+| selinux-policy-refpolicy-cups
+| cups.pp
+| This contains the Common UNIX Printing System policy module.
+|}
+
+===== Custom Policy =====
+
+Using a modular policy has the benefit that it is possible to support custom policy modules. The proposed method of doing this is to have an /etc/selinux.d directory that contains the policy packages that should be installed/loaded. When a debian package is installed/removed that supplies a policy package it adds/removes itself (or a symlink to itself) to /etc/selinux.d and triggers semodule (which is a trigger registered by the policycoreutils package). The script that handles the semodule trigger then checks the loaded modules and the ones found in /etc/selinux.d and adds/removes them via the semodule utility.
+
+The selinux-policy-refpolicy* packages will place their policy packages into /etc/selinux.d/refpolicy.
+
+It is also possible that the user doesn't want to use the policy shipped with Hardy.  (For example, he is compling and installing a newer version of Reference Policy). The user has several options, but to make this as simple as possible we are providing an selinux-policy-dummy package that satisifes the necessary debian ''Provide: selinux-policy'' but contains no policy itself.  The user will be responsible for updating the SELINUXTYPE entry in his /etc/selinux/config file.
+
+===== Switching Security Modules =====
+
+In order to switch to a security module, the appropriate security module must be loaded into the kernel and enabled. Currently, SELinux is compiled into the Gutsy kernel but disabled, and can be enabled by passing selinux=1 on the kernel command line. AppArmor is currently loaded as a module. Given this, the following is necessary to switch between them:
+
+* AppArmor to SELinux
+** disable the AppArmor module (apparmor.enabled=0 for Ubuntu 9.04 and earlier, security=selinux for 9.10 and higher)
+** enable the SELinux module (selinux=1)
+** reboot
+* SELinux to AppArmor
+** enable the AppArmor module (remove apparmor.enabled=0 (or security=selinux for 9.10 and higher), it is on by default)
+** disable the SELinux moduel (remove selinux=1, it is off by default)
+** reboot
+
+These flags are passed by the bootloader to the kernel. Ubuntu uses update-grub to manage the Grub menu.lst configuration file. update-grub regenerates the menu options (generally whenever a new kernel is installed). The above kernel options should be placed in either the kopt or defoptions options of update-grub's meta configuration of menu.lst. Placing it in the kopt line will add them to all the kernels whereas defoptions only affects the default kernels (not the alternatives).
+
+Additionally, when switching to SELinux, the filesystem must be relabeled (as SELinux provides label-based security). The disk may be relabeled on shutdown. A shutdown relabel has the advantage that the system doesn't need to be rebooted twice on startup (once to relabel, and again to boot with everthing labeled correctly). The drawback to a shutdown relabel is that it may or may not happen (system is shutdown incorrectly). As a fallback the system will still relabel on startup if necessary.
+
+The switching process will be handled by the selinux package.
+
+=== Installing SELinux ===
+
+==== apt-get ====
+
+ 1. Install selinux:
+    > apt-get install selinux
+ 1. Reboot
+
+==== aptitude ====
+
+# Remove apparmor and apparmor-utils
+# Install selinux
+# Deselect selinux-policy-dummy and choose selinux-policy-refpolicy
+# Apply changes
+# Reboot
+
+==== Development Repo ====
+
+The Ubuntu Hardened team has an alternate repository for development and testing purposes:
+
+ 1. Update /etc/apt/sources.list by appending the following:
+*** deb http://ppa.launchpad.net/ubuntu-hardened/ubuntu hardy main
+*** deb-src http://ppa.launchpad.net/ubuntu-hardened/ubuntu hardy main
+ 1. Update repo:
+    > apt-get update
+ 1. Install updated packages:
+    > apt-get upgrade
+ 1. Install selinux:
+    > apt-get install selinux
+*** These packages will be removed:
+**** apparmor
+**** apparmor-utils
+ 1. Reboot
+
+=== Package Status ===
+
+Status Legend:
+
+{| class="wikitable"
+|-
+| <#93BEFF> Planning
+| <#FF4040> Needs Fix
+| <#FFDD40> Needs Review
+| <#68FF40> Merged
+|}
+
+Please put notes about the status as references to below the table. For example:
+
+{| class="wikitable"
+|-
+| <#FF4040> Needs Fix [1]
+|}
+
+[1] Fix me!
+
+SELinux Packages:
+
+{| class="wikitable"
+|-
+| Source Package
+| Status
+| Notes
+|-
+| selinux
+| <#68FF40> Merged
+| still needs: load_policy should be in /sbin not /usr/sbin
+|-
+| selinux-basics
+| <#68FF40> Merged
+| 
+|-
+| selinux-policy-dummy
+| <#68FF40> Merged
+| waiting in NEW
+|-
+| libsepol
+| <#68FF40> Merged
+| 
+|-
+| libselinux
+| <#68FF40> Merged
+| 
+|-
+| checkpolicy
+| <#68FF40> Merged
+| 
+|-
+| libsemanage
+| <#68FF40> Merged
+| 
+|-
+| refpolicy
+| <#68FF40> Merged
+| 
+|-
+| sepolgen
+| <#68FF40> Merged
+| 
+|-
+| policycoreutils
+| <#68FF40> Merged
+| needs libsemanage
+|-
+| setools
+| <#68FF40> Merged
+| 
+|}
+
+External Packages:
+
+{| class="wikitable"
+|-
+| Source Package
+| Binary Package
+| Status
+|-
+| grub
+| grub
+| <#68FF40> Merged
+|-
+| openssh
+| openssh-server
+| <#68FF40> Merged [1]
+|-
+| pam
+| pam
+| <#68FF40> Merged
+|-
+| shadow
+| login
+| <#68FF40> Merged
+|-
+| ustr
+| libustr
+| <#68FF40> Merged
+|}
+
+[1] This bug was fixed in the package openssh - 1:4.7p1-4ubuntu1
+
+----
+CategorySpec

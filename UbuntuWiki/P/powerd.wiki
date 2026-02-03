@@ -1,0 +1,186 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== powerd ==
+
+powerd is a system daemon that helps manage power states on the phone by providing a DBUS API. This API is used by system services, not apps, to change the state of the system power and display. powerd also manages some things internally, like the activity timeout, although that code will be moving to Unity.
+
+=== Bugs ===
+
+Please report any bugs you find with powerd. If you have issues, you need to enable debug messages, which as of July 11 are disabled by default. In order to do that you need to edit /etc/init/powerd.conf and remove the comment (the # character) on the line that says "env POWERD_DEBUG=1". After doing that you can reboot the phone and reproduce your issue. Once the issue comes back, please attach the contents of /var/log/syslog to the bug. If you want you can filter that log to only have powerd entries using grep.
+
+The current powerd bug list can be found <nowiki>[[https://bugs.launchpad.net/powerd/+bugs|Here]]</nowiki>.
+
+==== Testing ====
+
+NOTES:  
+* During the display tests listed below, allow the display to timeout due to idle and go blank. You will need to hold an active state request so that you device does not suspend (powerd-cli active). The current defaults are 45 seconds for dim and 60 seconds for blank. If you press the power button to turn off the display, the "display on" and related tests will fail, this itself is a test case listed below.
+* There is a set of automated tests. It is listed below as ''powerd-cli test'', but this suite cannot test any of the hardware dependent pieces. That makes these results nice to have on a daily basis to ensure that we didn't break the software, but it's not as important to have them run on a wide variety of hardware.
+
+{| class="wikitable"
+|-
+| <tablestyle="width: 80%">'''PowerD Test Plan'''
+|-
+| '''Test Description'''
+| '''Command'''
+| '''Pass/Fail'''
+|-
+| Test Display On, Brightness Dim
+| powerd-cli display on
+| 
+|-
+| Test Display On, Brightness Bright
+| powerd-cli display on bright
+| 
+|-
+| Test Display On, Brightness Dim, Proximity On
+| powerd-cli display on proximity
+| 
+|-
+| Test Display On, Brightness Bright, Proximity On
+| powerd-cli display on bright proximity
+| 
+|-
+| Test Display On, Don't Care about Brightness Level
+| powerd-cli display on dc
+| 
+|-
+| Test Display On, Don't Care about Brightness Level with Proximity
+| powerd-cli display on dc proximity
+| 
+|-
+| Test Display On upon receiving a phone call
+| powerd-cli listen
+| 
+|-
+| Test Display On upon receiving a SMS text
+| powerd-cli listen
+| 
+|-
+| Test Display On upon receiving a MMS text
+| powerd-cli listen
+| 
+|-
+| Run the built-in automated powerd-cli Tests <<BR>> All of the powerd dbus API will be tested <<BR>> All of the tests should report "Passed"
+| powerd-cli test <<BR>> Save off the output
+| 
+|-
+| Test that power button overrides any requested screen state via powerd-cli
+| Press the Power Button to force suspend <<BR>> Issue: powerd-cli display on bright <<BR>> The Command should be ignored
+| 
+|-
+| Test that the activity timer dims the screen after 45 seconds
+| powerd-cli listen
+| 
+|-
+| Test that the activity timer shuts off the screen after 60 seconds
+| powerd-cli listen
+| 
+|-
+| <rowspan=4> Ensure that when 2 display activities are sent, dim and bright. The bright activity always overrides the dim
+| 
+| Open 2 terminals, <<BR>> In the 1st terminal issue: powerd-cli display on <<BR>> In the 2nd terminal issue: powerd-cli display on bright
+|-
+| Ensure that the display switches from Dim to Bright
+| 
+|-
+| Open 2 terminals, <<BR>> In the 1st terminal issue: powerd-cli display on bright <<BR>> In the 2nd terminal issue: powerd-cli display on
+|-
+| Ensure that the display remains bright and dim is ignored
+| 
+|-
+| <rowspan=2> Ensure that stopping powerd kills all pending activity requests
+| 
+| Open 3 terminals, <<BR>> In the 1st terminal issue: powerd-cli display on <<BR>> In the 2nd terminal issue: powerd-cli display on bright
+|-
+| In the 3rd terminal Issue: sudo initctl restart powerd <<BR>> Verify the existing activities have been cancelled <<BR>> : powerd-cli list
+|}
+
+<<BR>>
+The following table displays the tested devices, percentage of pass/fail test case ratio. Get the version by running ''dpkg -l | grep powerd'' on your device. 
+<<BR>>
+<<BR>>
+
+{| class="wikitable"
+|-
+| '''Tested Devices'''
+| '''Powerd Version'''
+| '''Date'''
+| '''Pass/Fail'''
+|-
+| Nexus4
+| 0.13+13.10.20130703-0ubuntu1
+| 7/2013
+| Pass
+|-
+| Nexus7
+| 0.13+13.10.20130703-0ubuntu1
+| 7/2013
+| Pass
+|}
+
+=== API ===
+
+The documentation below is for the dbus API, it is documented as if these are C-style function calls, but currently there is no library to use. The code in powerd-cli.c provides examples for calling into this API from C.
+
+'''Note''' - powerd requires that clients that request ''Sys``State'' ( to inhibit suspend ), must remain connected to the system DBus session, or their active ''Sys``State'' requests will be dropped by powerd.
+
+* System States
+** string requestSysState(string name, int state)
+** name: Name for this request (for debugging)
+** state: may be one of:
+*** 1 - Requesting this state will prevent the device from suspending. There are no other valid states
+** Return Value: Returns a string cookie
+** void clearSysState(string cookie)
+** provided a valid cookie, this will clear a state request. If this is the last active state request, the phone will suspend immediately.
+* Display States
+** string requestDisplayState(string name, int state, unsigned int flags)
+** name: Name for this request (for debugging)
+** state: may be one of
+*** 0 - callers will use this when they do not care about whether the screen is on, but instead need to modify flags or brightness settings. For example, a call to enable the Proximity Sensor's control of the screen would set this value.
+*** 1 - will turn the screen on, overriding DONT_CARE requests
+** flags: may any of (or'd together)
+*** 1 - allow the proximity sensor to turn the screen on and off
+*** 2 - disable auto-brightness which is based on ambient light
+*** 4 - request "bright" screen brightness. If not requested the screen may be dimmed.
+** Return Value: a cookie for use with updateDisplayState and clearDisplayState
+** void updateDisplayState(string cookie, int state, unsigned int flags)
+*** cookie: the cookie returned by requestDisplayState for the request to be modified
+*** state: new state for the request, using the same values as in requestDisplayState
+*** flags: new flags for the request, using the same values as in requestDisplayState
+** void clearDisplayState(string cookie)
+** provided a valid cookie, this will clear a state request. If this is the last request to keep the screen on, it will turn off.
+* Brightness Control
+** getBrightnessParams(void)
+** Retrieves platform-dependent brightness parameters
+** Returns a tuple containing the following parameters:
+*** int dim_brightness: Dim brightness (>= 0.15)
+*** int min_user_brightness: Minimum allowed user brightness value
+*** int max_brightness: Maximum allowed brightness
+*** int default_brightness: Default brightness at boot
+*** boolean ab_available: True if autobrightness is supported on this platform
+** void setUserBrightness(int brightness)
+** brightness: Brightness level specified by the user
+** void userAutobrightnessEnable(boolean enable)
+** enable: True to enable autobrightness, False to disable it
+* '''Client Registration and State Change Acknowledgement''': Interfaces to request that powerd wait for acknowldgement from a client before completing a pending system state transition
+** void registerClient(string name) - Register a client with powerd for acknowledgement of system state transitions
+** name: Name of the client (for debugging)
+** void unregisterClient(string name) - Unregister a previously registered client
+** name: Same client name passed to registerClient
+** void ackStateChange(int state) - Acknowledge state transition
+** state: The state transition which is being acknowledged
+* Signals
+** SysPowerStateChange(int state)
+** state: New system power state
+** DisplayPowerStateChange(int state, unsigned int flags)
+** state: Current display state. In this context the DONT_CARE state means the screen is off.
+** flags: Current display flags
+   

@@ -1,0 +1,161 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+== Summary ==
+
+A buggy BIOS can cause many different and subtle problems to Linux, ranging from reboot problems, incorrect battery power readings, suspend/resume not working correctly, and strange ACPI issues. 
+
+This page describes some of the issues which can cause problems and may help you to troubleshoot broken BIOS issues.
+
+=== Buggy DSDT ===
+
+Sometimes a BIOS will contain a buggy Differentiated System Description Table (DSDT)and can cause subtle problems for the Linux ACPI driver.
+
+The (DSDT) can be disassembled using the Intel iasl disassembler tool. Install iasl using:
+
+<pre>
+sudo apt-get install iasl acpidump
+</pre>
+and get the DSDT data and disassemble it as follows:
+{{{ 
+sudo acpidump -o acpidump.txt
+acpixtract acpidump.txt
+iasl -d dsdt.dat ssdt*.dat
+}}}
+
+{i} Note that acpixtract can produce additional files. Often those are SSDT#.dat files which are suplemental system description tables which can hold additions to the DSDT. The files can be disassembled the same way the main DSDT.dat is done.
+
+More information about the DSDT can be found in the ACPI specification, which can be downloaded from http://www.acpi.info/
+
+Although understanding the disassembled DSDT can be challenging, it can be worth the effort to understand what the
+ASL code is trying to do as sometimes there are coding errors which lead to very subtle ACPI problems.
+
+Using the Intel DSDT disassembler has proved very revealing in some
+cases. For example, one BIOS had a race condition in the initialisation
+of the Embedded Controller. The Linux ACPI driver was reading values
+form the Embedded Controller before the controller was fully ready, and
+hence incorrect values were being returned to the Linux kernel for
+various devices, such as the smart battery etc..
+
+Another bug found in the DSDT was from the sloppy use of the ASL
+Acquire() operator used to obtain a mutex. The Acquire() operator has a
+timeout argument, which can be 0xFFFF (wait forever to acquire a mutex)
+or a timeout in milliseconds. For the non-infinite wait there should be
+a check to see if the Acquire worked correctly or timed-out.  We have
+seen code that does not check the mutex timeout and hence race
+conditions have occurred causing the corruption of settings in the
+embedded controller and misreadings by the Linux ACPI driver.
+
+Rule: Always check return values from mutex Acquire() operators when
+using finite timeouts.
+
+=== BIOS checking tools ===
+
+If you suspect your BIOS is not behaving correctly, then it is worth 
+using the Firmware Test Suite (fwts) to automatically check for incorrect
+BIOS behaviour. 
+
+To install, use:
+
+<pre>
+sudo apt-get install fwts
+</pre>
+
+..and to run the automated batch tests use:
+
+<pre>
+sudo fwts
+</pre>
+
+The test results will be automatically appended to a log file "results.log"
+
+We suggest running this tool and carefully looking at the log of errors it
+reports as a first pass in seeing any glaring problems.
+
+=== DSDT handling Operating System Variants ===
+
+Most BIOS code check OS variants keyed off the _OSI and _OS objects.
+Most BIOS that invoke OSI(Linux) do nothing with it, but others that do
+cause Linux to break in different ways (supsend/resume, Video reposting,
+etc). The Linux ACPI driver disables OSI(Linux) by default, with the hope
+that it discourage BIOS writers from using it.
+
+Linux will continue to claim OSI compatibility with Windows until the
+day when the majority of Linux systems have passed a Linux compatibility
+test rather than a Windows compatibility test.
+
+=== ACPI _BIF method ===
+
+The ACPI _BIF method provides the kernel with battery specific information.
+Hence if it is incorrect it can fool high level applications such as gnome-power-manager 
+to shut a system down when it believes power has reached a critically low point.
+
+A broken _BIF method has been known to caused some power
+management headaches. For example, it is important that the "Design Capacity of Warning" and "Design Capacity of Low" are non-zero, otherwise the gnome-power-manager cannot easily determine a correct strategy for hibernating or shutting down a PC when the battery becomes critically low.
+
+The Firmware Test Suite "method" test will will sanity check many of the common ACPI methods, such as _BIF. To run this test, use:
+
+<pre>
+sudo fwts method
+</pre>
+
+Generally, packages should have all their fields set without relying on
+any defaults to zero. It is a sloppy BIOS practice to omit the
+setting of fields in packages - fields need to be set - missing fields
+lead to bugs which can fool the kernel or applications that rely on
+specific ACPI information being provided correctly.
+
+=== Reboot Methods ===
+
+A PC can be rebooted by Linux using several different strategies,
+selectable by the kernel reboot= boot option. These strategies are:
+
+* Putting the processor back into real mode and jumping to the BIOS reset address (reboot=b)
+* Keyboard controller reset by writing 0xfe to port 0x64 (reboot=k)
+* Forcing the processor to triple fault (reboot=t)
+* By forcing a Intel PCI reset by writing 0x2 and then 0x04 to port 0xCF9 (reboot=p)
+* By writing a magic value to a port/register, as specified by ACPI FACP values RESET_VALUE and RESET_REG (an "ACPI reset") (reboot=a)
+
+The last method ("ACPI reset") has shown to be problematic with one particular
+BIOS, as the RESET_VALUE and RESET_REG were values 0x06 and 0xCF9 which
+tries to do a Intel PCI style reset but only worked in 90% of
+reboots. This is because the reset should be performed in two stages (a write of
+0x2, a port delay, and then a write of 0x04) rather than just one write of (0x02 | 0x04). 
+
+{i} For debugging purpose it is possible to add "reboot=<letter>" to the kernel command line in order to enforce a particular reboot method)
+
+=== Suspend/Resume and Hibernate/Resume ===
+
+BIOS issues can cause suspend/resume to fail. You can use the Firmware Test Suite to soak test Suspend/Resume (S3) and Hibernate/Resume (S4). Use the --s3-multiple and --s4-multiple options to specify the number of iterations. For example..
+
+Suspend Resume:
+<pre>
+sudo fwts s3 --s3-multiple=20
+</pre>
+
+Hibernate Resume:
+
+<pre>
+sudo fwts s4 --s4-multiple=20
+</pre>
+
+Debugging Suspend/Resume is now explained at: <nowiki>[[https://wiki.ubuntu.com/DebuggingKernelSuspend]]</nowiki>.
+
+Debugging Hibernate/Resume is now explained at: <nowiki>[[https://wiki.ubuntu.com/DebuggingKernelHibernate]]</nowiki>.
+
+=== See Also ===
+
+* https://wiki.ubuntu.com/Kernel/Reference/fwts
+* https://wiki.ubuntu.com/DebuggingACPI
+* ftp://ftp.suse.com/pub/people/trenn/ACPI_BIOS_on_Linux_guide/acpi_guideline_for_vendors.pdf
+
+----
+CategoryKernel CategoryDocumentation

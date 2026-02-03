@@ -1,0 +1,106 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+* '''Launchpad Entry''': UbuntuSpec:servercloud-q-apt-improvements
+* '''Created''': RobieBasak
+* '''Contributors''': RobieBasak, ScottMoser, RobertCollins, MichaelVogt
+* '''Packages affected''': debootstrap, apt
+
+=== Summary ===
+Almost all users of apt have seen the 'Hash Sum Mismatch' errors during an 'apt-get update'.  This represents a race condition in apt.  It is most likely exposed when a mirror is in the process of updating.  The most common situation is:
+* apt downloads Release file
+* server updates Packages file
+* apt downloads Packages file
+* apt compares Packages file against Release file and complains
+
+=== Release Note ===
+Ubuntu's public mirrors now contain an improved archive format. Coupled with updates to apt transient apt-update errors are a thing of the past.
+
+=== Rationale ===
+Prior to this change, the apt repository format suffered from a number of race conditions that caused apt to occasionally fail during an "apt-get update". Repositories have multiple index files which are fetched. "apt-get update" fails verification if index files don't match the exact hash present in another index file, even if they would work for accessing the repository.
+These race conditions cause significant problems in the development release that updates frequently:
+* Developer velocity suffers
+* Automated testing fails due to spurious apt-get failures
+After release, the -updates and -security pockets still suffer from this race condition, so "apt-get update" can still fail in production. This means that:
+* End-users must retry manually
+* Automated testing on stable releases can fail due to spurious apt-get failures.
+* Developers have to either write workarounds for apt-get failures or accept that their product (eg. MAAS and juju) will be unreliable when they attempt to install packages.
+
+=== User Stories ===
+
+* Jim is using juju, and adds a node. He does not want to see apt fail due to a race condition.
+* Marley is using the Ubuntu installer for network based installs against a local mirror that is updated from a remote mirror. He does not want installs to fail due to the mirror being updated.
+* Sally wants to use a http proxy to cache deb downloads and does not want to be vulnerable to caching mismatched files that would cause apt failures.
+* Tim is setting up continuous integration for his project, which depends on apt and debian-installer (via MAAS). He does not want to see failures in his status report that are due to apt or debootstrap failing, and does not want to worry about having to add retry logic for these cases.
+
+=== Design ===
+==== Repository Specification ====
+The by-hash specification is currently an optional addition to any apt repository. But if the by-hash scheme is supported by a mirror for a given release, it must comply with the following:
+* An InRelease URL MUST exist for the release.
+* A dists/<release>/by-hash/<algorithm>/<hash> URL MUST return the corresponding file for every hash and  hash algorithm listed in dists/<release>/InRelease for that file.
+* The InRelease URL MUST NOT be updated before all dists/<release>/by-hash/<algorithm>/<hash> URLs that are referred to by the new InRelease file are first available.
+* A dists/<release>/by-hash/<algorithm>/<hash> URL MUST NOT be removed until the InRelease URL no longer refers to it, AND all downstream cached copies of the InRelease URL that were previously served by the mirror have expired. Definition of cache expiry is protocol-dependent. For HTTP, expiry is defined by HTTP cache control headers. When an explicit expiry time is not defined, it is taken to be 259200 seconds (approximately three days) after the time the URL was last served.
+
+==== Unresolved Issues ====
+===== Fallback mechanism =====
+Users use different repositories at once, and not all of them are expected to implement this scheme all at once. So we need a scheme to allow apt to fall-back automatically when by-hash isn't available on a per-mirror or per-(mirror, release) basis. Possible solutions:
+* Detect if by-hash is available by trying to use it
+** A client can just try and fetch a by-hash file. This specification guarantees that all by-hash files must exist at all times. So if a client fails to fetch a by-hash file that it has been pointed to, then it can assume that the mirror does not support by-hash at all, and fall back to the old behaviour. Downside: the current apt code architecture makes this sort of change in behaviour somewhat awkward.
+** Indicate the presence of by-hash support by an additional sentinel file as part of this specification. Downside: the current apt code architecture makes this sort of change in behaviour somewhat awkward.
+* Detect if by-hash is available by being told this in the InRelease file:
+** Advantage: only minor changes to clients needed to parse the new field in InRelease
+** Disadvantages:
+**** Requires InRelease re-signing, so will not work without breaking archive authentication or support straight from the master archive.
+**** Potential to break existing clients, even if they should ignore unknown files in InRelease already.
+* Extend the sources.list format to specify if by-hash is available manually.
+===== Client Code Changes =====
+* The proposed changes to apt would bump the ABI, breaking ABI compatibility with Debian, which is undesirable. If we could have a global flag that turns this new behaviour on and off, then could Debian share our changes even if they do not use this scheme?
+
+=== Assumptions ===
+* The master Ubuntu archive does not currently support InRelease. This means that deployment of this scheme today would be slightly out-of-spec with regard to the By-Hash Repository Specification defined above. The by-hash scheme will still work with Release.gpg signatures, but a race condition will exist until InRelease files are published. This scheme will still eliminate a number of other more common race conditions without InRelease, so is still worth doing now. And as soon as InRelease files are generated, this scheme will allow apt to become race-free without any additional effort.
+* If a client hits multiple mirrors for different index files (eg. for round-robin DNS based load balanced mirrors), then a race condition still exists. This can only be fixed by coordinating the update across all the mirrors (by updating all by-hash URLs across all mirrors first, and only then doing the InRelease files). This is not possible to fix in any other reasonable way, unless clients or caches can be configured to not mix mirrors during a single update.
+
+=== Deployment Plan ===
+==== Code Changes ====
+# apt and debootstrap need to be updated to support the new changes and to fall back to the old behaviour if the new scheme is not available.
+# A by-hash generator needs to be written, which can parse InRelease, create the by-hash entries and delete expired ones (trivial).
+# The publisher needs to be updated to use the by-hash generator (presumed trivial).
+# Mirror script packages need to be updated to sync the by-hash files and InRelease files in the correct race-free order. Candidates:
+** debmirror
+** ubumirror
+ 1. apt-ftparchive should be updated to generate by-hash files.
+==== Migration ====
+The order of these steps does not matter:
+* Upload production-ready apt and debootstrap changes. If master archive by-hash support is not yet available, these will fall back to non by-hash operation so will not disrupt service.
+* Update the publish to generate the by-hash directory (and cleanup). Clients with by-hash support will start using it straight away. Clients with no by-hash support will not be affected.
+==== Rollback ====
+If rollback is required, then it will be easy. apt and debootstrap changes can be reverted at any time. The publisher can pull out of generating by-hash at any time before release by reverting apt and debootstrap changes first. If Debian go a different route, then we can take their changes and reverse ours in debootstrap and apt. The publisher can stop publishing by-hash at any time, since clients will fall back to old behaviour automatically. If client by-hash support is released, then it may be advisable to keep publishing by-hash until EOL, in order to keep released clients race-free. This should not have much of a maintenance burden, since by-hash generation is trivial and independent.
+
+=== Test/Demo Plan ===
+We can test and demonstrate this facility without putting anything into production.
+# Add patched apt and debootstrap to a PPA.
+# Publish a Quantal mirror with by-hash information that is updated in a race-free manner. This will have to include InRelease re-signing by a testing (non-offical) key to eliminate all races.
+# Publish debian-installer netboot images based on the patched apt and debootstrap.
+# Base automated Quantal-based installer tests on the test by-hash mirror to verify that the races have gone away.
+
+=== Further Discussion ===
+* https://lists.ubuntu.com/archives/ubuntu-devel/2012-July/035487.html
+* http://lists.debian.org/debian-dak/2012/05/threads.html#00006
+* https://bugs.launchpad.net/ubuntu/+source/apt/+bug/972077
+
+A number of alternative schemes to fix this problem have been discussed (TBC: summarise them here). This particular scheme:
+* Requires no new state or addition to a single source of truth.
+* Can be deployed by an arbitrary mirror for use downstream without any upstream support.
+* Can be removed if and when Debian implement an alternative scheme that solves this problem.
+* Is fully backwards-compatible with older clients. They will continue working and their behaviour will not change.
+* Carries minimum risk of regression because the change will be undetectable as far as old clients are concerned.
+
+Caveats:
+* Client changes are required to achieve race-free operation.

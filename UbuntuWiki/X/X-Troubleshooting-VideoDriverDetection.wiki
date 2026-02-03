@@ -1,0 +1,235 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+'''Symptoms:'''
+* The NVIDIA binary driver is installed but X boots without 3D, or fails to boot, intermittently
+* With no driver specified in /etc/X11/xorg.conf, booting X loads the vesa driver (as seen by many "VESA:" lines in your /var/log/Xorg.0.log instead of "INTEL:", "FGLRX:", etc.)
+* With a driver specified in /etc/X11/xorg.conf, booting X ignores the setting and loads vesa instead
+* You had -fglrx installed previously but have switched to -ati, and now are seeing various odd problems including one or more of the following:
+** Failure to boot, perhaps including an error mentioning MTRRs
+** Performance issues
+** Monitor power management stops working
+** glxgears/glxinfo fails to work
+** Various crashes, freezes, rendering errors, etc.
+* You've just (un)installed a proprietary driver, and now 
+** ...it fails to boot into X, or
+** ...weird things are being displayed on the monitor, or
+** ...it works in 2D but 3D apps or compiz doesn't work properly
+* Things were working fine, then you booted a different kernel and now they aren't
+* Your system has hybrid graphics, and after toggling to the other graphics card strange things are happening
+* You installed Ubuntu to a USB key and installed one of the proprietary drivers onto it.  The key works on systems with nvidia graphics but does weird things on systems with intel graphics.
+
+'''Non-Symptoms''':
+* If you've never had -fglrx installed on your system, there is no chance you have this problem
+* /var/log/Xorg.0.log shows some other non-VESA driver, but just isn't loading up for some reason.  In this case look in /var/log/gdm/*, /var/log/Xorg.0.log[.old], dmesg, or /var/log/syslog for error messages and go from there.
+
+=== How It Works ===
+
+==== fglrx ====
+The GL libraries are installed using an alternatives system.  With this system, you can install any number of drivers, each of which places their GL files into their own separate subdirectories, and /usr/lib/libGL.so becomes just a symbolic link to whatever you've chosen to use.
+
+The open source drivers use kernel mode setting (KMS), which makes the kernel portion of the graphics driver get loaded very early on in boot.  If you want to use a proprietary driver, this piece needs to be disabled in order for the proprietary driver to load.
+
+Since Hardy, the X server auto-detects what driver should be loaded for the video hardware it detects as present.  It does this by polling the PCI bus for VGA devices, and then checks their PCI ID's against a registry of PCI ID's each video driver has reported as supported; if none are found, -vesa is the fallback.  Next, it loads the driver and initializes it.  Finally, it probes the monitor(s) for DDC or EDID information to determine its resolution, dpi, and other capabilities, and brings them up.
+
+The fglrx driver includes kernel components which don't always get fully uninstalled when switching to -ati.  In addition, -fglrx provides its own fglrx-specific version of libgl, which can cause breakage when running -ati.
+
+In theory, apt should be able to clean up all the fglrx bits properly, but in practice there are many corner cases where bits get left behind.
+
+Try:
+<pre>
+ dpkg -l '*fglrx*'
+</pre>
+and
+<pre>
+ locate fglrx
+</pre>
+to see if there is still some proprietary bits around causing problems.
+
+It is possible to have proprietary video drivers installed alongside free ones without stomping on the GL libraries.  However, there are certain situations where errors can happen.
+
+=== Problem: Video card not supported by driver ===
+
+Determine the PCI ID of the chip:
+
+<pre>
+lspci -nn | grep VGA
+
+01:00.0 VGA compatible controller [0300]: ATI Technologies Inc RV535 [Radeon X1650 Series] [1002:71c7] (rev 9e)
+</pre>
+
+Here, the PCI ID is <code>1002:71c7</code>.
+
+Now look in the PCI ID registry to see which driver is used.  (Drop the colon ':' when doing this.)
+
+<pre>
+grep -i 100271c7 /usr/share/xserver-xorg/pci/*.ids
+
+/usr/share/xserver-xorg/pci/radeon.ids:100271C7
+</pre>
+
+This indicates that X would pick the -radeon driver for me.  If you did not get output, then your chip is not currently supported by any driver.  There could be several reasons:
+
+1. If you have '''newer hardware''' (such as if you're an OEM and testing hardware that is not yet released) then it may simply be the case that support for your chip has not been added to the driver, or was added only recently and is not available in the released driver.
+
+You can try appending your pci id to the /usr/share/xserver-xorg/pci/*.ids file.  This will tell X to load the driver anyway.  *Sometimes* this works; more often it does not.
+
+You can also try a newer version of the video driver by <nowiki>[[http://cgit.freedesktop.org/|installing from upstream git]]</nowiki>.  See <nowiki>[[http://www.freedesktop.org/wiki/Infrastructure/git/Users|Freedesktop Git Usage]]</nowiki> for directions on using git.
+
+2. On the other hand, if you have '''older hardware''', then if your hardware used to work with a non-vesa driver in the past, possibly support for your hardware has been dropped from the video driver.  Check that driver's mailing list for more information.
+
+3. If you have '''unusual hardware''', such as a video card from a minor vendor, then a third possibility is that it needs a driver not available in the standard distribution (or perhaps not available at all).  In this case, you'll need to locate and install the necessary driver.
+
+=== Problem: No monitor detected ===
+
+If no monitor is connected at the time X boots, it may not know what driver to load.  Try attaching a monitor.
+
+=== Problem: X is falling back to vesa or fbdev ===
+
+In some cases, X will fail to boot with the correct driver, and try again with a different driver, like vesa.  Usually in this case you should have a <code>/var/log/Xorg.0.log</code> or <code>/var/log/Xorg.0.log.old</code> that explains why it failed to load the original driver.
+
+=== Problem: Missing NVIDIA kernel module on boot causes rapidly flashing black screen during boot ===
+
+By and large it sounds like the vast majority of users had smooth upgrade experiences.  However, it came to our attention that some nvidia users experienced a problem during upgrades to Karmic where X fails to load and instead flashes a black screen continuously rather than going into the low graphics failsafe mode; this problem is now solved.  Further investigation as to why it was going into failsafe mode to begin with, showed that the problem was that the nvidia.ko kernel module was missing during boot; these are due to a variety of unusual situations, and are described in more detail below.
+
+'''Flashing GDM Bug''': The black screen flashing behavior on X failure was root caused to be due to the newly rewritten gdm 2.8, which dropped support for triggering failsafe on X failure.  This trigger would kick in for a variety of different types of X failures, such as a typo in the xorg.conf, mis-installation of video drivers, certain kinds of X crashes, and so on.  This failsafe trigger would boot the user into a low graphics mode session that includes some basic tools for diagnosing, reporting, and working around the problem.  Since this trigger feature was not included in the gdm rewrite, instead of triggering failsafe-x, gdm would just keep trying to start X continuously.  Because the new gdm was introduced fairly late in our release cycle, our testing only discovered the bug shortly before release, so we decided to handle it as a post-release update.  This flashing issue was solved several days after the release by introducing an upstart job which detects if gdm has failed several times, and then boots into the failsafe session.  This is ready for upload to Karmic as SRU bug <nowiki>[[https://bugs.edge.launchpad.net/ubuntu/+source/gdm/+bug/441638|#441638]]</nowiki> and is currently in karmic-proposed for testing.
+
+'''Effect on Nvidia''': The flashing behavior can kick in for a variety of reasons and it is not driver-specific.  However, since the broken failsafe symptoms are so strikingly unusual, many people with drastically different underlying bugs have assumed they have the same problem, and this has led to much confusion.  Nvidia was notable in particular because, as a proprietary binary driver, it has a need to rebuild its kernel module when the kernel version changes (such as during upgrades), and needless to say this is not an error-proof process.  In the past, if it failed for whatever reason, GDM would load the failsafe-x session, which then displayed a relevant error message to the user; with the broken failsafe in Karmic users were not able to see this and thus had no way to differentiate one issue from the next.
+
+'''Troubleshooting Advice''':  Generally for missing nvidia.ko bugs, what we need is the make.log file - this is found in a subdirectory under /var/lib/dkms/nvidia/.  Our bug tools should be given the logic to attach this file automatically to apport bug reports, but for now it needs to be collected manually by the bug reporter.
+
+Below we go into the technical details of some of these different bugs that can cause a missing nvidia.ko.
+
+==== A. No nvidia.ko because it failed to build but Jockey didn't notice ====
+
+Normally, most users rely on Jockey, the hardware driver administration tool, to install -nvidia.  In certain cases it may be possible that nvidia.ko simply fails to build for the given combination of hardware, kernel, and driver.  The expectation is that on failure Jockey ought to bail out and notify the user of the problem, but there are cases where this does not happen, see <nowiki>[[https://bugs.edge.launchpad.net/ubuntu/+bug/451305|bug #451305]]</nowiki>.  A fix for this Jockey issue is uploaded to karmic-proposed now and will be released after gaining sufficient testing.
+
+==== B. No nvidia.ko because GDM boots without waiting for DKMS to complete ====
+
+Ironically, perhaps the most common situation that can cause a missing nvidia.ko kernel module is likely due to boot performance improvements in Karmic.  In the past, when a new kernel was installed, on the next boot DKMS would rebuild nvidia.ko during the boot process.  By the time X was ready to start this building would have been completed.  In Karmic we now start X much earlier in the boot sequence, and this may not always give DKMS enough time to finish making nvidia.ko.  When X discovers it is not there, it either falls back to the -nv or -vesa video driver (if possible) or triggers the failsafe.
+
+At least, this is our theory.  Because the way this works there is either never a true error, or else the log file with the error gets overwritten.  So either way there is no solid evidence this issue has happened in the wild.  Still, even if it is just theoretical, we should ensure it cannot happen.  See <nowiki>[[https://bugs.edge.launchpad.net/ubuntu/+bug/438398|bug #438398]]</nowiki> for tracking this problem.
+
+Some people have found that simply restarting the computer results in it coming back with -nvidia properly; others find they need to run:
+
+<pre>
+    dpkg-reconfigure nvidia-185-kernel-source
+</pre>
+
+and some find they must fully reinstall the nvidia driver.  (Many people reinstall the nvidia driver from the nvidia website at this point, which also will solve the problem but puts your system into a non-stock state which may make future support more challenging.  It is probably sufficient to purge and reinstall nvidia.)
+
+Ultimately the real fix will be to serialize the driver update process to ensure nvidia.ko always gets built for the new kernel before attempting to boot X.  Since this issue is something which could affect any DKMS-using driver, it may be best to implement this as a new feature for DKMS in Lucid.
+
+As a shorter term solution which might be safe enough to roll out for Karmic, we could add an upstart job which causes gdm to be delayed if a DKMS build is in process.
+
+==== C. No nvidia.ko module for -rt, -server specialized kernels ====
+
+Historically, the most common reason for a failed build of nvidia.ko was because the reporter was using one of the specialized kernels such as the real-time kernel kernel, which may not receive as much testing as the standard Ubuntu kernel.  We put attention into Karmic to get these issues resolved, and most if not all of these bug reports are confirmed as solved, but it remains an area that remains only lightly tested and so will need continued vigilance.  
+
+==== D. No nvidia.ko module due to missing/broken build system pieces ====
+
+In order to compile the nvidia.ko module it is necessary to have a working compiler, patch utility, and other build tools.  There are certain (obscure) corner cases where these may be unavailable or broken.  These are lower priority issues but still worth fixing.  (Patches welcomed!)
+
+One example of this that we need to examine closely for Lucid is upgrades directly from Hardy.  (E.g. <nowiki>[[https://bugs.launchpad.net/ubuntu/+bug/467490|bug #467490]]</nowiki>)
+
+=== Problem: Need to purge -fglrx ===
+
+Typically, the following manual commands will properly uninstall -fglrx:
+
+<pre>
+  sudo apt-get remove --purge xorg-driver-fglrx fglrx*
+  sudo apt-get install --reinstall libgl1-mesa-glx libgl1-mesa-dri xserver-xorg-core
+  sudo dpkg-reconfigure xserver-xorg
+</pre>
+
+For systems with multiarch enabled (Ubuntu 11.10/Oneiric and later has it by default), if you have installed more than one architecture of a package, you have to specify each to reinstall them (or you will get an "E: Internal Error, No file name for libgl1-mesa-glx"):
+
+<pre>
+  sudo apt-get install --reinstall libgl1-mesa-glx:amd64 libgl1-mesa-dri:amd64 libgl1-mesa-glx:i386 libgl1-mesa-dri:i386 xserver-xorg-core
+</pre>
+
+To check which architectures you have installed, you must use dpkg, as no other program has such feature yet:
+<pre>
+  dpkg --get-selections|grep libgl1-mesa
+libgl1-mesa-dri                                 install
+libgl1-mesa-dri:i386                            install
+libgl1-mesa-glx                                 install
+libgl1-mesa-glx:i386                            install
+
+</pre>
+
+Then reboot (or fix up the kernel modules and restart gdm).
+
+=== Problem:  Need to fully remove -nvidia and reinstall -nouveau from scratch ===
+
+A similar issue exists for -nvidia/-nouveau, for similar reasons.  People don't run into it quite as much since -nv doesn't tap 3D functionalities as often, but it still happens.
+
+The nvidia kernel module is loading from the proprietary drivers, but x is trying to load -nouveau. If you installed the binary drivers from nvidia.com to get into this situation you will want to run sudo nvidia-settings --uninstall and then install the binary drivers provided by ubuntu instead after you reboot. if thats not the case you can do a sudo apt-get install nvidia-current and it will overwrite your xorg.conf with the needed one.
+
+Here is a recipe which removes all old video drivers, and reinstalls nouveau:
+
+<pre>
+  sudo nvidia-settings --uninstall
+  sudo apt-get remove --purge nvidia*
+  sudo apt-get remove --purge xserver-xorg-video-nouveau xserver-xorg-video-nv
+  sudo apt-get install nvidia-common
+  sudo apt-get install xserver-xorg-video-nouveau
+  sudo apt-get install --reinstall libgl1-mesa-glx libgl1-mesa-dri xserver-xorg-core
+  sudo dpkg-reconfigure xserver-xorg
+</pre>
+
+Then reboot your system and when it comes up it will be running with nouveau.
+
+=== Problem: Breaks after upgrading to or from a proprietary driver and restarting X ===
+
+Make sure to reboot after enabling or disabling a proprietary driver.  This is necessary because the open source drivers use kernel mode-setting (KMS) which needs to be enabled or disabled in initrd.  If you just restart X after switching drivers, it can leave your system in a really weird state.  If it freezes at this point, just hold down the power button to do a hard restart of the system.
+
+=== Problem: Need to manually review/tweak alternatives settings ===
+
+The Additional Drivers utility in System Settings handles all the work of installing and configuring the driver, setting the alternatives, and so forth.  However, if you do some of this manually, like installing files by hand, it can leave the alternatives system in an inconsistent state.
+
+You can use the command 'update-alternatives' to manually review and alter your alternatives settings.  Some helpful commands:
+
+<pre>
+ sudo update-alternatives --display gl_conf
+ sudo update-alternatives --config gl_conf
+ sudo ldconfig
+ sudo update-initramfs -u
+</pre>
+
+=== Problem: Switching drivers on system with hybrid graphics ===
+
+There are systems on the market which ship with multiple video cards which you can toggle between.  In the past, if you wished to use an open source driver for one card, and a proprietary one for the other, this would not work; you had to completely uninstall one driver and install and reconfigure the other in order to make it work.
+
+Now, you should be able to do this more easily by using the Hardware Devices applet to enable or disable the proprietary driver, and then rebooting.
+
+=== Problem:  Swapping drive between system with -nvidia and non-nvidia causes breakage ===
+
+After enabling -nvidia on one system, it puts in the nvidia libGL.  When you move the drive to a different, non-nvidia system, it will boot with a different video driver (say, -intel or -ati), but it finds it has an incompatible libGL and wonky things happen as a result.
+
+There are two ways to correct this issue if you are experiencing the
+same thing:
+
+1) Boot the drive in the computer with the nvidia card and disable the nvidia driver in jockey-gtk (Hardware Drivers)
+
+2) On the computer which flips the screen. Run the following command from a TTY
+
+<pre>
+$ sudo update-alternatives --config gl_conf
+
+$ sudo ldconfig
+$ sudo update-initramfs -u
+$ sudo reboot
+</pre>
+
+=== Problem: nvidia drivers from nvidia.com won't install ===
+
+nvidia's drivers do not (yet) honor the alternatives system.  For this reason installation of them would cause your system to get into a horribly inconsistent state.

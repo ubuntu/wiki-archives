@@ -1,0 +1,225 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+This page describes how to send pop-up messages to NX and X-windows sessions.  With the NX sessions, these messages can be accompanied by sound.  This was developed using Ubuntu 7.04 (Feisty).
+
+=== Introduction ===
+
+The Python script below was developed to send pop-up messages with sound to NX and X sessions running on a Ubuntu server.  This was developed on a home network consisting of a Ubuntu 7.04 server running FreeNX, and Windows PCs and Ubuntu/Xubuntu PCs running the nomachine NX client or X-Windows.  The NX clients are configured to support sound, but the X-windows clients receive only a silent pop-up message.
+
+=== Dependencies ===
+
+The script uses gxmessage to send the pop-up messages, and esdplay to transmit a .wav sound file.  Gxmessage is a requirement to run the script.  Esound needs to be installed if sound functionality is required.
+
+<pre>
+sudo aptitude install gmessage
+sudo aptitude install esound
+</pre>
+
+=== Setting up NX Sessions for Sound ===
+
+This section is not required to get the script running without sound.  If you want to get the script running quickly, you can skip this section, and come back to it later.
+
+Follow the <nowiki>[[FreeNX]]</nowiki> instructions to install FreeNX on a Ubuntu server.
+
+Ensure that esound is installed (see above), and that the esd service is running like so ..
+
+<pre>
+ps -e | grep 'esd'
+17249 ?        00:00:00 esd
+</pre>
+
+Download the 'NX Client DEB for Linux' or 'NX client for Windows' from http://www.nomachine.com/download.php and install on your Ubuntu and Windows PCs.  In the configuration of the NX client, click on the 'Services' tab, and tick 'Enable Multimedia Support' - this enables sound for the NX client.
+
+Each user needs to log onto your Ubuntu server using their NX client, and start System/Preferences/Sound from the panel.  They need to choose 'ESD - Enlightened Sound Daemon' for the various sound options.  They can test the sound while making these selections.
+
+=== Creating and Running the Script ===
+
+Copy the script code below into a file called bcast.py.  Ensure that this script is executable by using the chmod command.
+
+<pre>
+chmod 755 bcast.py
+</pre>
+
+The script needs to be run using the sudo prefix if you are not logged in as root.
+
+<pre>
+sudo ./bcast --message "Message" --title "Title" --timeout 0 --sound "wavefile.wav"
+</pre>
+
+The script can be called from within cron jobs that are running using the root account.
+
+This is the text that needs to be copied into bcast.py ..
+
+<pre>
+# !/usr/bin/python
+
+"""
+Broadcast a pop-up message to X and NX sessions.  A .wav can be specified to
+send sound with the message, but this will only be received by NX sessions.
+
+Usage: sudo ./bcast.py --message "message" [--title "title"] [--timeout secs]
+                                        [--sound "wavefile.wav"]
+"""
+
+import os, subprocess, sys, getopt
+
+def usage(msg=None):
+  sys.stdout = sys.stderr
+  if msg != "":
+    print msg
+  print __doc__
+  sys.exit(2)
+def processargs():
+  global title, message, wavefile, timeout
+
+## Default values ..
+  title = "Alert"
+  message = ""
+  wavefile = ""
+  timeout = 0
+
+  optionlist = ["message=","title=","timeout=","sound="]
+  try:
+    opts, args = getopt.getopt(sys.argv[1:], "", optionlist)
+    if len(opts) < 1:
+      raise getopt.error, ""
+  except getopt.error, msg:
+    usage(msg)
+
+  try:
+    for opt, val in opts:
+      if val.startswith("--"):  # 2 options with no value between
+        raise Exception("Option '%s' has no associated value." % opt)
+#### print opt, "=", val
+      if opt == "--message":
+        message = val
+      elif opt == "--title":
+        title = val
+      elif opt == "--sound":
+        wavefile = val
+      elif opt == "--timeout":
+        try:
+          timeout = int(val)
+        except:
+          raise Exception("Timeout value '%s' is not an integer." % val)
+  except Exception, msg:
+    usage(msg)
+
+  for arg in args:
+    print "***" + arg
+def checkdependancies():
+## Make sure that gxmessage is available ..
+## PIPE was not defined - so used -1
+  p = subprocess.Popen(['which gxmessage'], stdout=-1, shell=True)
+  result = p.wait()
+  if result != 0:
+    print "Gxmessage needs to be installed."
+    print "On ubuntu, run 'sudo apt-get install gxmessage'."
+    exit(-2)
+
+## Make sure that esdplay is available ..
+  p = subprocess.Popen(['which esdplay'], stdout=-1, shell=True)
+  result = p.wait()
+  if result != 0:
+    print "esdplay is not installed - therefore sound will not function."
+    print "On ubuntu, run 'sudo apt-get install esound' to enable sound."
+def sendalerts():
+## To hold list of displays - to avoid duplication.
+  displaylist = []
+
+## Get PID list in /proc ..
+  pidlist = os.listdir("/proc")
+  for pid in pidlist:
+
+### All number directories are PIDs ..
+    if pid.isdigit():
+      try:
+        envfile = "/proc/" + str(pid) + "/environ"
+        env = open(envfile)
+        environ = env.readline()
+      except:
+        pass  #readenv=False
+      else:
+##### print envfile
+        envlist = environ.split("\0")
+##### print len(envlist)
+
+        espeaker = ""
+        display = ""
+        user = ""
+        shlvl = ""
+
+##### Get $USER, $DISPLAY, $HOME, $ESPEAKER ..
+        for en in envlist:
+          if en.startswith("USER="):
+            user = en[5:]
+####### Skip, if this is a system process ..
+            if user == "root" or user.isdigit():
+              break
+          if en.startswith("DISPLAY="):
+            display = en[8:]
+            os.environ['DISPLAY'] = display
+          elif en.startswith("HOME="):
+            home = en[5:]
+            os.environ['HOME'] = home
+          elif en.startswith("ESPEAKER="):
+            espeaker = en[9:]
+            os.environ['ESPEAKER'] = espeaker
+            subprocess.Popen(['export ESPEAKER'], shell=True)
+          elif en.startswith("SHLVL="):
+            shlvl = en[6:]
+
+        try:
+###### Some filtering ..
+###### eg. exclude $DISPLAY=nx/nx,options=/home/sinead/.nx/C-Buddy-1001 ..
+          if "," in display:
+            continue
+###### eg. exclude $DISPLAY=:1.0
+          if display[0] == ":":
+            continue
+###### Add .0 - eg. unix:1000->unix:1000.0 (else get duplication)
+          if "." not in display:
+            display+= ".0"
+        except:
+          continue
+
+##### Send Popup Message to User's Screen using gxmessage ..
+##### Use shlvl to identify real users (for example, excludes gdm)
+##### Shell=True is important - else doesn't work ..
+        if user != "" and display != "" and shlvl != "":
+          try:
+####### Only send to the display if it hasn't already been done.
+            result=displaylist.index(display)
+          except:
+            if espeaker != "" and wavefile != "":
+              print "%s - Display='%s' Speaker='%s'" % (user, display, espeaker)
+            else:
+              print "%s - Display='%s'" % (user, display)
+
+            subprocess.Popen(['sudo -u %s gxmessage -center ' \
+              '-timeout %s -display %s -title "%s" "%s"' % \
+              (user, timeout, display, title, message)], shell=True)
+
+####### If user's session supports ESD sound - eg. an NX session and
+####### a wave file is specified, play a sound/music, also ..
+            if espeaker != "" and wavefile != "":
+              subprocess.Popen(['sudo -u %s esdplay %s' % (user, wavefile)],
+                                                        shell=True)
+
+####### Register this display as alerted.
+            displaylist.append(display)
+processargs()
+checkdependancies()
+sendalerts()
+</pre>
+
+----

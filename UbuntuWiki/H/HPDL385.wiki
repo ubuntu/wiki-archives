@@ -1,0 +1,287 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+This page was created to aid people trying to configure a HP DL385 under Ubuntu Linux.  This page was originally based on the Hoary release, however I'm sure future releases will work equally well on this machine.  Over all Hoary runs excellently on this machine, and for the most part, installs 100% painfree.  That's not to say there's not quite a bit to know about your new 64bit machine.  I also try to include other information related to HP machines that non-HP customers may be surprised by.  This page may additionally be helpful to people installing ubuntu on other HP hardware, or people trying to install on other 64-bit Opteron hardware.
+
+=== Hardware Description ===
+* Dual Opteron (250/2.4GHz)
+* Smart Array Controller 6i
+** Raid 0/1+0/5
+** 64M read cache onboard, non-battery backed
+** Optional battery-backed writeback cache (128M, giving total of 192M cache) 
+** BBWC Enabler for SA6i
+** http://froogle.google.com/froogle?q=346914-b21&btnG=Search+Froogle&scoring=p
+** Online migration of stripe size, or raid levels
+** Online expansion of raid containers
+** I don't think sophisticated actions like this are supported without the battery backed cache
+* 6 Hotswap bays
+* Rack Mountable
+* ATI Rage XL
+* 2 Broadcom tygon3 Gigabit Ethernet
+* 1 iLO board
+** Integrated Lights out Management
+** 1 Ethernet port
+** SSH access
+** HTTP/HTTPS access
+** Allows remote console
+** Uses video bios to access console
+** Text modes are free
+** Graphics requires advanced license
+** Works under any OS
+** Can be accessed via SSH, or via Java applet
+** Allows remote power cycling
+** the iLO appears to be a little mini-linux box
+
+=== General HP Info ===
+* SmartStart
+** Diagnostics
+** RAID resizing/creation
+* Flashing System Firmware
+** I have successfully flashed the system firmware, iLO firmware, and raid firmware online under linux
+** Flashing the firmware on the individual SCSI devices required using the firmware maintainence CD
+=== Initial Ubuntu Installation ===
+* Initial Ubuntu installation should go smoothly, the drive controller and network controllers should be detected properly
+* Recommend doing a server installation
+* We used LVM for all of the partitions except root and swap
+* Would recommend installation of `ia32-libs` if you plan on running any 32-bit JVMs or other 32-bit packages
+
+=== Kernel ===
+* Install package `linux-amd64-k8-smp`
+* After you have rebooted, remove `linux-amd64-generic` and `linux-image-amd64-generic` packages
+* After you have removed those packages, you should be able to `aptitude update`, `aptitude upgrade` your system without getting extra kernels you don't want
+
+=== Raid Controller Tools & Monitoring ===
+* You'll need something to monitor for raid drive failure.  The kernel module will not report any nastyness that may be happening with your drives.  There's a number of different methods of monitoring this.  I've elected to install the HP ACU CLI (Array Configuration Utility - Command Line Interface) and write a quick monitoring script to watch for drive failure.  I've elected to do it this way rather than using some of the more sophisticated HP utilties that they provide because I have been burned by closed-source hardware tools in the past (FWIW, not by HP).  
+* Visit HP's site and download the HP ACU CLI for Redhat Enterprise Server 4.  It'll be an rpm.  The filename will look something like `hpacucli-7.30-9.linux.rpm`.  You'll have to convert this to a TGZ using alien, install the package manually, install some scarry 32bit libraries, and update some of the scripts to get this to thing to work.
+* <pre>
+alien -t hpacucli-7.30-9.linux.rpm
+mkdir tmp
+cd tmp
+tar -xzvf ../hpacucli-7.30.tgz
+cd opt
+mv compaq /opt
+cd ../usr/sbin
+mv hpacucli /usr/sbin
+cd ../../..
+rm -rf tmp
+</pre>
+* You'll need the `ia32-libs` package installed
+* At this point you should be getting this error:
+<code>/opt/compaq/hpacucli/bld/.hpacucli: error while loading shared libraries: libstdc++-libc6.2-2.so.3: cannot open shared object file: No such file or directory</code>
+* Now get prepared to be scared.  
+** http://packages.ubuntu.com
+** search for packages with `libstdc++-libc6.2-2.so.3` in it
+** Something like: http://packages.ubuntu.com/hoary/libs/libstdc++2.10-glibc2.2 will come up
+** This package is in the universe, and is for '''i386''', not '''x86_64'''.  If you want your HP utilities to work, you'll have to get the library out of it that you need.
+** Go download the deb manually, it'll be something like: http://gr.archive.ubuntu.com/ubuntu/pool/universe/g/gcc-2.95/libstdc++2.10-glibc2.2_2.95.4-22_i386.deb
+** Convert the package to a tgz, extract the library, install it into /usr/lib32
+<pre>
+ wget http://gr.archive.ubuntu.com/ubuntu/pool/universe/g/gcc-2.95/libstdc++2.10-glibc2.2_2.95.4-22_i386.deb
+alien -t libstdc++2.10-glibc2.2_2.95.4-22_i386.deb
+mkdir tmp
+cd tmp/
+tar -xzvf libstdc++2.10-glibc2.2-2.95.4.tgz
+cd usr/lib
+mv * /usr/lib32
+cd ../../..
+rm -rf tmp
+</pre>
+** Modify the `/usr/sbin/hpacucli` script and modify the LD_LIBRARY_PATH and put '/usr/lib32:' infront of what's currently there.. EG: `export LD_LIBRARY_PATH=/usr/lib32:$HPACUCLI_BIN_INSTALLATION_DIR`
+** hpacucli should work now.  The cli isn't super, and doesn't include tab completion, or command history.. But it's functional
+==== RAID Monitoring Tools ====
+** Now that the CLI is installed, it can be used to monitor the state of the RAID containers and drives
+** I have written/adapted a small script for monitoring the drives, I called it <code>hpsa6i.sh</code>
+*** <pre>
+
+emaillist=raid@xxx.com
+
+host=`hostname`
+/bin/echo -e "set target controller slot=0\nshow status\narray A physicaldrive all show status\narray A logicaldrive all show status" | hpacucli > /tmp/raid-current
+curdiff=`/usr/bin/diff -u /usr/share/hpsa6i/raid-good /tmp/raid-current`
+currentinfo=`cat /tmp/raid-current`
+rm /tmp/raid-current
+
+if [ "$curdiff" != "" ] ; then
+        /usr/lib/sendmail -f devnull@$host -t << HPsa6iRAIDEOF
+To: $emaillist
+From: root@$host     
+Subject: Raid may be broken on $host 
+Errors-To: devnull
+Raid may be broken on $host. 
+
+====> A diff between production and current is:
+
+$curdiff
+
+====> Full Raid Current Info:
+
+$currentinfo
+
+HPsa6iRAIDEOF
+
+fi
+</pre>
+** You'll want to customize that script as appropriate including
+*** Email address
+*** slot #
+*** Array #
+** Create the <code>/usr/share/hpsa6i</code> directory
+** Create the initial ''raid-okay'' state file:
+*** <pre>
+cd /usr/share/hpsa6i
+/bin/echo -e "set target controller slot=0\nshow status\narray A physicaldrive all show status\narray A logicaldrive all show status" | hpacucli > raid-good
+</pre>
+** Add to root's cronjob
+*** <pre>
+PATH=$PATH:/usr/sbin:/sbin:/usr/bin:/bin:/usr/local/sbin:/usr/local/bin
+* /30 * * * * /usr/local/bin/hpsa6i.sh
+</pre>
+==== Online RAID Array Expansion ====
+* We use RAID 1/0, your milage may vary
+* We have the 128M BBWC Enabler for our SA6i.  I hear that container expansion does not work without the battery backup module.  I have no idea if this is true.
+* Physically insert the new drives 
+** You may insert the drives at anytime prior to doing the actual expansion
+* run `hpacucli`
+* execute command `controller slot=0 array A add drives=allunassigned`
+** I think this one takes a long time. For 2 x 146.5GB disks about 2 days.
+* execute command `controller slot=0 array A logicaldrive 1 modify size=max`
+** I think this one is fairly quick.
+** You can check progress with `controller slot=0 array A logicaldrive show all` ''(I think)''
+* Reboot Server
+** Perhaps you know of a way for linux to detect the changes in the underlying c0d0 device.. but I care about my data :)
+* Use `evmsn`, `lvexpand` to expand your regions and volumegroups
+** Watchout if using EVMS to maintain lvm2 VGs.  There is an issue with `/dev/mapper` devices not getting updates executed from evms.  `/dev/evms` devices will work fine until you can reboot.  Ubuntu by default mounts `/dev/mapper` devices however.  If you try to mount the `/dev/mapper` devices, after a container+fs expand, you'll be '''VERY VERY SORRY''' (insert stern fs and inode corruption warning here).  After a reboot `/dev/mapper` devices will have the proper size info.
+
+=== iLO ===
+* HP has a slick little monitoring board built into the DL385 (and many of their other servers)
+* I believe it's a mini little machine (running linux I believe) that has the capability of controlling the machine remotely, including remote console access
+* It has the following features
+** Ethernet access
+** Simulated console access (hooks into the bios to see what's on the screen.  TEXT modes are free, graphics modes need a special license)
+** a serial console is probably more reliable than it's text remote console.. but it does work
+** ssh access
+** https / java clients
+** Remote power cycle, diagnostics
+* There is a bug in the iLO ssh server that will cause instability with Ubuntu Hoary
+** Ubuntu Hoary, is configured to send over the LANG environment variable whenever you log into a remote machine.  the iLO ssh server crashes if you send over any environment variables when you establish a connection.  
+** This has been reported to HP and has a case number of '''3211317810''', presumably they will have to issue an iLO firmware update to resolve the issue
+** You can work around this issue by modifying your <code>/etc/ssh/ssh_config</code> and removing the '''SendEnv LANG LC_*''' line
+
+=== Java - 64bit/32bit JVMs ===
+* I have very little milage on the Java JVMs on these machines at this point.  I will update this page if we discover any issues during our burnin period for these servers.  
+* 64bit JVMs are not stable under Hoary.  You will experience thread deadlocking under heavy threadloads.  You should run breezy if you want your system to be stable.  (this has to do with the version of glibc)
+
+* I believe you need to install the `ia32-libs-gtk` to get your 32-bit JVMs to work reliably.  Don't worry, you don't need GTK. (atleast under hoary)
+
+* We install a potpourri of JVMs to be able to easily swap between them
+* we create a symlink /usr/local/java to point to one of the java packages below, then have add /usr/local/java to everybody's path
+** This makes it easy to swap the entire system between JVMs
+* If you need AWT (headless ofcourse) to work with the IBM JVM, you'll need to install the following packages
+** `ttf-freefont xvfb msttcorefonts libxmu6 libx11-6 libxtst6 xlibs xfonts-base xserver-common libxp6 libstdc++5`
+** If you don't, you'll get crashes like:
+  <pre>
+java.lang.UnsatisfiedLinkError: awt (libXmu.so.6: cannot open shared object file: No such file or directory)
+        at java.lang.ClassLoader.loadLibrary(ClassLoader.java:934)
+        at java.lang.ClassLoader.loadLibraryWithClassLoader(ClassLoader.java:903)
+        at java.lang.System.loadLibrary(System.java:379)
+        at sun.security.action.LoadLibraryAction.run(LoadLibraryAction.java:76)
+        at java.security.AccessController.doPrivileged(AccessController.java:187)
+</pre>
+** You can use -Djava.awt.headless=true or xvfb
+** AWT TrueType fonts do not appear to render proplerly (spacing wise) under ubuntu (verses how they're supposed to be rendered under windows)
+** They worked better under Debian woody, I have no clue what the difference is
+** Sun's JVM is *better* at rendering, not perfect
+** Your milage may vary
+
+==== IBM JVM 1.5.0 AMD64 (64-bit) ====
+* http://www-128.ibm.com/developerworks/java/jdk/linux/download.html
+* unpack to /opt
+* rename `ibm-java2-x86_64-50` to `IBMJava2-amd64-150`
+
+==== IBM JVM 1.4.2 AMD64 (64-bit) ====
+* http://www-128.ibm.com/developerworks/java/jdk/linux140/
+* unpack to /opt
+
+==== IBM JVM 1.4.2 i386 (32-bit) ====
+* http://www-128.ibm.com/developerworks/java/jdk/linux140/
+* unpack to /opt
+* Will require `ia32-libs` to be installed
+
+==== Blackdown 1.4.2 AMD64 (64-bit) ====
+* http://www.blackdown.org/java-linux/java-linux-d2.html
+* unpack to `/opt`
+* rename `j2sdk1.4.2` to `j2sdk1.4.2-blackdown-amd64`
+
+==== Sun 1.5.0 AMD64 (64-bit) ====
+* http://java.sun.com/j2se/1.5.0/download.jsp
+* unpack to `/opt`
+* rename `jdk1.5.0_03` to `jdk1.5.0_03-sun-amd64`
+
+==== Sun 1.4.2 i386 (32-bit) ====
+* http://java.sun.com/j2se/1.4.2/download.html
+* Will require `ia32-libs` to be installed
+
+=== MySQL - 64bit ===
+* I have very little milage on MySQL on these machines at this point.  I will update this page if we discover any issues during our burnin period for these servers.  
+* Install package `mysql-server`
+** We run the MySQL stock binary, not the ubuntu binary.  I am sure many of the ubuntu people may be confused by this, but we have been very successfully doing this on our 32-bit Debian machines for some time.  This has the advantage that when we run into problems with MySQL, we can eliminate the distro as part of the problem.  MySQL 32-bit binaries are statically linked, however their 64-bit binaries do not appear to be.  This may end up changing our strategy on running MySQL standard binary, but I will update here based on our experiences.
+** http://dev.mysql.com/downloads/mysql/4.0.html
+** We are running MySQL 4.0 because of some issues with some incompatible changes in the MySQL 4.1 release
+** Download Linux (AMD64 / Intel EM64T, glibc-2.3, dynamic, gcc)
+*** I have installed the ICC libraries and MySQL ICC... and it seemed to work, but I chickened out from acctually using it
+** unpack the tar.gz to a temporary directory
+** <pre>
+ /etc/init.d/mysql shutdown
+cd /usr/sbin
+mv mysqld mysqld.ubuntu
+mv /tmp/mysql....../bin/mysqld .
+cd /etc
+ln -s mysql/my.cnf my.cnf
+/etc/init.d/mysql
+mysql -u root -p
+status
+</pre>
+*** When you run status you should see 4.0.24-standard-log or something similar, and not 4.0.23_Debian-3ubuntu2-log
+** MySQL 64bit is not stable on hoary, and will fail regression at this time due to a glibc bug:
+*** https://bugzilla.ubuntu.com/show_bug.cgi?id=11730
+*** A fix is available, and will be released to hoary shortly
+** Another issue is present in the MySQL 64bit running under hoary, where the MySQLd will report an out of memory condition... with gigabytes of memory remaining.  
+*** This issue does not ocour under the 32-bit version
+*** I will be trying glibc 2.3.4 to see if it resolves this issue
+*** 64-bit MySQL is not stable under hoary, and we will be running 32-bit MySQL until this issue has a resolution
+** Initial testing under breezy appears to be stable
+** Using the 64-bit version under breezy (vs the 32-bit version) seems to yield approximately a 10% performance increase
+
+=== Other HP Utilities ===
+* I don't have any of the other HP utilties for linux installed other than the ACU CLI.  Undoubtedly many of them work and are useful.  Some of them are even compiled for x86-64 (YAY!).  Anybody who has any feedback of what they use them for, may feel free to comment on them here.  I got burned pretty badly by some MegaRaid2 monitoring utilities that crashed our kernels, so I now shy away from closed-source-scarry-vendor tools.
+
+=== Miscellaneous Todos ===
+* Probably want to reconfigure postfix
+** <code>dpkg-reconfigure postfix</code>
+* Probably want to redirect root's email:
+** <pre>
+zile /etc/aliases
+newaliases
+</pre>
+** when you did the <code>dpkg-reconfigure postfix</code> it asked you where to send root's email... This probably didn't do anything since <code>/etc/aliases</code> probably already existed
+* Probably want to tweak the kernel options in the ''kopt'' section of /boot/grub/menu.lst, then call  <code>update-grub</code> and make sure it generated the correct headers for you
+** panic=60
+** console=ttyS0,57600
+** elevator=deadline
+** We've found that the deadline elevator works better than the anticipatory with the 6i controller
+** remove quiet 
+** remove splash
+* May wish to setup a serial console
+** Add: <code>T0:23:respawn:/sbin/getty -L ttyS0 57600 vt100</code> to <code>/etc/inittab</code>
+** Also use the console=ttyS0,57600 kernel option above
+
+=== Server Burnin ===
+----
+CategoryLookMergeDelete

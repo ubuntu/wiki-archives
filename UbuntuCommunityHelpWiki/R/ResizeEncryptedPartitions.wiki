@@ -1,0 +1,560 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+{| class="wikitable"
+|-
+| <rowbgcolor="#FFF280"> {i} Please refer to EncryptedFilesystems for further documentation.
+|}
+
+== Introduction ==
+
+Encryption seems to becoming more popular and the Alternate CD allows installation onto a LUKS encrypted root and swap partitions.
+
+Resizing an encrypted partition is somewhat complicated. GUI tools such as Gparted see the LUKS container or crypt as unpartitioned space and thus resizing encrypted partitions must be performed entirely from the command line.
+
+{| class="wikitable"
+|-
+| <#ccaaaa> <nowiki>[[File:IconsPage/warning.png]]</nowiki> WARNING! Although unlikely (each step is reversible), resizing your encrypted partitions may result in data loss. '''BACKUP YOUR DATA FIRST'''
+|}
+
+It may in fact be easier to re-install and restore your data from backup rather then attempt to resize your encrypted partition.
+
+== Terminology ==
+
+Encrypted partitions are akin to a Russian Nesting Dolls and the terminology can be confusing. While a detailed explanation of either LVM or encryption is beyond this how to, think of an encrypted system we have multiple containers, the physical partition on the hard drive, the LUKS container or crypt, LVM, and the file system. We need to resize each of these containers in the proper order.
+
+* __Physical partition__ -> This is a partition on your hard drive to contain the LUKS crypt (The Alternate CD defaults to /dev/sda5 for encryption).
+* __Crypt or LUKS container__. LUKS = Linux Unified Key Setup. LUKS creates a crypt within the physical partition. The contents of the crypt are, of course, encrypted. The crypt is mapped to /dev/mapper/crypt1 and LVM is utilized to create partitions within the crypt.
+* __LVM or Logical Volume Management__. LVM takes physical partitions (AKA Physical Volumes) and creates Logical Volumes, somewhat similar to a logical partition within an extended partition.
+** __Physical Volume__. The (LVM) Physical Volume used for encryption is the LUKS crypt, which is mapped to /dev/mapper/crypt1.
+** __Logical Volume__. The (LVM) Physical Volume is divided into (LVM) Logical Volumes which are in turn used for / (root partition) and swap. Similar to logical partitions, these are contained within the (LVM) physical volume within (LUKS) crypt within the physical partition (Hard Drive).
+* __File System__. The actual file system (ext3 / swap) written onto the (LVM) logical volumes.
+
+== Setup ~ Desktop (Live) CD, Adding the tools to manage encrypted partitions ==
+
+Resizing an encrypted partition must be performed from a live CD and support for encryption and LVM are not included on the live CD.
+
+1. Boot the live (Desktop) CD and install lvm2 and cryptsetup.
+
+<pre>
+sudo apt-get update && sudo apt-get install lvm2 cryptsetup
+</pre>
+
+2. Load the cryptsetup module.
+
+<pre>
+sudo modprobe dm-crypt
+</pre>
+
+3. Decrypt your file system.
+
+<pre>
+sudo cryptsetup luksOpen /dev/sda5 crypt1
+</pre>
+
+4. Get the live CD to recognize (activate) your LVM.
+
+<pre>
+sudo vgscan --mknodes
+sudo vgchange -ay
+</pre>
+
+You can now manage your encrypted partitions, mount them, copy them, or perform maintenance (fsck, backup, resize).
+
+== Resizing ~ Overview ==
+
+The order of the steps depends on if you are shrinking or enlarging your encrypted partition. Enlarging is somewhat easier as the defaults of many of the commands is to fill the available space.
+
+=== Enlarge an encrypted partition ===
+
+# Boot the desktop, live CD. Use gparted (or any tool) to put unallocated space adjacent, and to the left of your Crypt partition.
+# Enlarge the Partition storing the crypt with '''''fdisk'''''.
+# Reboot ~ You should always reboot after changing your partition table with '''''fdisk'''''.
+# Boot the desktop, live CD. Install & configure the tools (lvm2 and cryptsetup).
+# Enlarge the Crypt with '''''cryptsetup'''''.
+# Enlarge the (LVM) Physical Volume with '''''pvresize'''''.
+# Enlarge the (root) (LVM) Logical Volume with '''''lvresize'''''.
+# Enlarge the (root) file system with '''''resize2fs'''''.
+# Reboot to your encrypted hard drive.
+
+=== Reduce an encrypted partition ===
+
+# Boot the desktop, live CD. Install & configure the tools (lvm2 and cryptsetup).
+# Reduce the (root) file system with '''''resize2fs'''''.
+# Reduce the (root) (LVM) Logical Volume with '''''lvreduce'''''.
+# Reduce the (LVM) Physical Volume with '''''pvresize'''''.
+# Reduce the Crypt with '''''cryptsetup'''''.
+# Reboot to reduce the Partition storing the crypt with '''''fdisk'''''.
+# Reboot to your encrypted hard drive ~ You should always reboot after changing your partition table with fdisk.
+
+== Detailed resizing ~ Reducing an encrypted partition ==
+
+1. Reduce the size of your file system.
+
+If you have an ext2 or ext3 filesystem, you can use resize2fs and you need to check the file system before you can resize it.
+
+<pre>
+sudo e2fsck -f /dev/mapper/ubuntu--vg-root
+sudo resize2fs -p /dev/mapper/ubuntu--vg-root 5g
+</pre>
+
+* Replace the "5g" with your intended size (in Gb) of your filesystem.
+* The -p flag shows a progress hash.
+
+Check that the file system is still intact with e2fsck.
+
+<pre>
+sudo e2fsck -f /dev/mapper/ubuntu--vg-root
+</pre>
+
+If you have a btrfs filesystem, you should instead use a command like:
+
+<pre>
+btrfs filesystem resize -500m /dev/mapper/ubuntu--vg-root/@subvolume
+</pre>
+
+** You can use a variety of commands to reduce the size. The example above reduces it by 500MB, but it can be increased in a similar way or can be set to a specific size.
+
+You can verify that the shrink worked by running:
+
+<pre>
+btrfs filesystem show -d
+</pre>
+
+** -d will show information for all devices.
+
+2. Reduce the size of your root (LVM) Logical Volume. The -L flag is how much you want to reduce the size of your (LVM) Logical Volume, so keep this in mind.
+
+Display your (LVM) Logical Volumes with lvdisplay.
+
+<pre>
+sudo lvdisplay
+</pre>
+
+ Note how much you need to reduce your root (LVM) Logical Volume  by (in my case it was 4.3 Gb).
+
+<pre>
+sudo lvreduce -L -4.3G /dev/ubuntu--vg/root
+</pre>
+
+ Note: You will need to change the "-4.3G" to the proper size to reduce your (LVM) Logical Volume to your desired size.
+
+Re-display your (LVM) Logical Volumes to check the final size is correct.
+
+<pre>
+sudo lvdisplay
+</pre>
+
+3. Resize your (LVM) Physical Volume.
+
+{| class="wikitable"
+|-
+| <#FFFACD><nowiki>[[File:IconsPage/info.png]]</nowiki> The physical volume used by LVM can become "fragmented" in that the (LVM) Logical Volumes within the (LVM) Physical Volume are not always in order. There is no defragmentation tool, so if you may need to manually move the logical partitions (back up the data, delete the (LVM) Logical Volume, re-create a replacement (LVM) Logical Volume, restore data from backup).
+|}
+
+''In order to resize the (LVM) Physical Volume I had to manually move (delete then recreate) the swap (LVM) Logical Volume.''
+
+Show the size of your physical volume with pvdisplay
+
+<pre>
+pvdisplay
+</pre>
+
+''Remove the swap (LVM) Logical Volume''
+
+<pre>
+lvremove /dev/ubuntu--vg/swap_1
+</pre>
+
+Resize the (LVM) Physical Volume.
+
+<pre>
+sudo pvresize --setphysicalvolumesize 5.6G /dev/mapper/crypt1
+</pre>
+
+''Now we will restore (recreate) the swap (LVM) Logical volume.''
+
+Set permissions of (LVM) Physical Volume to allow allocation (if needed)
+
+<pre>
+sudo pvchange -x y /dev/mapper/crypt1
+</pre>
+
+Restore the swap (LVM) Logical Volume.
+
+<pre>
+sudo lvcreate -L 512m -n swap_1 ubuntu--vg
+sudo mkswap -L swap_1 /dev/ubuntu--vg/swap_1
+</pre>
+   
+ As the mkswap command finishes it will print the new uuid to the terminal.
+
+Update fstab with new uuid (use any editor)
+
+ Mount the root (LVM) Logical Volume.
+
+ <pre>
+ sudo mount /dev/ubuntu--vg/root /mnt
+ }}}
+
+ Edit /etc/fstab 
+
+ {{{
+ gksu gedit /mnt//etc/fstab
+ }}}
+
+ Copy-paste the new uuid from the terminal to fstab, updating the uuid for your swap partition.
+
+ Save and exit gedit
+
+ Unmount the root (LVM) Logical Volume
+
+ {{{
+ sudo umount /mnt
+ }}}
+
+ Re-lock the (LVM) Physical Volume after adding the (LVM) Logical Volume swap  (locking the (LVM) Physical Volume keeps it from changing).
+
+ {{{
+ sudo pvchange -x n /dev/mapper/crypt1
+ }}}
+
+4. Resize your crypt.
+
+Show the size of your crypt with cryptsetup.
+
+{{{
+sudo cryptsetup status crypt1
+</pre>
+
+ This shows the size of your crypt in sectors.
+
+ '''Make note of the offset'''
+{| class="wikitable"
+|-
+| offset: 2056 sectors
+|}
+
+Resize with cryptsetup. Note: nowadays the cryptsetup does not accept the -o parameter.
+
+<pre>
+sudo cryptsetup -o 2056 -b 11800000 resize crypt1
+</pre>
+
+ -o = offset (get this from the status command)
+
+ -b = size in sectors.
+
+{| class="wikitable"
+|-
+| <#B0C4DE><nowiki>[[File:IconsPage/tip.png]]</nowiki> I had to do this by trial and error. After resizing I used Gparted to show the size of the crypt (System -> Administration -> Partition Editor ; select /dev/mapper/crypt1 from the pull down menu). Close gparted after confirming the new size of your crypt.
+|}
+
+5. Resize your partitions with fdisk.
+
+Unmount your LVM and crypt :
+
+<pre>
+sudo vgchange -an
+sudo cryptsetup luksClose crypt1
+</pre>
+
+{| class="wikitable"
+|-
+| <#ccaaaa><nowiki>[[File:IconsPage/warning.png]]</nowiki> cryptsetup luksClose throws error: ioctl, busy device (a <nowiki>[[https://bugzilla.redhat.com/show_bug.cgi?id=809188|bug]]</nowiki>?). So you have to '''reboot''' before using fdisk!
+|}
+
+Now the scary part, use fdisk to manually resize your partitions.
+
+ <nowiki>[[File:IconsPage/warning.png]]</nowiki>  If you are unfamiliar with fdisk, I advise you read this link. <nowiki>[[http://tldp.org/HOWTO/Partition/fdisk_partitioning.html|How to partition with fdisk]]</nowiki>
+
+{| class="wikitable"
+|-
+| <#B0C4DE><nowiki>[[File:IconsPage/tip.png]]</nowiki> Note : fdisk does NOT overwrite data, so if you make a mistake you should be able to "undo" the changes.
+|}
+
+List your partition information with fdisk.
+
+<pre>
+sudo fdisk -l
+</pre>
+
+ <nowiki>[[File:IconsPage/warning.png]]</nowiki> '''WRITE THIS INFORMATION DOWN''' (or print it out).
+
+Re-write your partition table. To do this, use fdisk to DELETE your partitions and RECREATE them, but in a smaller size.
+
+<pre>
+sudo fdisk /dev/sda
+</pre>
+
+This was my fdisk session :
+
+ <pre>
+ The number of cylinders for this disk is set to 1305.
+ There is nothing wrong with that, but this is larger than 1024,
+ and could in certain setups cause problems with:
+ 1) software that runs at boot time (e.g., old versions of LILO)
+ 2) booting and partitioning software from other OSs
+ (e.g., DOS FDISK, OS/2 FDISK)
+ 
+ Command (m for help): d
+ Partition number (1-5): 5
+ 
+ Command (m for help): d
+ Partition number (1-5): 2
+ 
+ Command (m for help): n
+ Command action
+ e extended
+ p primary partition (1-4)
+ e
+ Partition number (1-4): 2
+ First cylinder (32-1305, default 32):
+ Using default value 32
+ Last cylinder or +size or +sizeM or +sizeK (32-1305, default 1305): +6000M
+ 
+ Command (m for help): n
+ Command action
+ l logical (5 or over)
+ p primary partition (1-4)
+ l
+ First cylinder (32-761, default 32):
+ Using default value 32
+ Last cylinder or +size or +sizeM or +sizeK (32-761, default 761):
+ Using default value 761
+ 
+ Command (m for help): n
+ Command action
+ l logical (5 or over)
+ p primary partition (1-4)
+ p
+ Partition number (1-4): 3
+ First cylinder (762-1305, default 762):
+ Using default value 762
+ Last cylinder or +size or +sizeM or +sizeK (762-1305, default 1305):
+ Using default value 1305
+ 
+ Command (m for help): p
+ 
+ Disk /dev/sda: 10.7 GB, 10737418240 bytes
+ 255 heads, 63 sectors/track, 1305 cylinders
+ Units = cylinders of 16065 * 512 = 8225280 bytes
+ Disk identifier: 0x000a6bf9
+ 
+ Device Boot Start End Blocks Id System
+ /dev/sda1 * 1 31 248976 83 Linux
+ /dev/sda2 32 761 5863725 5 Extended
+ /dev/sda3 762 1305 4369680 83 Linux
+ /dev/sda5 32 761 5863693+ 83 Linux
+ 
+ Command (m for help): w
+ The partition table has been altered!
+ 
+ Calling ioctl() to re-read partition table.
+ Syncing disks.
+ }}}
+
+{| class="wikitable"
+|-
+| <#B0C4DE><nowiki>[[File:IconsPage/tip.png]]</nowiki> Note : go to fdisk expert mode by commanding x to move ('b') the sda5 to start at it's original sector (eg. 501760).
+|}
+
+Cancel the "Authentication" dialog that appears (the live CD is trying to auto-mount your new partition).
+
+The LVM partition's system id should also be changed to "Linux LVM":
+  {{{
+  Command (m for help): t
+  Partition number (1-5): 5
+  Hex code (type L to list codes): 8e
+  Command (m for help): w
+  }}}
+Failure to do this may cause the beginning sector of the logical partition not to line up with where it used to be, and the LVM will be unreadable!
+
+6. <Say prayer here> {{http://ubuntuforums.org/images/smilies/eusa_pray.gif}}
+
+Reboot to your hard drive, enter your crypt password.
+
+If all went well your system should boot normally.
+
+== Detailed resizing ~ Enlarging an encrypted partition ==
+
+This section will be shorter, it is basically the reverse of the above. Enlarging is easier as the defaults resize the containers to the largest available space.
+
+1. Boot a live CD and, using any tool, using any tool create a new partition, lets call it '''/dev/sda6''' , next to and to the left of (after) your crypt.
+
+2. Write random data to the new partition with dd.
+
+ '''Make sure you have the correct partition for this command or you will overwrite your crypt.'''
+
+{{{
+sudo dd if=/dev/urandom of=/dev/sda6
+</pre>
+
+{| class="wikitable"
+|-
+| <#B0C4DE><nowiki>[[File:IconsPage/tip.png]]</nowiki> You can run that command as many times as your paranoia requires.
+|}
+
+3. Use fdisk as above to delete and then re-create a larger crypt partition.
+
+4. Reboot to the live CD.
+
+5. Install lvm2 and cryptsetup
+
+<pre>
+sudo apt-get update && sudo apt-get install lvm2 cryptsetup
+</pre>
+
+6. Load the cryptsetup module.
+
+<pre>
+sudo modprobe dm-crypt
+</pre>
+
+7. Decrypt your file system.
+
+<pre>
+sudo cryptsetup luksOpen /dev/sda5 crypt1
+</pre>
+
+8. Get the live CD to recognize (activate) your LVM.
+
+<pre>
+sudo vgscan --mknodes
+sudo vgchange -ay
+</pre>
+
+9. Resize the Crypt.
+
+<pre>
+sudo cryptsetup resize crypt1
+</pre>
+
+10. Resize the (LVM) Physical Volume.
+
+<pre>
+sudo pvresize /dev/mapper/crypt1
+</pre>
+
+11. Resize your root (LVM) Logical Volume.
+
+ Unlock the (LVM) Physical Volume.
+
+ <pre>
+ sudo pvchange -x y /dev/mapper/crypt1
+ }}}
+
+ Resize the (LVM) Physical Volume.
+
+ {{{
+ sudo lvresize -l +4G /dev/ubuntu-vg/root
+ }}}
+
+  __Note__: Change the +4G to the amount of space you are adding, or +100%FREE to use all of the available space.
+
+ Re-lock the physical volume.
+
+ {{{
+ sudo pvchange -x n /dev/mapper/crypt1
+ }}}
+
+12. Resize the filesystem.
+
+{{{
+sudo e2fsck -f /dev/mapper/ubuntu--vg-root
+sudo resize2fs -p /dev/mapper/ubuntu--vg-root
+</pre>
+
+{| class="wikitable"
+|-
+| <#B0C4DE><nowiki>[[File:IconsPage/tip.png]]</nowiki> You can check the size of the file system by mounting it '''before and after''' resizing the file system and running df -h . '''DO NOT RESIZE A MOUNTED PARTITION'''
+|}
+
+  Before :
+
+  <pre>
+  Filesystem Size        Used Avail Use% Mounted on
+  /dev/mapper/ubuntu--vg-root 5.0G 2.1G 2.7G 45% /mnt
+  }}}
+
+  After :
+
+  {{{
+  Filesystem Size        Used Avail Use% Mounted on
+  /dev/mapper/ubuntu--vg-root 9.2G 2.1G 6.6G 24% /mnt
+  }}}
+
+13. <Say prayer here> {{http://ubuntuforums.org/images/smilies/eusa_pray.gif}}
+
+Reboot to your hard drive, enter your crypt password.
+
+If all went well your system should boot normally.
+
+__Note__ : With most of those commands the default was to resize by expanding to take up the available space. This is why expanding is easier then reducing.
+
+== Alternatives for different situations (LVM, jfs) ==
+
+Some different steps are needed with different filesystems, LVM etc.
+Sometimes there's no need to reboot or even umount.
+
+For example, I just enlarged an encrypted jfs volume under LVM like this
+(logical volume /dev/vg00/extra encrypted as extra_crypt and mounted on /extra):
+
+{{{
+lvextend -L820G /dev/vg00/extra
+cryptsetup resize extra_crypt
+mount -o remount,resize /extra/
+</pre>
+
+That's all - no fsck's, umounts or reboots needed.
+
+For ext3/ext4 filesystem it should work similarly,
+just use resize2fs instead of the remount.
+
+== References ==
+
+__LUKS wiki page__ :
+
+ http://www.saout.de/tikiwiki/tiki-index.php?page=ResizeLUKSPartitions
+
+__Manage encrypted partitions from a live CD__ :
+
+ http://www.ubuntugeek.com/rescue-an-encrypted-luks-lvm-volume.html
+
+ http://linuxwave.blogspot.com/2007/11/mounting-lvm-disk-using-ubuntu-livecd.html
+
+__man resize2fs__ :
+ http://linux.die.net/man/8/resize2fs
+
+__LVM__ :
+
+ Setup : http://www.netadmintools.com/art365.html
+
+ Extend: http://www.netadmintools.com/art366.html
+
+ Shrink: http://www.netadmintools.com/art367.html
+ 
+ http://www.spinics.net/lists/lvm/msg16476.html
+
+ http://www.debuntu.org/how-to-install-ubuntu-over-lvm-filesystem
+
+__fdisk__  :
+ http://www.enigmacurry.com/2007/04/28/resizing-a-luks-dm-crypt-cryptsetup-filesystem/
+
+__Note__ : '''The first (and only comment at the time of this post) on this blog reads'''
+
+<pre>
+How to get the data back ?
+</pre>
+
+'''BACK UP before your Resize.'''
+
+----

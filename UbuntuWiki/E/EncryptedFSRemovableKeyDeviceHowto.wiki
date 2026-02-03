@@ -1,0 +1,397 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+This tutorial may render your system unusable. You should know what you're doing.
+Proceed at your own risk.
+
+== Encrypted LUKS FS with Removable Drive as Key Howto ==
+
+Using this tutorial you can set up a LUKS encrypted partition to unlock at boot using a key stored on a removable device. Alternatively if the device is not present, you will be asked for a passphrase.
+
+THE KEY WILL NOT BE STORED AS A FILE, BUT ITS BYTES WILL BE RAW-COPYED ON THE REMOVABLE DEVICE.
+
+'''This tutorial assumes that you already have an encrypted partition and a removable device to store the key on.'''
+
+Let's call /dev/sdXX the encrypted drive/partition and /dev/sdY the removable device.
+
+=== Partitioning your removable device ===
+
+Format your device as you want but make sure to create a not formatted partition where we're going to physically write the key. Make sure to create a partition and not to just leave the space unallocated.
+
+For example you may want to create 2 partitions: one fat32 for storing file as usually and one (not formatted) for the key. 
+
+You may use parted (Command Line Interface) or gparted (graphical UI), to install them just type:
+
+<pre>
+$ sudo apt-get install parted
+</pre>
+
+or
+
+<pre>
+$ sudo apt-get install gparted
+</pre>
+
+Here's an example with parted:
+
+<pre>
+$ sudo parted /dev/sdY
+GNU Parted 1.8.9
+Viene usato /dev/sdY
+Benvenuti in GNU Parted. Digitare "help" per l'elenco dei comandi.
+(parted) mklabel
+Avviso: L'etichetta del disco su /dev/sdY verrà eliminata e tutti i dati su
+questo disco saranno persi. Continuare?
+Sì/Yes/No? Y                                                              
+Tipo dell'etichetta del nuovo disco?  [msdos]? msdos                      
+(parted) mkpartfs primary fat32 0 -8m
+(parted) print                                                            
+Modello: Generic USB Disk (scsi)
+Disco /dev/sdY: 1032MB
+Dimensione del settore (logica/fisica): 512B/512B
+Tabella delle partizioni: msdos
+
+Numero  Inizio  Fine    Dimensione  Tipo     File system  Flag
+ 1      512B    1024MB  1024MB      primary  fat32        lba 
+
+(parted) mkpart primary 1024m -1s
+(parted) print                                                                
+Modello: Generic USB Disk (scsi)
+Disco /dev/sdY: 1032MB
+Dimensione del settore (logica/fisica): 512B/512B
+Tabella delle partizioni: msdos
+
+Numero  Inizio  Fine    Dimensione  Tipo     File system  Flag
+ 1      512B    1024MB  1024MB      primary  fat32        lba 
+ 2      1024MB  1032MB  7999kB      primary                   
+
+(parted) quit       
+Informazioni: Potrebbe essere necessario aggiornare /etc/fstab.                                                                 
+</pre>
+
+Let's call /dev/sdY2 the unformatted partition.
+
+=== Creating the key ===
+
+Now we need to create a new key and add it to to the encrypted drive.
+You can use the following command for a 256-byte password (if the command blocks, just move your mouse or press some keys to generate the needed entropy):
+
+<pre>
+$ dd if=/dev/random of=keyfile.key bs=1 count=256
+</pre>
+
+Now add that key to the LUKS device (the encrypted one, not the removable one):
+
+<pre>
+$ sudo cryptsetup luksAddKey /dev/sdXX keyfile.key
+</pre>
+
+You'll need to provide a working key for that drive.
+
+=== Writing the key to the removable device ===
+
+Now we're going to write the generated key directly on the not formatted partition of the removabile device.
+The key will NOT be written as a file, but raw bytes will be copied. It will not be visible when mounted to a system. The not formatted partition ensures we have a mean to access the location where the key is stored and prevents other systems from messing with your device.
+
+Now just do:
+
+<pre>
+$ sudo dd if=keyfile.key of=/dev/sdY2 bs=1 count=256
+</pre>
+
+At this point you can safely remove the keyfile:
+
+<pre>
+$ shred -u keyfile.key
+</pre>
+
+=== Getting the id of the newly created partition ===
+
+Run:
+
+<pre>
+$ ls -l /dev/disk/by-id/ | grep sdY2
+</pre>
+
+The output will be like this:
+<pre>
+lrwxrwxrwx 1 root root 10 2009-04-24 15:45 usb-Generic_USB_Disk_00000000000000-0:0-part2 -> ../../sdc2
+</pre>
+
+Here the important thing is: '''usb-Generic_USB_Disk_00000000000000-0:0-part2''' (you will get a different string)
+We will use this later, it will be referred as <ID>.
+
+=== Creating the keyscript ===
+
+Now we need to create a keyscript that gets the key from the removable drive at boot time and uses it to open your encrypted volume.
+
+Do:
+<pre>
+$ sudo nano /usr/local/sbin/usbkeyscript.sh
+</pre>
+
+And paste the following text:
+
+<pre>
+
+[ -x /sbin/usplash_write ] && usplash_exists='1'
+usplash_running()
+{
+        [ -z "$usplash_exists" ] && return 1
+        pidof "usplash" >/dev/null
+        return $?
+} 
+
+fixup_verbosity()
+{
+        if [ "$(expr match "$(cat /proc/cmdline)" '.*quiet')" -gt "0" ]; then
+                /sbin/usplash_write "VERBOSE off" 2>/dev/null
+        else
+                /sbin/usplash_write "VERBOSE on" 2>/dev/null
+        fi
+}
+
+write_to_console()
+{
+
+        read system_uptime no_var < /proc/uptime
+
+	if [ "x$2" != "xs" ]; then 
+        	printf '[%8s0000] %s' "$system_uptime" "$1" >&2
+	else
+		printf '%s' "$1" >&2
+	fi
+
+	if [ "x$2" != "xn" ]; then
+		printf '\n' >&2
+	fi
+}
+
+write_to_usplash()
+{
+        usplash_running
+        if [ $? -eq 0 ]; then
+                /sbin/usplash_write "VERBOSE on"
+                /sbin/usplash_write "$1 $2"
+                fixup_verbosity
+        fi 
+        
+        write_to_console "$2" "$3"
+
+        return 0
+}
+
+if [ "x$1" = "x" -o "x$1" = "xnone" ]; then
+	write_to_usplash "TEXT" "Keyscript: not configured for external keydevice." >&2
+	/lib/cryptsetup/askpass "Enter passphrase: "
+	exit 0
+else
+	KEYDEVICE=$(echo $1 | cut -d# -f 1)
+	KEYSIZE=$(echo $1 | cut -d# -f 2)
+	KEYPOS=$(echo $1 | cut -d# -f 3)
+fi	
+
+SETTLETIMEOUT=5 #in secs
+FIRSTDEVICETIMEOUT=100 #in decisecs
+DEFAULTDEVICETIMEOUT=5  #in decisecs
+
+DEVICETIMEOUT="${FIRSTDEVICETIMEOUT}"
+
+if [ -f /tmp/usbkey-discover-done ]; then
+	DEVICETIMEOUT="${DEFAULTDEVICETIMEOUT}"
+fi
+
+touch /tmp/usbkey-discover-done
+
+write_to_usplash "TEXT" "Keyscript: waiting for udev to settle"
+
+if [ -x /sbin/udevsettle ]; then
+    /sbin/udevsettle --timeout=${SETTLETIMEOUT} > /dev/null 2>&1
+fi
+
+write_to_usplash "TEXT" "Keyscript: searching for device..." "n"
+
+slumber=${DEVICETIMEOUT}
+while [ ! -b "${KEYDEVICE}" ]; do
+/bin/sleep 0.1
+slumber=$(( ${slumber} - 1 ))
+
+if [ ${slumber} -lt 0 ]; then
+	write_to_usplash "FAILURE"  "not found." "s"
+	/lib/cryptsetup/askpass "Enter passphrase: "
+	exit 0
+fi
+done
+
+write_to_usplash "SUCCESS" "found." "s"
+
+dd if=${KEYDEVICE} bs=1 count=${KEYSIZE} skip=${KEYPOS} 2> /dev/null
+
+exit 0
+</pre>
+
+Press CTRL+X and then Enter to save the file.
+Now change the permissions:
+<pre>
+$ sudo chmod 500 /usr/local/sbin/usbkeyscript.sh
+</pre>
+
+=== Editing crypttab ===
+
+At this point we need to tell the system to run our keyscript at boot to get the key:
+
+<pre>
+$ sudo nano /etc/crypttab
+</pre>
+
+You will find something like this:
+
+<pre>
+<mapper_device> /dev/<device> none luks
+</pre>
+
+Where '''<mapper_device>''' is the name of the device created after succefully mounting the encrypted disk and '''<device>''' is the physical encrypted device.
+
+You'll need to modify the line to:
+
+<pre>
+<mapper_device> /dev/<device> /dev/disk/by-id/<ID>#256#0 luks,keyscript=/usr/local/sbin/usbkeyscript.sh
+</pre>
+
+Where '''<ID>''' is the id of the partition on the removable device we found before,
+'''256''' is the key lenght and '''0''' is the offset from the starting of the partition where the key is stored.
+
+Mine looks like this (i've edited some names):
+
+<pre>
+sdXX_crypt /dev/disk/by-uuid/00000000-1111-2222-3333-444444444444 /dev/disk/by-id/usb-Generic_USB_Disk_00000000000000-0:0-part2#256#0 luks,keyscript=/usr/local/sbin/usbkeyscript.sh
+</pre>
+
+Again, press CTRL+X and save the file.
+
+=== Updating initramfs ===
+
+If the encrypted device you're working on is the one that contains your root ( / ), you'll need to regenerate initramfs to copy the files we've created/modifyed to initramfs.
+
+First you may want to make a backup, run:
+<pre>
+$ sudo cp /boot/initrd.img-$(uname -r) /boot/initrd.img-$(uname -r).bak
+</pre>
+
+Now run:
+<pre>
+$ sudo update-initramfs -u
+</pre>
+
+=== Rebooting the system ===
+
+At this point all should be fine. You can try rebooting your system and hope that everytihng went well.
+If the system fails to boot you can always mount the partition that contains /boot files from the recovery shell, and then replace the new initrd image with the backup one.
+
+The system shoul be able to automatically mount you encrypted device if your removable drive is present, or ask your password otherwise.
+
+If all went well you can remove the backup image with:
+
+<pre>
+$ sudo rm /boot/initrd.img-$(uname -r).bak
+</pre>
+
+=== Forcing yourself to remove the keydevice ===
+
+There is no extra security in encrypted disks if you leave the device plugged id.
+This script stops the boot process right before gdm is started, until the keydevice is removed.  
+
+Run:
+<pre>
+$ sudo nano /etc/init.d/remove-usbkeydevice
+</pre>
+
+And paste the following text (usplash functions are edited from a script I found at ubuntu forums, credit to the autor: StR34k):
+<pre>
+
+KEYDEVICE=/dev/disk/by-id/<ID>
+
+[ -x /sbin/usplash_write ] && usplash_exists='1'
+usplash_running()
+{
+        [ -z "$usplash_exists" ] && return 1
+        pidof "usplash" >/dev/null
+        return $?
+} 
+
+fixup_verbosity()
+{
+        if [ "$(expr match "$(cat /proc/cmdline)" '.*quiet')" -gt "0" ]; then
+                /sbin/usplash_write "VERBOSE off" 2>/dev/null
+        else
+                /sbin/usplash_write "VERBOSE on" 2>/dev/null
+        fi
+}
+
+write_to_console()
+{
+
+        read system_uptime no_var < /proc/uptime
+
+	if [ "x$2" != "xs" ];  then
+        	printf '[%8s0000] %s' "$system_uptime" "$1" >&2
+	else
+		printf '%s' "$1" >&2
+	fi
+
+	if [ "x$2" != "xn" ]; then
+		printf '\n' >&2
+	fi
+}
+
+write_to_usplash()
+{
+        usplash_running
+        if [ $? -eq 0 ]; then
+                /sbin/usplash_write "VERBOSE on"
+                /sbin/usplash_write "$1 $2"
+                fixup_verbosity
+        fi 
+        
+        write_to_console "$2" "$3"
+
+        return 0
+}
+
+case "$1" in
+start)
+
+	if [ -b ${KEYDEVICE} ]; then
+		write_to_usplash "TEXT" "Please remove your keydevice to continue."
+	fi
+
+	while [ -b ${KEYDEVICE} ]; do sleep 0.1; done
+
+	exit 0;
+	;;
+* )
+	echo "Usage: remove-usbkeydevice start"
+	exit 1
+	;;
+esac
+</pre>
+
+Put your keydevice partition id in place of '''<ID>''' on the top of the script.
+Save and exit as usual.
+
+Now change the permissions:
+<pre>
+$ sudo chmod 755 /etc/init.d/remove-usbkeydevice 
+</pre>
+
+Tell the system to run it at startup:
+<pre>
+$ sudo update-rc.d remove-usbkeydevice start 28 2 3 4 5 .
+</pre>

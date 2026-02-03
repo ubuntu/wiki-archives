@@ -1,0 +1,163 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== GPG key management ==
+=== Introduction ===
+To ensure all updates are signed, yet allow us to allow external entities to sign updates and handle the case where our key is compromised, the following GPG setup will be implemented.
+
+Two different bits need to do GPG verification:
+* Client (validate channels.json, index.json and all files)
+* Upgrader (validate all files)
+
+The following GPG key chain will be used:
+* ARCHIVE MASTER: 3F272F5B 2007-11-09  Ubuntu Archive Master Signing Key <ftpmaster@ubuntu.com> (never expires)
+* IMAGE MASTER: Ubuntu System Image Master Signing Key <system-image@ubuntu.com> (never expires)
+* IMAGE SIGNING: Ubuntu System Image Signing Key (2013) <system-image@ubuntu.com> (expires after 2 years)
+
+The client has 4 keyrings:
+* archive-master - mandatory, persistent, contains the ARCHIVE MASTER key, unsigned (never changes, never expires)
+* image-master - mandatory, persistent, contains the IMAGE MASTER key, signed by the ARCHIVE MASTER key (hopefully never changes, never expires)
+* image-signing - mandatory, persistent, contains the IMAGE SIGNING key, signed by the IMAGE MASTER key (updated regularly, expires after 2 years)
+* device-signing - optional, temporary, contains the keys valid for the index.json and update files for the device, signed by the IMAGE SIGNING key (updated regularly, expires after a month)
+* blacklist - optional, persistent, contains any key that should no longer be trusted, signed by the IMAGE MASTER key
+
+The client will ship with the archive master keyring on disk.  If the client is shipped with the image-master and image-signing keyrings, the associated .tar.xz and .tar.xz.asc files will also be provided (see below). Those will be updated as needed by the client.  The upgrader will ship with just the archive master keyring.
+
+The client pushes the image-master, image-signing, and device-signing (if present) keyring tar.xz and .tar.xz.asc (signature) files to the cache partition for the upgrader to use.
+The upgrader will attempt to read the blacklist from the system partition, should it fail to do so, it'll continue without blacklist.
+
+=== Signing and Validation ===
+
+In the descriptions below, when a file's signature is checked for validity, it must be DIRECTLY signed by the specified key.  Specifically, indirect signature chains are NOT supported.  For example, if a file is said to be DIRECTLY signed by the image-signing key, only the image-signing key (inside the associated keyring) is acceptable.  The file cannot be signed by the image-master key or the archive-master key, even though the image-signing key is signed by the image-master.
+
+Another point to clarify.  Some files may be signed by either the image-signing key, or the device-signing key if there is one.  When the device-signing key is specified (i.e. in the index.json file), then files signed by either key are accepted.
+
+=== Blacklist keyring ===
+
+The blacklist keyring is a bit special. It differs from the others in that any key in that keyring is considered invalid during any signature validation process, regardless of whether the key is valid, revoked, or expired.  Think of it as a set operation; we take the set of keys that signed a file and difference it with all the keys in the blacklist.  The remaining keys are the valid signatures of the file.
+
+This keyring is downloaded by the client, stored alongside the others in the data partition (but not in a user writable location) and ISN'T passed to the upgrader. Instead the upgrader accesses it directly from the data partition. If it can find it, it uses it, if it can't, it doesn't. A missing blacklist keyring won't lead to upgrade failure.
+
+The reason behind this is that we need to always use an up-to-date blacklist keyring coming from a user inaccessible location. Otherwise, a user flashing using eMMC could simply skip that keyring (as it's optional) and provide files signed from a compromised key (before the matching keyring expires) which would then be considered valid.
+Similarly, we can't make the blacklist keyring mandatory as the user could then simply provide an older version of it when updating from eMMC. We can't make the keyring expire every month either as that keyring is signed by image-master key and so signature can't be automated.
+
+Therefore the current design is the only reliable way of rapidly revoking keys and ensuring that no revoked key may be used for both over-the-air and over-the-wire updates.
+
+=== Files ===
+==== Keyrings ====
+* `https://server/gpg/image-master.tar.xz` is a GPG keyring tarball
+* `https://server/gpg/image-master.tar.xz.asc` is the signature for the image-master keyring. This is DIRECTLY signed by the ARCHIVE MASTER key.
+* `https://server/gpg/image-signing.tar.xz` is a GPG keyring tarball
+* `https://server/gpg/image-signing.tar.xz.asc` is the signature for the image-signing keyring. This is DIRECTLY signed by the IMAGE MASTER key.
+* `https://server/<channel>/<device>/device-signing.tar.xz` is a GPG keyring tarball
+* `https://server/<channel>/<device>/device-signing.tar.xz.asc` is the signature for the device-signing keyring. This is DIRECTLY signed by the current IMAGE SIGNING key.
+* `https://server/gpg/blacklist.tar.xz` is a GPG keyring tarball
+* `https://server/gpg/blacklist.tar.xz.asc` is the signature for the blacklist keyring. This is DIRECTLY signed by the IMAGE MASTER key.
+
+==== Other files ====
+* `https://server/channels.json` is ALWAYS DIRECTLY signed by the current IMAGE SIGNING key.
+* `https://server/<channel>/<device>/index.json` is ALWAYS DIRECTLY signed by the IMAGE SIGNING key, or a key contained in the keyring linked from channels.json (if present).
+
+=== GPG keyring tarball format ===
+The GPG keyrings will be distributed as .tar.xz tarballs with a detached (.asc) GPG signature.
+
+The content of those tarballs will be made of two files:
+* keyring.gpg - a standard GPG keyring
+* keyring.json - a JSON file with the following syntax
+** expiry is a UTC UNIX EPOCH at which the keyring should be considered invalid (optional, defaults to no-expiry)
+** type is one of "archive-master", "image-master", "image-signing", "device-signing" or "blacklist"
+** model is the name of the model this keyring applies to (optional, defaults to any model)
+<pre>
+{
+    'expiry': 123456,
+    'type': 'blacklist',
+    'model': nexus7
+}
+</pre>
+
+=== Use cases ===
+==== Standard update ====
+* The client has the ARCHIVE MASTER key, the current IMAGE MASTER key, and the current IMAGE SIGNING key in its keyring.
+* The client downloads the blacklist from https://server/gpg/blacklist.tar.xz (and .asc) and loads all the invalid fingerprints
+* The client attempts to grab https://server/channels.json, and validates its signature against the image-signing key.
+* The client looks for the entry for the channel and device in use, if present it looks for and downloads a device-signing keyring, and validates its signature against the image-signing key.
+* The client then downloads and validates https://server/<channel>/<device>/index.json against the image-signing keyring or the device-signing keyring (if present).
+* The update is then resolved, all files downloaded and validated against the image-signing keyring, or the device-signing keyring (if present), and copied to android:/cache/.
+* The client then exports image-master keyring as android:/cache/image-master.tar.xz and android:/cache/image-master.tar.xz.asc
+* The client then exports image-signing keyring as android:/cache/image-signing.tar.xz and android:/cache/image-signing.tar.xz.asc
+* The client then exports the device-signing keyring as android:/cache/device-signing.tar.xz and android:/cache/device-signing.tar.xz.asc (if present)
+
+* The upgrader loads the blacklist keyring from the system partition (if possible)
+* Any key contained in the blacklist will be removed from the keyrings before any validation will be done.
+* {for every file}
+** The upgrader checks that the file is DIRECTLY signed by a key stored in either the image-signing.tar.xz or device-signing.tar.xz (if present)
+** If device-signing.tar.xz is present, and the file is signed by a device-signing key, the upgrader checks that the device-signing key is DIRECTLY signed by a key stored in image-signing.tar.xz
+** The upgrader checks that the image-signing key is DIRECTLY signed by a key stored in image-master.tar.xz
+** The upgrader checks that the image-master key is DIRECTLY signed by the ARCHIVE MASTER key which it has locally.
+** Once all checks pass, the file is unpacked and applied
+
+==== compromised device key ====
+===== procedure =====
+# Revoke the key if possible and publish to the GPG network
+# Add the key to the blacklist keyring, have the keyring signed by the IMAGE MASTER key
+# Issue a new device-signing key (or keys depending on vendor)
+# Generate a new device-signing keyring with the new key
+# Sign the new device keyring with the IMAGE SIGNING key
+# Re-sign any index.json and tarball that were signed by the old key
+
+===== effect on the client =====
+* On the next check, the client will download a refreshed blacklist keyring
+* The new device-signing keyring will be downloaded with the next update
+* MITM attacks are prevented by the use of the https certificate so an old version of the keyring can't be pushed to the client. If for some reason https could be intercepted and the client somehow would never be able to grab the new blacklist keyring, then the expiry set on the keyring would make it invalid after a month.
+
+===== effect on the upgrader =====
+* The upgrader will read the blacklist keyring from the system partition, so as soon as the client runs once after revocation, the user won't be able to use something signed by the invalidated key.
+* If the system partition doesn't contain the revoked entry or the blacklist can't be read for some reason then a user can have their system update to something signed by a key from the device-signing keyring (using sdcard based flash) until the keyring expires (a month).
+
+==== compromised IMAGE SIGNING key ====
+===== procedure =====
+# Revoke the key and publish to the GPG network
+# Add the key to the blacklist keyring, have the keyring signed by the IMAGE MASTER key
+# Issue a new IMAGE SIGNING key
+# Generate a new image-signing keyring with the new key
+# Sign the new image-signing keyring with the IMAGE MASTER key
+# Re-sign channels.json, all the index.json, all the device-signing keyrings and any tarball that were signed by the old IMAGE SIGNING key
+
+===== effect on the client =====
+* On the next check, the client will download a refreshed blacklist keyring
+* Validation of channels.json will fail, causing a download of the image-signing keyring and its validation against the image-master keyring
+* MITM attacks are prevented by the use of the https certificate so an old version of the keyring can't be pushed to the client. If for some reason https could be intercepted and the client somehow would never be able to grab the new blacklist keyring, then the expiry set on the keyring and the key would make it invalid after two years.
+
+===== effect on the upgrader =====
+* The upgrader will read the blacklist keyring from the system partition, so as soon as the client runs once after revocation, the user won't be able to use something signed by the invalidated key.
+* If the system partition doesn't contain the revoked entry or the blacklist can't be read for some reason then a user can have their system update to something signed by a key from the image-signing keyring (using sdcard based flash) until the keyring expires (2 years). It's to be noted that even though the device-signing keyring will expire after a month (if used for the particular device), a new one can be generated from the compromised image-signing key.
+
+==== compromised IMAGE MASTER key ====
+===== procedure =====
+# Revoke the key and publish to the GPG network
+# Issue a new IMAGE MASTER key
+# Add the key to the blacklist keyring, have the keyring signed by the new IMAGE MASTER key
+# Generate a new image-master keyring with the new key
+# Sign the new image-master keyring with the ARCHIVE MASTER key
+# Re-sign the image-signing keyring with the new IMAGE MASTER key
+
+===== effect on the client =====
+* On the next check, the download will try to download a refreshed blacklist keyring
+* Validation of the blacklist keyring will fail, causing a download of the image-master keyring and its validation against the archive-master keyring
+* Validation of the image-signing keyring will fail, causing a download of the image-signing keyring and its validation against the image-master keyring
+* The rest continues as normal
+* MITM attacks are prevented by the use of the https certificate so an old version of the keyring can't be pushed to the client. If for some reason https could be intercepted and the client somehow would never be able to grab the new blacklist keyring, then the attacker would be able to fake the update server as the image-master keyring doesn't expire.
+
+===== effect on the upgrader =====
+* The upgrader will read the blacklist keyring from the system partition, so as soon as the client runs once after revocation, the user won't be able to use something signed by the invalidated key.
+* If the system partition doesn't contain the revoked entry or the blacklist can't be read for some reason then a user could create a fake image-signing keyring and sign their images with that, the image-master keyring doesn't expire so there's nothing that'd make this stop after a while.
+
+==== compromised archive master key ====
+That should never happen as there's nothing we can do if that happens short of re-generating all the keys and hoping we can get the users to update to a fixed system before anyone abuses the compromised key.

@@ -1,0 +1,692 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+/* = From PSpice to ngspice/gEDA = */
+
+~-''Discussion about this page on: <nowiki>[[http://ubuntuforums.org/showthread.php?p=9823995#post9823995|Wiki page discuss: From PSpice to ngspice-gEDA - Ubuntu Forums]]</nowiki>''-~
+
+{{{#!wiki comment
+'''Contents'''}}}
+
+=== Introduction ===
+
+Well, it's been a while since I've done electric circuit simulation in my bachelor days, however every once in a while I have to do it yet again - and usually I'm expected to run `Pspice 9.1` Student version for Windows. 
+
+Now, back in the late 90's, I don't think there was even anything else to use; and even these days - if you're designing your latest iP(o)(a)d circuitry and you need speed and efficiency, it's obviously reasonable to invest in software that will increase your productivity, in order to hoard the tons of ca$h from your product :) 
+
+And - of course you can install the old ''`PSpice Student`'' under Wine (see <nowiki>[[http://ubuntuforums.org/showthread.php?t=1570404|Installing & Running PSpice Student 9.1 on Ubuntu Lucid - Ubuntu Forums]]</nowiki>) - but I find it very irritating that I'm led to use proprietary stuff like `PSpice` all over again, even for relatively simple things - when there are open source tools these days, that actually '''will''' (''even though in a slower, and maybe not as streamlined, manner'') perform the same job just as well. In other words: simulating a circuit with a couple of elements, in order to do a simple theoretical exercise - is simply not a reason good enough for me, to experience proprietary software vendor lock-in. 
+ 
+So, as I only occasionally have to delve into this, I usually forget all the basics related to simulation - so I thought I'd write it up this time (''while it's still fresh :D'') for future reference. This document will discuss possibilities of porting stuff from Pspice to ngspice (from gEDA), but only in terms of '''simulation''' of electric circuits; and to see what it all means, let's take a look back at the basics. 
+
+=== Basics - ye olde schoole ===
+
+Traditionally, we would approach electronic circuit design like this: 
+* We would draw a '''schematic''' of the electric circuit
+* We would set-up a system of equations based on the schematic and circuit theory, and we would '''solve''' for the variable(s) of interest (say, some voltage in the circuit), to see whether it would theoretically behave as we want to
+* Once we are satisfied with the theoretical design, we would obtain parts - and we would draw a '''PCB layout''' of the circuit for the given parts
+* Finally, we '''implement''' the PCB layout on a real circuit board with the parts, and produce a finished circuit. 
+
+Of course, traditionally, we would in principle do all these steps 'by hand', using 'pen & paper'. Computer software for <nowiki>[[http://en.wikipedia.org/wiki/Electronic_design_automation|Electronic design automation ]]</nowiki> also goes along these steps: 
+* We draw a circuit schematic in a '''schematic''' editor
+* Based on this schematic, we perform '''simulation''' on the circuit, to obtain solutions for the variable(s) of interest (say, some voltage in the circuit)
+* Using the schematic as a starting point, we would draw a PCB '''layout''' of the circuit
+* The finished layout files can be then sent to a manufacturer for '''implementation'''. 
+
+Notably, the solving of equations by hand is replaced by the simulation process; and this is the part that we're going to focus on in this document; that is, we're looking at possibilities to replace PSpice with ngspice in terms of simulation - and pcb layout will not be discussed (''apart from <nowiki>[[#NotesOnLayout|Notes on layout]]</nowiki>''). 
+
+==== Schematic vs. netlist ====
+
+Let's take a look at a brief example - say, this parallel RLC circuit:
+
+<nowiki>[[http://en.wikipedia.org/wiki/File:RLC_parallel_circuit.png|{{http://upload.wikimedia.org/wikipedia/commons/2/2f/RLC_parallel_circuit.png}}]]</nowiki>
+
+When we talk of a '''schematic''', what we talk about is ''geometry''; in terms of computers, that means that a schematic software must 'know' the looks (geometric/graphical descripton) of symbols for V, R, L and C; then it must also 'know' that there is a line connecting V and R on top at an angle of 90 degrees (and same for the bottom); that there is a line connecting R and L on top at an angle of 90 degrees; etc. In other words, ''schematic software'' will keep track of all graphical information of a schematic in terms of x,y coordinates - not unlike a vector drawing software (such as <nowiki>[[http://inkscape.org/|Inkscape]]</nowiki>). 
+
+However, in circuit theory, we take that all (idealized) conductors have resistance of zero Ohms; and that any connection between two (ideal) conductors can be treated as a single conductor. Hence in circuit theory we don't necesarilly deal with 'wires' as physical objects; we instead deal with 'nodes' and 'branches', where a 'node' with be a group of any ammount of wires (as in 'ideal conductors') connected together at one end. Therefore, in circuit theory, what is of interest is ''topology'' - that is, we are interested in what is connected to what - instead of how these connection looks like, which is geometry (which, as we mentioned, is taken care of by the schematic software). And a topological description of a circuit is known as a '''<nowiki>[[http://en.wikipedia.org/wiki/Netlist|netlist]]</nowiki>''' - and this is the level that electric circuit ''simulator'' software (and circuit theory in general) works on. 
+
+In other words - in the circuit shown above, ''schematic software'' will see four elements and 8 connecting lines (wires) - four on top, four on bottom - as a ''graphic''. However, ''simulation software'' will see two nodes, and four elements connected between them, as a ''netlist''. Say the top four connections form node 'n1', and bottom four connections form node 'n2'; then a netlist describing the above circuit would be:
+<pre>
+V	n1 n2
+R	n1 n2
+L	n1 n2
+C	n1 n2
+</pre>
+
+So, the __netlist__ is not a graphical representation of the circuit - the graphical representation is the __schematic__. You can have many geometric ''schematic'' representations of a circuit (for example, the angles between lines in the above drawing don't have to be 90 degrees), but they will still describe the same ''netlist'' (in terms of how the elements are connected). 
+
+==== SPICE netlist ====
+
+As we noted previously, circuit simulation software operates on a netlist. At this point, let us note that the starting point circuit software is `SPICE` - "''Simulation Program with Integrated Circuit Emphasis''" - which originally is, in fact, open-source. However, note: 
+~-
+ <nowiki>[[http://en.wikipedia.org/wiki/SPICE|SPICE - Wikipedia, the free encyclopedia]]</nowiki>
+ {{{#!
+As an early open source  program, SPICE was widely distributed and used. Its ubiquity became such that "to SPICE a circuit" remains synonymous with circuit simulation.
+...
+SPICE inspired and served as a basis for many other circuit simulation programs, in academia, in industry, and in commercial products. The first commercial version of SPICE was ISPICE, an interactive version on a timeshare service, National CSS. The most prominent commercial versions of SPICE include HSPICE (originally commercialized by Shawn and Kim Hailey of Meta Software, but now owned by Synopsys) and PSPICE (now owned by Cadence Design Systems). The academic spinoffs of SPICE include XSPICE, developed at Georgia Tech, which added mixed analog/digital "code models" for behavioral simulation, and Cider (previously CODECS, from UC Berkeley/Oregon State Univ.) which added semiconductor device simulation. 
+ }}}-~
+
+Because of this, a good thing is that even a proprietary program like `PSpice` will, at a certain point in the simulation workflow, will output a text-only netlist file; which could be in principle be then used in an open-source simulator. The bad thing is that - each vendor develops a slightly different syntax for netlists, and so netlists produced by one software are usually not directly compatible with another; and that is the case also with the netlists produced by `PSpice`, in respect to their use in `ngspice`. 
+
+=== Workflow ===
+
+At this point, let us look at how things are done in `PSPice` and `ngspice/gEDA` respectively. 
+
+==== PSpice (Schematics/Capture) ====
+
+When you install `PSpice 9.1` Student version, the first confusion you may experience, is that the installer will ask you whether you'd like to install `Schematic`, `Capture` or both. While you may just as well install both, it's useful to get acquainted with the PSpice versions: 
+~-
+ <nowiki>[[http://www.orcad.com/forums/ShowPost.aspx?PostID=16890|Differ bet pspice student and OrCAD capture - OrCAD Community]]</nowiki>
+ {{{#!
+What i want to ask is the different between pspice student(schematic) and OrCAD capture?what is the function for each one?
+In OrCAD capture, there is schematic too.
+...
+orcad capture is for drawing circuit diagrams for translating into circuit boards using layout.
+as far as I am aware, pspice is for circuit simulation.
+...
+Except that Capture is also used as a front end for PSpice.  While Capture is used to describe the circuit to be simulated, PSpice forms the back-end analysis engine.  I think that the place where the use of Capture "forks" between making a circuit board and doing a simulation is at the netlist step.  If you want to simulate, you make a PSpice netlist; if you are going for a PCB, you make a Layout netlist (or a netlist for whatever other layout tool you intend to use).  Of course, this is an oversimplified explaination. 
+...
+BTW, re "pspice student".  While a "student version" of PSpice was offered some years ago as a somewhat stripped-down edition, a fully-functional (non-student) version can be purchased.  Also, I believe that there is often some confusion between the historical "student version" and the limited version of PSpice that comes with the OrCAD "lite" demo disks.  
+...
+I believe the confusion here may be related to the old PSpice Schematics that used to be included as a schematic entry tool with Microsim PSpice (mid-early 90's) before it was purchased by the OrCAD product line, which was later purchased by Cadence...(i can't imagine how that could be confusing...)
+If this is the case, PSpice Schematics was a very basic design tool and is essentially a "dead" product as it hasn't had any development in at least 6 or 7 years. It was replaced by Capture as the main schematic entry tool and I know of very few people who use Schematics anymore. Schematics does not integrate with any of the newer simulation or PCB design softwares.
+...
+It's true that any OrCAD "Lite" general product demo disc might be used by a student wanting to expose himself to simulation with PSpice.  But, contrary to belief in some quarters, there is one and only one specific "Pspice Student Version". 
+In 2000, OrCAD offered the explicitely-titled: "PSpice Student Version, Release 9.1".  This "PSpice Student Version" is separate and distinct from any random version-numbered OrCAD Lite Demo disks, including any that might have been offered as OrCAD Lite 9.1, or whatever it might have been called back then, in the year 2000..
+This Student Version was separately packaged and narrowly and explicitly targeted to the academic community by OrCAD.  According to the Release Notes:
+"The Student Version of PSpice is intended for use by college students and professors who are interested in learning about analog and mixed-signal simlation.  It is not intended to demonstrate the capabilities of any product other than PSpice."
+...
+This Student Version includes only what would be necessaary for doing PSpice simulation; PSpice A/D 9.1, Web Update 1 and choice of schematic editor.  Surprisingly, the user may specify at installation the choice of PSpice Schematics 9.1 (the old Microsim editor) or Capture 9.1, Web update 2.  There is no Layout, CIS, or anything else that would not be pertinent to "PSpice Student Version", as opposed to a general OrCAD "demo", "lite", "starter", or whatever else it might be called.
+This Student Version is limited in ways quite similar to the Lite demos.  For example, circuit simulations limited to 64 nodes, 10 transistors, 65 digital pimitives, 10 transmssion lines, etc.  The sample library contains only 39 analog and 134 digital parts.  Use of Model Editor limited to diodes.  And so forth.
+I found no evidence that any explicit "Student Version" other than Release 9.1 was ever published.
+ }}}-~
+
+Well, hope this clears the confusion - I couldn't have said it better myself :) Obviously, the reason why one can still find `PSpice` Student 9.1 in academic circles, is that even though its limited - simulation works for small designs, there's GUI, it doesn't cost money and it is not a time limited demo. And all this long after the only 'student' version was first released - and even after `Schematics` has been discontinued:
+~-
+ <nowiki>[[http://www.cadence.com/products/orcad/pages/downloads.aspx#installer|Cadence OrCAD Downloads]]</nowiki>
+ {{{#!
+PSpice Schematics Installer
+The development and support for the Cadence® PSpice® Schematics product has been discontinued with the OrCAD® 10.0 release. It is imperative that Cadence® continually evaluate its product offerings to guarantee that we are maintaining our focus and providing you with the most effective and efficient products.
+
+You are strongly urged to fulfill your schematic entry needs with OrCAD Capture ,Allegro® Design Entry CIS, Allegro® Design Entry HDL.
+
+We will continue distribution of PSpice Schematics as a download from www.cadence.com as an aid to our customers who wish to continue using it. Cadence may discontinue subsequent versions of PSpice Schematics at any time.
+ }}}-~
+Also, note: 
+~-
+ <nowiki>[[http://www.electronicspoint.com/can-get-student-edition-pspice-t42580.html|Where can I get the Student edition of PSpice?]]</nowiki>
+ {{{#!
+Do another Google search for PSpice Student and find a different ftp site. There are a lot of them out there that have the download. The Cadence site doesn't have it anymore because it is too old to use anymore as an effective sales tool (it is version 9.1+, and the current version for sale is 10.0.) While there are rumors of a newer version being produced, it will only have Capture available as a front end, and no one has actually seen it, yet.
+ }}}-~
+
+In the end, what we care for is that with `PSpice` student 9.1, we can install two applications:
+* '''Schematics''' - this is the first historically - originally "!MicroCad", then "!OrCad", `Pspice Schematics` ... 
+* '''Capture''' - ... then Cadence bought Orcad, discontinued `Schematics`, and offered `Capture` instead
+
+While the two versions look very much alike, there are differences between them: 
+* `Schematics` doesn't have a concept of a project (`PSpice Design Manager` can be used to manage directories/"workspaces" instead); saves everything in plain text files
+* `Capture` does have a concept of a project, however it is saved as a proprietary binary file 
+
+However, they both output a plain text `.net`, and `.out` (which is the `.net` file combined with model descriptions and simulation settings) files. Here is a brief overview of differences and files used in each software:
+{| class="wikitable"
+|-
+| '''Software'''
+| '''project'''
+| '''schematic'''
+| '''sim.profiles'''
+| '''sim.settings'''
+| '''probe settings'''
+| '''schem.alias'''
+| '''netlist'''
+| '''merged out'''
+|-
+| '''`PSpice Schematics`'''
+| (directory)
+| '''.sch''' (txt)
+| (none)
+| '''.cir''' (txt)
+| '''.prb''' (txt)
+| '''.als''' (txt)
+| '''.net''' (txt)
+| '''.out''' (txt)
+|-
+| '''`OrCAD Capture`'''
+| '''.dsn''' (bin)
+| '''.dsn''' (bin)
+| '''.sim''' (txt)
+| '''.cir''' (txt)
+| '''.prb''' (txt)
+| '''.als''' (txt)
+| '''.net''' (txt)
+| '''.out''' (txt)
+|}
+
+For the possibilities on conversion from/to these file formats, see <nowiki>[[#PSpice9.1FileConversion|PSpice 9.1 file conversion]]</nowiki> below. Also, for `PSpice Schematics`, you may want to take a look at <nowiki>[[http://www.seas.upenn.edu/~jan/spice/PSpice_UserguideOrCAD.pdf|PSpice User's Guide]]</nowiki>. 
+
+For now, let's get back to the differences in workflow between these two programs. Say we want to simulate a simple RC lowpass filter with a square wave input. 
+
+A screenshot of `PSpice Schematics` from Student 9.1 can be seen below: 
+
+<nowiki>[[http://img690.imageshack.us/i/pspiceschematics.png/|{{http://img690.imageshack.us/img690/9805/pspiceschematics.png}}]]</nowiki>
+
+A brief sequence of steps would be: 
+* Open `Schematics`; File/New for a new schematic, File/Save to save .sch
+* Draw / "Get new part" to place a new part 
+* Draw / "Wire" to connect the parts 
+* Analysis / "Setup" to setup analysis (transient, AC..)
+* Markers / "Mark Voltage/Level" to add 'probes' (what to measure)
+* Analysis / "Create Netlist" to create netlist `.net` file
+** Errors here will be shown in "Pspice Message Viewer"
+* Analysis / "Simulate" to run Pspice simulation
+* Analysis / "Run probe" to view plot of results (if they're not already shown)
+
+A screenshot of `OrCAD Capture` from Student 9.1 can be seen below: 
+
+<nowiki>[[http://img194.imageshack.us/i/orcadcapture.png/|{{http://img194.imageshack.us/img194/7184/orcadcapture.png}}]]</nowiki>
+
+A brief sequence of steps would be: 
+* Open `Capture`; File / New / "Project" - pick "Schematic" and fill in name, location; then choose libraries - for a new project; schematic gets autocreated
+* Place / "Part" to place a new part (make sure you've clicked on the schematic window to get this option) 
+* Place / "Wire" to connect the parts  
+* PSpice / "New Simulation Profile" to setup analysis (transient, AC..)
+* PSpice / Markers / "Voltage/Level" to add 'probes' (what to measure)
+* PSpice / "Create Netlist" to create netlist `.net` file
+** Errors here will be shown in "Session Log"
+* PSpice / "Run" to run Pspice simulation
+
+Note that, in spite of their differences, both programs will create the (more or less) same netlist for this circuit:
+{| class="wikitable"
+|-
+| Software
+| '''`Pspice Schematics`'''
+| '''`Orcad Capture`'''
+|-
+| Netlist output
+| `V_V2         $N_0001 0 DC 0V `<<BR>>`+PULSE -5V 5V 0us 2us 2us 20us 40us `<<BR>>`C_C1         0 $N_0002  10n   `<<BR>>`R_R1         $N_0002 $N_0001  10k  `<<BR>>
+| `C_C1         0 N29588  10n` <<BR>>`R_R1         N29582 N29588  10k` <<BR>>`V_V2         N29582 0` <<BR>>`+PULSE -5V 5V 0 2u 2u 20u 40u`<<BR>>
+|}
+
+Note that in the schematics, we never explicitly assigned nets, so the software must name them automatically for us. You can notice that `Schematics` adds a dollar sign $ in front of net names, but otherwise keeps them numbered sequentially; while `Capture` does not add a dollar sign, and uses a random number to name net nodes instead. 
+
+Also, in both programs, after the simulation has been run, the `Probe` window should automatically start, and display plots of waveforms obtained from simulation; usually traces for those nodes that have markers on the schematics will be automatically displayed on the plots (''there is also the convenience of adding markers to the schematic, and have the plots update automatically in the `Probe` window''). 
+
+==== gschem, gnetlist and ngspice ====
+
+Now that we have seen the workflow of the `PSpice` software, let's look at the comparable workflow in the open tools. In the <nowiki>[[http://www.gpleda.org/index.html|gEDA]]</nowiki> suite of tools, the tools which in `PSpice` appear as part of single application (whether it's `Schematics` or `Capture`), are here separated. The tutorial that I found most helpful for introducing the use of these tools is: 
+* <nowiki>[[http://littletux.homelinux.org/knowhow/ngspice.pdf|Electronic circuit simulation with gEDA and NG-Spice by Example]]</nowiki>
+
+Note that while part of `gEDA`, <nowiki>[[http://ngspice.sourceforge.net/|Ngspice]]</nowiki> is distributed separately, and hosted on sourceforge. For more about the programs related to `gEDA` (`gaf` - gEDA and friends), see: 
+* <nowiki>[[http://ftp.sunet.se/geda/tools/index.html|gEDA Project Tools]]</nowiki>
+* <nowiki>[[http://www.geda.seul.org/wiki/geda:gaf|geda:gaf (geda Wiki)]]</nowiki>
+
+Here it should be mentioned that it is a good idea you build the latest versions of these tools from source (for instance, some of the latest syntax is only supported in ngspice-21 in cvs).
+
+To build the latest source of geda:  
+<pre>
+sudo apt-get build-dep geda-gaf
+git clone git://git.gpleda.org/gaf.git
+cd gaf
+./autogen.sh
+./configure
+make 
+cd .. 
+
+</pre>
+
+Note, you may get the following error: 
+<pre>
+checking for autopoint ... no
+autogen.sh: You must have GNU gettext installed.
+
+sudo apt-get install autopoint
+</pre>
+
+If you'd like to run `gaf`/`geda` programs different from the default location, note that `/usr/local...` is to some extent hardcoded; note the following snippet for that kind of installation:
+<pre>
+cd gaf 
+
+mkdir gafbin
+
+make prefix=${PWD}/gafbin install
+
+cd gafbin
+ln -s ./share/gEDA/system-gschemrc gschemrc
+cp ./share/gEDA/system-gafrc gafrc
+
+echo "(define geda-data-path \"./share/gEDA\")
+(define geda-rc-path \"./share/gEDA\")
+
+$(cat gafrc)" > gafrc
+
+ 
+LD_LIBRARY_PATH=./lib ./bin/gschem -L ./share/gEDA/scheme/
+</pre>
+
+However, if you'd really like to run `geda` programs from a different folder, use a script like `geda-gaf-env.sh` below: 
+<pre>
+
+GDIR=/abs/path/to/gafbin
+
+export PATH=$GDIR:$GDIR/bin:$PATH
+export LD_LIBRARY_PATH=$GDIR/lib
+export GEDADATA=$GDIR/share/gEDA
+</pre>
+
+... then you can simply source this script: `. geda-gaf-env.sh`, and then simply calling `gschem` should work (''note that in this case, you do not want the copies of `gschemrc` and `gafrc` to sit in the `gafbin` folder, as in the previous step - it is enough to just rename them to something else (e.g. `__gafrc`), so they don't influence the loading process'')
+
+For the latest source of `ngspice`, you might want to check the script <nowiki>[[http://sdaaubckp.svn.sourceforge.net/viewvc/sdaaubckp/source-build-scripts/get-ngspice-src-deb.sh|get-ngspice-src-deb.sh]]</nowiki> which builds the source as a debian package, whilst activating some useful `configure` switches. 
+
+So let's get back at the workflow, and reconstruct the same circuit in the gEDA suite of tools. To draw the schematic, we'd use `gschem`: 
+
+<nowiki>[[http://img709.imageshack.us/i/gschem.png/|{{http://img709.imageshack.us/img709/2919/gschem.png}}]]</nowiki>
+
+A brief sequence of steps would be: 
+* New schematic is automatically created when started - File/Save to save it (''or keyboard sequence 'f', then 's' - NOT Ctrl+S!'')
+* Add / "Component" to place a new part
+* If the value of a component isn't shown, right-click on the element and choose "Edit...", from the "Add Attribute" menu choose 'Name:' of "value", and in 'Value:' below enter the value; and finally check the "Visible" checkmark before clicking "Add", and then "Close". 
+* Place / "Net" to connect the parts (and right click to cancel, use 'n' on keyboard to start 'net mode' again) 
+* Save once finished
+
+Well, that was it :) 
+
+You can notice that - as opposed to `PSpice` - you cannot call "create netlist"; or setup, and run 'simulation profiles' from `gschem` - and that is because `gschem` is just for drawing a schematic, nothing else :) Also, notice that `gschem` uses an `.sch` extension just like `PSpice Schematics` (needless to say, although both are in plain text format, `sch`s are not compatible between `PSpice` and `gschem`). 
+
+In any case, 'simulation profiles' would be settings we'd want to issue to our simulation software - `ngspice` - not to the schematic drawing software :) To assist with that, there is a so-called "Spice-directive" symbol in `gschem`, which has a 'file' attribute; here you can enter a filename with additional SPICE commands that set up the simulation, which will be included in the final netlist. Note, however, that the attributes would have to be set up like this in the `.sch` file - for succesful parsing further on: 
+<pre>
+C ... spice-directive-1.sym
+{
+T ...
+device=directive
+T ...
+refdes=AD1
+T ...
+value=unknown
+T ...
+file=spice-commands.txt
+}
+</pre>
+
+Also, at this point, you may want to create a text file called `gafrc` in the same directory as your `.sch` file, with only one line in it: 
+<pre>
+(component-library "./")
+</pre>
+This tells the `gEDA` tools where to look for resources; then you'll be able to modify symbols from `gschem`, and save your modified symbols (`.sym` files) in the same directory as the `.sch` file; and `gschem` will be able to find the custom symbols (and any files referenced as part of a 'SPICE directive') easily when it reads the schematic. 
+
+To '''create a netlist''' at this point, we would have to call another `gEDA` program, `gnetlist`, which will accept the `.sch` file from `gschem` as input, and generate a `.net` netlist output. I like to call: 
+<pre>
+gnetlist -v -s -g spice-sdb -o FILENAME.net FILENAME.sch
+</pre>
+
+''Note: option -s for sort is removed -see <nowiki>[[https://bugs.launchpad.net/geda/+bug/777010|Bug #777010 in gEDA: “ gnetlist : sort option missing”]]</nowiki>; now use
+{{{ 
+gnetlist -v -O sort_mode -g spice-sdb -o FILENAME.net FILENAME.sch
+}}}''
+
+The netlist which is output would then contain the netlist of the actual circuit on the schematic - plus any additional commands we may have included through a "SPICE directive" object. In this case, for an empty commands.txt directive file (''if you use a SPICE directive, you must also create a file, else `gnetlist` will fail with `No such file or directory: "spice-commands.txt"`''), the netlist would look something like this: 
+<pre>
+* ...[snip]...
+* ==============  Begin SPICE netlist of main design ============
+C1 0 1 10n  
+R1 2 1 10K  
+V2 2 0 pulse -5V 5V 0u 2u 2u 20us 40us
+* vvvvvvvv  Included SPICE model from spice-commands.txt vvvvvvvv
+* ^^^^^^^^  End of included SPICE model from spice-commands.txt ^^^^^^^^
+* 
+.end
+</pre>
+
+Note that a star * at the beginning of a line in a SPICE netlist is usually treated like a comment. Again, `gnetlist` has automatically numbered unspecified nets - unlike `PSpice`, it simply assigns sequential numbers as net node names. 
+
+Finally, now that we have a netlist `.net` file, we can perform simulation on it using `ngspice`. Note that `ngspice` can be used in two modes - interactive and batch mode. For '''interactive''' mode, we can use either:
+<pre>
+$ ngspice
+* *****
+* * ngspice-21plus : Circuit level simulation program
+* * The U. C. Berkeley CAD Group
+* * Copyright 1985-1994, Regents of the University of California.
+* * Please submit bug-reports to: ngspice-bugs@lists.sourceforge.net
+* * Creation Date: Sun Sep  5 15:56:09 CEST 2010
+* *****
+ngspice 1 -> source test.net
+
+Circuit: * gnetlist -v -s -g spice-sdb -o test.net test.sch
+
+ngspice 2 -> 
+</pre>
+or
+<pre>
+$ ngspice test.net
+* *****
+* * ngspice-21plus : Circuit level simulation program
+* * The U. C. Berkeley CAD Group
+* * Copyright 1985-1994, Regents of the University of California.
+* * Please submit bug-reports to: ngspice-bugs@lists.sourceforge.net
+* * Creation Date: Sun Sep  5 15:56:09 CEST 2010
+* *****
+
+Circuit: * gnetlist -v -s -g spice-sdb -o test.net test.sch
+
+ngspice 1 -> 
+</pre>
+Once the netlist file has been loaded and a prompt is shown, we can then issue commands on the prompt that will perform simulation and / or plot results. 
+
+On the other hand, we can call `ngspice` in '''batch mode''', which I prefer (because under Linux, <nowiki>[[http://sourceforge.net/tracker/index.php?func=detail&aid=2558285&group_id=38962&atid=423915|arrow keys are malfunctioning]]</nowiki>, unless you build correctly); for that, we'd use the `-b` switch, so the call is `ngspice -b test.net`. This will read the circuit netlist in the file `test.net` - plus any additional SPICE simulation and copying commands and execute them (possibly generating images and / or raw data), and then `ngspice` will exit. 
+
+As an example, we could have our commands written in a `.control ... .endc` section; so our "`spice-commands.txt`" would look like this: 
+<pre>
+.control
+
+* set color for postscript output
+set hcopypscolor=1
+
+* do a transient analysis 
+* from tstart=0s to tstop=500us with tstep=1us
+
+tran 1us 500us
+
+* save the plots of node voltages V(1) and V(2)
+* in a test-tran.ps file
+
+hardcopy test-tran.ps V(1) V(2) 
+
+.endc
+</pre>
+
+Then we can call `gnetlist` again, and this time our full netlist output will look like:
+<pre>
+* ==============  Begin SPICE netlist of main design ============
+C1 0 1 10n  
+R1 2 1 10K  
+V2 2 0 pulse -5V 5V 0u 2u 2u 20us 40us
+* vvvvvvvv  Included SPICE model from spice-commands.txt vvvvvvvv
+.control
+
+* set color for postscript output
+set hcopypscolor=1
+
+* do a transient analysis 
+* from tstart=0s to tstop=500us with tstep=1us
+
+tran 1us 500us
+
+* save the plots of node voltages V(1) and V(2)
+* in a test-tran.ps file
+
+hardcopy test-tran.ps V(1) V(2) 
+
+.endc
+* ^^^^^^^^  End of included SPICE model from spice-commands.txt ^^^^^^^^
+* 
+.end
+</pre>
+
+And if we now call `ngspice` in batch mode: 
+<pre>
+$ ngspice -b test.net
+
+Circuit: * gnetlist -v -s -g spice-sdb -o test.net test.sch
+
+Doing analysis at TEMP = 27.000000 and TNOM = 27.000000
+
+Warning: v2: no DC value, transient time 0 value used
+
+Initial Transient Solution
+--------------------------
+
+Node                                   Voltage
+----                                   -------
+1                                           -5
+2                                           -5
+v2#branch                         -1.35525e-20
+
+No. of Data Rows : 667
+
+The file "test-tran.ps" may be printed on a postscript printer.
+Note: No ".plot", ".print", or ".fourier" lines; no simulations run
+
+$ convert -background white -layers flatten test-tran.ps test-tran.ps.png
+</pre>
+... it will inform us that there are "''no simulations run''" - however, they indeed have run, since the `test-tran.ps` file will be generated, and it will look like this: 
+
+<nowiki>[[http://img841.imageshack.us/i/testtranps.png/|{{http://img841.imageshack.us/img841/1228/testtranps.png}}]]</nowiki>
+
+Yikes - that looks like the same result we got with `PSpice` for the same circuit; lovely :) To finish this section, here's a script I use, which I call `schem2netlist`:
+<pre>
+k=${1%%.sch}
+dn=$(dirname $k)
+bn=$(basename $k)
+old=$(pwd)
+cd $dn
+gnetlist -v -s -g spice-sdb -o ${bn}.net ${bn}.sch
+ngspice -b ${bn}.net
+cd $old
+</pre>
+You call it with the filename of the `.sch` file, then it runs both `gnetlist` and `ngspice` in batch mode. 
+
+=== Porting Pspice to ngspice ===
+
+What this should have demonstrated by now, is that in order to '''simulate''', what we need is, basically, a netlist file (we don't really need the schematic); and both `PSpice Schematics` and `OrCAD Capture` will generate such a file in plain text format. At this point, let us mention the major references, that deal with respective SPICE syntax: 
+* <nowiki>[[http://ngspice.sourceforge.net/docs/ngspice21-manual.pdf|ngspice-21 user manual]]</nowiki>
+* <nowiki>[[http://www.electronics-lab.com/downloads/schematic/013/tutorial/PSPCREF.pdf|PSpice Reference Manual]]</nowiki>
+
+Here we can say, that the basic syntax is, in fact, compatible between `PSpice` and `ngspice`: for instance, we can just take the netlist from `PSpice` from the example above, add a `.control` section to it - and we can use it as an input to `ngspice`; say if we took the netlist from `PSpice Schematics`:
+<pre>
+* test2.net: Schematics Netlist *
+
+* From PSpice schematics - included verbatim: 
+
+C_C1         0 $N_0001  10n   
+R_R1         $N_0001 $N_0002  10k  
+V_V2         $N_0002 0 DC 0V 
++PULSE -5V 5V 0us 2us 2us 20us 40us
+
+* control section for ngspice:
+
+.control
+
+* set color for postscript output
+set hcopypscolor=1
+
+* do a transient analysis 
+* from tstart=0s to tstop=500us with tstep=1us
+
+tran 1us 500us
+
+* save the plots of node voltages V($N_0001) and V($N_0002)
+* in a test-tran.ps file
+
+hardcopy test-tran2.ps V(\$N_0001) V(\$N_0002) 
+
+.endc
+.end
+</pre>
+
+If we now run `ngspice -b test2.net`, we will obtain more-or-less exactly the same plot as previously. (Note that there may be problems with using the $ character in `ngspice` for net names, as it is used there to reference variables, see "<nowiki>[[http://sourceforge.net/projects/ngspice/forums/forum/133842/topic/3824656|Segmentation fault when trying to define a LIMIT function]]</nowiki>" - however, the above should work under Linux). 
+
+Of course, the example up to now was chosen precisely to demonstrate that there is at least ''some'' level of compatibility between different netlists; and that is because the basic SPICE models for R, L, C and transient voltage sources (like PULSE, SIN etc) are considered '''SPICE primitives''', and in principle should be supported by all SPICE simulators; however:
+~-
+ <nowiki>[[http://www.vhdl.org/verilog-ams/htmlpages/public-docs/v2.3_drafts/merged_spice_v1.0.pdf|Annex E - SPICE compatibility - Verilog-AMS Language Reference Manual]]</nowiki>
+ {{{#!
+SPICE is not a single language, but rather is a family of related languages. The first widely used version of SPICE was SPICE2g6 from the University of California at Berkeley. However, SPICE has been enhanced and distributed by many different companies, each of which has added their own extensions to the language and models. As a result, there is a great deal of incompatibility even among the SPICE languages themselves. 
+...
+2. Not all SPICE simulators support the same set of component primitives. 
+...
+3. The names of the built-in SPICE primitives, their parameters, or their ports can differ from simulator to simulator. 
+...
+4. The mathematical description of the built-in primitives can differ. As with the netlist syntax, incompatible enhancements of the models have crept in through the years.
+ }}}-~
+
+Although - at least for the case of basic compatibility of primitives between `PSpice` and `ngspice`, it seems we are in luck :) More involved examples, however, will require a bit of theory - and quite a bit more of looking through the manuals for the proper syntax of things :) 
+
+So, now, let's try and take a look at ....
+
+==== A more complicated example ====
+
+Say we have a sinusoidal source, that goes into an ideal opamp which works as a comparator; on the output we expect a square signal as a result of transient analysis (in the time domain). Then, let's put this square signal through a simple D+R||C peak detector - we should be able to see some exponential fades. Finally, let's put this signal through a high-pass filter - the remaining sharp edges should be more prononounced. 
+
+Let's say this circuit has been implemented in `PSpice Schematics`, and the resulting netlist is this: 
+<pre>
+V_V1         $N_0001 0  
++SIN 0V 5V 10KHz 0 0 0
+D_D1         $N_0002 $N_0003 D1N4148 
+E_U1         $N_0002 0 VALUE {LIMIT(V($N_0001,0)*1E6,-15V,+15V)}
+R_ROUT         $N_0004 0  10k  
+R_R1         $N_0003 0  1k  
+C_C1         0 $N_0003  10n   
+E_HIPASS1         $N_0004 0 CHEBYSHEV {V($N_0003)} HP (10KHz 600Hz) 1dB 50dB
+</pre>
+
+There are several problems with this netlist, in respect to simulating in `ngspice`:
+* `ngspice` doesn't know what sort of a model is "!D1N4148" (however, a "1N4148" model is given in the `ngspice` manual)
+* `ngspice` doesn't know what a "LIMIT" function is (but it's relatively easy to define it)
+* `ngspice` uses curly braces '{}' to refer to parameters (not to delimit expressions as above)
+* The E source (non-linear voltage source) in `ngspice` uses `vol='...'` syntax to define expressions - not `VALUE {...}`
+* `ngspice` doesn't know what a "CHEBYSHEV" model is. 
+
+All of these can be solved more or less trivially, except the Chebyshev filter model. Here a trick can be applied - namely, `ngspice` supports a `s_xfer` object, which per the manual, is "''the s-domain transfer function [is] a single input, single output transfer function in the Laplace transform variable 's' that allows for flexible modulation of the frequency domain characteristics of a signal.''" On the other hand, in `Pspice`, "''You can get a list of the filter Laplace coefficients for each stage by enabling the LIST option in the Simulation Settings dialog box.''" (<nowiki>[[http://ecee.colorado.edu/~kuester/spice/spice.htm|SPICE Hints]]</nowiki>) - however, this is a GUI option found only in the full version of `Capture`. Yet, there is a way around it for the student version - simply open the "`.cir`" file from `Schematics`, and add "`.OPTIONS LIST`" as a line below the "`.tran`" directive; and then open the schematic again, and ''without'' creating a netlist anew, run simulation again in `Schematics`. After this, the `.out` file should contain: 
+<pre>
+E_HIPASS1  $N_0004       0 CHEBYSHEV            ($N_0003)
+ Maximum frequency = 1.60627e+007,   Frequency resolution = 1960.78
+ Stage: (  N2*S^2  +    N1*S   +     N0   )/(  D2*S^2  +    D1*S   +     D0   )
+     1: 8.912510E-01 0.000000E00 0.000000E00 1.000000E00 3.123065E04 3.970855E09
+     2: 0.000000E00 1.000000E00 0.000000E00 0.000000E00 1.000000E00 1.271461E05
+</pre>
+
+Lovely - the s-coefficients of the Chebyshev filter :) Luckily, the `s_xfer` object will accept the coefficients in the same order as they are written above by `PSpice` (''"The order of the coefficient parameters is from that associated with the highest-powered term decreasing to that of the lowest" - make sure you check the manual''). Also, note that above we get two stages; each stage is a second order filter; and hence the total filter is a cascade of two second order filters - or a fourth order filter. So, in `ngspice` we can establish these two 2nd order filters as models, then cascade them in a subcircuit, then use an instance of this subcircuit as a replacement for E_HIPASS1. 
+
+With this in mind, this is how the converted netlist readable for `ngspice` would look like: 
+<pre>
+* test3.net: Pspice Schematics Netlist - ngspice rework*
+
+* add a definition for Pspice LIMIT function
+.func LIMIT(x,y,z) { min(max(x,y),z) }
+
+* taken from the ngspice manual 
+.model D1N4148 D (is=2.495E-09 rs=4.755E-01 n=1.679E+00
++ tt=3.030E-09 cjo=1.700E-12 vj=1 m=1.959E-01 bv=1.000E+02
++ ibv=1.000E-04)
+
+* Chebyshev PSpice hipass filter: first, define
+* models for each 2nd order stage output from PSpice
+* must add initial conditions to models!
+* analog models - used by A elements
+.model chebyA s_xfer(num_coeff=[8.912510E-01 0 0] 
++ den_coeff=[1 3.123065E04 3.970855E09] 
++ int_ic=[0 0 0])
+* since here s^2 is zero in both num and den, 
+* must erase initial zeros - and have int_ic accordingly 2 elems long!
+* else will get -nan for start!
+.model chebyB s_xfer(num_coeff=[1 0] 
++ den_coeff=[1 1.271461E05] 
++ int_ic=[0 0])
+
+* and then - the cascade as subcircuit
+* subcircuit - used by X elements
+.subckt chebytot 1 2
+A_1  1     net.1   chebyA
+A_2  net.1 2   chebyB
+.ends
+
+* now the actual netlist from PSpice
+* (minimally changed)
+
+V_V1         $N_0001 0  
++SIN 0V 5V 10KHz 0 0 0
+D_D1         $N_0002 $N_0003 D1N4148 
+* E_U1         $N_0002 0 VALUE {LIMIT(V($N_0001,0)*1E6,-15V,+15V)}
+E_U1         $N_0002 0 vol='LIMIT(V($N_0001,0)*1E6,-15V,15V)'
+R_ROUT         $N_0004 0  10k  
+R_R1         $N_0003 0  1k  
+C_C1         0 $N_0003  10n   
+* E_HIPASS1         $N_0004 0 CHEBYSHEV {V($N_0003)} HP (10KHz 600Hz) 1dB 50dB
+X_HIPASS1  $N_0003 $N_0004 chebytot
+
+* control section for ngspice:
+
+.control
+
+* set color for postscript output
+set hcopypscolor=1
+
+* do a transient analysis 
+* from tstart=0s to tstop=500us with tstep=1us
+
+tran 1us 500us
+
+* save the plots of node voltages 
+* in a test3-tran.ps file
+
+hardcopy test3-tran.ps V(\$N_0001) V(\$N_0002) V(\$N_0003) V(\$N_0004) 
+
+.endc
+.end
+</pre>
+
+If we now run `ngspice -b test3.net`, we will get pretty much the same waveforms `PSpice` would have given us: 
+
+<nowiki>[[http://img189.imageshack.us/i/test3tranps.png/|{{http://img189.imageshack.us/img189/1568/test3tranps.png}}]]</nowiki>
+
+(except that `PSpice` may also show V($N_0003) with a peak that shoots over 20V). Notice also that: 
+* `PSpice` usually outputs the diode model in the `.out` file - you may want to compare its parameters to the parameters used in `ngspice`, although remember that they are not always called the same
+* Note that, while the s-domain filter coefficients are output by `PSpice` in order that is readable by `ngspice` - if it happens you have a 0 for s^2 both in numerator and denumerator, this reduces the filter to first order - and hence, the initial conditions `int_ic` of the `s_xfer` object '''must''' have only two entries - else the filter will 'crash' ngspice (because nan values will be generated). 
+* To design filters like in `PSpice` (by specifying frequencies, and obtaining resulting s- coefficients), take a look at the Scilab function <nowiki>[[http://www.scilab.org/product/man/analpf.html|analpf]]</nowiki> (but be careful about differences in `rad/s` and `Hz`) 
+
+Well, that is pretty much it - I won't even get started on what other problems you may experience with models of transistors, or MOSFET, etc... :) 
+
+=== PSpice 9.1 file conversion ===
+
+Up to now, we basically had to put in manual effort, in order to get a netlist generated by `PSpice` ported into a format readable by `ngspice`. One would think - is there not some automatic way? Say by converting a schematic from `PSpice` format to `ngspice` format? 
+
+Well, unfortunately not: 
+* `PSpice Schematics` can:
+** open and save as its own `.sch` schematics and `.slb` symbol files
+** export as AutoCAD .dxf
+* `OrCAD Capture` can:
+** open `.opj` projects, Capture `.dsn` and SDT schematic `.sch` design, Capture `.olb` and SDT `.lib` Library 
+** Import Design from: PSpice (Microsim schematic `*.sch` and Microsim library `.slb` - msim.ini file is required), EDIF (`*.ed*` files) and PDIF (PCAD PDIF `*.pdf` files)
+** Save `.dsn` as (choose the `.dsn` node in the project tree, and File / Save As..) SDT 386+ `.sch` ; SDT Rel. IV `.sch` and Capture 7.2 `.dsn` (<nowiki>[[http://www.edaboard.com/thread183697.html|Cadence v16 to OrCAD v9.2 sch and layout file conversion?]]</nowiki>)
+
+Note that "''The '.SCH' extension for OrCAD's schematic is for the older SDT version of OrCAD (IV & 386+).''" (<nowiki>[[http://www.sxlist.com/techref/app/format_conversion.htm|How to convert design information from one file format to a different one]]</nowiki>)
+* Also, note: "''If using SDT/386+, I recommend that you use the 32TO16 utility to convert the schematics to 16 bit format.''" (<nowiki>[[http://www.pcengines.ch/orcad.htm|Tools for OrCAD SDT Schematic Capture]]</nowiki>); 
+** 32TO16.EXE utility seems to have belonged to <nowiki>[[http://www.altium.com/community/downloads/en/protel99installationnotes.cfm|Altium Protel 99]]</nowiki>, and it's so old, it runs in `dosbox`, than not `wine` (still, very hard to get it to do anything). 
+
+Needless to say, `gschem` can only open and save its own schematic and symbol files. And there is a tool called `sarlacc` (`sarlacc_schem` - <nowiki>[[http://archives.seul.org/geda/user/Jul-2006/msg00343.html|Re: gEDA-user: Importing Orcad (or other) symbols into gschem]]</nowiki>) that was meant to be able to convert older OrCAD schematics to `gschem` format; unfortunately it cannot handle `PSpice Schematics` from 9.1 student version (it responds with `File is not an ORCAD 16 Bit Schematic`). 
+* "''I wrote `sarlacc` for earlier versions of OrCAD.  You could go into OrCAD and try to save everything as OrCAD 386 files.  Not sure if that option is still there in version 7. ''" (<nowiki>[[http://archives.seul.org/geda/user/Jan-2004/msg00080.html|Re: gEDA-user: OrCAD 7 to gEDA?]]</nowiki>)
+* "'' There is a project labeled "olib" which stands for "OrCAD Library" and which is already part of the gEDA project. The problem with that "side project" is that it was designed for OrCAD version 4.0 (fairly old version). And the author says that there are several bugs in it.''" <nowiki>[[http://archives.seul.org/geda/user/Mar-2007/msg00021.html|Re: gEDA-user: Is the OrCAD Library Active?]]</nowiki>
+
+Now, in principle, since the `PSpice Schematics` saves plain-text `.sch` files, in shouldn't be too difficult to write a translator to `gschem .sch` files. However, given that `PSpice Schematics` has been discontinued for a while, that is pointless - it might have a point, if it was possible to easily downconvert a Capture `.dsn` design to a (Microsim) `Schematics` `.sch`. However, one can succesfully only upgrade from Microsim PSpice Schematics `.sch` to an OrCAD Capture `.dsn` (<nowiki>[[http://www.orcad.com/forums/PrintPost.aspx?PostID=21449|Converting Orcad .sch files (32 Bit) to Capture .dsn files - OrCAD Community]]</nowiki>), but not downgrade the other way around: files like <nowiki>[[ftp:--ftp.analog.com-pub-dsp-adv601-hardware-orcad_schem-sdt.cfg|sdt.cfg]]</nowiki> seem to be needed, which are not included in the Student version - and so this part of the process fails. 
+
+A final possibility might be the <nowiki>[[http://en.wikipedia.org/wiki/EDIF|EDIF - file format]]</nowiki>: "~-''EDIF (Electronic Design Interchange Format) is a vendor neutral format in which to store Electronic netlists and schematics. It was one of the first attempts to establish a neutral data exchange format for the electronic design automation (EDA) industry. ... Most of the EDA vendors produced EDIF 2 0 0 translators, but they were definitely more interested in generating high-quality EDIF readers, and they had absolutely no motivation at all to write any software that generated EDIF (an EDIF Writer), beyond threats from customers of mass migration to another vendor's software. ... The harder it became to export customer data to EDIF, the more the vendors seemed to like it.''-~". Well, in any case - the Student version can import EDIF, however, only OrCAD full version can export EDIF; so no use in this example.
+* Furthermore, `gEDA` seems not to be able to read EDIF in respect to schematics, however: "''patch to allow edif netlist import into PCB (connectivity netlist only) is at: [sourceforge]''" (<nowiki>[[http://archives.seul.org/geda/user/Oct-2006/msg00361.html|Re: gEDA-user: Orcad binary file format]]</nowiki>)
+
+Messy, this schematic file conversion business, no? :) 
+
+=== Notes on layout ===
+
+While there is a PCB layout tool in `gEDA`, called simply <nowiki>[[http://pcb.gpleda.org/|PCB]]</nowiki>, I haven't worked much with it (though it seems decent from screenshots). What I have used, and am quite pleased with, is <nowiki>[[http://www.lis.inpg.fr/realise_au_lis/kicad/|Kicad]]</nowiki> (<nowiki>[[http://kicad.sourceforge.net/|wiki]]</nowiki>), which offers a rather streamlined path from a ''schematic'' to a ''PCB layout''; unfortunately, it does not have any integrated part related to simulation (''however, it does create netlists, and those might possibly be used with `ngspice`; using `gnetlist` on `KiCAD` schematic files is also an unexplored option''). 
+
+An interesting note about `KiCAD` is that one can read <nowiki>[[http://www.mail-archive.com/kicad-users@yahoogroups.com/msg01704.html|Orcad EDIF to KICAD]]</nowiki>, using a tool called <nowiki>[[https://sourceforge.net/projects/edif2kicad/|edif2kicad]]</nowiki> ([[http://www.mail-archive.com/kicad-users@yahoogroups.com/msg01808.html|[kicad-users] OrCad EDIF schematic to KiCad]]). Unfortunately, as of yet, there are no direct translator between `KiCAD` and `gschem` schematics (''although, given both are open applications and use plain-text schematics files, a translator certainly seems possible''). 
+
+=== Conclusion ===
+
+This document shows that a direct 1-to-1 correspondence between offerings of `PSpice` Student 9.1 and `gEDA` tools is not possible. In particular, one cannot use the ''schematic'' as a point of conversion between the two. 
+
+However, if the focus is on ''simulation'', then the schematic is actually not needed (other than as a convenience tool) - one can use the ''netlist'' as a point of transfer from `PSpice` to `ngspice`. Although not always, in many circumstances netlists generated in `PSpice` *will* be portable to `ngspice`, albeit with sometimes significant user effort..  
+
+As a final remark, below in 'Additional' I have included some links to some posts I have made to ''ngspice-users'' forum, that contain some basic `ngspice` examples, which might be helpful.
+
+=== Additional ===
+
+* <nowiki>[[http://wiki.ubuntu.com/Intro_to_opamps_with_ngspice-gEDA|Intro to opamps with ngspice/gEDA - Ubuntu Wiki]]</nowiki>
+* <nowiki>[[http://sourceforge.net/projects/ngspice/forums/forum/133842/topic/3833858|ngspice-users: Command log: basic use: variables and vectors]]</nowiki>
+* <nowiki>[[http://sourceforge.net/projects/ngspice/forums/forum/133842/topic/3824656|ngspice-users: Segmentation fault when trying to define a LIMIT function]]</nowiki>
+* <nowiki>[[http://sourceforge.net/projects/ngspice/forums/forum/133842/topic/3831340|ngspice-users: Analyzing XSPICE analog models ?]]</nowiki>
+* <nowiki>[[http://sourceforge.net/projects/ngspice/forums/forum/133842/topic/3832009|ngspice-users: Minimal working example for s_xfer, and strange results]]</nowiki>
+* <nowiki>[[http://sourceforge.net/projects/ngspice/forums/forum/133842/topic/3834703|ngspice-users: Minimal working example for disto analysis]]</nowiki>
+* <nowiki>[[http://sourceforge.net/projects/ngspice/forums/forum/133842/topic/3831549|ngspice-users: s_xfer Chebyshev and noise analysis]]</nowiki>

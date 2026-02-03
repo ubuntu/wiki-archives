@@ -1,0 +1,353 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== Introduction ==
+{| class="wikitable"
+|-
+| <tablestyle="float:right; font-size: 0.9em; width:40%; background:#F1F1ED; margin: 0 0 1em 1em;" style="padding:0.5em;"><<BR>>
+|}
+
+The Xen Project hypervisor is an open-source type-1 or baremetal hypervisor, which makes it possible to run many instances of an operating system or indeed different operating systems in parallel on a single machine (or host). The Xen Project hypervisor is the only type-1 hypervisor that is available as open source. It is used as the basis for a number of different commercial and open source applications, such as: server virtualization, Infrastructure as a Service (IaaS), desktop virtualization, security applications, embedded and hardware appliances. The Xen Project hypervisor is powering the largest clouds in production today.
+As of Ubuntu 11.10 (Oneiric), the default kernel included in Ubuntu can be used directly with the Xen hypervisor as the management (or control) domain (Dom0 or Domain0 in Xen terminology). 
+
+The rest of this guide gives a basic overview of how to set up a basic Xen system and create simple guests.  Our example uses LVM for virtual disks and network bridging for virtual network cards.  It also assumes Xen 4.4 (the version available in 14.04) and the xl toolstack.  It assumes a familiarity with general virtualization issues, as well as with the specific Xen terminology.  Please see the <nowiki>[[http://wiki.xen.org/wiki/Xen_Overview|Xen wiki]]</nowiki> for more information.
+
+== During installation of Ubuntu ==
+
+During the install of Ubuntu for the partitioning method choose "Guided - use the entire disk and setup LVM". Then, when prompted to enter "Amount of volume group to use for guided partitioning:" Enter a value just large enough for the Xen Dom0 system, leaving the rest for virtual disks.  Enter a value smaller than the size of your installation drive. For example 10 GB or even 5 GB should be large enough for a minimal Xen Dom0 system.  Entering a percentage of maximum size (e.g. 25%) is also a reasonable choice. 
+
+== Installing Xen ==
+Install a 64-bit hypervisor.  (A 64-bit hypervisor works with a 32-bit dom0 kernel, but allows you to run 64-bit guests as well.)
+<pre>
+$ sudo apt-get install xen-hypervisor-amd64
+</pre>
+
+As of Ubuntu 14.04, GRUB will automatically choose to boot Xen first if Xen is installed.  If you're running a version of Ubuntu before 14.04, you'll have to modify GRUB to default booting to Xen; see below for details.
+
+Now reboot:
+<pre>
+$ sudo reboot
+</pre>
+And then verify that the installation has succeeded:
+<pre>
+$ sudo xl list
+Name                                        ID   Mem VCPUs	State	Time(s)
+Domain-0                                     0   945     1     r-----      11.3
+</pre>
+
+== Network Configuration ==
+{i} It's assumed that you are using a wired interface for your network configuration. !WiFi networks are tricky to virtualize and many times not even possible. If you are feeling adventurous, please start here <nowiki>[[http://wiki.xen.org/wiki/Xen_in_WiFi_networks|Xen in WiFi Networks]]</nowiki>.
+ 
+For this example, we will use the most common Xen network setup: ''bridged''. You will also find an example on how to set up <nowiki>[[http://openvswitch.org/|Open vSwitch]]</nowiki> which has been available since Xen 4.3.
+
+==== Disable Network Manager ====
+If you are using Network Manager to control your internet connections, then you must first disable it as we will be manually configuring the connections. Please note that you are about to temporarily lose your internet connection so it's important that you are physically connected to the machine.
+
+As documented in NetworkManager:
+<pre>
+$ sudo stop network-manager
+$ echo "manual" | sudo tee /etc/init/network-manager.override
+</pre>
+
+==== Using bridge-utils ====
+{{{ 
+$ sudo apt-get install bridge-utils
+}}}
+
+In a bridged setup, it is required that we assign the IP address to the bridged interface. Configure network interfaces so that they persist after reboot:
+<pre>
+$ sudo vi /etc/network/interfaces
+</pre>
+<pre>
+auto lo eth0 xenbr0
+iface lo inet loopback
+
+iface xenbr0 inet dhcp
+  bridge_ports eth0
+
+iface eth0 inet manual
+</pre>
+
+Restart networking to enable xenbr0 bridge:
+<pre>
+$ sudo ifdown eth0 && sudo ifup xenbr0 && sudo ifup eth0
+</pre>
+
+The brctl command is useful for providing addition bridge information. See: '''man brctl'''
+
+==== Using Open vSwitch ====
+{{{ 
+$ sudo apt-get install openvswitch-switch
+}}}
+
+In a bridged setup, it is required that we assign the IP address to the bridged interface. Configure network interfaces so that they persist after reboot:
+<pre>
+$ sudo vi /etc/network/interfaces
+</pre>
+
+<pre>
+auto lo eth0
+iface lo inet loopback
+
+iface eth0 inet manual
+
+allow-hotplug ovsbr0
+iface ovsbr0 inet dhcp
+</pre>
+
+Set up Open vSwitch
+<pre>
+$ sudo ovs-vsctl add-br ovsbr0
+$ sudo ovs-vsctl set Bridge ovsbr0 stp_enable=false other_config:stp-max-age=6 other_config:stp-forward-delay=4
+$ sudo ovs-vsctl list Bridge
+$ sudo ovs-vsctl add-port ovsbr0 eth0
+</pre>
+
+Now bring the interfaces up and acquire an IP address through DHCP. You should have your internet connection back at this point.
+<pre>
+$ sudo ip link set eth0 up
+$ sudo dhclient ovsbr0
+</pre>
+
+==== Recommended Bridge Settings ====
+For performance and security reasons, it's highly recommended<<FootNote(Recommended Bridge Settings: <nowiki>[[http://wiki.xen.org/wiki/Network_Configuration_Examples_(Xen_4.1%2B)|Network Configuration Examples]]</nowiki>)>> that ''netfilter'' is disabled on all bridges.
+<pre>
+$ sudo vi /etc/sysctl.conf
+</pre>
+<pre>
+net.bridge.bridge-nf-call-ip6tables = 0
+net.bridge.bridge-nf-call-iptables = 0
+net.bridge.bridge-nf-call-arptables = 0
+</pre>
+<pre>
+$ sudo sysctl -p /etc/sysctl.conf
+</pre>
+
+== Creating vms ==
+
+There are many options for installing guest images:
+* <nowiki>[[http://libguestfs.org|virt-builder]]</nowiki>: A program for building VM disk images; part of the libguestfs set of tools
+* <nowiki>[[http://xen-tools.org|xen-tools]]</nowiki>: A set of scripts for creating various PV guests 
+* <nowiki>[[http://virt-manager.org|virt-manager]]</nowiki>: A management system using libvirt
+* Converting an existing installation
+* Downloading pre-build guest images (e.g. http://wiki.xen.org/wiki/Guest_VM_Images)
+
+Or you can manually create one, as described below.
+
+=== Manually Create a PV Guest VM ===
+
+In this section we will focus on Paravirtualized (or PV) guests. PV guests are guests that are made Xen-aware and therefore can be optimized for Xen. 
+
+As a simple example we'll create a PV guest in LVM logical volume (LV) by doing a network installation of Ubuntu (other distros such as Debian, Fedora, and CentOS can be installed in a similar way).
+
+List your existing volume groups (VG) and choose where you'd like to create the new logical volume.
+<pre>
+$ sudo vgs
+</pre>
+
+Create the logical volume (LV).
+<pre>
+$ sudo lvcreate -L 10G -n lv_vm_ubuntu /dev/<VGNAME>
+</pre>
+
+Confirm that the new LV was successfully created.
+<pre>
+$ sudo lvs
+</pre>
+
+==== Get Netboot Images ====
+Choose an archive mirror <nowiki>[[https://launchpad.net/ubuntu/+archivemirrors]]</nowiki>.
+
+<pre>
+$ sudo mkdir -p /var/lib/xen/images/ubuntu-netboot/trusty14LTS
+$ cd /var/lib/xen/images/ubuntu-netboot/trusty14LTS
+$ wget http://<mirror>/ubuntu/dists/trusty/main/installer-amd64/current/images/netboot/xen/vmlinuz
+$ wget http://<mirror>/ubuntu/dists/trusty/main/installer-amd64/current/images/netboot/xen/initrd.gz
+</pre>
+
+==== Set Up Initial Guest Configuration ====
+<pre>
+$ cd /etc/xen
+$ cp xlexample.pvlinux ubud1.cfg
+$ vi ubud1.cfg
+</pre>
+
+<pre>
+name = "ubud1"
+
+kernel = "/var/lib/xen/images/ubuntu-netboot/trusty14LTS/vmlinuz"
+ramdisk = "/var/lib/xen/images/ubuntu-netboot/trusty14LTS/initrd.gz"
+
+memory = 1024
+vcpus = 1
+
+vif = [ 'script=vif-openvswitch,bridge=ovsbr0' ]
+
+disk = [ '/dev/<VGNAME>/lv_vm_ubuntu,raw,xvda,rw' ]
+
+</pre>
+
+Start the VM and connect to the console to perform the install.
+<pre>
+$ sudo xl create -c /etc/xen/ubud1.cfg
+</pre>
+
+Once installed and back to command line, modify guest configuration to use the pygrub bootloader. These lines will change
+<pre>
+$ vi /etc/xen/ubud1.cfg
+</pre>
+<pre>
+bootloader = "/usr/lib/xen-4.4/bin/pygrub"
+</pre>
+
+Now let's restart the VM with the new bootloader. (If the VM didn't shutdown after the install above, you may manually shut it down.)
+<pre>
+$ sudo xl shutdown ubud1
+$ sudo xl create -c /etc/xen/ubud1.cfg
+</pre>
+
+==== Quick XL Console Tips ====
+Connect to the VM console
+<pre>
+$ sudo xl console ubud1
+</pre>
+
+Disconnect from the console
+<pre>
+Ctrl+]
+</pre>
+
+=== Manually installing an HVM Guest VM ===
+
+Download Install ISO.
+
+http://www.ubuntu.com/download/desktop
+
+<pre>
+sudo pvs
+</pre>
+
+choose your VG
+
+Create a LV
+
+<pre>
+sudo lvcreate -L 4G -n ubuntu-hvm /dev/<VG>
+</pre>
+
+Create a guest config file /etc/xen/ubuntu-hvm.cfg
+<pre>
+builder = "hvm"
+name = "ubuntu-hvm"
+memory = "512"
+vcpus = 1
+vif = ['']
+disk = ['phy:/dev/<VG>/ubuntu-hvm,hda,w','file:/root/ubuntu-12.04-desktop-amd64.iso,hdc:cdrom,r']
+vnc = 1
+boot="dc"
+</pre>
+
+<pre>
+xl create /etc/xen/ubuntu-hvm.cfg
+vncviewer localhost:0 
+</pre>
+
+After the install you can optionally remove the CDROM from the config and/or change the boot order.
+
+For example /etc/xen/ubuntu-hvm.cfg:
+
+<pre>
+builder = "hvm"
+name = "ubuntu-hvm"
+memory = "512"
+vcpus = 1
+vif = ['']
+disk = ['phy:/dev/<VG>/ubuntu-hvm,hda,w']
+vnc = 1
+boot="c"
+</pre>
+
+== Xen Toolstack Choices ==
+
+http://wiki.xen.org/wiki/Choice_of_Toolstacks
+
+=== Xen and xl ===
+
+xl is a new toolstack written from the ground up to be a replacement for xend and xm.  In Xen 4.4, xl is the default toolstack and xend is deprecated.  It is planned to be removed in Xen 4.5.
+
+xl is designed to be command-for-command compatible with xm.  You should be able to use the same config file and the same commands you're used to; just use "xl" instead of "xm". 
+
+To switch back to xm, do the following:
+
+<pre>
+sudo sed -i 's/TOOLSTACK=.*\+/TOOLSTACK="xm"/' /etc/default/xen
+sudo reboot
+sudo xm list
+</pre>
+
+xl and xm are very similar in functionality with a few notable exceptions:
+http://wiki.xen.org/wiki/XL
+
+=== Xen and Libvirt ===
+
+Ubuntu 14.04 contains libvirt 1.2.2, which contains support for Xen, both libxl and xend.  If you specify "xen:///" as the hypervisor, it will automatically detect which is the appropriate method to use.
+
+<pre>
+sudo apt-get install virtinst
+</pre>
+
+<pre>
+sudo virt-install --connect=xen:/// --name u14.04 --ram 1024 --disk u14.04.img,size=4 --location http://ftp.ubuntu.com/ubuntu/dists/trusty/main/installer-amd64/
+</pre>
+
+=== Xen and XAPI ===
+
+* http://packages.ubuntu.com/precise/xcp-xapi
+* http://manpages.ubuntu.com/manpages/precise/man1/xapi.1.html
+* http://manpages.ubuntu.com/manpages/precise/man1/xe.1.html
+
+=== Other tips and tricks ===
+
+Create and format disk image file
+<pre>
+sudo mkdir -p /var/lib/xen/images
+sudo dd if=/dev/zero of=/var/lib/xen/images/ubuntu-guest.img bs=1M seek=3096 count=0
+sudo mkfs.ext4 -F /var/lib/xen/images/ubuntu-guest.img
+</pre>
+
+=== Xen and Grub on older versions of Ubuntu ===
+
+Modify GRUB to default to booting Xen ("Xen 4.1-amd64" should be replaced with the appropriate name, in 12.10 the line is "Ubuntu GNU/Linux, with Xen hypervisor". The current string can be obtained by looking for one of the menuentry lines in /boot/grub/grub.cfg. In theory the first element created by the 20_linux_xen script):
+<pre>
+sudo sed -i 's/GRUB_DEFAULT=.*\+/GRUB_DEFAULT="Xen 4.1-amd64"/' /etc/default/grub
+sudo update-grub
+</pre>
+
+== See Also ==
+
+* http://wiki.xen.org/wiki/XenPCIpassthrough
+* http://wiki.xen.org/wiki/Xen_VGA_Passthrough
+
+== External Links ==
+
+* http://wiki.xen.org/wiki/Debian_Guest_Installation_Using_Debian_Installer - Netboot installation of PV guests
+
+* http://wiki.xen.org/wiki/HostConfiguration/Networking - Networking configuration details from Xen.org wiki
+
+* http://libvirt.org/uri.html#URI_file - Libvirt xend configuration
+ 
+* http://wiki.xen.org/wiki/Xen_Man_Pages - Xen Man pages
+
+* http://xenbits.xen.org/docs/unstable/man/xmdomain.cfg.5.html - xm config options
+
+* http://xenbits.xen.org/docs/unstable/man/xl.cfg.5.html xl config options
+
+* http://xenbits.xen.org/docs/unstable/misc/xl-disk-configuration.txt  xl disk configuration
+* http://serverfault.com/questions/390373/xen-4-1-host-dom0-with-blktap-disks-tapaio-not-connecting blktap issues and fixes.

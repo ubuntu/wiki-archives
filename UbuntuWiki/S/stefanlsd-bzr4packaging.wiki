@@ -1,0 +1,205 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== bzr for packaging - Draft Status ==
+
+=== Introduction ===
+
+I was recently doing some security CVE patches into wireshark and placed the wireshark repository under bzr control, and found it a really great way to work, which (usually) saves me a lot of time. I thought I would outline the process here and maybe it can be useful to others.
+
+I am by no means an expert of packaging, diffing, or bzr-ing, so please feel free to correct or improve this entry!
+
+=== Why use Bazaar (bzr) ===
+
+The reasons for using bzr can be found on the bzr <nowiki>[[http://bazaar-vcs.org/|homepage]]</nowiki>.
+
+My reasons for using bzr for package maintenance include:
+
+ 1. Revision control
+ 2. Generating diffs is easy
+ 3. Easy merging into other bzr branches
+ 4. Ability to push it into Launchpad or let others branch from me
+ 5. Ensure that no cruft lands up in your package in prep for debdiff
+
+=== Notes ===
+
+The trick to using any version control system (VCS) like bzr is to commit in logical groups. Don't change large amount of code or text and then commit. Break it down to as small as possible related units. For example, if I was including a specific feature I would just change the files that do that, and then commit and give it a good commit log entry about that feature.
+
+A handy way to do this is use bzr commit filename/filenames
+
+That will just commit the changes to the filename/filenames you want
+
+In this way, if I wanted to remove just that feature, i could. If i wanted to merge that feature into another branch, i could also do that. This becomes useful for me when I need to patch into Intrepid, Hardy, Gutsy and Dapper.  Often i can just merge the corresponding entry straight into the other branch.
+
+bzr revert is awesome!  I often mess something up, or try something temporarily and it doesn't work. bzr revert then takes me back to my last commited revision.
+
+=== Practical Example ===
+
+For this example I will go through a security patch to mpg123.<<BR>>
+This is listed as <nowiki>[[http://people.ubuntu.com/~ubuntu-security/cve/2009/CVE-2009-1301.html|CVE-2009-1301]]</nowiki>
+
+# Do some homework. Find all the related information you can about the bug. Search other Linux distributions, CVE information, bug reports. Anything that will help.
+# Find or create the appropriate fix or patch. Generally speaking, one of the other distributions or upstream creates a patch. From the CVE we found that version 1.7.2 of mpg123 fixed this particular id3 problem.
+# Check what exactly we have in the archives. <nowiki>[[http://packages.ubuntu.com/]]</nowiki> can be useful for this. In this case, Karmic is shipping with 1.4.3-4ubuntu1.
+# Download the package and check the debian/Changelog. Perhaps the fix was backported. In this case it wasn't.  I used lp-pull-source mpg123 karmic to retrieve the pacakge. I could of also used apt-get source mpg123 assuming I had karmic sources in /etc/apt/sources.list
+# Lets find the patch. I found the svn for mpg123 and the commit for revision <nowiki>[[http://www.mpg123.org/cgi-bin/viewvc.cgi/tags/1.7.2/?view=log|1920]]</nowiki>.
+# Download the patch. (I am using the web interface to download a diff. SVN can be used from the command line to get the specific revision.
+# Lets put the source under bzr version control.
+<pre>
+cd mpg123
+bzr init
+bzr add .
+bzr commit
+</pre>
+
+I give my first commit a description of "Initial Commit"
+
+# Check which files the patch modifies (diffstat is handy for this) - and check the actual source files to ensure that the patch makes sense (since this is version 1.4.3 and the patch is from 1.7.2)
+# Lets see if our patch applies directly.
+
+<pre>
+cd mpg123-1.4.3/src/libmpg123
+patch --dry-run -p4<../../../id3patch.diff (you may need to change the -p# to remove the corresponding leading paths depending on where you are)
+patching file id3.c
+Hunk #1 succeeded at 179 (offset -7 lines).
+Hunk #2 succeeded at 208 (offset -7 lines).
+</pre>
+
+Great. Our patch would succeed, although there is an offset of 7 lines. This means that it didn't apply that that cleanly, but it could work out what we wanted and where to patch.
+
+ 0. Lets check if mpg123 has some form of patch system. You are looking for the debian/patches directory and if the debian/control file has anything like cdbs, quilt, dbs, dpatch etc. In this case there doesn't appear to be any. Its generally accepted that if there is no patch system, you can patch inline to make the diff as small as possible (especially important with SRU's and security udpates).
+
+ 0. Since there is no patch system, I am just going to apply my patch inline by running the patch command without the --dry-run option.
+
+<pre>
+patch -p4 <../../../id3patch.diff
+</pre>
+
+ 0. bzr diff - this shows us the diff between the last commited revision and whats changed currently. This is great for generating new patches!
+
+ bzr diff > newpatch.diff would of written the following to a file.  This would also fixed out offset problem by making a new patch.
+
+<pre>
+=== modified file 'src/libmpg123/id3.c'
+--- src/libmpg123/id3.c	2009-04-30 18:55:49 +0000
++++ src/libmpg123/id3.c	2009-04-30 19:13:37 +0000
+@@ -179,22 +179,22 @@
+* /
+ void store_id3_text(mpg123_string *sb, char *source, size_t source_size, const int noquiet)
+ {
+-	int encoding;
++	unsigned int encoding;
+ 	int bwidth;
+ 	if(!source_size)
+ 	{
+ 		debug("Empty id3 data!");
+ 		return;
+ 	}
+-	encoding = source[0];
++	encoding = (unsigned int) source[0];
+ 	++source;
+ 	--source_size;
+-	debug1("encoding: %i", encoding);
++	debug1("encoding: %u", encoding);
+ 	/* A note: ID3v2.3 uses UCS-2 non-variable 16bit encoding, v2.4 uses UTF16.
+ 	   UTF-16 uses a reserved/private range in UCS-2 to add the magic, so we just always treat it as UTF. */
+ 	if(encoding > 3)
+ 	{
+-		if(noquiet) warning1("Unknown text encoding %d, assuming ISO8859-1 - I will probably screw a bit up!", encoding);
++		if(noquiet) warning1("Unknown text encoding %u, assuming ISO8859-1 - I will probably screw a bit up!", encoding);
+ 		encoding = 0;
+ 	}
+ 	bwidth = encoding_widths[encoding];
+@@ -208,7 +208,7 @@
+ 	if(source_size % bwidth)
+ 	{
+ 		/* When we need two bytes for a character, it's strange to have an uneven bytestream length. */
+-		if(noquiet) warning2("Weird tag size %d for encoding %d - I will probably trim too early or something but I think the MP3 is broken.", (int)source_size, encoding);
++		if(noquiet) warning2("Weird tag size %d for encoding %u - I will probably trim too early or something but I think the MP3 is broken.", (int)source_size, encoding);
+ 		source_size -= source_size % bwidth;
+ 	}
+ 	text_converters[encoding](sb, (unsigned char*)source, source_size);
+</pre>
+
+13. If we are happy with this patch, lets go ahead and commit it.
+
+<pre>
+bzr commit
+</pre>
+
+Give it a commit message
+<pre>
+"Inline patch for CVE-2009-1301. Downloaded from http://www.mpg123.org/cgi-bin/viewvc.cgi/tags/1.7.2/?view=log|1920"
+</pre>
+
+ 0. Make the necessary changes to the debian/Changelog with dch -i. Follow the versioning scheme from the [[https://wiki.ubuntu.com/SecurityTeam/UpdatePreparation#Packaging|SecurityTeamUpdatePreparation] wiki page.
+
+Mine looks something like this:
+
+<pre>
+mpg123 (1.4.3-4ubuntu2) karmic; urgency=low
+
+** SECURITY UPDATE: Integer signedness error in the store_id3_text function
+    in the ID3v2 code in mpg123 before 1.7.2 allows remote attackers to cause
+    a denial of service (out-of-bounds memory access) and possibly execute
+    arbitrary code via an ID3 tag with a negative encoding value. (LP: 370031).
+   - src/libmpg123/id3.c: Inline patch from upstream SVN rev 1920.
+   - http://www.mpg123.org/cgi-bin/viewvc.cgi/tags/1.7.2/?view=log
+   - CVE-2009-1301
+
+ -- Stefan Lesicnik <stefan@email.com>  Thu, 30 Apr 2009 21:49:40 +0200
+</pre>
+
+In this case, since this is the patch for Karmic - the current development version, I can just bump the version and release to karmic and not karmic-security. (We would do this if Karmic was released)
+
+ 0. Update the maintainer if necessary! (this is not the case with us, as it is already an ubuntu revision of the package)
+
+ 0. Build the package. 
+<pre>
+debuild -S -sa -i.bzr
+or
+bzr-buildpackage -S (assumes you have bzr-builddeb installed)
+</pre>
+
+-i.bzr says ignore .bzr directory
+
+ 0. Generate a debdiff between the original package and your new one
+
+<pre>
+debdiff mpg123_1.4.3-4ubuntu1.dsc mpg123_1.4.3-4ubuntu2.dsc > debdiff
+</pre>
+
+Check this debdiff file carefully to ensure that only the changes you expect are included. Also ensure that all changes in the file are listed in the debian/changelog.
+
+ 0. Build your package using pbuilder! This is important to make sure that after your changes, your package still compiles.
+
+ 0. For SRU and security updates, its vital that you motivate and test your patches. There are some good guidlines on the <nowiki>[[https://wiki.ubuntu.com/StableReleaseUpdates|StableReleaseUpdates]]</nowiki> wiki page.
+
+ 0. In a chroot or virtual machine, test your patch that it works as expected. Try and find a POC or way to reproduce the problem before your new package. Document these results. Apply your fixed package and then try and reproduce the problem. On the bug, show these steps to make life easier for the motu-sru or security team.
+
+ 0. Once you are happy, attach the the debdiff to the bug. Don't forget to include the bug number in the debdiff to autoclose the bug when your package is accepted into the archive.
+ 
+ 0. For an existing bug, check that all upstream links are in place. Link to upstream and other distributions if you can.
+
+ 0. Ensure that you link the CVE to the bug if it is a security update.
+
+ 0. Prepare the same fix and test for the rest of the affected distributions!  bzr can help you nicely here by creating the diff.
+
+<pre>
+bzr diff -r1..2 > patch.diff
+</pre>
+
+Ensure its done what you expect, and then commit!  
+
+ 0. Forward the fix to Debian!
+
+=== Conclusion ===
+
+I hope this overview was useful to someone. Although i probably don't use bzr or any of the tools to there full extent, using it in this small way makes my life / and hopefully now yours, alot easier. 

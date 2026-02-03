@@ -1,0 +1,318 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+This is where I'm keeping my notes on changes I would like to see in <nowiki>[[https://launchpad.net/desktopcouch|desktopcouch]]</nowiki> based on my experience working on <nowiki>[[https://launchpad.net/dmedia|dmedia]]</nowiki>.  Note that this is written out of love of desktopcouch, despite being a list of pain points I would like to see changed.
+
+ -- <nowiki>[[LaunchpadHome:jderose]]</nowiki> 
+''May Stuart and Jason's bromance continue.''
+
+'''Update:''' There is a <nowiki>[[https://blueprints.launchpad.net/ubuntu/+spec/desktop-o-desktopcouch-enhancements|UDS-O blueprint]]</nowiki> for this.
+
+=== Intro ===
+
+Both dmedia and Novacut use an architecture like this:
+
+<nowiki>[[File:novacut-dmedia.png]]</nowiki>
+
+Key features being:
+
+* Backend components that must talk to both desktopcouch and vanilla CouchDB
+
+* HTML UI components that must run in both embedded !WebKit and regular browsers, must talk to both desktopcouch and vanilla CouchDB
+
+(See <nowiki>[[http://cdn.novacut.com/couchone-guest.html|more background here]]</nowiki>.)  To do this, dmedia has rolled it's own way to abstract away the "desktop" part of desktopcouch, something which is basically possible, but is a bit fragile and hacky.  In the O cycle, I'd really love for the following to happen:
+
+ 1. Remove the reconnection hack (ie, have desktopcouch port remain stable throughout session)... this is the one thing dmedia can't abstract away
+
+ 2. Move dmedia abstractions to standalone project/package so this pattern can be reused by other projects, and so the desktopcouch team has a stable, simple target as far as not breaking these abstractions
+
+ 3. Standardize where static webUI files are stored, how they are accessed through CouchDB
+
+=== Reconnection hack must go ===
+
+To have the reconnection hack work you must use a `desktopcouch.records.database.Database`, which makes it basically impossible to abstract away the desktop.
+
+My #1 request for Oneiric is for this to change.  Instead, the port ''must'' remain the same throughout the desktop session.  It's fine if the port is randomly chosen at the start of the session, but it must remain the same once desktopcouch starts.
+
+When it comes down to it, the API needs to be plain HTTP.  Requiring a specialized wrapper library like desktopcouch closes off too many cool use cases (like having the same app run both on the web and on desktopcouch more or less transparently).
+
+For what it's worth, `desktopcouch.Database` isn't close enough to the CouchDB REST API to be usable by dmedia (DC makes too many assumptions, certain functionality isn't available).  In fact, even <nowiki>[[http://packages.python.org/CouchDB/|python-couchdb]]</nowiki> has been a constant headache for dmedia... again, certain functionality isn't exposed, and there is way too much magic/ambiguity behind the scenes.
+
+Not that this sort of wrapper isn't probably a perfect fit for some applications.  But dmedia and Novacut are pretty demanding, and something close to the metal like <nowiki>[[https://launchpad.net/microfiber|microfiber]]</nowiki> would make my life much easier.
+
+Update: ''Chad is rewriting the local_files part of desktopcouch and moving the random-port choice out of the OS and into desktopcouch. In O, desktopcouch ports will be consistent, regardless of whether couchdb has previously exited.''
+
+=== abstractcouch ===
+
+The hypothetical `abstractcouch` package is my proposal for moving the code dmedia uses to abstract away the "desktop" part of destkopcouch into a standalone Python package.  This way the pattern can be easily used by other apps, and it gives the desktopcouch team a simple, stable target as far as not breaking the abstraction.  For some background, see <nowiki>[[https://bugs.launchpad.net/dmedia/+bug/722035|lp:722035]]</nowiki>.
+
+The idea is to have a single API call like `abstractcouch.get_env()` that returns information about the CouchDB environment, be it desktopcouch or system-wide CouchDB.  We want this API call to be as quick as possible, cause as few modules to be imported as possible.
+
+For example, if you were running against desktopcouch, it would return something like this:
+
+ <pre>
+{
+  "oauth": {
+    "consumer_key": "oRTyTHKiKu",
+    "consumer_secret": "bdXSzITryM",
+    "token": "lyrygLlsbk",
+    "token_secret": "QbqvZaiBGV"
+  },
+  "port": 45484,
+  "url": "http://localhost:45484/"
+}
+</pre>
+
+Or if you were running against the system-wide CouchDB, it would return something like this:
+
+ <pre>
+{
+  "port": 5984,
+  "url": "http://localhost:5984/"
+}
+</pre>
+
+<nowiki>[[http://bazaar.launchpad.net/~dmedia/dmedia/trunk/view/head:/dmedia/core.py#L79|dmedia.core.get_env()]]</nowiki> implements the above behavior (but the point is apps shouldn't have to abstract away the desktop part on their own).
+
+When talking to CouchDB from Python, <nowiki>[[http://bazaar.launchpad.net/~dmedia/dmedia/trunk/view/head:/dmedia/abstractcouch.py#L53|dmedia.abstractcouch.get_server()]]</nowiki> is used to create an appropriately configured `couchdb.Server` based on the ''env'' it is passed.
+
+When talking to CouchDB from !JavaScript (UI running in embedded !WebKit), the dmedia <nowiki>[[http://bazaar.launchpad.net/~dmedia/dmedia/trunk/view/head:/dmedia/gtkui/widgets.py#L32|CouchView]]</nowiki> is used to transparently sign OAuth requests.  This would be a great piece to standardize and upstream into desktopcouch.
+
+=== Make web apps first class citizens ===
+
+dmedia and Novacut make heavy use of an architecture like this:
+
+<nowiki>[[File:webtastic.png]]</nowiki>
+
+The idea is that a large part of the user experience is implemented as an HTML5 UI, which can run as a native app in embedded !WebKit, or be delivered over the web to standard browsers.  When running as a native app, we're integrating with all the Ayatana niceties, so the experience isn't exactly the same, but close.  Although certainly not the only way to take advantage of desktopcouch, running in embedded !WebKit has some big advantages:
+
+* Can build a very snappy UI by making XMLHttpRequest directly to CouchDB, dynamically updating DOM
+* A plastic tool that gives designers sweeping freedom, yet allows quick implementation
+* Can build reusable user experiences consumable both in native apps and over the web
+
+With help from Stuart Langridge, I have the dmedia <nowiki>[[http://bazaar.launchpad.net/~dmedia/dmedia/trunk/view/head:/dmedia/gtkui/widgets.py#L32|CouchView]]</nowiki> working as a nice proof of concept.  Importantly, `CouchView` will transparently sign the OAuth requests when connecting to desktopcouch, plus works equally well connecting to the system wide CouchDB.
+
+I would like to further refine `CouchView` and upstream it into desktopcouch.  Although this isn't critical for dmedia/Novacut (we already have it), I think this would really enhance the appeal of building new apps specifically for desktopcouch.
+
+=== Standard location for static webUI files ===
+
+Small pain point that needs to be addressed as part of making web apps first class citizens.
+
+Futon (the CouchDB web admin UI) is served from static files.  In the '''httpd_global_handlers''' section of the config, you'll see something like this:
+
+ <pre>
+_utils    {couch_httpd_misc_handlers, handle_utils_dir_req, "/usr/share/couchdb/www"}
+</pre>
+
+Many desktopcouch/hosted CouchDB apps will need to deliver static HTML, CSS, and !JavaScript files accessible from CouchDB, so it would be nice to have standard location where these files are installed, say:
+
+ <pre>
+/usr/share/couchdb/apps/PACKAGE/*
+</pre>
+
+And a standard handler configured by default in desktopcouch (but perhaps commented out by default in system wide CouchDB), say:
+
+ <pre>
+_apps    {couch_httpd_misc_handlers, handle_utils_dir_req, "/usr/share/couchdb/apps"}
+</pre>
+
+So that the `couch.js` file that ships with dmedia would be available at, say:
+
+ <pre>
+http://localhost:39846/_apps/dmedia/couch.js
+</pre>
+
+This also makes it easy for dmedia apps to utilize !JavaScript etc shipped with dmedia.
+
+Currently when `dmedia-service` starts, it will save the webUI assets as attachments in the '''/dmedia/app''' doc.  Although this was a quick way to get things working, it's a dirty, dirty hack.  It doesn't make sense to replicate the UI around... different devices will have different versions installed, or totally different user interfaces, etc.  These static files should be shipped in the Debian packages (or equivalent for the platform in question).
+
+=== Per DB sync should be opt-in, not opt-out ===
+
+Developing with desktopcouch I've found it annoying that all the databases are synced to !UbuntuOne by default... I frequently create test databases for testing dmedia (not just unit tests, but also using dmedia for an extended period, while not wanting to hose up my production dmedia DB).  !UbuntuOne sync is, of course, 100% awesome, but having it op-in rather than opt-out would make life easier for developers.  It also avoids potential unexpected privacy oopses... when I was first learning desktopcouch I was surprised everything was synced by default.  In my case, nothing in the database was sensitive, but for some, that wont be the case.
+
+So:
+
+* At the very least, desktopcouch should not sync databases whose names start with '''test_'''
+* Preferably, change from opt-out to opt-in, eg have '''included_names''' rather than '''excluded_names'''
+
+The 2nd point needs some explanation.  It doesn't make sense to sync all databases to all devices as not all devices will have the apps that use those databases.  This is particularly an issue with phones and tablets, where syncing unnecessary databases will needlessly burn through precious storage, bandwidth, and CPU time.
+
+A device can easily supply the databases it wants synced as that's local information based on the apps installed, etc; however, a device has no way of knowing what databases it should opt-out of.
+
+Update: ''"test_" databases should be excluded, probably.  Chad disagrees about default opt-in for desktop*.  Replication (even the included/excluded record itself) is always a local concern, unless you're a server; phones and such should replicate exactly what they need and no more, and they'e allowed to choose what they want.''
+
+=== Enforcing "record_type" is too restrictive ===
+
+Although the '''record_type''' convention addresses an important need (standardizing document schema for use across apps), it's rather awkward and verbose.  In dmedia/Novacut, the type (or record_type) needs to be referenced very often, and in many contexts (view functions, UI code, etc), so I needed something more concise.
+
+For example, the desktopcouch spec dictates something like this:
+
+ <pre>
+{
+    "_id": "ZZZATIZG6IA3DJOEANQCFT3FHR4IU2FC",
+    "record_type": "http://www.freedesktop.org/wiki/Specifications/dmedia/file"
+}
+</pre>
+
+But dmedia uses something much less verbose:
+
+ <pre>
+{
+    "_id": "ZZZATIZG6IA3DJOEANQCFT3FHR4IU2FC",
+    "type": "dmedia/file"
+}
+</pre>
+
+This is a very typical dmedia view function:
+
+ <pre>
+function(doc) {
+    if (doc.type == 'dmedia/file') {
+        emit(doc.mtime, null);
+    }
+}
+</pre>
+
+Which becomes awkward and far less readable if using the desktopcouch convention:
+
+ <pre>
+function(doc) {
+    if (doc.record_type == 'http://www.freedesktop.org/wiki/Specifications/dmedia/file') {
+        emit(doc.mtime, null);
+    }
+}
+</pre>
+
+I hate to make waves here, but this is something I've thought long and hard about.  The "record_type" convention has a rather low signal-to-noise ratio, not to mention the fact that a wiki just isn't the best place to formalize the schema, in my opinion.  For example, <nowiki>[[http://www.freedesktop.org/wiki/Specifications/desktopcouch/server_identity|some of desktopcouch's own record types still lack wiki pages]]</nowiki>.
+
+At the end of the day, I chose to use something more succinct because the burden ultimately falls on those implementing user interfaces, and on independent implementations of the dmedia protocol and schema.  I have high hopes of making dmedia a widely used standard in the consumer electronics space, so the schema must be very low friction.
+
+To be clear, I'm not saying existing desktopcouch apps shouldn't continue to use the "record_type" convention, nor that new apps shouldn't use it (unless they have a good reason to not).  I'm just saying it should be ''optional'', shouldn't be enforced.  Right now you can't even retrieve a dmedia doc through the desktopcouch Python API:
+
+ <pre>
+>>> from desktopcouch.application.server import CouchDatabase
+>>> dc = CouchDatabase('dmedia', create=True)
+>>> dc.get_record('ZZ2X5I2Y3NVCGU5LSRQAMHRXW2WGPG7R')
+Traceback (most recent call last):
+  ...
+desktopcouch.records.NoRecordTypeSpecified: Record type must be specified and should be a URL
+</pre>
+
+=== Split desktopcouch into simpler components ===
+
+I know some of this has already happened, but I really want to see desktopcouch steadily move toward an architecture like this:
+
+<nowiki>[[File:components.png]]</nowiki>
+
+Starting from the bottom:
+
+* '''CouchDB''' - system wide CouchDB
+* '''desktopcouch''' - a very light component that does nothing more than start the per-user CouchDB; I want this part of desktopcouch (and CouchDB itself) to get light enough that we could start by default at session start (meaning it must have a small memory footprint)
+* '''abstractcouch''' - as above, this abstracts whether we're running against system-wide CouchDB or desktopcouch, so the components above work against both; this provides the fundamental API (just the information needed to make HTTP requests to the CouchDB REST API)
+* '''syncmanager''' - takes care of replication to !UbuntuOne, local peers, and continuous replication directly to remote peers so <nowiki>[[http://www.jonobacon.org/2011/04/30/my-dream-ubuntu-one-feature/|Jono get's his dream UbuntuOne feature]]</nowiki> (also needed for real-time collaborative editing with Novacut)
+* '''records api''' - this is the Python records API; it's there for compatibility with existing desktopcouch apps that use it (and future apps that want to use it), but it's ''optional'', as apps can just as well using plain HTTP via abstractcouch
+
+=== Power improvements ===
+
+On my system (3GHz Phenom II X4), desktopcouch-session is causing a constant 20 wakeups per second even when apparently idle:
+
+<nowiki>[[File:wakeups.png]]</nowiki>
+
+Note that this was ''without'' the desktopcouch !UbuntuOne component installed... so this is not the result of syncing, just the fact the desktopcouch-service is running at all.
+
+I have a hunch there is, er, a ''twisted'' reason for all these wakeups at idle.
+
+Update: ''Chad says this is the glib main loop.  See https://bugs.launchpad.net/desktopcouch/+bug/475447 ''
+
+=== Performance improvements ===
+
+This is slower than it should be:
+
+ <pre>
+from desktopcouch.records.server import  CouchDatabase
+dc = CouchDatabase('dmedia', create=True)
+</pre>
+
+The above takes around 0.2 seconds on my 3.0GHz Phenom II X4.  From the bit of profiling I've done, this time could be halved simply by avoiding importing the Python `uuid` module, which is painfully slow to import:
+
+ <pre>
+45923 function calls (44515 primitive calls) in 0.215 CPU seconds
+
+Ordered by: cumulative time
+List reduced from 846 to 10 due to restriction <10>
+
+ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+    1    0.000    0.000    0.215    0.215 ./dc-benchmark.py:8(run)
+    1    0.001    0.001    0.129    0.129 /usr/lib/pymodules/python2.7/desktopcouch/records/__init__.py:22(<module>)
+    1    0.001    0.001    0.125    0.125 /usr/lib/python2.7/uuid.py:45(<module>)
+    2    0.000    0.000    0.123    0.061 /usr/lib/python2.7/ctypes/util.py:235(find_library)
+    2    0.000    0.000    0.123    0.061 /usr/lib/python2.7/ctypes/util.py:207(_findSoname_ldconfig)
+    2    0.000    0.000    0.107    0.053 /usr/lib/python2.7/re.py:139(search)
+    2    0.100    0.050    0.100    0.050 {built-in method search}
+    1    0.000    0.000    0.064    0.064 /usr/lib/pymodules/python2.7/desktopcouch/records/server.py:1(<module>)
+    1    0.001    0.001    0.064    0.064 /usr/lib/pymodules/python2.7/desktopcouch/application/server.py:23(<module>)
+   36    0.001    0.000    0.034    0.001 /usr/lib/python2.7/re.py:229(_compile)
+</pre>
+
+Another performance pain point is that <nowiki>[[http://packages.python.org/CouchDB/|python-couchdb]]</nowiki> is rather slow compared to what it could be.  For example, here's python-couchdb:
+ 
+ <pre>
+* ** Benchmarking python-couchdb ***
+Python: 2.7.1+, x86_64, Linux
+  Saving 2000 documents in db 'test_benchmark_pycouchdb'...
+    Seconds: 80.61
+    Saves per second: 24.8
+  Getting 2000 documents from db 'test_benchmark_pycouchdb'...
+    Seconds: 11.51
+    Gets per second: 173.7
+  Deleting 2000 documents from db 'test_benchmark_pycouchdb'...
+    Seconds: 13.68
+    Deletes per second: 146.2
+Total seconds: 105.80
+Total ops per second: 56.7
+</pre>
+
+Compared to <nowiki>[[https://launchpad.net/microfiber|microfiber]]</nowiki>:
+
+ <pre>
+* ** Benchmarking microfiber ***
+Python: 3.2.0, x86_64, Linux
+  Saving 2000 documents in db 'test_benchmark_microfiber'...
+    Seconds: 13.90
+    Saves per second: 143.9
+  Getting 2000 documents from db 'test_benchmark_microfiber'...
+    Seconds: 9.59
+    Gets per second: 208.5
+  Deleting 2000 documents from db 'test_benchmark_microfiber'...
+    Seconds: 11.23
+    Deletes per second: 178.0
+Total seconds: 34.73
+Total ops per second: 172.8
+</pre>
+
+Note that in both cases this is talking to system-wide CouchDB without OAuth.  Also note that a small amount of microfiber's performance advantage is due to Python3 apparently having a faster HTTP client.
+
+=== Local pairing ===
+
+As in replication to devices on localnet without going out to the net, without talking to !UbuntuOne.
+
+Stuart told me about the existing mechanism to do this (I can't recall details), but he mentioned that currently it's not particularly secure.  This is something that needs to be improved/standardized for dmedia and Novacut, and preferably fixed in desktopcouch.
+
+For dmedia, fast local sync is quite useful.  For serious editing with Novacut, local sync is essential as that's how we're going to distribute workload on a local cluster.
+
+The security issue is key for dmedia as it's the metadata where dmedia is more vulnerable.  As for the file transfer part, the fact that files are named by their content hash gives us quite good security, even if we use no auth at all:
+
+ 1. You can only GET files whose content hash you already know
+ 2. You can't modify or delete files
+ 3. At worst, you can upload unwanted files (say, maliciously plant files)
+
+However, all hell breaks loose if an attacker starts modifying docs in the dmedia database.  So strong authentication here is important.
+
+Update: ''Chad says: Both client and server ends must verify the identity of the peer.  For a client, sending OAuth tokens verifies itself to the server, but it doesn't know that the server is really who it says.  For that, we need something like SSL and negotiated self-signed CA creds at pairing time.  This gets ugly fast.''

@@ -1,0 +1,318 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+* '''Launchpad Entry''': UbuntuSpec:server-lucid-ec2-config
+* '''Created''': 2009-11-24
+* '''Contributors''': Scott Moser
+* '''Packages affected''':
+
+=== Summary ===
+
+Ubuntu Cloud images are generic "fresh install" disk images that are started up on various clouds and configured at boot time.  Previous releases only allowed customization via a user provided script.  That script would run at S99 (similar to traditional rc.local).
+
+Instead of requiring the user to write a script to customize the image, we would like to provide a configuration file syntax to support common customization, such as installing additional packages, installing all updates ...
+
+=== Release Note ===
+
+Ubuntu Cloud Images can now be configured via a human readable config file syntax.  Previously customization could only be done via provided scripts.
+
+=== Rationale ===
+
+Previous Ubuntu releases only supported customization via a script file running late in the boot process.  This had many problems:
+* writing shell scripts is complex, easy to screw up
+* only 16k of user data can be passed in a ec2 user-data script
+* script based customization means that the script-provider must maintain their scripts themselves.
+
+By providing a Config syntax with a limited number of options, we can make sure that a given config file behaves the same on different versions of the OS.  For some users the config syntax may provide all the customization they need.
+
+=== User stories ===
+
+* As a system administrator, I want to deploy an AMI based on the latest Ubuntu Server Edition in EC2. I run the example commands provided, and my instance is started with the latest Ubuntu updates automatically applied. I can confidently allow public access to the instance, knowing that it is always up to date, and I do not accrue any data transfer charges on account of the update process. 
+* As a casual user of EC2, I would like to easily make small changes to my instance in its first boot, without having to know details of how the boot process works.  I'd like to install some extra packages from the archive and some from my own ppa.
+
+=== Assumptions ===
+
+=== Design ===
+
+On first boot, the boot hooks implementation (UbuntuSpec:server-lucid-ec2-boothooks,<nowiki>[[ServerLucidCloudBoothooks]]</nowiki>) dumps the user data to a local file and then emits a '''cloud-config''' event with the '''CFGFILE''' environment variables pointing to the config.yaml file. Upstart jobs will then read the configuration file to configure the running instance.
+
+The following is a list of configuration items that we would like to support:
+* update the instance (apt-get upgrade)
+* add additional packages (apt-get install)
+* adding repositories (with shortcuts for a ppa) and installation of packages from these repositories.
+* mount EBS volumes at specified location
+* configure ephemeral storage usage
+** RAID 0 or LVM to give improved speed and size
+** define mount locations (/dev/sda2 on /var/log, /dev/sdb on /mnt ...)
+* 'runurl' support
+
+==== Upstart jobs ====
+
+Jobs depend on at least '''cloud-config''' event:
+<pre>
+ start on cloud-config
+</pre>
+
+The following upstart jobs are available:
+* apt_conf: configures apt
+* pkg_install: installs packages after apt_conf
+
+==== Sample YAML configuration file ====
+
+Please see <nowiki>[[http://bazaar.launchpad.net/%7Esmoser/ec2-init/ec2-init.devel/files/head%3A/doc/examples/|ec2-init/doc]]</nowiki> subdirectory for maintained examples, and more tools/write-mime-multipart for a utility to write mime-multi-part files from a list of files.
+
+<pre>
+
+apt_update: false
+
+apt_upgrade: true
+
+apt_sources:
+
+# PPA shortcut:
+# * Setup correct apt sources.list line
+# * Import the signing key from LP
+# 
+# See https://help.launchpad.net/Packaging/PPA for more information
+# 
+ - source: "ppa:user/ppa"    # Quote the string
+
+# Custom apt repository:
+# * Creates a file in /etc/apt/sources.list.d/ for the sources list entry
+# * [optional] Import the apt signing key from the keyserver 
+# * Defaults:
+# + keyserver: keyserver.ubuntu.com
+# + filename: 00-boot-sources.list
+# 
+# See sources.list man page for more information about the format
+# 
+ - source: "deb http://archive.example.org lucid main restricted" # Quote the string
+   keyid: 12345678 # GPG key ID published on a key server
+   keyserver: keyserver.example.org
+   filename: 01-mirror-example.org.list
+
+# Custom apt repository:
+# * The apt signing key can also be specified 
+# by providing a pgp public key block
+# 
+# The apt repository will be added to the default sources.list file:
+# /etc/apt/sources.list.d/00-boot-sources.list
+# 
+ - source: "deb http://mirror.example.net/karmic/ ./" # Quote the string
+   key: | # The value needs to start with -----BEGIN PGP PUBLIC KEY BLOCK-----
+      -----BEGIN PGP PUBLIC KEY BLOCK-----
+      Version: SKS 1.0.10
+
+      mI0ESXTsSQEEALuhrVwNsLIzCoaVRnrBIYraSUYCJatFcuvnhi7Q++kBBxx32JE487QgzmZc
+      ElIiiPxz/nRZO8rkbHjzu05Yx61AoZVByiztP0MFH15ijGocqlR9/R6BMm26bdKK22F7lTRi
+      lRxXxOsL2GPk5gQ1QtDXwPkHvAhjxGydV/Pcf81lABEBAAG0HUxhdW5jaHBhZCBQUEEgZm9y
+      IE1hdGhpYXMgR3VniLYEEwECACAFAkl07EkCGwMGCwkIBwMCBBUCCAMEFgIDAQIeAQIXgAAK
+      CRANXKLHCU0EIIJHBAC1NCwdLwchCPIQU2bd562/YWcB7QSgYD3j+Llqm8v6ghFQ0Bdygbn1
+      M6tzpwDiPxXQfZRqGhJsluCVHGLCQYNm0HDNisP4+YrZF3UkmAXDwZuh8K3LmvUPM+lLY8YJ
+      1qnFHp3eN9M8/SYEFN0wlaVAurZD13NaU34UePd46vPtzA==
+      =eVIj
+      -----END PGP PUBLIC KEY BLOCK-----
+
+apt_conf:
+
+# Creates an apt proxy configuration in /etc/apt/apt.conf.d/01-proxy
+ - filename: "01-proxy"
+   content: |
+    Acquire::http::Proxy "http://proxy.example.org:3142/ubuntu";
+
+# Add the following line to /etc/apt/apt.conf.d/00-boot-conf
+# (run debconf at a critical priority)
+ - content: |
+    DPkg::Pre-Install-Pkgs:: "/usr/sbin/dpkg-preconfigure --apt -p critical|| true";
+
+debconf_selections: |     # Need to perserve newlines
+##### Force debconf priority to critical.
+        debconf debconf/priority select critical
+
+##### Override default frontend to readline, but allow user to select.
+        debconf debconf/frontend select readline
+        debconf debconf/frontend seen false
+ 
+packages:
+ - openssh-server
+ - postfix
+
+ssh_keys:
+  rsa_private: |
+    -----BEGIN RSA PRIVATE KEY-----
+    MIIBxwIBAAJhAKD0YSHy73nUgysO13XsJmd4fHiFyQ+00R7VVu2iV9Qcon2LZS/x
+    1cydPZ4pQpfjEha6WxZ6o8ci/Ea/w0n+0HGPwaxlEG2Z9inNtj3pgFrYcRztfECb
+    1j6HCibZbAzYtwIBIwJgO8h72WjcmvcpZ8OvHSvTwAguO2TkR6mPgHsgSaKy6GJo
+    PUJnaZRWuba/HX0KGyhz19nPzLpzG5f0fYahlMJAyc13FV7K6kMBPXTRR6FxgHEg
+    L0MPC7cdqAwOVNcPY6A7AjEA1bNaIjOzFN2sfZX0j7OMhQuc4zP7r80zaGc5oy6W
+    p58hRAncFKEvnEq2CeL3vtuZAjEAwNBHpbNsBYTRPCHM7rZuG/iBtwp8Rxhc9I5w
+    ixvzMgi+HpGLWzUIBS+P/XhekIjPAjA285rVmEP+DR255Ls65QbgYhJmTzIXQ2T9
+    luLvcmFBC6l35Uc4gTgg4ALsmXLn71MCMGMpSWspEvuGInayTCL+vEjmNBT+FAdO
+    W7D4zCpI43jRS9U06JVOeSc9CDk2lwiA3wIwCTB/6uc8Cq85D9YqpM10FuHjKpnP
+    REPPOyrAspdeOAV+6VKRavstea7+2DZmSUgE
+    -----END RSA PRIVATE KEY-----
+
+  rsa_public: ssh-rsa AAAAB3NzaC1yc2EAAAABIwAAAGEAoPRhIfLvedSDKw7XdewmZ3h8eIXJD7TRHtVW7aJX1ByifYtlL/HVzJ09nilCl+MSFrpbFnqjxyL8Rr/DSf7QcY/BrGUQbZn2Kc22PemAWthxHO18QJvWPocKJtlsDNi3 smoser@localhost
+
+  dsa_private: |
+    -----BEGIN DSA PRIVATE KEY-----
+    MIIBuwIBAAKBgQDP2HLu7pTExL89USyM0264RCyWX/CMLmukxX0Jdbm29ax8FBJT
+    pLrO8TIXVY5rPAJm1dTHnpuyJhOvU9G7M8tPUABtzSJh4GVSHlwaCfycwcpLv9TX
+    DgWIpSj+6EiHCyaRlB1/CBp9RiaB+10QcFbm+lapuET+/Au6vSDp9IRtlQIVAIMR
+    8KucvUYbOEI+yv+5LW9u3z/BAoGBAI0q6JP+JvJmwZFaeCMMVxXUbqiSko/P1lsa
+    LNNBHZ5/8MOUIm8rB2FC6ziidfueJpqTMqeQmSAlEBCwnwreUnGfRrKoJpyPNENY
+    d15MG6N5J+z81sEcHFeprryZ+D3Ge9VjPq3Tf3NhKKwCDQ0240aPezbnjPeFm4mH
+    bYxxcZ9GAoGAXmLIFSQgiAPu459rCKxT46tHJtM0QfnNiEnQLbFluefZ/yiI4DI3
+    8UzTCOXLhUA7ybmZha+D/csj15Y9/BNFuO7unzVhikCQV9DTeXX46pG4s1o23JKC
+    /QaYWNMZ7kTRv+wWow9MhGiVdML4ZN4XnifuO5krqAybngIy66PMEoQCFEIsKKWv
+    99iziAH0KBMVbxy03Trz
+    -----END DSA PRIVATE KEY-----
+
+  dsa_public: ssh-dss AAAAB3NzaC1kc3MAAACBAM/Ycu7ulMTEvz1RLIzTbrhELJZf8Iwua6TFfQl1ubb1rHwUElOkus7xMhdVjms8AmbV1Meem7ImE69T0bszy09QAG3NImHgZVIeXBoJ/JzByku/1NcOBYilKP7oSIcLJpGUHX8IGn1GJoH7XRBwVub6Vqm4RP78C7q9IOn0hG2VAAAAFQCDEfCrnL1GGzhCPsr/uS1vbt8/wQAAAIEAjSrok/4m8mbBkVp4IwxXFdRuqJKSj8/WWxos00Ednn/ww5QibysHYULrOKJ1+54mmpMyp5CZICUQELCfCt5ScZ9GsqgmnI80Q1h3Xkwbo3kn7PzWwRwcV6muvJn4PcZ71WM+rdN/c2EorAINDTbjRo97NueM94WbiYdtjHFxn0YAAACAXmLIFSQgiAPu459rCKxT46tHJtM0QfnNiEnQLbFluefZ/yiI4DI38UzTCOXLhUA7ybmZha+D/csj15Y9/BNFuO7unzVhikCQV9DTeXX46pG4s1o23JKC/QaYWNMZ7kTRv+wWow9MhGiVdML4ZN4XnifuO5krqAybngIy66PMEoQ= smoser@localhost
+
+disable_ec2_metadata: true
+
+</pre>
+=== Implementation ===
+
+This config syntax parser will be implemented as a plugin to the generic boot hooks implementation. It will be installed as part of the image.
+
+==== UI Changes ====
+
+* Newly developed programs under the UbuntuSpec:server-lucid-xc2 (<nowiki>[[ServerLuciXc2]]</nowiki>) spec may expose supported config options as command line options when creating an instance.
+
+==== Code Changes ====
+
+A plugin to the boot hooks implementation will be implemented.  It will be passed data that is determined to be intended for the plugin.
+
+This new plugin will need to implement the parsing of the configuration, and acting on the supported configuration types.  Most likely:
+* the plugin will be implemented in python
+* the config file format will be read by python ConfigParser
+
+==== Migration ====
+These changes will be done in a backwards compatible manner.  Users that were creating scripts for customizing their images and passing those scripts to ec2 in user-data will see no changes.
+
+Documentation will be provided on the wiki to point users to the more simplistic and user friendly configuration file syntax.
+
+=== Test/Demo Plan ===
+
+''' TODO '''
+* test cases will need to be developed and used that exercise the supported customization.  The UbuntuSpec:server-lucid-cloud-test spec (<nowiki>[[ServerLucidCloudImageTest]]</nowiki>) will implement the test infrastructure.
+
+=== Unresolved issues ===
+
+None.
+
+=== BoF agenda and discussion ===
+
+==== UDS discussion notes ====
+
+The current method by which users can configure UEC/EC2 images is via 'user-data'. user-data that begins with #! is executed by the appropriate interpreter at S99 runlevel. This is a very effect method for customization but one that requires a fair amount of expertise to utilize.
+
+It would be nice to provide a config file like syntax that would allow:
+- what mirrors to use / what additional repos to add
+- whether or not updates are installed on first boot
+- ssh private keys to use (allowing user to dictate them, rather than polling for random keys from ec2-console)
+- extra packages to install
+
+Note: this differs from UbuntuSpec:server-lucid-ec2-boothooks as this would provide only for specific/static function. [1] would provide a hook into the images that could allow for building this blueprint.
+
+===== Problems with the status quo =====
+* writing shell scripts is complex, easy to screw up -- simple things should be simple
+* only 64k of user data can be passed
+* maintenance issues
+ 
+===== Use cases =====
+* package installation (Ubuntu repositories) *simple*
+** including tasks
+** add specific apt repositories
+* package installation (custom repositories) *simple*
+* install latest updates *simple*
+* Pass more than 64k of user data
+** landscape (registration data)
+** puppet (bootstrap (certificate/private key, autoregistration))
+** rightscale (rightscripts)
+** other config mgmt system: cfengine, bcfg, spline, capistrano
+* Advertise specific features [don't know]
+* dynamic DNS
+* EBS mounting and snapshots *simple*
+** udev script mounting of volume based on metadata in the volume
+* ephemeral storage mounting
+** RAID *simple*
+* asynchronous notification that the instance is up and running:
+** email
+** jabber/XMPP
+** simpledb, sqs
+** rabbitmq (message queue)
+** submission to a url *simple-low priority*
+* run custom scripts
+** at what point in the boot process?
+** pass an upstart job
+* pass any type of credentials through user-data (AWS, certificates, keytabs, ssh keys)
+** security issues
+** all data should be kept as safe as possible
+*** config option to set perms on said data
+    
+
+summary:
+ - as early as possible parses various souces of user data
+ - acts on it
+
+===== Implementation ideas =====
+* share syntax, semantics with d-i preseeding
+* use puppet - not a generic solution to the issue, requires infrastructure
+* Simple key/value pairs format, read by plugins
+* Core features: bootstrapping process -- package install, repository add
+* Section / key-value pair format where each section would get read by a specific plugin
+* Credentials transfer: use S3-backend "safe" storage
+* store scripts, data in S3, access via URL
+** runurl run.alestic.com/apt/rightscale
+** runurl run.alestic.com/apt/alestic
+** runurl run.alestic.com/email/start me@example.com
+
+==== Other Feedback ====
+
+* Notes from EricHammond regarding this snippet in the sample config file:
+
+    <pre>
+## Update apt database on first boot
+## (ie run apt-get update)
+## Default: true
+   apt_update: false
+</pre>
+
+        I am concerned about the implication that apt-get update might be run automatically on first boot even when the old style user-data script is provided or when users are configuring through automated ssh on startup.
+
+        I understand and support the desire to make things easy for new users, but would also suggest that it is also important to let advanced users configure their new instances quickly and not get in their way.
+
+        Here's a sample scenario:
+    <pre>
+    user-data script changes apt sources to a different repository,
+    includes multiverse, and/or adds a PPA.  user-data script then
+    runs apt-get update itself and starts installing software.
+</pre>
+
+        If apt-get update is run automatically before this starts, then the user-data script has to figure out how to wait for the (useless) update to complete, making the code more complex and delaying the startup of the instance.
+
+        If the apt-get update were to default to false, then the new config file approach can easily switch it to true, not breaking the way that it currently works.
+
+        The following proposal seemed to meet some level of agreement on the ubuntu-ec2 and ubuntu-cloud mailing lists (i.e., Mathias said it sounded good and nobody else objected):
+        <pre>
+  ec2init automatically runs apt-get update on first boot, UNLESS:
+
+  1. a user-data script is provided by the user (starting with #!), OR
+  2. the advanced user-data configuration format is provided by the user
+     AND that configuration specifies that apt-get update should not be
+     run.
+</pre>
+
+----
+CategorySpec

@@ -1,0 +1,180 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+== Introduction ==
+
+<nowiki>[[http://projects.puremagic.com/greylisting/|Greylisting]]</nowiki> is a spam reduction technique that can be very effective. It works by temporarily rejecting from client machines that are unknown to the server's greylisting service.
+
+If the client is standards-compliant, it will attempt to re-send its message after its initial failed smtp session, and your receiving mail server will accept it. The client is then added to a list of known clients, and will not be delayed in the future. This means that the first e-mail from an unknown client will be delayed, but subsequent ones will be processed right away.
+
+Most spam mailers, on the other hand, do ''not'' re-send messages after failed smtp sessions.
+Thus, in theory, greylisting effectively blocks the majority of spammers.
+
+This guide assumes that you are the administrator of an Ubuntu server with an up-and-running Postfix service that already sends and receives e-mail successfully. Commands, example values and defaults are derived from Ubuntu 16.04 LTS, all assuming that you want to run Postgrey on the same machine as Postfix.
+
+Always backup your configuration files before modifying them so that you can quickly roll back to a working setup.
+
+== Installation ==
+
+First, check that you have enabled the <code>universe</code> repository in '''/etc/apt/sources.list'''. See <nowiki>[[https://help.ubuntu.com/community/Repositories/CommandLine#Adding_Repositories|Adding Repositories]]</nowiki> if you need info on how to do this.
+
+After verifying that <code>universe</code> is enabled, update your package lists by entering the following command in a terminal:
+
+<pre>
+sudo apt update
+</pre>
+
+Now install the <code>postgrey</code> package and its dependencies:
+
+<pre>
+sudo apt install postgrey
+</pre>
+
+== Configuration ==
+
+Now you are ready to instruct Postfix to use Postgrey. 
+
+Edit '''/etc/postfix/main.cf''' and add <code>check_policy_service inet:127.0.0.1:10023</code> to the parameter smtpd_recipient_restrictions.
+
+Finally, reload the Postfix configuration:
+
+<pre>
+sudo postfix reload
+</pre>
+
+Postfix should now be using Postgrey.
+
+== In Use ==
+
+Once Postgrey is running and Postfix is set up to use it, entries will start to appear in <code>/var/log/mail.log</code>. To see the ones printed by Postfix whenever it gets told to delay a message, run:
+
+<pre>
+sudo grep -i "postfix/smtpd" /var/log/mail.log | grep -i "greylisted"
+</pre>
+
+Entries will look something like this:
+
+<pre>
+Jul 24 16:00:57 mailserver postfix/smtpd[12524]: NOQUEUE: reject: RCPT from mail.server.com[1.2.3.4]: 450 4.2.0 <someone@somedomain.com>: Recipient address rejected: Greylisted, see http://postgrey.schweikert.ch/help/somedomain.com.html; from=<bounce-someone.else@anotherdomain.com> proto=ESMTP helo=<mail.server.com>
+</pre>
+
+Postgrey also writes its own log entries. To see the ones it generates whenever it tells Postfix to delay a message, run: 
+
+<pre>
+sudo grep -i "postgrey" /var/log/mail.log | grep -i "action=greylist"
+</pre>
+
+Entries will look something like this:
+
+<pre>
+Jul 24 16:00:57 mailserver postgrey[1420]: action=greylist, reason=new, client_name=mail.server.com, client_address=1.2.3.4, sender=bounce-mc.us11_12345678.998765-someone=somedomain.com@mail.server.com, recipient=someone@somedomain.com
+</pre>
+
+Messages that have been delayed due to greylisting will be tagged with an <code>X-Greylist</code> header, e.g.:
+
+<pre>
+X-Greylist: delayed 341 seconds by postgrey-1.34 at mail.server.com; Sun, 24 Jul 2016 16:26:38 CEST
+</pre>
+
+== Customization ==
+
+Be sure to send test messages from another server and watch <code>/var/log/mail.log</code> closely whenever you apply changes that are explained in this section.
+
+=== Whitelisting ===
+
+You may want to prevent certain remote clients and/or local recipients from getting their mails delayed by greylisting. 
+
+Before you start assembling your list of domains, take a look at the contents of the file '''/etc/postgrey/whitelist_clients'''. In Ubuntu and other Debian derivatives, the default version of this file contains domain names of well-known mail providers (e.g. Google) whose servers are known to transfer legitimate mail.
+
+To add your own list of whitelisted clients in addition to the default ones, create the file '''/etc/postgrey/whitelist_clients.local''' and enter one host or domain per line.
+
+To apply your changes, reload Postgrey:
+
+<pre>
+sudo systemctl reload postgrey
+</pre>
+
+=== Delay Time ===
+
+The default delay - i.e. the minimum amount of time that must pass before Postgrey will accept a retry from a greylisted client - is 300 seconds (5 minutes). 
+To change this value, edit '''/etc/default/postgrey''' and add the '''--delay=N''' argument to POSTGREY_OPTS, where N is the desired delay in seconds. 
+
+E.g., for a 60-second delay:
+
+<pre>
+POSTGREY_OPTS="--inet=127.0.0.1:10023 --delay=60"
+</pre>
+
+Restart Postgrey to apply your changes:
+
+<pre>
+sudo systemctl restart postgrey
+</pre>
+
+=== Listening Port ===
+
+In this guide, we assume that Postgrey is listening on port number 10023.
+
+To check this in Ubuntu 16.04, run:
+
+<pre>
+sudo grep "postgrey" /var/log/mail.log | grep -i "resolved"
+</pre>
+
+You should see an output similar to this:
+
+<pre>
+Jul 29 13:40:26 mailserver postgrey[16036]: Resolved [localhost]:10023 to [127.0.0.1]:10023, IPv4
+</pre>
+
+In this case, we have confirmed that the service is listening on port 10023.
+
+If you want Postgrey to listen on another port, edit the file '''/etc/default/postgrey''' and change the value of the "--inet" argument as desired.
+
+For example, to make Postgrey listen on port 10113, use <code>--inet=10113</code>.
+
+Then update your Postfix configuration in '''/etc/postfix/main.cf''' by modifying the "check_policy_service" parameter to <code>check_policy_service inet:127.0.0.1:10113</code>.
+
+To apply your changes, restart Postgrey…
+
+<pre>
+sudo systemctl restart postgrey
+</pre>
+
+…and then reload the Postfix configuration
+
+<pre>
+sudo postfix reload
+</pre>
+
+=== IPv6 ===
+
+Making Postgrey use IPv6 instead of the default IPv4 when you run it on the same machine as Postfix will probably not make much practical difference with regards to performance, but it may be useful in other applications.
+
+To use Postgrey over IPv6, simply specify your IPv6 address in addition to the port number in '''/etc/default/postgrey'''.
+
+For example, to listen on port 10023 over IPv6 on localhost, use <code>--inet=[::1]:10023</code>.
+
+Then update your Postfix configuration in '''/etc/postfix/main.cf''' and change the "check_policy_service" parameter to <code>check_policy_service inet:[::1]:10023</code>.
+
+To apply your changes, restart Postgrey…
+
+<pre>
+sudo systemctl restart postgrey
+</pre>
+
+…and then reload the Postfix configuration
+
+<pre>
+sudo postfix reload
+</pre>
+----
+CategoryEmail

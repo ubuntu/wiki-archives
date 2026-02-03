@@ -1,0 +1,177 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+=== gdb ===
+
+You can use the standard set of GNU tools that we use for debugging,
+such as gdb and valgrind for debugging the code end of things. Note
+that the view implementation of unity at least runs inside the same
+process (compiz) which handles redrawing of all elements on the screen
+(windows, panels, etc) and also window management (focus, stacking) so
+if you hit a breakpoint in gdb or a your program receives a signal (eg
+SIGSEGV) which could cause execution to stop, your display would lock
+up and you wouldn't be able to interact with gdb if you were running
+it inside of a terminal running under unity.
+
+Note that in order to resolve this, you'll need to be able to access
+gdb outside of a frozen screen. I usually have another machine
+connected to the network and run gdb over ssh, so when a breakpoint is
+hit I can interact with gdb on the remote machine. That's basically a
+matter of doing something like:
+
+DISPLAY=:0 COMPIZ_CONFIG_PROFILE=ubuntu gdb compiz --replace ccp &
+
+on the remote machine. If you don't have a remote machine, you can use
+VT switching as a means to get back and forth between the debug
+console and unity, so using Ctrl-Alt-F1 and Ctrl-Alt-F7 to get between
+the two. Use the same command for debugging.
+
+=== valgrind ===
+
+If you're not interested in using some of the program control stuff
+that gdb provides such as breakpoints, assembler dumps etc then I
+usually just run compiz through valgrind (sudo apt-get install
+valgrind) on the session I'm working on, eg opening a terminal and
+doing
+
+valgrind compiz --replace ccp &
+
+Running compiz through valgrind is basically the same as running
+compiz through an emulator, so it is going to be slow, however
+valgrind can give you good information at runtime if your program is
+doing anything strange memory wise (the root cause of most crashes)
+and will also give you a full backtrace when a crash happens. Note
+here that when a crash happens you'll lose the ability to focus
+windows (eg type in your terminal) and your panels and launcher will
+disappear, so you'll need to drop to a VT after it happens and launch
+metacity or something similar.
+
+Also note that almost everything in unity except for the launcher can
+be run outside of the window manager process in a separate testing
+window so that you're not relaunching the window manager all the time.
+Those examples are found in the tests/ folder in the source code.
+
+Some other interesting tools for debugging:
+
+=== X11Vis ===
+
+X11Vis is a small x-request-and-reply interception daemon which you
+can run compiz through in order to debug problems related to calls on
+Xlib (eg XDoThis, XDoThat).  The likelihood of you needing this tool
+is probably quite small since there isn't much in unity except for the
+drag-and-drop code and compiz itself which does a lot of complicated
+Xlib work, but for reference for others, here's how I set it up:
+
+1. clone it from the github repo
+
+sudo apt-get install git
+git clone https://github.com/x11vis/x11vis.git
+
+2. install the dependencies
+
+sudo apt-get install cpan
+sudo cpan install AnyEvent AnyEvent::Socket Twiggy Dancer IO::All
+JSON::XS Moose MooseX::Singleton XML::Twig
+
+3. install x11vis
+
+sudo make install
+
+4. run the interceptor
+
+./interceptor/interceptor.pl
+
+The output will be something like:
+"Interceptor running on :8 on 127.0.0.1
+
+Unfortunately, compiz uses server grabs in a few places to ensure that
+in critical sections (eg reparenting, decoration, startup) that we're
+in perfect sync with X11 and that X11 is not processing anybody else's
+requests that could be conflicting with ours until we're done doing
+that operation. This breaks X11vis in a few areas, which sucks. So in
+order to debug these issues you're going to need to build compiz from
+source (there's a build guide here:
+http://wiki.compiz.org/C%2B%2BCompiling). Once you've done that,
+you'll need to edit the following files and comment out references to
+XGrabServer and XUngrabServer:
+
+core/src/window.cpp
+core/src/screen.cpp
+core/src/event.cpp
+core/plugins/decor/src/decor.cpp
+
+There's about 7 or 8 pairs of them. Once that's done, recompile and
+install core and run it like usual to check if it works. Once that's
+done, you can run it under X11vis with something like:
+
+DISPLAY=127.0.0.1:0 compiz --replace ccp &
+
+X11vis will then log and process every single X request that compiz
+(and unity) makes and also every single reply and event that it
+receives. Note that this is a /lot/ of data, mainly because window
+managers are probably the most X-traffic heavy clients out there.
+There's also a request made and events given every time we redraw
+areas of the screen too. So in order to run this, you're going to need
+a fairly powerful machine with a lot of memory (I'd suggest at least
+4GB). After the (fairly long) startup, you'll be able to interact with
+the interface normally, albeit a bit slower in X-heavy places.
+
+X11vis is only really useful if you have concrete steps the reproduce
+the problem and then you can quickly kill the window manager and use
+metacity or something instead. X11vis also has a handy feature called
+"markers" which help a lot when sifting through the trace reports it
+gives you. Set them with
+
+x11vis -m "Starting to reproduce the bug"
+x11vis -m "Finished reproducing the bug"
+
+Once that's done, you can view the trace reports in a browser while
+the interceptor is running by going to http://localhost:5523 . There's
+a lot of information generated here, and I'd suggest using chromium to
+view this report since the other browsers I've found can't handle that
+much data in AJAX pages. You can then ctrl-f for your marker strings
+and look at all the X traffic coming through both ways there.
+
+=== ApiTrace ===
+
+ApiTrace is another useful tool which does something similar for
+OpenGL, except that it snapshots the OpenGL state on every frame so
+you can replay frame-by-frame your program to see where rendering
+problems are coming from. Note that at present, it does not work with
+compiz because there is no support for GLX_EXT_texture_from_pixmap, a
+GLX extension that compiz requires. So its only useful at the moment
+on the stuff in tests/
+
+1. Download it from git
+git clone https://github.com/apitrace/apitrace.git
+
+2. Install the dependencies
+sudo apt-get install libqjson-dev libqtwebkit-dev libqt4-dev libgl1-mesa-dev
+
+3. Build it
+cd apitrace
+mkdir build
+cd build
+cmake ..
+make && sudo make install
+
+4. Run your program with the preloaded GL API tracer
+
+LD_PRELOAD=/usr/local/lib/glxretrace.so ./tests/test-places
+
+5. Retrace it
+
+qapitrace test-places.trace
+
+From there you can inspect bound framebuffers, textures, shaders etc.
+
+That's pretty much everything to do with unity debugging. There's
+other more obscure tools out there that might help, but these ones are
+the main ones that the unity developers use.

@@ -1,0 +1,187 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== Summary ==
+Setup clients on a local network to automatically mount '''NFS''' shares whenever the fileserver is up, without using autofs. Instead, a simple bash script called by a custom '''upstart job''' checks if the server is up, and if the shares need to be mounted or unmounted.
+
+'''Note: A more modern nfs_automount script has been released on 18 July 2013. It is available on <nowiki>[[https://github.com/vwal/nfs_automount|GitHub]]</nowiki>.'''
+
+== Introduction ==
+{| class="wikitable"
+|-
+| <tablestyle="float:right; font-size: 0.9em; width:40%; background:#F1F1ED; margin: 0 0 1em 1em;" style="padding:0.5em;"><<BR>>
+|}
+
+For a small office or home network populated with Unix-like computers (e.g., a few Ubuntu desktops or laptops and a fileserver), NFS (Network File System) is a good way to share storage space and centralise the backup of important documents. However, having a fileserver running 24/7 is often overkill for such a setup.
+
+One way to have clients mount NFS shares automatically when the fileserver is turned on, is to use a package called '''autofs'''. Unfortunately, there are a few unresolved issues with using autofs in combination with NFS. In my case, when autofs tries to mount NFS shares when the fileserver is turned off, the desktop and filebrowsers like Nautilus in particular become extremely unresponsive, regardless of the options used. Attempting to mount the share manually from the command line when the server is down however, does return a message of failure quite promptly, without hanging the desktop.
+
+To solve this issue, I wrote a simple bash script that is run through the <nowiki>[[UpstartHowto|upstart]]</nowiki> system. The script simply checks if the fileserver is up, if the shares need mounting or unmounting, and then sleeps for a while before checking again. This works out quite well, so I decided to share this information in case someone else runs into these issues.
+
+== Prerequisites ==
+
+* This howto assumes that you have an NFS server set up with shares exported, and one or more clients capable of mounting those shares. For more information on setting up NFS shares and mounting them on a client from the command line, see: <nowiki>[[SettingUpNFSHowTo]]</nowiki>.
+* Clients should be able to ping the server to determine if it is running.
+* Naturally, you need administrator access on the clients to install the script and upstart job outlined below.
+* This script assumes that the directory paths of the shares match the location where they are mounted. In my case, the fileserver has two shares: /media/Storage and /media/Backup. On the clients these shares are mounted on the same paths. If your setup deviates from this, the script needs some modification.
+
+== The script ==
+
+Download the latest version of the script from https://github.com/jdhoek/util/blob/master/autonfs.sh, or copy and paste the following in your favourite text editor:
+
+{{{#!bash
+
+FILESERVER="yournfsserverhere"
+
+MOUNTOPTS="-o rw,hard,intr,tcp,actimeo=3"
+
+INTERVAL=60
+
+DELIMETER="|"
+
+MOUNTS=( "/media/exampleRemote1|/media/exampleLocal1" "/media/exampleMount2" )
+
+LOG=true
+
+function log {
+    if $LOG; then
+        echo $1
+    fi
+}
+
+log "Automatic NFS mount script started."
+
+declare -a MOUNTP
+while true; do
+### Is the NFS daemon responding?
+    rpcinfo -t "$FILESERVER" nfs &>/dev/null
+    if [ $? -eq 0 ]; then
+##### Fileserver is up.
+        log "Fileserver is up."
+        for MOUNT in ${MOUNTS[@]}; do
+####### Split up the share into the remote and local mount point.
+            MOUNTP=(`echo ${MOUNT//$DELIMETER/ }`)
+####### The second part of the mount string is the local mount point.
+####### If there is no second part, local and remote are mounted on
+####### the same location.
+            HERE=${MOUNTP[${#MOUNTP[@]}-1]}
+            THERE=${MOUNTP[0]}
+            if grep -qsE "^([^ ])+ ${HERE}" /proc/mounts; then
+                log "$HERE is already mounted."
+            else
+######### NFS mount not mounted, attempt mount
+                log "NFS share not mounted; attempting to mount ${HERE}:"
+                mount -t nfs ${MOUNTOPTS} ${FILESERVER}:${THERE} ${HERE}
+            fi
+        done
+    else
+##### Fileserver is down.
+        log "Fileserver is down."
+        for MOUNT in ${MOUNTS[@]}; do
+####### Split up the share into the remote and local mount point.
+            MOUNTP=(`echo ${MOUNT//$DELIMETER/ }`)
+####### The second part of the mount string is the local mount point.
+####### If there is no second part, local and remote are mounted on
+####### the same location.
+            HERE=${MOUNTP[${#MOUNTP[@]}-1]}
+            THERE=${MOUNTP[0]}
+            if grep -qsE "^([^ ])+ ${HERE}" /proc/mounts; then
+######### NFS mount is still mounted; attempt umount
+                log "Cannot reach ${FILESERVER}, unmounting NFS share ${HERE}."
+                umount -f ${HERE}
+            fi
+        done
+    fi
+    sleep $INTERVAL
+done
+
+}}}
+
+=== Adjust the script to your situation ===
+
+Now adjust the '''FILESERVER''' variable and put the network name or IP-address of your NFS server there. By default, Ubuntu sets up your networking environment in such a way, that computername.local can be used to reach that computer over the local network, so the network name for myfileserver is myfileserver.local.
+
+Next, change the '''MOUNTS''' variable to match the NFS shares exported by your NFS server. '''MOUNTS''' is an array; multiple entries are separated by spaces. So if you have two shares exported as /media/MyShare1 and /media/MyShare2, that line would look like this:
+
+<pre>
+MOUNTS=( "/media/MyShare1" "/media/MyShare2" )
+</pre>
+
+An advantage of mounting shares in /media, is that they automatically show up as mounted drives on the user's desktop. If the folder you want to mount the remote share on is not on the same path, you can use the | character to enter the local and remote path:
+
+<pre>
+MOUNTS=( "/media/Things|/media/SharedThings" )
+</pre>
+
+Save the script somewhere with an obvious name. In this example we call it autonfs.sh. Open a terminal and cd to where you saved the script. Now make the script executable by calling:
+
+<pre>
+chmod +x autonfs.sh
+</pre>
+
+Next, move it to a place where it can be called by our upstart job, but also from the console to test. A good place to put such custom executables is /usr/local/bin.
+
+<pre>
+sudo mv autonfs.sh /usr/local/bin
+</pre>
+
+This script will tell you what it doing when run. To test this script, call it from a terminal:
+
+<pre>
+autonfs.sh
+</pre>
+
+If the script works, your shares should show up on the desktop and the computer:// location in Nautilus. If the fileserver goes down or becomes unreachable, the shares should disappear, and reappear when the fileserver comes back on-line. If this works, move on to the next step.
+
+=== Installing a custom upstart job ===
+
+The next step is to have the clients automatically run the above script when they are booted. We can use upstart for this. Create a new text file, and enter the following:
+
+<pre>
+
+description	"Mount NFS-shares"
+
+start on (filesystem)
+respawn
+
+exec /usr/local/bin/autonfs.sh
+</pre>
+
+This upstart job starts our script as soon as the filesystem is up, and restarts it (respawn) if it got killed. Save it as autonfs.conf. From a terminal (cd to the location of this new file), move it into place (it goes in /etc/init), and adjust the read/write permissions. We will also create a link in the /etc/init.d directory; this way, the upstart job can be treated like a normal init.d job (the SysVInit standard):
+
+<pre>
+sudo chown root:root autonfs.conf
+sudo chmod 644 autonfs.conf
+sudo mv autonfs.conf /etc/init
+cd /etc/init.d
+sudo ln -s /lib/init/upstart-job autonfs
+</pre>
+
+The script can now be started and stopped as a normal upstart job by calling '''start autonfs''' and '''stop autonfs'''.
+
+Start the upstart job. When you reboot it will be started for you:
+
+<pre>
+start autonfs
+</pre>
+
+If you have more clients you want to set up in this way, repeat the above for them as well.
+
+== Troubleshooting ==
+If the script fails to mount shares or if the server is always reported as "down", check if the rpcinfo and mount commands used in the script work as intended when run from the command line.
+
+If the script (or commands called from it) complains about <code>mount: wrong fs type, bad option, [...]</code>; then double check if ''nfs-common'' is installed. This should be covered in the basic NFS-tutorial linked to above.
+
+This HowTo was originally posted on the Ubuntu Forums. If you get stuck or have a helpful addition, please have a look at <nowiki>[[http://ubuntuforums.org/showthread.php?t=1389291]]</nowiki>.
+
+== How the script works ==
+The script enters an eternal loop and keeps checking if it can reach the fileserver once every minute (unless you adjust the '''INTERVAL''' variable). If it can reach the fileserver (confirmed with rpcinfo), it checks if the mounts are already mounted by searching for them (grepping) in '''/proc/mounts'''. If they are not mounted, it tries to mount them.
+
+Else, if the server is down, it checks if these shares are still mounted. If they are, it tries to unmount them with the -f flag (useful for unmounting unreachable NFS shares).

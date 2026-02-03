@@ -1,0 +1,97 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+== AppArmor Policy Reviews (DRAFT) ==
+When reviewing policy for !AppArmor, please consider the following:
+
+=== General advice ===
+* Prefer adding the minimum access that is required rather than expanded access
+* Always use 'owner @{HOME}' instead of '@{HOME}'
+* Use 'owner' when possible when granting 'w'
+* Do not provide 'x' to files that also have 'w'
+* Do not provide 'm' to files that also have 'w'
+* Programs compiled with an executable stack often require 'mr' permissions rather than 'r'. These programs should be recompiled without an executable stack
+* Be selective with `capabilities(7)`
+** Never allow CAP_MAC_ADMIN or CAP_MAC_OVERRIDE. These are used to allow updating apparmor policy
+** Almost never allow CAP_SYS_ADMIN. It must not be allowed if the kernel doesn't support CAP_MAC_ADMIN (earlier kernels required CAP_SYS_ADMIN instead of CAP_MAC_ADMIN)
+** Question the use of CAP_DAC_OVERRIDE or CAP_DAC_READ_SEARCH. Sometimes these are needed simply because of a packaging error where the files do not have the proper initial DAC permissions. In these cases, fix the packaging instead.
+** CAP_SYS_PTRACE should not typically be allowed
+** Examine all other request for capabilities
+* Use abstractions appropriately. Sometimes an abstraction may provide more than is needed, but most often the abstraction is appropriate.
+* Some programs may request access to the DBus system bus socket, but may not actually need it for normal functioning. In these cases, use:<pre>
+  deny /{,var/}run/dbus/system_bus_socket rw,
+</pre>
+ The same may be the case for the dbus machine-id:<pre>
+  deny /var/lib/dbus/machine-id r,
+</pre>
+* Use the private-files or even better the private-files-strict abstraction when giving access to files in $HOME. You may need to selectively add rules from either or both of these if your profile needs access to some of the files
+* Consider using explict 'deny' rules to silence denials that do not affect the application's functionality (but be careful, it makes it more difficult to debug)
+* Use the tunables when available. Eg, use '@{PROC}' instead of '/proc/'
+* Do not allow 'w' to /dev/cpu/*
+* Unless the policy if for a DBus service, dbus rules should specify one or both of 'send' and 'receive' (ie, 'acquire' should only be used for services, and the use of acquire should be limited to the dest, path and/or interface that the service implements)
+* MORE HERE
+
+=== Execute rules ===
+==== Ux/ux ====
+'Ux' and 'ux' allow for transitions to the unconfined profile. 'Ux' triggers glibc's secure exec to protect against things like LD_PRELOAD (full list is in <nowiki>[[http://sourceware.org/git/?p=glibc.git;a=blob;f=sysdeps/generic/unsecvars.h;h=d5b8119c9cb5cf5f1391325282287c5935c86589;hb=6392473fe970b0cdace62f31000a83ba0fcf6161|glibc's unsecvars.h]]</nowiki>).
+* Never use 'ux'
+* Very rarely, if ever, use 'Ux'. While 'Ux' triggers glibc's secure exec, there are many other environment variables that can be used to escape confinement.
+** Possibly use with certain compiled setuid applications (the kernel triggers glibc's secure exec for setuid applications automatically). Should verify other environment variables cannot be used to influence the binary (eg, use `ldd` on the binary and examine source for environment variables). The use of 'Ux' should be justified in the profile.
+** Never use with gtk programs since the caller can influence the binary via GTK_MODULES
+** Never use with interpreted scripts since the caller can influence the script via the environment (eg, CLASSPATH, PERL5LIB, PYTHONPATH, ...). It may be possible to use if the callee is adjusted to sanitize its environment, but this is error-prone.
+** Use with shell scripts is discouraged. If used, document why in the profile and adjust the called script to clean its environment. Eg, for the following profile:<pre>
+/bin/foo {
+  /bin/bar.sh Ux,   # interpreted by /bin/sh -> /bin/dash
+  /bin/baz.bash Ux, # interpreted by /bin/bash
+</pre>
+ '/bin/bar.sh' should at a minimum use at the top of its script:<pre>
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export ENV=
+export CDPATH=
+</pre>
+ '/bin/baz.bash' should at a minimum use at the top of its script:<pre>
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export ENV=
+export BASH_ENV=
+export CDPATH=
+export GLOBIGNORE=
+export BASH_XTRACEFD=
+</pre>
+
+==== Px/Pix/PUx/px ====
+'Px' and 'px' allow for transitions to another defined profile. 'Px' triggers glibc's secure exec. 'Pix' will try to transition to an existing profile, otherwise inherit this profile. 'PUx' is the same except falls back to unconfined.
+* 'px' should not typically be used since the environment is not scrubbed at all. It may be possible to use if the callee is adjusted to sanitize its environment, but this is error-prone. The use of 'px' should be justified in the profile.
+* 'Px' and 'Pix' are generally ok to use, but care should be taken when transitioning to interpreted scripts and shell scripts
+* 'PUx' should generally be avoided (see 'Ux', above)
+
+==== Cx/cx ====
+'Cx' and 'cx' allow for transitions to a defined child profile. 'Cx' triggers glibc's secure exec.
+* 'cx' should not typically be used since the environment is not scrubbed at all. It may be possible to use if the callee is adjusted to sanitize its environment, but this is error-prone. The use of 'cx' should be justified in the profile.
+* 'Cx' is generally ok to use, but care should be taken when transitioning to interpreted scripts and shell scripts
+* Ubuntu has a 'sanitized_helper' child profile that is available when using the 'ubuntu-helpers' abstraction. This profile is essentially unconfined, but has the following rules which prevents loading .so and .py files that the owner has write access to (eg, helps prevent escape via GTK_MODULES and PYTHONPATH abuse):<pre>
+  audit deny owner /**/* m,              # compiled libraries
+  audit deny owner /**/*.py* r,          # python imports
+</pre>
+ 
+ While this provides additional protection over 'Ux', there are a number of caveats:
+** it doesn't work with applications running as 'root' (eg, 'root' owns everything in /usr/lib or /usr/share and this all these are denied)
+** it should not be used with unmodified/unverified shell scripts (see 'Ux', above)
+** it should not be used with unmodified/unverified interpreted scripts other than python (ie, it doesn't protect perl scripts, java, ruby, etc)
+
+==== ix ====
+'ix' is generally considered ok since the callee inherits the profile of the caller. This may result in a wider permission set than is strictly required for the caller or the callee. Use of child profiles (Cx) may be used in these cases.
+
+=== Considerations ===
+When profiling, it is important to keep the following in mind:
+* !AppArmor does not yet provide environment filtering (<nowiki>[[https://bugs.launchpad.net/ubuntu/+source/apparmor/+bug/1045985|LP: #1045985]]</nowiki>). Profiled applications should be examined for their honored environment variables (see 'Ux/ux' above for some discussion)
+* !AppArmor does not yet mediate DBus or IPC in general. If the IPC socket is a file, access can be mediated use a file access rule (eg access to the system bus is provided via the `dbus` abstraction). Abstract sockets such as those used by the DBus session bus are permitted by !AppArmor.
+* !AppArmor does not yet mediate X. Consider using a nested X server (eg, Xpra or Xephyr) and/or aa-sandbox
+* !AppArmor does not examine file contents when making access decisions (eg, 'foo.pdf' may not be a PDF file, but 'bar' might be)

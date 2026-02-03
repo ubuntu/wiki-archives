@@ -1,0 +1,74 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+https://blueprints.launchpad.net/ubuntu/+spec/regression-rooter
+
+This is a preliminary/conceptual design of a tool for assisting with narrowing down regressions in Ubuntu, by doing mechanical analysis of version/date info from /var/log/dpkg.log, and correlating with other users seeing similar symptoms via crowdsourcing.
+
+=== Background ===
+Regression bugs are distinctive because they can be analyzed effectively by just comparing the broken and working cases.  In a best case situation, the bug can be narrowed to a specific change in a specific package, which gives a developer really, really good info for solving the issue quickly.
+
+Regression bugs also tend to be very important, since the user experience at having software worsen is extremely undesirable all around.
+
+Currently, we have a variety of ad hoc methodologies for tracking and analyzing regression bugs.  For instance, we might ask the user to do a git bisection search - which is effective, but may be intimidating for the non-technical.  We can also ask people to downgrade to earlier versions of ubuntu packages, but that works only if they still have the earlier .deb file somewhere handy.  Tracking of regression bugs is done by giving appropriate tags to bug reports; there are several tools like apport hooks which assist with this.
+
+But as a whole, the overall approach is not very systematic or cohesive, and depends on a lot of manual work and user coaching.
+
+=== Fundamentals ===
+
+When a user reports a bug, if they identify that it is a regression in Ubuntu, we can assume three things.  First, that there existed a state on that user's machine where the regression did not occur, second that the current state of the user's machine exhibits the bug, and third that the packages the user tested were installed via dpkg.
+
+If we're fortunate, the user may remember approximately when they did not see the regression, thus giving us a more tangible initial date for #1.  Without at least a rough guess, it will be hard to apply regression analysis techniques, so to simplify things we'll just exclude regressions where the initial date is unknown.
+
+Now, dpkg maintains a log at <code>/var/log/dpkg.log*</code> which lists each package that is updated, the version updated, and when it was updated.
+
+That is some really key information, but we can't use it until we know one more bit of information - what package (or packages) are relevant to the bug.
+
+This doesn't tell us whether the user was doing a system update, vs. installing particular packages, but we can intuit that based on the quantity (and type) of packages that were updated within a short period of time.
+
+Given some ability to distinguish updates from individual package installs, we can derive an additional bit of data - the update frequency for the machine.
+
+One other fundamental bit of data we can draw from is the date the given version of the package first became available for mirrors.  This can be useful in correlating different users' bug reports that share similar symptoms.  This data can be extracted from Launchpad itself.
+
+=== Concept ===
+
+<nowiki>[[File:suspects.png]]</nowiki>
+
+RegressionRooter is a desktop application for analyzing dpkg.log files to help isolate regression bugs with the goal of making them easier to solve.
+
+To use the tool, the first step is to start a new analysis session.  (You may be working on multiple bugs at the same time, so we keep track of the state of each analysis session separately.)  The user can input a description of the problem or a bug report # at this point.  They also need to select range of datetimes when they believe they first started noticing the regression; a fuzzy confidence score can be specified for these dates.  Optionally they can specify one or more package names/regex's they think may be related; a fuzzy confidence score can be entered here too.
+
+The tool then parses /var/log/dpkg.log* files and builds a table of package changes.  At this time it also calculates a rough weighting score for each package based on whether it was updated inside the date range and the confidence score.  Packages which match the regex's the user provided have their score increased by an amount commensurate with their confidence score.  This table is saved as a "package suspects" file (format should be textual such as .txt, .csv, .json, or .xml).
+
+Next, the user has a choice of steps to take.  RegressionRooter can:
+
+* ...assist in '''filing a bug''' for the user by suggesting a package name to file against, and invoking apport to submit a bug report; along with the other standard info it will attach the package-suspects file.
+
+* ...perform '''searches against existing bug reports''' in Launchpad reported by other users with similar issues and similar package versions installed, to help identify if the issue is already known and reported.
+
+* ...walk the user through '''downgrading specific packages''' on a case-by-case basis, for packages with .debs still present in <code>/var/cache/apt/archives</code>.  It will help keep track of what all has been downgraded, to permit restoring them to stock versions.  It can also take care of pinning the packages if the user wants to retain the unbroken versions while they await a fix.
+
+* ...if downgrading a particular package had no effect, identify the package as "probably innocent" in the package-suspects file.  This also decrements the weighting score so the package won't be suggested in the future.
+
+* ...'''update the bug report''' as additional versions of packages are tested and ruled in or out as suspects.
+
+* ...'''cache more downgradable debs''' into another directory (/var/cache/regressionrooter/archives/ perhaps?)  This assumes there are mirrors or other authoritative places where the older .debs can be found (if there isn't, maybe this also needs to be established).  For the Ubuntu archive Launchpad keeps old .debs available (for example [url]https://edge.launchpad.net/ubuntu/+source/mesa/7.8.1-1ubuntu1[/url]), although I am unsure if this is exposed via the API.
+
+* ...'''correlate suspect package versions''' given two package-suspect files.  It does this by summing the weights of all the package updates and outputting a new package-suspects merge file; this way common package updates will bubble up to the top, and packages unique to one user will sink.  This merge file can be merged with additional reporters (but never with the same package-suspects file twice) to continue to sum up scores.  In theory, the more merges done, the more accurate the results will be (ala "wisdom of crowds")
+
+=== Implementation ===
+
+1. Two key parts here are the "package-suspects" file definition, and the <code>/var/log/dpkg.log*</code> file parser, and it's probably logical to start by implementing these first.  Indeed such a tool can be of some use for analyzing bug reports that include dpkg.log, by itself.
+
+2. A command line tool to merge two package-suspect files would probably be straightforward to implement at this point.
+
+3. A simple GUI tool to assist in downgrading packages.  It should display a listing of available packages/versions found in /var/cache/apt/archives/ with toggle buttons to downgrade that package.  It would need logic to handle cases where there are dependencies involved (maybe initially just refuse to do the downgrade at all in such cases, to keep things simple.)  
+
+4. Integrate all the above bits together into a single GUI interface.  Also incorporate the ability to invoke apport to file bugs, the ability to attach the package-suspects file to a bug report, and analysis session management.

@@ -1,0 +1,123 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+
+On the Ubuntu Touch images we run the Android HAL (Hardware Abstraction Layer) in a container to make
+use of the binary drivers and some daemons that are needed to drive the builtin hardware of a phone.
+
+=== Booting by default into the Ubuntu rootfs ===
+
+To run Android in a container Ubuntu needs to become the default system we are booting to.
+This is achieved by using a generic Ubuntu initramfs in the phones boot.img instead of the Android
+supplied one.
+
+The initramfs script that manages the booting lives in the '''initramfs-tools-ubuntu-touch''' package.
+To get a binary initrd.img the '''ubuntu-touch-generic-initrd''' package exists, this will always contain the
+latest binary initrd.img based n the last '''initramfs-tools-ubuntu-touch''' package in the Ubuntu archive.
+
+People that are porting their devices to the Ubuntu Touch container model should take into account that
+Ubuntu's Upstart is used as init system. Upstart likes to have an actually existing device
+as /dev/console. Many Android kernels do not provide this as default or even have something like
+console=none or console=ram hardcoded in their boot commandline arguments. Such drawbacks in the
+kernel or commandline need to be fixed to be able to use this model properly 
+(<nowiki>[[http://paste.ubuntu.com/5939625/| here]]</nowiki> is for example a kernel patch used on the i9100 image to change
+the behavior of CONFIG_CMDLINE_EXTEND ... now using this option appends the kernel cmdline to the bootloader
+one instead of pre-pending, this way console=tty1 can be handed over as the last cmdline argument and with
+CONFIG_VT_CONSOLE and CONFIG_HW_CONSOLE set in the kernel config upstart is now happy)
+
+=== System Preparation for using the LXC container ===
+
+Since the Android container is supposed to initialize all hardware (beyond the disk and minimal bits
+required for booting) it needs to come up as early as possible in the boot process and since android
+ships its own device handling daemon in form of ueventd, we need to make sure that udev does not
+intefere with the devices on boot. For this purpose the '''lxc-android-config''' package (which is carrying
+all configuration, overrides, jobs and scripts for running the android container) ships an upstart
+override job for udev that delays its startup until the container is fully done tinkering with devices.
+Various udev rules like firmware rules, v4l or alsa rules are overridden as well.
+
+To have similar permissions on the Ubuntu side as we do at the Android side, the '''lxc-android-config'''
+package ships a 70-$devicename.rules file for phones it knows and puts this file in place for udev usage
+on first boot.
+
+On first boot there is also a script run that creates the proper Android mountpoints and fstab entries
+in the Ubuntu filesystem, you will find /data, /system, /vendor and /factory (or /efs, depending on the device) 
+mountpoints in the Ubuntu root filesystem.
+ 
+All first boot handling is done by the lxc-android-boot upstart job.
+
+=== Booting the Android LXC container ===
+
+Android does not, like other Linux, jump out of its initrd into a root filesystem on disk.
+Instead the initrd is actually the rootfs. The Android build that gets created from phablet.ubuntu.com
+takes care that the android initrd is shipped in /system/boot/android-ramdisk.img from where it gets copied
+to /boot at install time and on upgrades.
+
+Once the system is ready to fire up a container, upstart sends an event to the lxc-android-config job
+which uses lxc-start to initialize the preconfigured "android" lxc container config.
+
+The above mentioned "android" config ships in /var/lib/lxc/android with the '''lxc-android-config''' package.
+After the config file has been parsed /var/lib/lxc/android/pre-start.sh is executed. This script
+unpacks the android-ramdisk.img as the contrainer rootfs and parses its pre-start.d subdir which contains
+code snippets for temporary or permanent modification of the rootfs. Whole files of the rootfs can be
+replaced by putting a copy into /var/lib/lxc/android/overrides/ (very useful to work with a modified
+android init.rc file)
+
+Now that the container is populated with a rootfs lxc-start executes /init inside it and returns to the
+lxc-android-config upstart job. The lxc-android-config job now emits the "android" event to upstart.
+
+Based on this event delayed services like udev can now get started and apps can start talking to the
+container through libhybris. Logs inside the container can be read via /system/bin/logcat which (like
+all other binaries in this path) can just be executed from Ubuntu. The Android properties system is also
+fully accessible from Ubuntu and getprop/setprop are shipped in the image as management tools and persistent 
+properties can be added to /data/properties if needed.
+
+For further communication between the container and the host the /dev/socket directory from Android is shared 
+across the two systems. Here ofono talks to rild (the vendor shipped binary daemon that manages mobile modems) for example.
+
+=== Using a 64bit Android Container ===
+
+With Android 5.0/Lollipop 64bit BSPs (Board Support Packages) for Android became available. Ubuntu will host these in a container similarly to 32 bit builds.
+
+==== Common Requirements ====
+
+A 64bit Android BSP will have a 64bit kernel. Therefore the Ubuntu kernel which hosts the android patches from such a BSP will also be 64bit.
+
+In order to host the Android BSP user-side components, we will need a 64bit lxc container to host the Android parts.
+
+Other system components interface to this container as before, eg via sockets or libHybris.
+
+TODO: Add support in libHybris for 64bit libraries
+
+Android documentation encourages dual 32/64bit builds for native libraries, but leaves any final decision to the implementor, so long as their system remains compatible with existing Android applications. Ubuntu does not have this constraint, so can potentially use a 64 bit BSP two different ways: 64bit only, or a 32/64 multiarch approach.
+
+==== 64bit ====
+
+If all the services we depend on are made available in 64bit form, we have the option of building a 64bit touch image analogous to the 64bit desktop images. In this case all the user side packages are selected from the arm64 archive.
+
+==== multi-arch 32/64bit ====
+
+In practice, android BSPs must support the existing 32bit ecosystem of android applications, and so contain the equivalent of multiarch support. They ship a suite of 32 and 64 bit libraries. On a case-by-case basis, some of the libraries may be better tested or supported in either the 32bit or 64bit form.
+
+If we assume that some key systems (RILD?) will be maintained for some time in 32bit form, then we may discover that building a pure 64bit Ubuntu image is not possible, or will be lower quality than a 32bit equivalent.
+
+It seems likely that 64bit is being introduced aggressively to provide a marketing feature for handsets, and the ecosystem of software on a handset will transition more slowly.
+
+As such, it may be advantageous to stay with our existing 32bit ubuntu images, and boot these on a multi-arch enabled 64bit kernel. Such a system would need a libybris that was aware of the fact it was being used in a multi-arch system, and would need to support both 32bit and 64bit libaries. Note that the linking would only ever be to the 'same' size, so 32bit Ubuntu to 32bit Android or 64bit Ubuntu to 64bit Android.
+
+==== mixed-containers, 32bit Ubuntu, 64bit Android ====
+
+Considering the discussion above about multi-arch systems, we've also got a third option, which is to boot just the container hosting android in 64 bit (which assumes a 64bit kernel), and then initialise the ubuntu user space as today, in 32 bit.
+
+One key advantage of this arrangement is that it is contained within the device tarball, and therefore can re-use our existing rootfs images.
+
+This diagram documents the arrangement:
+
+<nowiki>[[File:android64bitcontainer.png]]</nowiki>

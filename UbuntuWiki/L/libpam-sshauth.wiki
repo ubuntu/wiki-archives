@@ -1,0 +1,118 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+* '''Launchpad Entry''': libpam-sshauth
+* '''Created''': sbalneav
+* '''Contributors''': 
+* '''Packages affected''': ldm
+
+=== Summary ===
+
+We need an pam module that can authenticate a user on the local machine by ssh'ing to a remote server.
+
+=== Rationale ===
+
+Currently, we're authenticating on the thin client by screen-scraping tty output of an ssh to the server.  This means the LDM display manager isn't a "standard" login process, that normally talks to pam.  By writing a pam module that will authenticate a user based on ssh'ing to a defined server, we can re-write ldm to be a proper pam application.  This then opens up other options for ldm: ldap auth, kerberos, smart-card, etc., all become much easier for us to support.
+
+As well, a libpam-sshauth module would have benefits for a lab full of full fledged workstations.  Administrators wanting a network authentication system, but not wanting to go through the learning curve of LDAP would have a simpler option open to them.
+
+=== User stories ===
+
+Mary has just installed LTSP. While trying to login on a client, she's shown an error about the server not responding. That might actually mean that the ssh keys are not up to date, or that she mistyped her password. With libpam-sshauth, Mary would get more informative error messages.
+
+James is a teacher/sysadmin in a small school. He'd like to have central account management and networked homes, but LDAP/NFS configuration and maintainance seem too difficult to him. libpam-sshauth offers a really easy alternative, while enabling him to manage his users with the standard GUI user management tools offered by his DE (e.g. users-admin).
+
+=== Assumptions ===
+
+* PAM module will provide the same or better functionality as the current LDM.
+* password expiry will be supported.
+* All PAM messages will be communicated to the user (i.e. "Your password will expire in 5 days")
+* We will be able to pass ssh connection options for the tunnel creation.
+
+=== Design ===
+
+Design elements:
+
+* We'll use <nowiki>[[http://www.libssh.org|libssh]]</nowiki>
+* We should handle all the pam types:
+** account: we'll want to make sure we're not trying to log in on any account that's in the chroot's passwd file.
+** auth: contact the remote server, make sure the login's valid.
+** password: Password expired on the remote end? Better handle changing it.
+** session: lots of things here, see below.
+* Should properly handle try_authtok so that if someone does auth by some other method first in the pam stack (say, LDAP), then the libpam-sshauth should be able to use that authtok to login, and create the socket.
+* auth and password are the most important: we authenticate on the local machine based on our ability to ssh into a remote machine.  If our password's expired on the remote machine, we should handle it in the standard pam method: with a password chat.
+* The session section's where the meat and potatoes gets done.  After we've authenticated, we should:
+** set up the users' environment exactly the same as a local login does (i.e. set $HOME, etc.)
+** We'll create a command socket for the user in /var/run (format of the name to be configurable in the conf file, see below)
+** Listener will be forked off to handle the socket.
+** We'll set an environment variable called LIBPAM-SSHAUTH-CONTROL-SOCKET OR-SOME-OTHER-EQUALLY-LONG-NAME so that other processes can send commands to the server via the authenticated channel.
+* libpam-sshauth should be distro-friendly:
+** have a debug option for increased verbositude to logs
+** should log to syslog
+** should have an /etc/libpam-sshauth/config file
+** should ALSO have an /etc/libpam-sshauth/config.d directory for packages and/or programs to be able to create configs without package conflicts.
+* For creating the command socket/X11 forwarding, we'll simply invoke an ssh command with the appropriate options:
+** It's assumed we'll simply be able to use authtok as the password, since the authentication phase should have already reset the password if it's expired.
+** Sample command line: <code>ssh -N -M -S /tmp/foosock -Y -l username host</code>
+
+We'll of course use the control socket for our usual nefarious purposes within LTSP.  However, another nefarious purpose comes to mind: a libnss-sshauth.
+
+libnss-sshauth should:
+
+* fit within the nss call chain nicely.  It should, at least, handle /etc/passwd and /etc/group for uid|gid > 512
+* Check that the LIBPAM-SSHAUTH-CONTROL-SOCKET variable is there.  If not, simply return failure so as to move to the next NSS module in the chain.
+* If the LIBPAM-SSHAUTH-CONTROL-SOCKET is there, then check to see that the socket it points to is valid.
+* If it is, then fulfill the request by making the appropriate getent db <ent> requests over the command socket.
+* Some kind of caching might be appropriate:
+** Built into the module itself
+** Use nscd?
+
+Alternative implementation to libnss-sshauth could be to use a mini-ldap-server on the ltsp server to serve passwd/group data using ldap protocol. There's a proof-of-concept implementation available at https://code.launchpad.net/~vmlintu/+junk/devel
+
+The test implementation uses nss as backend and generates the ldap on the fly when a request is made. It works with nss-ldap and nss-ldapd. nss-ldapd does some caching and nscd can be used with nss-ldap to speed the nss queries. This implementation does not need any new code for the clients, only the server. The real implementation would be more complex as ldap queries can be done in quite a few ways.
+
+Running a single mini-ldap-server on the ltsp server may be less fault tolerant than libnss-sshauth if it has separate processes for every user.
+
+=== Implementation ===
+
+Work begun.  Progress may be tracked at:
+
+https://code.edge.launchpad.net/~sbalneav/ltsp/libpam-sshauth
+
+until it becomes an upstream project in it's own right.
+
+==== UI Changes ====
+
+None.
+
+==== Code Changes ====
+
+* LDM will become a full fledged PAM application.
+
+==== Migration ====
+
+ None should be needed.
+
+=== Test/Demo Plan ===
+
+* See README in the package
+
+=== Unresolved issues ===
+
+* Is Scott smart enough to write this?
+* --(Will anyone care?)-- ''-Yup, lots and lots of circumstantial sysadmins, e.g. teachers ;-)''
+
+=== BoF agenda and discussion ===
+
+* Beer: Ale? Lager? Stout?
+
+----
+CategorySpec

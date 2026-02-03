@@ -1,0 +1,114 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+''Please check the status of this specification in Launchpad before editing it.  If it is Approved, contact the Assignee or another knowledgeable person before making changes.''
+
+* '''Launchpad Entry''': UbuntuSpec:autoconfigure-monitor-frequency
+* '''Packages affected''': 
+
+=== Summary ===
+
+Rip out most of the existing install-time xorg configuration code and rely exclusively on the built-in run-time xserver autodetection code by default.  The primary objective is to finish closing bug 3731.  It is expected that this will allow us to put to rest a variety of other resolution-related bugs.
+
+=== Release Note ===
+
+Ubuntu has dropped the remainder of its install-time xorg configuration infrastructure in favor of Xorg's built-in autodetection capabilities.
+
+=== Rationale ===
+
+<nowiki>[[https://bugs.launchpad.net/ubuntu/+bug/3731|Bug 3731]]</nowiki> is the second oldest Ubuntu bug, next only to Bug #1.  There are also dozens of other bugs directly related to or dependent on fixing this bug.
+
+For Gutsy, we've achieved a great deal of work to mitigate the effects of the bug, via BulletProofX, DisplayConfigGtk, and general upgrades of drivers, xorg, and xorg server.  We've also corrected a number of bugs in the underlying install-time detection code.  Indeed, we've succeeded at making our current resolution configuration architecture pretty much "just work".  Whereas in Feisty it was rare to boot a newly installed Ubuntu and get the right resolution, now it is extremely common.
+
+However, to truly fix the remaining bugs we need to do a major rework of the entire xorg configuration architecture.  This will bring us in line with how upstream wishes things to work, as well as drop the maintenance burden of a lot of Debian/Ubuntu specific code.
+
+=== Use Cases ===
+
+* Henrietta has a CRT system that supports multiple resolutions.  When using Gutsy, she found that X was configured with the highest available resolution, which was far too high to be readable.  Henrietta is happy to find with Hardy, that X now honors the "preferred mode" listed in her CRT's edid info, and gives the "best" resolution now.
+
+* Ingrid has used Ubuntu for years, and always upgrades rather than doing fresh installs.  Unfortunately, when she upgraded from Feisty to Gutsy, it brought along her old xorg.conf, which was littered with hardcoded info that today's xorg does not need, requiring her to manually fix it.  She's pleased to note that the Hardy upgrade includes logic to properly regenerate her antique xorg.conf, leaving it essentially empty, since almost everything is now automatically detected by X.
+
+* Jenny has a monitor that fails to provide valid edid data to xorg.  She has tried installing a variety of different Linux distros, but after install they would fail to boot.  She was pleased to find that with Ubuntu Gutsy there was a friendly Bulletproof-X mode to allow her to indicate the correct monitor by hand, but even this seemed like a workaround.  With Hardy, though, the edid reading issue appears to be a thing of the past.  She booted the Hardy Live CD, and everything "just worked".
+
+* Katrina frequently gives presentations about Linux at different locations and connects to a lot of different projectors.  While she loves Ubuntu, she hates how it hardly ever seems to work properly with projectors.  Under Feisty it was basically impossible, so she always just rebooted into Windows to give presentations, which was rather embarrassing.  Under Gutsy, she was pleased that it now worked with a lot of projectors right out of the box, but too often it did not, and this was quite frustrating.  But starting with Hardy, she notices that it almost always works - in fact now Ubuntu works in situations where even Windows fails.
+
+* Loreena uses a Ubuntu installation on a USB stick, that she carries and uses in multiple locations.  So each time she boots she pretty much has a unique new set of hardware.  Frequently in the past this required reconfiguring the X server by hand to cope with the new monitor, but starting with Gutsy she found this to be less and less necessary, and now with Hardy, she never needs to do any xorg.conf editing - usually it gets it 100% right, and the few times it didn't, she could just fix it using DisplayConfigGtk and carry on.
+
+=== Assumptions ===
+
+* The Xorg project is much more capable than us at maintaining monitor auto-configuration code
+
+=== Design ===
+
+At its core, this bug derives from several interrelated factors:
+
+ 1.  Monitors should provide '''EDID''' data we can use to determine frequencies.  However, often this info is missing, inaccurate, corrupted, or misinterpreted.
+ 2.  Some of the detection code has platform dependencies that may malfunction on some hardware, leading to #1
+ 3.  The xorg-7.2/debian/xserver-xorg.postinst.in script attempts to guess the frequencies when the above tools aren't working.  However, it makes poor guesses, often leading to the bug.  This script is also quite lengthy (over 2000 lines of bash), making it more of a challenge to maintain than it should.
+ 4.  xorg-server itself has internal code for detecting and using EDID information to properly detect monitors.  However, at POSTINST time, we do not have a mechanism for determining whether monitor detection should be left up to xorg later.  Thus the installer has often specified frequencies when it doesn't need to.  (This is less of an issue with Gutsy.)
+ 5.  There are a number of circumstances, such as hotplugging monitors, attaching projectors, etc. which by definition the POSTINST scripts won't be able to deal with.
+
+From these considerations, it seems that we may need to consider changing the monitor detection architecture.
+
+The current system is designed to attempt to catch every case at installation time, both the regular case and all corner-cases.  If the user changes things, they can re-run the script to reconfigure.  However, users complain that this is hard to do (and rightly so!)  DisplayConfigGtk gives a more user-friendly mechanism for doing this, but is not tied in with the debconf mechanisms, and thus may need to be re-run when the user installs new xorg packages, which may lead to a clumsy user experience.  Another problem - as outlined above - the current system does not catch all the corner cases as it should, and some cases like monitor hotplugging cannot be addressed at all.
+
+A proposed alternate solution would drop the need to catch every case at installation time, leaving as much as possible to the X server's auto-detection algorithms, and relying more heavily on DisplayConfigGtk and BulletProofX to address the corner cases.
+
+This means that by default dexconf and debconf will be changed to not use monitor values detected through xresprobe and the like, and instead will leave it to the xserver.  It is expected that in situations where debconf does have accurate values, the X server would likewise be able to detect it, and that in situations where debconf has inaccurate values and that X server also cannot deal with them, that we should allow these to fall through to the GUI X config tools, and not attempt to guess things at POSTINST time.
+
+=== Detect Bus ID ===
+
+Another aspect that the xorg-server postinst script gets wrong is guessing at the bus id.  This can turn up both as returning a completely erroneous one (e.g. 0:5:0 when the vga device is clearly 1:0:0), and as selecting the on-board device when the user has an add-in card and the monitor is connected to this.
+
+See for example, http://www.linux.com/feature/118668
+
+Typically, Bus ID only needs to be specified for really old hardware.  Thus, for most cases with modern hardware we can just leave Bus ID out of xorg.conf.
+
+=== Implementation ===
+
+==== Code Changes ====
+
+See HardyHardwareDetection for a detailed listing of architectural changes to scripts to make xorg hardware detection work more automatically.  This covers the bulk of actual code changes required for addressing typical cases.
+
+See MonitorsDatabaseOnline for a description of modifications to DisplayConfigGTK to enable better community sharing of custom monitor configuration data.  This implementation work will address most of the a-typical cases.
+
+In addition, the following bugs will need to be reviewed and/or fixed, to cover the few remaining situations that the above two things won't address:
+
+* <nowiki>[[https://bugs.launchpad.net/ubuntu/+source/xresprobe/+bug/94994|94994]]</nowiki> - While we intend to eliminate the need for xresprobe, we need to understand what is causing this 'edidfail' bug, as it will also affect xorg (which also relies on edid info).  It may be beyond fixing, but by understanding it, we can then at least generate a plan of attack for managing it.
+
+* <nowiki>[[https://bugs.launchpad.net/ubuntu/+source/xresprobe/+bug/68654|68654]]</nowiki> - Currently we default to using the maximum available resolution.  Instead, we need to switch to using the "Preferred Mode".  Likely, we can achieve this by simply not specifying the resolutions and allow xserver to automatically detect them.  But this will require ample testing.
+
+* <nowiki>[[https://bugs.launchpad.net/ubuntu/+source/xorg/+bug/49827|49827]]</nowiki> - Possibly this issue is now resolved due to the fix for 27667, or may be just a dupe of 94994 (above).  So we need some analysis here to identify if there is an issue independent of those two, and if so, solve it.
+
+* <nowiki>[[https://bugs.launchpad.net/ubuntu/+source/xorg/+bug/146828|146828]]</nowiki> and <nowiki>[[https://bugs.launchpad.net/ubuntu/+source/xorg/+bug/156550|156550]]</nowiki> - gdm uses wrong screen size.  Potentially this is just due to the Virtual keyword in xorg.conf.  This needs to be researched, and if it's the case, a workaround or solution developed.
+
+==== Migration ====
+
+For Gutsy, we did not forcibly regenerate xorg.conf in order to preserve user customizations.  For Hardy, though, since we're eliminating so much of the xorg.conf's contents, we'll need to make a more strident effort to either regenerate or replace the xorg.conf's.
+
+One approach would be to include regexp's in xserver-xorg.postinst.in to detect replaceable sections of xorg.conf.  This is probably the safer solution.
+
+Another approach would be to just regenerate the xorg.conf entirely.  We should do this only as a last resort.
+
+=== Test/Demo Plan ===
+
+It's important that we are able to test new features, and demonstrate them to users.  Use this section to describe a short plan that anybody can follow that demonstrates the feature is working.  This can then be used during CD testing, and to show off after release.
+
+This need not be added or completed until the specification is nearing beta.
+
+=== Outstanding Issues ===
+
+None known
+
+=== BoF agenda and discussion ===
+
+----
+CategorySpec

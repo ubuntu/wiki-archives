@@ -1,0 +1,133 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== Encrypted Home Folder ==
+This HowTo shows how to use encfs and the pam-encfs.so pam module to automatically mount/unmount an encrypted volume for each user on login. This differs from dmcrypt/luks setups in 2 major ways:
+# A separate partition is not needed. Encrypted shrinks and grows on the fly.
+# It's possible for attackers to see the number and size of your encrypted files, though they won't know the name or contents.
+
+This trade off makes it easy to coexist users with encrypted home folders with users with unecrypted home folders, though it might be somewhat less secure. In this howto, the username is "testuser". You will need to replace this with your own username.
+
+==== Install the necessary programs. You will need universe enabled. ====
+* $ sudo aptitude install libpam-encfs
+
+==== Configure System Wide Settings ====
+===== Setup Fuse =====
+
+Load fuse and add "fuse" to /etc/modules so it loads on startup
+* $ sudo modprobe fuse
+* $ echo "fuse" | sudo tee -a /etc/modules
+
+'''Note:''' ''Since Ubuntu 9.04 fuse is part of the kernel, you no longer have to load the module.''
+
+===== Configure PAM =====
+
+Insert the line 
+  auth    sufficient      pam_encfs.so
+Somewhere before: 
+  auth    requisite       pam_unix.so 
+and append "use_first_pass" to each line following pam_encfs.so.
+
+* $ sudo gedit /etc/pam.d/common-auth
+
+Here's my common-auth as an example:
+* auth    sufficient      pam_encfs.so
+
+* auth    requisite       pam_unix.so nullok_secure use_first_pass
+
+* auth    optional        pam_smbpass.so migrate use_first_pass
+
+===== Configure the encfs PAM module =====
+/ect/security/pam_encfs.conf is the configuration file for the pam_encfs.so we just added to common-auth. Change "allow_other" to "nonempty".
+* $ sudo gedit /etc/security/pam_encfs.conf
+
+===== Make a folder to store encrypted home folders =====
+* $ sudo mkdir /home/.enc
+
+==== Setup The Users (repeat this for each user you wish to apply this to). ====
+You either need to login as another user with sudo rights OR log out of Gnome/KDE and hit Ctrl+Alt+F1 to login! The former is recommended if your home folder is already full of files.
+
+Backup your old home folder and make the directory structure
+* $ sudo mv /home/testuser /home/testuser.bak
+* $ sudo mkdir /home/.enc/testuser
+* $ sudo chown testuser:testuser /home/testuser /home/.enc/testuser
+
+Add the user to the fuse group:
+* $ sudo useradd testuser fuse
+
+If you logged into another user account, switch to the account your setting up:
+* $ su testuser
+
+Create the encrypted folder and mount it:
+I recommend "Expert Mode" with AES, any encryption level, 64bit blocks, blockencoded filenames, and all the rest of the defaults. This provides good security with maximum compatibility and useability. Paranoid mode disables hardlinks and may cause additional trouble for some applications (mutt, pine...). Also, use a good password, such as a pass phrase longer than 14 characters.
+
+* $ encfs /home/.enc/testuser /home/testuser
+ 
+If you set a more secure password, you need to update your account password or this won't work:
+* $ passwd
+
+DO NOT FORGET YOUR PASSWORD. Seriously, there's no other way to decrypt the data. It might be a good idea to keep an unencrypted backup in a safe location.
+
+Copy your files to the encrypted filesystem (Read Tips):
+We use two move commands. The latter gets your hidden files and folder, which contain all of your program settings. Alternatively, you could use 2 cp commands to copy.
+* $ cp -a /home/testuser.bak /home/testuser
+* $ mv /home/testuser/testuser.bak/* /home/testuser
+* $ mv /home/testuser/testuser.bak/.[a-zA-Z0-9]* /home/testuser
+* $ rmdir /home/testuser/testuser.bak
+
+Thats it! Log out and Ctrl+Alt+F7 back to your graphical environment and log in!
+
+=== How it all works ===
+Encfs creates an encrypted file/folder inside /home/.encfs/testuser for every file/folder you create inside /home/testuser. When the encrypted folder is "mounted" the files are decrypted on the fly and accessible at the mountpoint (/home/testuser). 
+
+With pam_encfs configured as it is, everytime a user tries to log in, it will attempt to execute "encfs /home/.enc/$USERNAME /home/$USERNAME" using your account password. For users you haven't setup encryption for, this will simply fail and everything is the same as normal. For users you setup, the empty /home/$USERNAME folder will suddenly provide access to their decrypted files and folders! Yay!
+
+The pam.d/common-auth setting means pam_encfs.so will try to run before login completes. The use_first_pass lines mean this modules will attempt to use the first password entered without prompting for a new password even if pam_encfs.so fails. This is necessary so users without encrypted folders aren't prompted twice for their passwords.
+
+=== Tips ===
+
+===== Encrypt your swap partition. =====
+Without an encrypted swap partition, its possible for unencrypted file parts, passwords, or even the encfs key to be written to your swap partition. If swap is not encrypted, this can all be read by an attacker. Downside of this is that hibernate will no longer function. 
+
+===== Change your password =====
+First, change your account password like normal. Then change the filesystem password. Open a terminal and do the following. Remember to change "testuser" with your username.
+
+Change your account login password:
+* $ passwd
+   (current) UNIX password: 
+
+Then you can change the encfs password:
+* $ encfsctl passwd /home/.enc/testuser
+* Enter current Encfs password
+* EncFS Password:
+
+You should reboot to fully test as the folder often doesn't unmount at logout if you're not on a text login.
+
+===== Using Nautilus for copying the files =====
+As stated below in the security notes, the you and the root user are the only accounts that can access your files while they're mounted. We can take advantage of this to make copying the unencrypted files to the encrypted space easier. In my case, I found the 'mv' command copies all files first and *then* deletes them. Unfortunately, I had a 30GB home folder and 10GB space, so mv kept running out of space and failing. With the GUI it's a lot easier to be selective about what your moving and to where.
+
+ 1. If necessary, create another account on the system and grant that user sudo privileges (add them to the admin group).
+ 2. Logout and log into this new account.
+ 3. Press Alt+F2 to access the Run Aplication dialog.
+ 4. Type in 'gksu nautilus' and enter the password for this new account when prompted.
+ 5. Open a terminal and issue 'su testuser'. This will log you into your main account within the terminal window and mount your home folder. MINIMIZE, do not close, this window. If you close it, pam will unmount your home folder.
+ 6. In the nautilus window, browse to \home
+ 7. You can right click on testuser.bak and choose open in new window. Now you have 2 windows running with root privileges. You can move/copy files from the old home folder to the new one. Press Ctrl+H to show hidden files so you can get all of your aplications settings as well.
+ 8. When everything's copied/moved, you can log into your normal account and delete the temporary user if you had to create one.
+
+===== Bug Workaround =====
+In the /etc/security/pam_encfs.conf file there is a variable "fusedefault" which sets the default fuse options. This is set to allow_root,nonempty by default. However, in the example config they set allow_other as a fuse option. One would expect this to override the default option. pam_encfs, however, simply joins the two together. This causes problems since allow_root and allow_other can't be used together. Either remove allow_root from your default and add it or allow_other (or neither) to each mount you want pam to make, or set something innocuous like nonempty as we did in the tutorial above. (Note: You need SOMETHING set as a fuse option or pam_encfs refuses to even attempt to mount. 
+
+==== Security Notes ====
+Normally fuse only allows access to the user who mounted an encrypted share; this is irrespective of the filesystem permissions. Because we used allow_root, the root user will be able to access your decrypted mount point so long as your files are mounted. Unfortunately, this is necessary for the pam module as the mounting is done by the root user. 
+
+Sometimes pam fails to unmount your folder (esp if use graphical login), leaving it open even though your logged out. As stated, root will have access, but other users won't be able to access the folder (unless you set allow_other as a parameter). So as long as you're the only user with sudo access, you're fine. Otherwise you should reboot after logout to be sure, or log in as the root user and check with the mount command. Truthfully, if your this concerned, you should probably be doing something like dmcrypt instead.
+
+As stated in the TIPS, without encrypting the swap partition, it is possible for someone to find parts of--or even entire--files from your home folder in the swap partition.

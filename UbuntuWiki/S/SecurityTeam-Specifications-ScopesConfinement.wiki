@@ -1,0 +1,253 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== Introduction ==
+
+For 13.10, scopes will not be available in the app store and <nowiki>[[https://wiki.ubuntu.com/SecurityTeam/Specifications/ApplicationConfinement|application confinement]]</nowiki> will prevent apps from abusing scopes and the scopes architecture. For 14.04 we'd like to have app developers able to deliver scopes via the app store. For us to be able to have scopes deliverable via click packages, we'll need to carefully design the system to support confining scopes.
+
+Scopes create a number of interesting challenges when considering application confinement. There are two overarching issues wrt to scopes.
+
+=== Issue #1: confinement ===
+** apps - ie, apps can't attack the system (ie, scopes, the dash, etc to ship off data, enumerate things, etc)
+** scopes - ie, scopes can't attack the system (ie, the dash, other scopes, user data, etc)
+
+=== Issue #2: scopes privacy ===
+
+This is about preventing any user data from leaving the device either by (malicious scopes) shipping off concrete data or by just querying remote sources. The latter is of concern because the query string already exposes private information.
+
+== Understanding different scopes ==
+* Running on Server (aka, 'remote scope')
+** Smart scopes, by definition, have no privacy issues. Anything that runs on the smart scopes server (SSS) can only deal in public information because there is no way to get per-user authentication data from the device to the SSS. Any credentials that a scope running on the SSS requires would have to be hard-coded into that scope. Smart scopes are usually queried by the master scope but any scope may query the SSS.
+* Running on Device (aka, 'local scope')
+** Local scope querying remote data, e.g. Google docs: no security concerns so long as the scope does not also have access content stored on the device. If local content permission was allowed, a malicious scope could send files on the device to any server. A scope querying remote data may query one or more data sources
+** Local scope querying multiple remote data sources via scope aggregation. Unlike when a scope simply queries multiple data sources itself, when a scope aggregates multiple remote scope queries, there is a security concern because the aggregating scope may obtain private information from other scopes (eg, consider when a legitimate Google docs leaf (non-aggregating) remote scope is configured for authentication at the remote site via the legitimate scope. A malicious aggregating scope could trigger the query for the legitimate Google docs scope and obtain the results, bypassing the intended access restrications of the legitimate scope)
+** Local scope querying content stored on the device, e.g. retrieving local music: no security concerns so long as the scope does not also have direct or indirect access to the internet to send the data. Indirect access means, a scope must not be able to push any data to an app (creating a file in the app container, accessing shared memory etc).
+** Local scope querying local and remote data: this can happen exclusely within the scope or via scope aggregation and because the scope (aggregating or not) has access to both data stored on the device and the network, this poses a security concern because local content could be uploaded anywhere (target server is never trustworthy). However, there are legitimate use cases for this functionality, such as showing the user's music collection where music is stored both locally and in the cloud (eg, U1db). Because we cannot sufficiently restrict/verify remote network endpoints, these types of scopes must come from trusted sources and/or be manually reviewed.
+
+==== Questions ====
+
+'''Q:''' Because scopes typically only query for information, is it possible to deny write access entirely?
+
+'''A:''' In theory read-only access of the file system is sufficient, however disallowing writes entirely may not always be efficient or performant (e.g. when searching local files/music, will want to create indexed caches because it is very inefficient to do index every time the scope is run).
+ <michi>I believe write access is OK as long as we can restrict that to a specific subtree in the file system, exclusive to the scope.</michi>
+ <jdstrand>!AppArmor confinement will provide rw access to a scope-specific path, likely under ~/.local/share somewhere</jdstrand>
+
+'''Q:''' If a scope wants to aggregate data from both local and remote sources, couldn't the (security) framework only allow to query the smart scope server (SSS) as the remote source? The smart scope server would then delegate the query request to the respective scopes running on server.
+
+'''A:''' That is not sufficient because a malicious local scope can include/hide/add local information (eg, from the filesystem or helper services) in the query string itself, which is passed unchecked to the scope running on the server.
+
+ <michi>I think the only possible answer here is that, if a scope wants access to both data stored on the device (generally, not restricted to its little corner) and access to the network, the scope must be written by Canonical or, possibly, an OEM.</michi>
+ <jdstrand>Agreed-- scopes may access data (that is not their own) stored on the device or the internet, but not both</jdstrand>
+
+'''Q:'''
+'''A:'''
+
+== Confinement Implementation ==
+Based on various discussions the scopes and security teams have come up with the following approach that mixes technology/design, AppArmor integration and AppStore processes/policy.
+
+=== Considerations ===
+* All scopes must be allowed to talk to the smart scopes server (SSS)
+* All local scopes have the ability to use the network and access the content stored on the device via helpers services. Local scopes that have access to both the network and local content pose a privacy concern and opportunity for data theft. For this specification, scopes that access the network may be referred to as 'scopes with networking permission' and scopes that access stored on the device may be referred to as 'scopes with content permission'.
+* Leaf scopes are data sources that are aggregated by other scopes. By definition, leaf scopes do not request data from other scopes
+* Aggregating scopes may request data from arbitrary other scopes
+* The scopes design as implemented in 13.10+ allows for individually turning off scopes as well as turning off internet searches globally for scopes. When scopes are turned off, they are never called by the master scope and therefore pose no risk and address privacy concerns
+
+=== AppStore Policy and Ubuntu Trust model for scopes ===
+* '''''Aggregating scopes with content permission''''' are considered '''''trusted''''', may run without confinement and may access the network or content stored on the device. Aggregating scopes with content permission shall be written either by Canonical or a trusted 3rd party (eg OEM). '''''Aggregating scopes with content permission shall not be delivered by arbitrary 3rd party developers in the !AppStore'''''. Canonical and trusted 3rd parties may deliver aggregating scopes with content permission via the !AppStore.
+* '''''Aggregating scopes with networking permission''''' are considered '''''trusted''''', may run without confinement and may access the network or content stored on the device. Aggregating scopes with networking permission shall be written either by Canonical or a trusted 3rd party (eg OEM). '''''Aggregating scopes with networking permission shall not be delivered by arbitrary 3rd party developers in the !AppStore'''''. Canonical and trusted 3rd parties may deliver aggregating scopes with networking permission via the !AppStore.
+* '''''Leaf scopes with content permission''''' are considered '''''untrusted''''', may access content stored on the device via helper services, shall not contact other scopes, shall run under confinement, and shall not access the network. '''''Leaf scopes with content permission may be delivered by 3rd party developers via the !AppStore (jdstrand> once interactions with URL dispatcher are properly handled, see below)'''''
+* '''''Leaf scopes with networking permission''''' are considered '''''untrusted''''', shall not access content stored on the device beyond their application-specific directories, shall not contact other scopes, shall run under confinement, and may access the network. '''''Leaf scopes with networking permission may delivered by 3rd party developers via the !AppStore'''''
+
+=== Design ===
+* All scopes provide endpoints in known locations. Eg (actual path subject to change-- the point is, the path is scope-specific such that !AppArmor policy can enforce access):
+** Public endpoints:
+** /run/user/<effective-uid>/zmq/Registry-*
+** /run/user/<effective-uid>/zmq/com.ubuntu.username.leaf-fs-scope-foo-r
+** /run/user/<effective-uid>/zmq/com.ubuntu.username.leaf-net-scope-bar-r
+** /run/user/<effective-uid>/zmq/unconfined-aggregating-canonical-net-scope-r
+** /run/user/<effective-uid>/zmq/unconfined-aggregating-partner-net-scope-r
+** /run/user/<effective-uid>/zmq/unconfined-aggregating-canonical-scope-r
+** /run/user/<effective-uid>/zmq/unconfined-aggregating-partner-scope-r
+** Private endpoints
+** /run/user/<effective-uid>/zmq/priv/com.ubuntu.username.leaf-fs-scope-foo
+** /run/user/<effective-uid>/zmq/priv/com.ubuntu.username.leaf-fs-scope-foo-*
+ In this manner, the master scope can simply look in the zmq/priv directory
+* Implement scopes-proxy to run on the system to communicate with SSS. Scopes connect to the scopes-proxy via a UNIX domain socket for their SSS communication. scopes-proxy can be hardened and confined with !AppArmor system profile. It can filter, perform input validation, and control network destination. This also is more efficient because fewer remote connections to the SSS are required
+* '''NOT AVAILABLE''': Leaf scopes with content permission (untrusted)
+** use the `ubuntu-scope-local-content` !AppArmor template:
+** access to certain non-sensitive files (eg, large parts of the system, 'owner @{HOME}/[^.]*' (essentially), uses private-files-strict abstraction, access to (non-scope) data in ~/.local/share, etc)
+** explicitly disallows networking
+** explicitly disallows aggregation
+** shall allow access to app data from the same click
+** communicates to SSS via a scopes-proxy using a UNIX domain socket allowed by !AppArmor policy
+** shall not follow recommendations from the SSS
+** example click manifest (name in click manifest must match what is registered with the scope-registry and run via the scopes runner):<pre>
+{
+  "description": "Local content scope description",
+  "framework": "ubuntu-sdk-14.10-dev1",
+  "hooks": {
+    "myscope": {
+      "scope": "fs-scope",
+      "apparmor": "scope-security.json"
+    }
+  }
+  "maintainer": "Some Guy <some.guy@ubuntu.com>",
+  "name": "com.ubuntu.developer.username.fs-scope",
+  "title": "Some fs scope",
+  "version": "0.1"
+}
+</pre>
+** click security manifest (scope-security.json):<pre>
+{
+    "template": "ubuntu-scope-local-content",
+    "policy_groups": [],
+    "policy_version": 1.2
+}
+</pre>
+** resulting AppArmor policy (example):<pre>
+APP_PKGNAME="com.ubuntu.developer.username.fs-scope"
+APP_VERSION="1.0.0"
+profile "com.ubuntu.developer.username.fs-scope_myscope_0.1" {
+## include <abstractions/base>
+## include <abstractions/private-files-strict>
+  audit deny network,
+  ...
+## Click install directory
+  @{CLICK_DIR}/@{APP_PKGNAME}/                   r,
+  @{CLICK_DIR}/@{APP_PKGNAME}/@{APP_VERSION}/    r,
+  @{CLICK_DIR}/@{APP_PKGNAME}/@{APP_VERSION}/**  mrklix,
+
+## Needed by .so scopes
+  /usr/lib/@{multiarch}/unity-scopes/scoperunner ixr,
+
+## leaf scope with content permissions
+  owner @{HOME}/.local/share/unity-scopes/leaf-fs/@{APP_PKGNAME}/   r,
+  owner @{HOME}/.local/share/unity-scopes/leaf-fs/@{APP_PKGNAME}/** mrwklix,
+
+## Allow scopes to share data with the app shipped in the same click
+  owner @{HOME}/.local/share/@{APP_PKGNAME}/   rw,
+  owner @{HOME}/.local/share/@{APP_PKGNAME}/** mrwkl,
+
+## Public endpoints
+  owner /run/user/[0-9]*/zmq/Registry-s                   rw,
+  owner /run/user/[0-9]*/zmq/Registry-p                    r,
+  owner /run/user/[0-9]*/zmq/@{APP_PKGNAME}-r             rw,
+  owner /run/user/[0-9]*/zmq/c-*-r                        rw,
+
+## Private endpoints
+  owner /run/user/[0-9]*/zmq/priv/@{APP_PKGNAME}          rw,
+  owner /run/user/[0-9]*/zmq/priv/@{APP_PKGNAME}-{c,q}    rw,
+
+## Give broad filesystem access...
+  /                         r,
+  /**/                      r,
+  /{media,mnt,opt,srv}/**   r, # removable media
+  ...
+}
+</pre>
+
+ Currently, leaf scopes with content permission are not available to click scopes due to a problem with information leakage via the URL dispatcher. If/when this issue is resolved, this scope type may be allowed via the click app store.
+* Leaf scopes with networking permission (untrusted)
+** use the `ubuntu-scope-network` !AppArmor template:
+** no access to files outside of scope-specific directories
+** allows networking
+** optionally allows access to accounts via trust-helper (ie, cached prompting)
+** may only specify the 'networking' and 'accounts' policy groups (specifically, "location" may not be specified (see below). This is enforced by the click-reviewers-tools.
+** explicitly disallows aggregation
+** shall allow access to app data from the same click
+** may communicate to SSS via a scopes-proxy using a UNIX domain socket allowed by !AppArmor policy (this cannot be enforced but well-behaved scopes may want to do this)
+** example click manifest (name in click manifest must match what is registered with the scope-registry and run via the scopes runner):<pre>
+{
+  "description": "Net scope description",
+  "framework": "ubuntu-sdk-14.10-dev1",
+  "hooks": {
+    "myscope": {
+      "scope": "net-scope",
+      "apparmor": "scope-security.json"
+    }
+  }
+  "maintainer": "Some Guy <some.guy@ubuntu.com>",
+  "name": "com.ubuntu.developer.username.net-scope",
+  "title": "Some network scope",
+  "version": "0.1"
+}
+</pre>
+** example click security manifest (scope-security.json, note the networking policy group is not required for thi scope, but it is harmless to include):<pre>
+{
+    "template": "ubuntu-scope-network",
+    "policy_groups": [],
+    "policy_version": 1.2
+}
+</pre>
+** resulting AppArmor policy (example):<pre>
+APP_PKGNAME="com.ubuntu.developer.username.net-scope"
+APP_VERSION="1.0.0"
+profile "com.ubuntu.developer.username.net-scope_myscope_0.1" {
+## include <abstractions/base>
+## include <abstractions/private-files-strict>
+## include <abstractions/nameservice>
+## include <abstractions/openssl>
+  ...
+## Click install directory
+  @{CLICK_DIR}/@{APP_PKGNAME}/                   r,
+  @{CLICK_DIR}/@{APP_PKGNAME}/@{APP_VERSION}/    r,
+  @{CLICK_DIR}/@{APP_PKGNAME}/@{APP_VERSION}/**  mrklix,
+
+## Needed by .so scopes
+  /usr/lib/@{multiarch}/unity-scopes/scoperunner ixr,
+
+## leaf scope with network permissions
+  owner @{HOME}/.local/share/unity-scopes/leaf-net/@{APP_PKGNAME}/   r,
+  owner @{HOME}/.local/share/unity-scopes/leaf-net/@{APP_PKGNAME}/** mrwklix,
+
+## Allow scopes to share data with the app shipped in the same click
+  owner @{HOME}/.local/share/@{APP_PKGNAME}/   rw,
+  owner @{HOME}/.local/share/@{APP_PKGNAME}/** mrwkl,
+
+## Public endpoints
+  owner /run/user/[0-9]*/zmq/Registry-s                   rw,
+  owner /run/user/[0-9]*/zmq/Registry-p                    r,
+  owner /run/user/[0-9]*/zmq/@{APP_PKGNAME}-r             rw,
+  owner /run/user/[0-9]*/zmq/c-*-r                        rw,
+
+## Private endpoints
+  owner /run/user/[0-9]*/zmq/priv/@{APP_PKGNAME}          rw,
+  owner /run/user/[0-9]*/zmq/priv/@{APP_PKGNAME}-{c,q}    rw,
+  ...
+}
+</pre>
+* Leaf scopes with content and networking permission (trusted)
+** may run without an !AppArmor profile or use the `unconfined` !AppArmor template if delivered as deb
+** run unconfined using the `unconfined` !AppArmor template if delivered as click
+** may follow recommendations from the SSS
+* Aggregating scopes with networking permission (trusted)
+** may run without an !AppArmor profile or use the `unconfined` !AppArmor template if delivered as deb
+** run unconfined using the `unconfined` !AppArmor template if delivered as click
+** may follow recommendations from the SSS
+* Aggregating scopes with content permission (trusted)
+** may run without an !AppArmor profile or use the `unconfined` !AppArmor template if delivered as deb
+** run unconfined using the `unconfined` !AppArmor template if delivered as click
+** may follow recommendations from the SSS
+* Aggregating scopes with content and networking permission (trusted)
+** may run without an !AppArmor profile or use the `unconfined` !AppArmor template if delivered as deb
+** run unconfined using the `unconfined` !AppArmor template if delivered as click
+** may follow recommendations from the SSS
+* Per the scopes team, the first iteration will restrict local scopes to using helpers and block wide access to the user's HOME directory.
+
+=== Open design questions ===
+* Unlike apps, scopes' lifecycle is not visible to users so direct access to the location service is not permitted. However, location data may be useful to scopes, so location information is passed to the scope as query parameter, but users will be able to control if location information is sent to scopes at all, to selected scopes or potentially in the future with configurable (ie, obfuscated) location information ("Scopes and location services" email from 2014/06/18)
+* Leaf scopes with content permission shall not follow recommendations from the SSS. How is this enforced, via the proxy?
+* Leaf scopes with content permission currently don't allow access to hidden directories (eg, ~/.local/share), but a scope may be bundled with an app. So long as we don't give access to @{HOME}/.local/share/unity-scopes/**, we should be able to do something like '@{HOME}/.local/share/@{PKGDOMAIN}.*/** r,' (PKGDOMAIN is not currently defined and would have limitations, so wouldn't want to grant 'w')
+* Leaf scopes with content permission are disabled since they may leak private data via URL embedding via the URL dispatcher. Because of this limitation, developers may:
+** use the `ubuntu-scope-network` template and modify their scope to work withinit
+** use the `unconfined` template
+** use the `ubuntu-scope-network` template and specify an additional `read_path` or `write_path` in the security manifest for the files that the scope needs
+  '''IMPORTANT''': specifying the `unconfined` template or use of `read_path/write_path` means the scope must come from a trusted source and/or require a manual review
+* Because scopes share application data with apps shipped in the same click, reviewers must be careful if the click package contains any permissions that triggers a manual review (permissions that pass the automatic checks are considered safe). Eg, if the app has wide filesystem permissions but no networking and the scope has networking but no filesystem permissions, then the app can make data from the system available to the scope and so it could send it out over the network.

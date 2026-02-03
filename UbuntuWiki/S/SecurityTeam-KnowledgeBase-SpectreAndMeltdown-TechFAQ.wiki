@@ -1,0 +1,199 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== Meltdown ==
+
+=== Can you break out of a VM into other VMs, or into the hypervisor with Meltdown? ===
+
+No, due to the fact that memory is (and has always been) isolated when running in a VM context.
+
+Note this doesn't hold true for paravirtualized (PV) guests, but these are relatively unused and being phased out.
+
+Unlike Meltdown, Spectre ''can'' break out of a virtual machine.
+
+=== Can you break into a VM from a process on the hypervisor with Meltdown? ===
+
+Yes, a malicious userspace application running on a hypervisor can read memory in any VM hosted on it.
+
+=== What mitigations are available for Meltdown? ===
+
+There is only one mitigation necessary and implemented for Meltdown, KPTI (Kernel Page-Table Isolation). KPTI has now been rolled out to all supported Ubuntu releases via security updates.
+
+=== What is PCID? ===
+
+PCID (Process-Context Identifier) is a CPU feature which allows tagging of TLB entries so that page table switches don't invalidate the whole cache. This reduces the performance impact of KPTI. Performance is further restored almost to previous states when PCID is used in combination with a more recent CPU feature, INVPCID. PCID and INVPCID were added in Intel's Westmere (2010) and Haswell (2013) CPU microarchitectures respectively.
+
+While PCID support was only included in the upstream 4.14 kernel, it has been backported along with the KPTI patchset as part of the kernel updates in the Meltdown USNs issued on Jan 9.
+
+Virtual machines can't use these optimisations unless the hypervisor exposes the CPU's PCID and INVPCID features. If the VM is running with an updated kernel, KPTI will still be active and the VMs will be secure, but they will experience seriously degraded performance until the hypervisor is updated to expose them.
+
+=== Is there KPTI support for 32-bit x86, a.k.a. i386? ===
+
+Not currently. There is <nowiki>[[http://lkml.iu.edu/hypermail/linux/kernel/1801.2/00657.html|a patchset posted upstream by SUSE]]</nowiki> that may serve as the basis for this support in the future, but for now there is no way to mitigate Meltdown on 32-bit x86 kernels.
+ 
+For now the recommended workaround is to <nowiki>[[https://askubuntu.com/questions/543658/install-64-bit-kernel-in-32-bit-ubuntu|install a 64-bit kernel]]</nowiki> with KPTI enabled; this is possible while still running the unmodified 32-bit userspace installation. However, even with KPTI support, a 32-bit x86 kernel cannot use PCID or INVPCID, so the performance impact will be severe. 
+
+=== In virtualized environments, does updating the hypervisor protect guests? ===
+
+No, guests must upgrade to a kernel with KPTI in order to protect themselves from their own userspace processes. 
+
+Vulnerable hypervisors can be used to attack all system memory, including memory owned by VMs. Vulnerable VMs can leak memory between processes within that VM, including between containers. For full protection, both the hypervisor and guest kernels need to be upgraded.
+
+== Spectre ==
+
+=== Can Spectre be exploited through a web browser ===
+
+Yes, it can. Javascript is a known attack vector, and browser sandboxing is insufficient to protect from it. This means that browsing the web with a vulnerable browser can open up an end-user to attack.
+
+While no videos have been published, there has been <nowiki>[[https://react-etc.net/entry/exploiting-speculative-execution-meltdown-spectre-via-javascript|PoC code published]]</nowiki> that demonstrates the vulnerabilities, and <nowiki>[[https://xlab.tencent.com/special/spectre/spectre_check.html|Tencent have released an online checker]]</nowiki> that uses a similar approach.
+
+Every major browser vendor had advisories linked in the <nowiki>[[https://meltdownattack.com/|vulnerability disclosure site]]</nowiki> and in the context of Ubuntu, Firefox and Chromium have been updated.
+
+=== Can VMs read memory from the hypervisor, or other VMs running on the same hypervisor with Spectre? ===
+
+Yes, these exploits are possible with Spectre. As we noted above, hypervisor memory is normally unavailable in VM context, but Spectre works by tricking the CPU  executing in hypervisor mode into leaking memory through caches into the VM.
+
+So Spectre indeed allows a VM to read memory which only the hypervisor should have access to, and since the hypervisor kernel has all system memory accessible, attacking the hypervisor kernel effectively provides access to all system memory.
+
+=== How do the Spectre mitigations work? ===
+
+Spectre mitigations are a complex topic due to the fact that there are 2 variants (named here SV1 and SV2), 4 different underlying mechanisms being used to mitigate them, and permutations in terms of support across hardware, hypervisor and operating system.
+
+SV1 is mitigated only by patching code sequences found to be vulnerable; static analysis is the mechanism currently being used to find these. This means that many userspace attacks are likely to remain undiscovered.
+
+There are 4 different underlying techniques SV2 mitigations utilize:
+
+* Indirect Branch Restricted Speculation (IBRS)
+* Indirect Branch Predictor Barrier (IBPB)
+* Single Thread Indirect Branch Predictor (STIBP)
+* Retpoline
+
+Of those, the first 3 are implemented in hardware and require microcode updates to be accessible. They also need to be implemented on both the hypervisor and the guest levels, and the hypervisor needs to expose the features to the guests.
+
+== Retpoline ==
+=== What is retpoline? ===
+
+Retpoline is a software workaround that mitigates against SV2. This workaround does not require microcode in order to be active; however, it requires that code be recompiled with a compiler enabled with this feature. Recompiling the kernel with this feature is simple, but updating all of userspace is a significant effort, without which protection from speculative userspace attacks needs to rely on the slower hardware-based mitigations.
+
+=== Does retpoline work on AMD, ARM, and other architectures? ===
+
+Retpoline is effective on x86 CPUs from Intel and AMD. It's not currently supported on processors from other vendors or of other architectures.
+
+=== If I run on a hypervisor with retpoline enabled, is my VM protected? ===
+
+No. Retpoline immunises software that is compiled with it against attacks using Spectre variant 2, but non-retpolined software running on the same system is still vulnerable. A retpolined hypervisor cannot be attacked, but in most cases (depending on how the hypervisor is configured) direct attacks between VMs and from VM processes against VM kernels are still possible. Some clouds prevent attacks between VMs, but it's unlikely that any prevent attacks between processes or against the kernel within a VM.
+
+=== If I'm using retpoline, do I still need the microcode features and corresponding firmware or hypervisor support? ===
+
+Yes, for now. A kernel (and hypervisor, if in a VM) using retpoline is sufficient to defend against the existing public Spectre variant 2 attacks, but they leave any un-retpolined userspace code vulnerable. Direct attacks that bypass the kernel are inevitable, so until every piece of code on a system is rebuilt with retpoline the kernel must use microcode-based mitigations to protect userspace.
+
+=== If I'm not using retpoline, do I need to have all microcode features enabled? ===
+
+Yes. Updated firmware/microcode (and hypverisor, if in a VM) are required to mitigate Spectre variant 2 on amd64, ppc64el and s390x platforms.
+
+=== What userspace applications are being updated? ===
+
+Due to the nature of Spectre, many userspace applications are likely affected. However, we understand that most applications have a reduced attack surface, and have focused our attentions on browsers which are the most important attack vectors and where key exploits were showcased.
+
+As mentioned earlier, Firefox has been updated, now to 58 but originally to 57 in USN 3516: https://usn.ubuntu.com/usn/usn-3516-1/ -- the corresponding advisory from Mozilla is at https://www.mozilla.org/en-US/security/advisories/mfsa2018-01/
+
+Chromium is a Universe package, and as such does not receive USNs, but has been updated to version 63, which disabled SharedArrayBuffer support. We are currently awaiting the <nowiki>[[https://www.chromium.org/Home/chromium-security/ssca|upstream release of version 64]]</nowiki>, which will contain broader Spectre mitigations.
+
+== Active Mitigations ==
+
+The kernel provides an interface to check the current status of known mitigations for CPU bugs via sysfs. You can check that like:
+
+<pre>
+$ head -n -0 /sys/devices/system/cpu/vulnerabilities/*
+=== > /sys/devices/system/cpu/vulnerabilities/l1tf < ===
+Mitigation: PTE Inversion; VMX: conditional cache flushes, SMT disabled
+
+=== > /sys/devices/system/cpu/vulnerabilities/mds < ===
+Mitigation: Clear CPU buffers; SMT disabled
+
+=== > /sys/devices/system/cpu/vulnerabilities/meltdown < ===
+Mitigation: PTI
+
+=== > /sys/devices/system/cpu/vulnerabilities/spec_store_bypass < ===
+Mitigation: Speculative Store Bypass disabled via prctl and seccomp
+
+=== > /sys/devices/system/cpu/vulnerabilities/spectre_v1 < ===
+Mitigation: __user pointer sanitization
+
+=== > /sys/devices/system/cpu/vulnerabilities/spectre_v2 < ===
+Mitigation: Full generic retpoline, IBPB: conditional, IBRS_FW, RSB filling
+
+</pre>
+
+== Configuration as a Hypervisor ==
+
+There are a multitude of CPU features available at the moment that are related to spectre and meltdown. Their availability depends on the architecture, manufacturer and microcode/firmware levels.
+
+There are a few extra considerations to be done as a hypervisor:
+
+One needs to consider the level of control about the code running in the guests to make decisions how many mitigations to apply on the host or pass through to guests which makes this a case by case decision.
+
+* Some features might come in different generations like the older `virt-ssbd` and the newer and improved `amd-ssbd`. Yet as a hypervisor one doesn't always know what the guest can exploit, so better pass both.
+* On one hand some of them like `ssbd` as an example are available but <nowiki>[[https://wiki.ubuntu.com/SecurityTeam/KnowledgeBase/Variant4|usually not used]]</nowiki>. But while that is true for Ubuntu other guests might want (or even need) to handle that differently. Therefore as a hypervisor it is usually recommended to better pass more than less of those features (security point of view).
+* On the other hand if you have mixed hardware in your server farm and need to consider migrations you might want to find a common denominator and only pass those features to the guest (security vs manageability trade-off)
+* There are features which are not security features per se, but help to lessen the performance impact of a mitigation. An example of such would be `pcid`. For quite some time this feature was considered unimportant, so it is missing in the predefined models of Westmere, SandyBridge, and IvyBridge.
+* Please note that some features can not be supported by all CPUs, for example `pcid` available on some, but not all Westmere CPUs. The same applies to different microcode levels.
+
+With all that in mind - and considering that the list of features (and related vulnerabilities) seems to keep growing - it is worth to take a regular look at the recent:
+
+* <nowiki>[[https://qemu.weilnetz.de/doc/qemu-doc.html#important_005fcpu_005ffeatures_005fintel_005fx86|QEMU documentation]]</nowiki>
+* <nowiki>[[https://wiki.ubuntu.com/SecurityTeam/KnowledgeBase|Security Knowledge Base]]</nowiki>
+* <nowiki>[[https://www.kernel.org/doc/html/latest/admin-guide/hw-vuln/|Kernel documentation on hardware vulnerabilities]]</nowiki>
+
+Consider all that and map it to your hosting scenario to come up with a list of cpu features that you want/need to enable. Then look below how to do so with QEMU/KVM or Libvirt.
+
+'''IMPORTANT:''' Even if you have a configuration - for example using host-passthrough - that does not need a configuration change, still guests needs to be fully shut down and restarted to pick up the new feature flags.
+
+==== QEMU/KVM ====
+
+From QEMUs point of view the CPU feature are just feature bits to pass to the guest. Initially CPU models with suffixes were added like `-IBPB` for AMD and `-IBRS` for intel. But that only covered the core features needed for meltdown. With the growing amount of related features and flags that was no more done. For example `ssbd` is not part of it nor are more recent flaws like `md-clear` for <nowiki>[[https://wiki.ubuntu.com/SecurityTeam/KnowledgeBase/MDS|MDS]]</nowiki>.
+
+Due to that you most likely need to modify the definition of your virtual CPU that is presented to your guest. The following illustrates how to do so at the example of the `virt-ssbd` feature. But all others would work the same way.
+
+You can check if the host system has the feature used to mitigate an issue with: Note: This is just about having the feature. If you are interested in the current status of mitigations see the section ''Active Mitigations'' above.
+
+<pre>
+$ grep 'virt-ssbd' /proc/cpuinfo
+  flags           : ... virt-ssbd
+</pre>
+
+If the above is true then the `virt-ssbd` feature will automatically be passed to the guest when using the CPU model `host`. For all other CPU models the feature needs to be added explicitly. For example if before you had used the CPU model ''EPYC'' the respective part of the command line would then have look like:
+
+<pre>
+    -cpu EPYC,+virt-ssbd
+</pre>
+
+==== Libvirt ====
+
+As with QEMU above the following illustrates how to enable a CPU feature at the example of the `virt-ssbd` feature. But again all others would work the same way.
+
+You can check your stack of Firmware, Kernel, QEMU and Libvirt is ready to expose the `virt-ssbd` flag to guests by checking the capabilities.
+
+<pre>
+$ virsh domcapabilities kvm | grep -- 'virt-ssbd'
+    <feature policy='require' name='virt-ssbd'/>
+</pre>
+
+If the above is true then the `virt-ssbd` feature will automatically be passed to the guest in the CPU modes `host-passthrough` and `host-model`.
+
+In all other cases the definition of the CPU that is presented to the guest needs to be modified.
+You can do so in the <nowiki>[[https://libvirt.org/formatdomain.html#elementsCPU|guests CPU element]]</nowiki>.
+While the rest of the CPU model specification depends on your case, adding the `virt-ssbd` feature is the same and will look like
+
+<pre>
+<cpu ...
+    <feature policy='require' name='virt-ssbd'/>
+</cpu>
+</pre>

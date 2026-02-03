@@ -1,0 +1,330 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+* '''Launchpad Entry''': https://launchpad.net/distros/ubuntu/+spec/no-more-source-packages
+* '''Created''':  by ScottJamesRemnant
+* '''Contributors''': ScottJamesRemnant, RobertCollins, JeffBailey
+* '''Packages affected''':
+
+=== Summary ===
+
+This informational specification describes a world in which the development base of Ubuntu is not source packages, but a revision control system.  It describes both the Bazaar and Launchpad features that would be needed to do this, and the kinds of work flow that the distro team would like to follow with them.
+
+=== Rationale ===
+
+The Debian-style source package archive is, itself, a primitive kind of revision control system supporting the basic set of operations such as checkout (`apt-get source`), commit (`dupload`) and log (`less debian/changelog`).  On top of this maintainers use patches to emulate a primitive branch control system with each patch representing a branch of changes.
+
+While suited for the "one package, one maintainer" approach, this has not proved well-suited to the kind of free-for-all upload environment of Ubuntu, or team collaboration on packages.  It also does not easily allow differences between two branches of the same package to be merged into each other, as well as being generally unsuited for the most basic operations performed anyway.
+
+A solution for this has always been to use a real revision control system to maintain the source package, providing the necessary features to allow team maintainership and collaboration on the package.  However this has always felt cumbersome, because in effect you are using a revision control system to maintain something intended for a different revision control system.
+
+The workflow ends up looking like:
+
+* Check out the source package from revision control
+* Make such changes as necessary
+* Commit and publish the changes
+* Generate a source package from the checkout
+* Upload the source package
+* Source package is checked for validity (GPG signature, etc.)
+* Source package is published into the archive
+* Source package is unpacked on buildd
+* Binaries are built and published into the archive
+
+Because this still relies on a source package being produced, it becomes tempting to simply grab the current source package from the archive, change it and upload it.  It's possible to bypass the revision control system entirely without any penalty to yourself.  This makes life harder for any maintainer doing the above because they have to insert an extra step.
+
+* Reconcile the checked out source package with the copy in the archive.
+
+There is actually no need for the source package to be part of the above workflow, it could be reduced to the following without any loss of functionality or security:
+
+* Check out the source from revision control
+* Make such changes as necessary
+* Commit and publish the changes
+* Request the package be built
+* Request and revision are checked for validity (GPG signature, etc.)
+* Source is checked out on buildd
+* Source package and binaries are built and published into the archive
+
+The "source package" can still be obtained from the archive for auditing purposes, however it is no longer the form in which changes are uploaded, so it does not usurp the revision control system underneath.
+
+=== Use cases ===
+
+=== Scope ===
+
+This specification is informational, it does not specify implementation details however it does specify an overview or design of individual components.  Individual specifications would tackle those components based on the information here.
+
+The scope of this specification is those source packages in the Ubuntu archive for which there is not a compelling reason to keep the authorative source in an FTP-uploaded source package, e.g. the kernel, where it is more useful to keep in `git` due to upstream harmonisation.
+
+This would also be a "best working practice" for distributions derived from Ubuntu.
+
+It would not be something "forced" up to Debian, we will still produce source packages and patches for them if they desire it, however having everything in a revision control system makes it far easier for us to do that and on a package-by-package basis, should the Debian maintainer like the system, collaborate with them using it.
+
+=== Design ===
+
+==== Bazaar ====
+
+While `bzr` is currently well-suited to maintaining software that is nominally a single line of development, it is not ideal for maintaining source packages which are really a collection of changes to a single piece of software.  Debian maintainers usually just represent them as a set of patch files, managed with tools such as "dpatch" or "quilt".
+
+The quilt work-flow turns out to be ideal for such things, and is actually possible to implement in `bzr` elegantly maintaining each patch as an individual thread of revisions within a larger branch. The <nowiki>[[https://launchpad.net/bzr-loom|Bzr Loom plugin]]</nowiki> implements this workflow.
+
+The commands for creating a source with looks like this:
+
+ <pre>
+[Branch upstream udev]
+$ bzr branch ... udev
+$ cd udev
+
+[Create the loom]
+$ bzr nick upstream
+$ bzr loomify
+$ bzr show-loom
+=> upstream
+
+[Create a new patch]
+$ bzr create-thread a-feature
+$ bzr show-loom
+=> a-feature
+   upstream
+$ vi ...
+$ bzr commit
+
+[Create another new patch]
+$ bzr create-thread fix-12345
+$ bzr show-loom
+=> fix-12345
+   a-feature
+   upstream
+$ vi ...
+$ bzr commit
+
+[Create the Ubuntu packaging branch]
+$ bzr create-thread ubuntu
+$ bzr show-loom
+=> ubuntu
+   fix-12345
+   a-feature
+   udev
+$ dh_make
+$ bzr add debian
+$ dch
+$ bzr commit
+
+[Record the set of patches, a meta-commit if you like.]
+$ bzr record "Package udev from scratch fixing bug 12345."
+
+[Push the branch to the super-mirror]
+$ bzr push ...
+</pre>
+
+At this point anyone with the loom plugin is able to see your branch as a discrete set of threads, anyone without the plugin will receive an error advising that the need the loom plugin. The plugin has no additional external dependencies so can be installed trivially. Programmatic tools built on bzrlib which are ignorant of looms will see the branch as a regular branch with the commit to the "ubuntu" thread as the tip. This has the advantage that what you check out is the code that is actually built, however it is easy to modify existing patches or add new ones.
+
+Modifying an existing patch;
+ <pre>
+[Go back to the patch you want to edit]
+$ bzr down-thread
+   ubuntu
+=> fix-12345
+   a-feature
+   udev
+$ vi ...
+$ bzr commit
+[Commit is made to the fix-12345 thread]
+
+[Now add the changelog entry. Note that the -a flag is currently hypothetical]
+$ bzr up-thread -a
+=> ubuntu
+   fix-12345
+   a-feature
+   udev
+$ dch -i
+$ bzr commit
+$ bzr record
+$ bzr push
+</pre>
+
+Changes from `fix-12345` are applied to the `ubuntu` thread as well, so conflicts you've caused in later patches in the series can be resolved.
+
+Adding a new patch:
+ <pre>
+[Go before the packaging]
+$ bzr switch fix-12345
+   ubuntu
+=> fix-12345
+   a-feature
+   udev
+
+[Create the patch]
+$ bzr loom-create fix-56789
+   ubuntu
+=> fix-56789
+   fix-12345
+   a-feature
+   udev
+$ vi ...
+$ bzr commit
+
+[And add the changelog entry]
+$ bzr up-thread
+=> ubuntu
+   fix-56789
+   fix-12345
+   a-feature
+   udev
+$ dch -i
+$ bzr commit
+</pre>
+
+Individual threads can also have changes taken from other branches
+ <pre>
+[Find the thread]
+$ bzr switch fix-56789
+   ubuntu
+=> fix-56789
+   fix-12345
+   a-feature
+   udev
+
+[Merge from elsewhere]
+$ bzr merge URL
+$ bzr commit
+</pre>
+
+While this is still somewhat manual, the basic features necessary are here and can be built on with additional tools.
+
+==== "HCT" ====
+
+Because the actual patch and branch management will be taken care of that the `bzr`-level, this leaves "HCT" to fulfill the role of providing the distribution maintainer with common operations in single commands, package-specific commands and access to features provided from inside the Launchpad system.
+
+This may be a standalone tool using `bzrlib`, a set of different tools or a `bzr` plugin.  Whichever seems appropriate.  The kinds of commands provided will fall into the following rough groups:
+
+* '''Source Directory:''' these commands use the Launchpad directory of knowledge about source packages to retrieve a source package using a simple command such as `source udev` rather than requiring a manual lookup of URLs, likewise connections between source packages (`upstream`, `debian`, etc.) can be discovered.
+
+* '''Packaging:''' these commands define a policy for using the underlying branch to maintain a source package.  Common operations such as `make`, `derive`, `add-patch`, `edit-patch`, `remove-patch`, etc. would be provided that, for example, ensured that the packaging is always at the tip of the loom and any constraints desired.
+
+* '''Building:''' commands that interact with Launchpad to request a `build` or `publish` of a package; either to one's PersonalPackageArchive or to the distribution itself.
+
+* '''Loom combining:''' commands that use the knowledge of package and individual thread (patch) relationships between source packages, upstream and different distributions held in Launchpad to perform interesting mass actions on looms.  These would include a lowish level `loom-merge` command that merges changes from one loom into another, including new and removed threads as well as changes in those threads and `loom-compare` that shows the results of the comparison rather than merging it.  Because the launchpad lookup is required to determine the relationship between threads, this could also use the same connection to obtain conflict resolution suggestions.
+
+* '''Source merging:'''commands that combine the sourec directory lookup and loom combining commands to provide source-package-level merges, e.g. `merge debian`.
+
+Work on a package with these tools might look like this (all commands are fictional):
+ <pre>
+[Grab the upstream udev branch]
+$ src fetch upstream udev
+$ cd udev
+
+[Package it]
+$ src make
+added debian/
+added debian/changelog
+added debian/control
+
+Type "bzr commit" when packaging complete.
+$ vi debian/...
+$ bzr commit
+
+[Add some patches]
+$ src add-patch fix-12345
+Type "src changelog" when all commits done.
+$ vi ...
+$ bzr commit
+$ src changelog
+[$EDITOR invoked on debian/changelog]
+
+$ src add-patch fix-56789
+Type "src changelog" when all commits done.
+$ vi ...
+$ bzr commit
+$ src changelog
+</pre>
+
+ <pre>
+[Grab the debian module-init-tools package]
+$ src fetch debian module-init-tools
+$ cd module-init-tools
+
+[Derive it]
+$ src derive
+$ bzr loom-show
+=> ubuntu
+   debian
+   some_patch
+   some_other_patch
+   module-init-tools
+
+[Make changes]
+$ src edit-patch some_patch
+Type "src changelog" when all commits done.
+$ vi ...
+$ bzr commit
+$ src changelog
+
+[Build and publish]
+$ src publish edgy
+[$EDITOR invoked for commit]
+
+[Merge from debian again, later]
+$ src merge debian
+debian: modified changelog
+fix_bug: new patch
+some_patch: removed
+some_other_patch: modified foo.c
+</pre>
+
+See also: http://blog.madduck.net/debian/2005.08.11-rcs-uploads
+
+==== The Launchpad Bazaar ====
+
+The Launchpad Bazaar uses a version of `bzr` with the loom plugin installed, enabling it to support looms.
+
+The current `/+branches` web pages can be extended to detect a loom-using branch and offer the list of individual threads above the list of revisions in the tip (which is what it would show without support).  Selecting an individual thread would show just the revisions for that thread.
+
+As each branch can be richly described in the Bazaar currently, each thread in a loom would also be richly described.  Likewise information about the relationships between branches and threads in looms would be available, and useful for linking threads together (for example the same thread in the Debian and RedHat packages).  This meta-data and these links would be provided on the page for the branch or thread.
+
+The Bazaar can also identify where a commit was performed to resolve a conflict between two branches, and provide a conflict resolution service so you don't have to do that if someone else already has.
+
+==== Build Daemons ====
+
+Build daemons currently download a published source package from the archive, unpack it, and then build it producing binaries and attaching them to the build record in the database.
+
+For packages uploaded via a revision control build request, there would be no source package, instead the buildd needs to check out the required revision control branch and build the binaries and source package from that.
+
+Source packages would be built on a single architecture, as `Architecture: all` packages currently are.
+
+==== Soyuz ====
+
+All source packages in a distribution start off being able to be uploaded by either FTP or by revision control build request, depending on whether either feature is available for that distribution.  However once a revision control build request has been processed, the package may then not be uploaded by FTP without a change from the UI.
+
+This allows derivative distributions to continue using FTP, as well as individual packages to use FTP for upload, while preventing an FTP upload from usurping a revision control branch.
+
+The current queue infrastructure deals exclusively with references to changes files, it would need to be extended to support either a changes file or a build request.
+
+For build requested packages, the source package is generated as a part of the build, this relationship would need to be expressed.
+
+Just as FTP uploads have a policy and checks, the same would be true for revision controlled packages.  The tip revision would have to be GPG signed by a member of the appropriate team, and the build request itself from somebody also in that team.  Also a basic check that the revision control branch is in some way derived from the last one built should be made, to prevent mid-air collisions.
+
+==== Other Daemons ====
+
+The Launchpad system will also provide a series of other daemons that perform hard drugery work on distribution maintainer's behalf, including:
+
+* Automatic syncs of source packages into derived distributions.
+
+* Automatic merges of changes into derived distributions, published if no conflicts, and reports where there are.
+
+* Automatic merges of upstream changes for testing purposes.
+
+=== Outstanding issues ===
+
+=== BoF agenda and discussion ===
+
+----
+CategorySpec
+
+NoMoreSourcePackages/GitImpl

@@ -1,0 +1,197 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+IN PROGRESS
+
+== Introduction ==
+
+This will detail setting up a complete mail server using the following: Ubuntu 5.10, Postfix, Courier, Amavis-new, ClamAV and SpamAssassin.  The end result will send & receive email using sasl authentication, check incoming email vs the spamhaus.org known spammer list (optional), filter all incoming email through amavis-new which will then run virus scanning & also check for spam.  If viruses are found the email is dumped, if spam is found the subject is relabeled '***SPAM***'.  Postmaster is notified of both for monitoring & updating of rules.
+
+A related article is on <nowiki>[[Courier]]</nowiki>, a more detailed guide by <nowiki>[[http://flurdy.com/docs/postfix/|Ivar Abrahamsen on flurdy.com]]</nowiki>.
+
+This guide has also been tested on Ubuntu 7.10 Gutsy.
+
+== Prerequisite ==
+
+You must be comfortable on the command line & have a reasonable knowledge of the OS in order to accomplish this.  This is not for the faint of heart.
+It is required to activate Universe and Multiverse repositories. Just follow this howto: <nowiki>[[AddingRepositoriesHowto]]</nowiki>.
+
+== Installation ==
+
+For beginning, install the main components of the mail system (For Ubuntu 7.10 Gutsy, you will need to replace libsasl2 with libsasl2-2):
+<pre>
+sudo apt-get install postfix libsasl2 sasl2-bin libsasl2-modules libdb3-util procmail courier-authdaemon courier-imap courier-imap-ssl courier-pop courier-pop-ssl
+</pre>
+
+Next install the filtering packages:
+<pre>
+sudo apt-get install amavisd-new spamassassin clamav-daemon clamav-freshclam re2c
+</pre>
+
+Install the optional packages for increased spam protection:
+<pre>
+sudo apt-get install libnet-dns-perl libmail-spf-query-perl pyzor razor
+</pre>
+
+Install some compress/uncompress utils (this allows the filters to scan compressed archives)
+<pre>
+sudo apt-get install file arc gzip bzip2 cabextract zip unzip unrar-free cpio tar zoo arj lzop nomarch pax unzoo
+</pre>
+
+== Configuration ==
+
+=== courier ===
+Courier comes fully configured out of the box. You should setup the Maildirs for the default user and in your existing folders. To do that, read here: <nowiki>[[Courier]]</nowiki>. '''Login to your local IMAP server may not work for uses that don't have a Maildir in their home folder.'''
+
+The very abbreviated approach of creating a Maildir is:
+<pre>
+cd ~
+maildirmake Maildir
+</pre>
+Note: if you already have a maildir, maildirmake should abort and say: ''maildirmake: File exists''
+=== postfix ===
+
+Postfix will need a little bit of tweaking before we're done.  We'll want to use <code>relay_host</code> to relay outgoing mail through your ISP account (otherwise we'll get a lot of denied outgoing email) and also setup some authentication.  The last thing we want is to setup an open mail relay for use by spammers!
+
+Append the following to /etc/postfix/main.cf
+(relayhost definition should match your ISP smtp settings.  Contact them for specifics)
+<pre>
+relayhost = mail.your-isp.com
+smtp_sasl_password_maps = hash:/etc/postfix/sasl_passwd
+</pre>
+
+Create /etc/postfix/sasl_passwd and add your ISP account information.  Example:
+(this should be the same login information you use to check your ISP email)
+<pre>
+mail.your-isp.com username:password
+</pre>
+
+For Ubuntu 7.10 Gutsy, you will also need to comment out the mailbox_command directive in  /etc/postfix/main.cf so that it looks like this: #mailbox_command = procmail -a "$EXTENSION"
+
+=== clamav ===
+
+The default behaviour of clamav will fit our needs. A daemon is launched (clamd) and signatures are fetch every day. If you want to use clamav for mail filtering, check the configuration files in <code>/etc/clamav</code>.
+
+Add <code>clamav</code> user in <code>amavis</code> in order clamav can access files:
+<pre>
+sudo useradd clamav --gid amavis
+</pre>
+
+Ubuntu 7.10 Gutsy note: this step will fail as the clamav user was created when the packages were installed.  Add the clamav to the amavis group by editing /etc/groups you need to add the text 'amavis' to the line that starts 'clamav' so that it looks something like this: clamav:x:126:amavis.  The 126 will change from one system to another.
+
+=== amavis ===
+
+Now, activate spam detection and antivirus detection in amavis by editing <code>/etc/amavis/conf.d/15-content_filter_mode</code>:
+
+<pre>
+use strict;
+
+@bypass_virus_checks_maps = (
+   \%bypass_virus_checks, \@bypass_virus_checks_acl, \$bypass_virus_checks_re);
+
+@bypass_spam_checks_maps = (
+   \%bypass_spam_checks, \@bypass_spam_checks_acl, \$bypass_spam_checks_re);
+
+1;  # insure a defined return
+</pre>
+
+=== spamassassin ===
+
+Spamasssassin will automagically scan for optional components and use them if available.  A few of these, which we will use, are the <code>dcc-client</code>, <code>pyzor</code> and <code>razor</code>.  These will not need to be configured.
+
+Edit <code>/etc/default/spamassassin</code> to activate the daemon:
+Edit the following line from ENABLED=0 TO ENABLED=1.
+<pre>
+ENABLED=1
+</pre>
+
+=== Postfix integration ===
+
+For postfix integration, you only need to add in <code>/etc/postfix/main.cf</code> the following line:
+<pre>
+content_filter=smtp-amavis:[127.0.0.1]:10024
+</pre>
+
+Also edit /etc/postfix/master.cf, adding this at the bottom:
+<pre>
+smtp-amavis	unix	-	-	-	-	2	smtp
+	-o smtp_data_done_timeout=1200
+	-o smtp_send_xforward_command=yes
+	-o disable_dns_lookups=yes
+	-o max_use=20
+
+127.0.0.1:10025	inet	n	-	-	-	-	smtpd
+	-o content_filter=
+	-o local_recipient_maps=
+	-o relay_recipient_maps=
+	-o smtpd_restriction_classes=
+	-o smtpd_delay_reject=no
+	-o smtpd_client_restrictions=permit_mynetworks,reject
+	-o smtpd_helo_restrictions=
+	-o smtpd_sender_restrictions=
+	-o smtpd_recipient_restrictions=permit_mynetworks,reject
+	-o smtpd_data_restrictions=reject_unauth_pipelining
+	-o smtpd_end_of_data_restrictions=
+	-o mynetworks=127.0.0.0/8
+	-o smtpd_error_sleep_time=0
+	-o smtpd_soft_error_limit=1001
+	-o smtpd_hard_error_limit=1000
+	-o smtpd_client_connection_count_limit=0
+	-o smtpd_client_connection_rate_limit=0
+	-o receive_override_options=no_header_body_checks,no_unknown_recipient_checks
+</pre>
+
+And add this immediately following the "pickup" transport service:
+
+<pre>
+	 -o content_filter=
+	 -o receive_override_options=no_header_body_checks
+</pre>
+
+This will help stop marking messages, reporting spam, as spam.
+
+Reload postfix, and now, content filtering with spam and virus detection is enabled.
+
+== Test ==
+Test your default installation using the following code segment.
+
+<pre>
+telnet localhost 25
+</pre>
+
+Postfix will prompt like following in the terminal so that you can use to type SMTP commands.
+
+<pre>
+Trying 127.0.0.1...
+Connected to localhost.
+Escape character is '^]'.
+220 localhost.localdomain ESMTP Postfix (Ubuntu)
+</pre>
+
+Type the following code segment in Postfix's prompt.
+
+<pre>
+ehlo localhost
+mail from: root@localhost
+rcpt to: root@localhost
+data
+Subject: First test of Postfix
+
+Hi,
+Are you there?
+regards,
+Me
+. (Type the .[dot] in a new Line and press Enter )
+quit
+</pre>
+Note:  The blank line after Subject: is required to separate the email header section from the body.
+
+----

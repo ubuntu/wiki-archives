@@ -1,0 +1,398 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+== ThirdPartyApt ==
+* '''Launchpad Entry''': https://launchpad.net/distros/ubuntu/+spec/third-party-apt
+* '''Created''': JeromeHaltom
+
+=== Introduction ===
+Installing a third party Apt repository is too hard.  ThirdPartyApt defines a file format that ISVs can publish on their web sites and distribute to users to download their software, optionally enabling automatic updates.
+
+This spec makes it easy for users to install third party software and have it update automatically.  By doing this in a consistent and standard way, we both discourage the use of difficult custom install methods and encourage better security than is currently practiced.
+
+=== Rationale ===
+Users want to use third party software.  Third parties should be able to distribute it to them.  We should provide tools to make installation, integration and maintenance of their programs easy for both users and developers.  Apt is an amazingly powerful and useful tool for such software.
+
+==== The current situation ====
+ISVs which target Ubuntu create their own, usually proprietary, installation infrastructure. These installers are not as robust as dpkg and can break things, particularly during distribution upgrades. They may install files that never get removed, if they even have an uninstall option.  They may conflict with or even overwrite system files.
+
+Even if it works, our users are harmed by these installers.  They have no central interface to view currently installed software, or remove it.  Automatic updates become as difficult as they are on Windows.
+
+Some more savvy third parties provide .deb files which the user can install simply by double clicking and launching with GDebI. While debs avoid many of the problems of custom install frameworks above, they introduce their own problems without apt.  Splitting packages into multiple debs is a tremendous hassle, and automatically providing updates, including security updates, is impossible.
+
+Even fewer third parties actually provide apt repositories for their packages. These packages are generally the best, but still not perfect. The user is required to copy and paste an obscure looking URL into sudoed text editor or Synaptic's Add Repository interface. The same has to be done for the apt-key which allows access to the repository. Update manager doesn't know how to handle them on dist upgrade.
+
+==== What Third Party Apt does ====
+
+ThirdPartyApt provides for Apt Repositories what GDebI provides for deb files.  We make it easy for users to use debs and repositories so ISVs will be more likely to provide them instead of custom install frameworks.
+
+ThirdPartyApt on its own does not force ISVs to use it. If the framework exists, and is well supported by Ubuntu, then ISVs will consider automatic updates and integration a service to their users. If not, the situation doesn't change, but there's no harm done.
+
+=== Scope and Use Cases ===
+The main use case is simple. A user should be able to be provided a link to click on by a third party ISV which will prompt the user for permission to install the software. The user should be able to accept and start the installation of that ISVs software. The ISV may provide this link on a Download page, or after an accepted payment transaction as been processed.
+
+The installed software should track updates from the ISV automatically and integrate into the existing infrastructure. Update-notifier should notify the user when the ISVs software is updated.
+
+For Ubuntu specific repositories, ISVs currently must give elaborate instructions for users to setup and enable the repository (eg: <nowiki>[[http://www.winehq.org/site/download-deb|here]]</nowiki> for Wine, or <nowiki>[[http://www.google.com/linuxrepositories/apt.html|here]]</nowiki> for Google).  Third Party Apt allows them to instead distribute a single file for users to double click on.
+
+Just before the Gutsy release, approximately 70,000 users were using the WineHQ APT repositories despite these complicated instructions, representing over 1% of Ubuntu users. While users of the WineHQ repository may no longer need to keep current once the version of Wine included with Ubuntu becomes "good enough," some free software projects will always require users to keep current with the very latest version of the software.  The <nowiki>[[http://spring.clan-sy.com/|Spring project]]</nowiki>, for instance requires users to have the same, latest version of spring in order to play multiplayer.  Since Ubuntu packages can only update every six months (or, at the very best, after a week's delay with backports enabled), Ubuntu users would be unable to play Spring without a Third Party Apt repository maintained by the Spring project.
+
+=== Design ===
+We create a .apt file format containing information necessary to install a package, optionally adding a repository and sanely handling upgrades.
+
+We then create a command-line program to handle these .apt files, and a graphical frontend for it.
+
+==== .apt file format ====
+
+The .apt file is formatted with standard dpkg stanzas. Each stanza contains a repository URL and filters describing what type of platform this URL is suitable for. Consider the example stanza:
+
+<pre>
+Architecture: i386
+Distribution: Ubuntu
+Codename: breezy
+Release: 5.10
+Archive:
+ http://us.archive.ubuntu.com/ubuntu breezy universe
+Install: photoshop
+</pre>
+
+The first four tags, Architecture, Distribution, Codename and Release specify the specific system that this stanza applies to. Each of these are read and tested against the user's system. If the user's system does not match, the stanza is ignored. This allows a single .apt file to specify delivery of an apt repository for multiple distributions and releases. A separate stanza could be constructed to apply to Ubuntu and/or Debian, pointing to different archives.
+
+===== List of tags =====
+* Architecture: Filters the stanza to the specified apt archive name. Examples would include i386 and/or powerpc.  Allows multiple options, like a dpkg control file.
+* Distribution: Filters the stanza to only be applied to systems where the LSB Distributor ID matches. The command `lsb_release -is` returns this.
+* Codename: Filters the stanza to only be applied to systems where the LSB Codename field matches. The command `lsb_release -cs` returns this.
+* Release: Filters the stanza to only be applied to systems where the LSB Release field matches. The command `lsb_release -rs` returns this.
+Archive lists the APT archives to add to the sources.list file.
+
+* Install: specifies which package or packages to install from the archive, separated by spaces.
+* Pin: describes which packages should be pinned via apt pinning. This means they should override the default Ubuntu stuff, even if the default Ubuntu stuff is a higher version.  This is obviously dangerous for distro upgrades, however there are ways to handle upgrades smoothly (see below)
+* Icon: contains a URL to an svg image to use in package listings.  Currently, we provide an Ubuntu icon in Synaptic for packages in main and a blank icon for packages in universe - Third party packages could be indicated by an icon specific to them.  This url should be on the same webserver as the APT repository in most cases.
+
+===== Mime type =====
+The first line of the file is then set to "#@application/x-apt 0". This allows mime magic to be used to detect the file type properly. All of this is mandatory, and the client implementation should reject a non-compliant file. The "0" following the mime type is the version number of the Apt file specification that the file conforms to. As breaking changes are made, we increase this number. This number will stay 0 until the specification is actually put into use.
+
+===== Signing the .apt file =====
+The resulting file is then signed with the same private key used to sign the Releases file of the archive. Signing of the file is mandatory. A guarantee of a single identity must be available from the .apt file itself all the way to the installing of the packages. The public key required to be added to apt-key is then appended to the end of the .apt file.  This way, if the user trusts the download link, then he can trust the repository software (see security below).
+
+ISVs should be encouraged to create a specific repository key and not, for instance, adopt a personal key.
+
+<pre>
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA1
+
+Architecture: i386
+Distribution: Ubuntu
+Codename: dapper
+Install: photoshop
+Archive:
+ deb http://archive.adobe.com/archive-ubuntu dapper multiverse
+
+-----BEGIN PGP SIGNATURE-----
+Version: GnuPG v1.4.2.2 (GNU/Linux)
+
+iD8DBQFEPICNRTZ5+YJ1b+YRAvDoAJ9+NBnSPLa32h7J+tbgisWrh58C2QCdHHwv
+<etc>
+=z7nf
+-----END PGP SIGNATURE-----
+-----BEGIN PGP PUBLIC KEY BLOCK-----
+Version: GnuPG v1.4.2.2 (GNU/Linux)
+
+mQGiBD/G9AgRBACZ519LX9cdoyJA+7gmWC+mUsiyPhnmMWu4uOg0M+vb/JPtDdfc
+<etc>
+=pIE5
+-----END PGP PUBLIC KEY BLOCK-----
+</pre>
+
+The above is an example of a final, signed, .apt file.
+
+=== Programs ===
+A program is provided to handle the .apt file type. When this program launches a .apt file, it strips the mime type, verifies the signature, exports the public key, parses all the stanzas and determines which applies to the current environment. It then walks the user through a few simple questions asking if they are sure they want to trust the included public key to install software onto their system. After the user has confirmed all the steps (and agreed to any applicable warnings about trusting third party repositories), the public key is added to apt-key and the packages specified by Install are installed.
+
+==== apt-list and GAptI ====
+<nowiki>[[apt-list]]</nowiki> is the console backend to this program.  apt-list will support installing .apt files, adding the repository within them (without installing the default packages), listing all repositories on a system, and removing a repository (optionally removing the packages it installed as well.)
+
+The graphical frontend to apt-list, <nowiki>[[GAptI]]</nowiki>, is already partially written.
+
+==== Single package install ====
+The implementation could remove the repository and key after a successful install if upgrade tracking isn't requested.  This allows ISVs to provide a single, permanent download link for an application on any version of Ubuntu.  For instance, rather than linking to foo-hardy-ubuntu1.deb, I could make a howto guide pointing to foo.apt; on hardy this would then install the latest foo.deb, while on hardy+1 it could simply install the foo.deb included in the Ubuntu repository (see self destruct, below).
+
+==== Modification to apt-get ====
+apt-get can be modified to use the repository name feature introduced here to allow for easier pinning.  For instance, the command ''apt-get -pin winehq install wine'' could pin the wine package to the winehq repository (ie, the one in /etc/apt/sources.list.d/winehq.list) and then install it.  This prevents having to manually add pinning preferences via editing a config file when using the command line.
+
+==== Modification to synaptic ====
+Synaptic will need to be modified slightly, as the Third Party Repositories preferences tab could accommodate the metadata we have here.
+
+=== Changes in /etc ===
+/etc/apt/sources.list will be considered deprecated - all repositories will now reside in their own files in /etc/apt/sources.list.d/
+For Ubuntu repositories, these will be:
+<pre>
+/etc/apt/sources.list.d/main.list
+/etc/apt/sources.list.d/restricted.list
+/etc/apt/sources.list.d/universe.list
+/etc/apt/sources.list.d/multiverse.list
+/etc/apt/sources.list.d/partner.list
+</pre>
+
+==== Creation of /etc/apt/keys.d ====
+Rather than maintaining a single keyfile, we add new keys as separate files in /etc/apt/keys.d.  This makes inspection, cleanup, and future signing of keys much easier to implement than having to call separate instances of apt-key.
+
+=== Security ===
+
+==== Security is better than the status quo ====
+Security with this feature is no worse than the current system, where users blindly copy and paste terminal commands with root permission or give Synaptic instructions.  By making it easy to avoid running terminal commands, we make users even more suspcious when asked to do so by a malicious entity.
+
+There is no good way to prevent users from installing software that they want to install; similarly, once a user is convinced he wants to install something, any attempt at preventing him simply builds frustration and a lack of trust in good security.
+
+==== Preventing accidental installs and properly warning the user ====
+Obviously, a user should not confirm a package installation which he didn't expect to happen, such as a web site opening a .apt file automatically.  Our frontend interface handles this elegantly; by standardizing the look and feel of what a third party installation is and informing the user what he is about to do, a user who doesn't want to install something will know to click cancel.
+
+By making a standardized good interface for installing third party software, we also allow the user to make an informed decision about what he is doing.  This currently does not happen with shell scripts and terminal commands.
+
+==== Preventing spoofing ====
+Since the .apt file must be signed by the same key that the repository it provides uses, any apt file the user receives can be known to have come "officially" from the repository.  This allows repository managers a greater control over their own default installation, allowing them to prevent possible breakages caused by installing the wrong packages from some other .apt file.
+
+More importantly, if the user trusts the website from where he is downloading the .apt file, then he can implicitly trust the repository as well.  While we still need to worry that the user has been mislead via phishing or DNS cache poisoning, this problem is no worse with .apt files than it is with proprietary installation frameworks.
+
+One possible trick is for a spoofed website to open it's own .apt file "quicker" than the expected web site, tricking the user into agreeing to the top-most instance of the confirmation dialog. To work around this, we can use a similar locking mechanism that we use in synaptic and apt-get - a second instance of the .apt handler attempting to run would spit out a warning to the user.
+
+==== Future key signing ====
+Once the software infrastructure is implemented, we can eventually investigate other means of providing further security.  For instance, we could ship a set of trusted keys, and then use those keys to sign known reputable ISVs (say, Google).  That way, when a key is unknown to us we could float a warning that, for instance, Ubuntu couldn't verify the repository was from Google. Such key signing, however, is beyond the scope of this blueprint.
+
+==== Discussion issues ====
+* Best way to handle future updates (ie new tags) for the spec - what should we do if we find a later version of a .apt file than the system knows how to handle?
+  - Perhaps we should define the version of thirdpartyapt in the file somewhere other than the initial mimetype, such as a separate version for every distro or in each entry 
+  - Option 1: look in the file itself for old information related to this distribution.  Could lead to largish apt files with information for every ubuntu release ever.
+  - Option 2: look in the file for a link to download a legacy apt file somewhere
+* What to do if our current OS matches more than one entry in the .apt file - pick latest, pick first, fail with a warning, etc.
+  - Pick first might be the smoothest option, so general defaults could be put at the end.
+
+* What should we allow to make the installation pretty?  Custom text? Icons?  We gain security by reducing customization of this (eg no "Do you want to install "INSTALL THIS NOW!!!"?)
+
+* More Possible Tags:
+* Repository-Depends: a list of repositories that should be enabled.  For instance, the third party repository could depend on universe, and then we either prompt the user to enable universe or fail.
+* Repository-Provides: an arbitrary name for the repository for other .apt files to check for with repository-depends
+
+* Self Destruct option
+** One very real possibility is that a third party package will move into Ubuntu proper somehow in a future release (either into commercial, main, or universe).  ThirdPartyApt should provide a way for the user to migrate from the third party package into the standard Ubuntu one during the upgrade, after which the third party repository is removed.
+
+* The implementation could set pins for the repository to only allow the requested package plus dependencies to be installable. This might prevent common errors in third party packaging from overwriting Ubuntu packages. Just a fail safe, not a security feature.
+
+* What do we do if we find multiple matches in the .apt file?  Pick the first, fail, or something else?
+
+=== Release Note ===
+
+Users may now install and remove third party software and repositories using a simple interface.  After downloading and double clicking a .apt file...(finish later)
+
+=== Meeting comments ===
+
+==== Upgrades ====
+* have a file format that describes how to perform a upgrade with that repo
+   (plus the possiblity to go to a repository/http location to get this instructions)
+   and use that for the main sources too 
+
+=== Releated work ===
+* gapti
+* nokia osso installer (.install files) 
+
+Nokia .install file format described at:
+
+* https://stage.maemo.org/svn/maemo/projects/haf/trunk/osso-application-installer/doc/repository.txt
+
+The file is recognised on the basis of:
+
+* MIME/type application/x-install-instructions
+
+which is added to:
+
+* `/etc/apt/sources*/`
+
+Example <pre>
+[install]
+repo_name = Foo Catalogue
+repo_deb  = deb http://foo.com/maemo mistral user
+package   = foo-app
+</pre>
+
+ We should probably have a /etc/apt/keys.d (or something like this)
+
+* SuSe has something new in 10.3 with XML:
+** http://en.opensuse.org/Standards/One_Click_Install
+
+* Ensure that this stuff works on the commandline too
+
+==== Meta-data ====
+
+Standardise the meta-data format (Icons, clear text name...) for each repo.
+
+* eg. `apt-list add`
+* Extend Nokia `osso .install` or Suse format with extra meta-data.
+* Migrate all Ubuntu `sources.list` entries to `apt.d/` files.
+* Need to have a Depends-Repo: universe
+
+==== Process ====
+
+Both Automatix and WineHQ are add a line to `sources.list`, first task is to optimise this. 
+
+=== Related Pages ===
+* <nowiki>[[GAptI]]</nowiki>
+* ThirdPartyPackages
+* https://wiki.ubuntu.com/aptgetinstallprotocol
+* https://blueprints.edge.launchpad.net/ubuntu/+spec/partner-repositories
+* http://brainstorm.ubuntu.com/idea/17246/ (Adding 3rd party apt sources is too risky - apt needs ringfencing system)
+
+=== New Comments ===
+* '''KrzysztofLichota''': another possible implementation of the idea is One Click Installer. See <nowiki>[[https://lists.ubuntu.com/archives/ubuntu-devel-discuss/2007-August/001391.html|this thread on ubuntu-devel-discuss]]</nowiki> and <nowiki>[[http://code.google.com/p/one-click-installer/|project home page]]</nowiki>. One Click Installer is more flexible and allows common format with other distros - for example Suse also implemented one click installation, see <nowiki>[[http://en.opensuse.org/Standards/One_Click_Install|here]]</nowiki>. IMO cooperation with other distros on common format is necessary for success of Linux on the desktop. Please keep it in mind when discussing this specification in Boston.
+
+* '''JeromeHaltom''': Krzysztof, I'm all for considering helping out distros. That's why the format relies on using lsb_* commands to determine which stanzas apply where. This is however an extension of apt. If your system does not support apt, .apt files naturally will not work with them. I suppose apt4rpm would be totally possible. I don't want to spend time mired in reinventing a package system. I want people to provide packages for Ubuntu, other distros be damned. =)
+
+* '''JeromeHaltom''': Scott, I'm ceding responsibility of this to you. Obviously you have the time to work on it. As for the Nokia stuff, I did consider it. In fact, I tried to influence the Nokia guys to look at this Ubuntu wiki page when designing theres. They didn't. Their stuff doesn't support adding keys of any sort, just a hard coded list of repositories that are certified. I'd also like to keep the core file format as close to standard dpkg-ness as possible: simple stanza blocks. To me it seems as if the format would be more acceptable to the development community that embraces apt if this is the case. As for Pinning: I think packages listed on the Install line should be pinned appropiately automatically. No need for a seperate Pin line.
+
+* '''JeromeHaltom''': As for upgrading between distro releases: I'm wondering how much of this is appropiatly handled by this spec, and how much should be handled in another fashion. What about delivering updates to the .apt file itself through apt? If a ISV wants to enable automatic updates, he would make a package, such as vmware-update, or some such, which would install a .apt file in /usr/share/apt/vmware.apt and trigger a postinst action. This postinst action would apply the stanzas in vmware.apt to the current files in /etc/apt/sources.d. Exactly as is triggered when manually clicking on a .apt file, but with no UI. This allows the ISV to distribute an upgrade path, for instance, to gutsy, by delivering a new -update package over their feisty repository.
+
+* "LoyeYoung": I like the idea and the discussion that's going on here. I have a little bash script that I use for myself and my own customers right now. There is much that I don't like about it, and I've documented several of the things I don't like in the script. Yes, it would allow me to do malicious things to the computer on which it's installed, but that's always the case for a repository. At the end of the day, the system owner has to trust the manager of the repository. There are other security implications as well, but I call it to your attention for whatever it may do to advance the discussion. Take a look at it and use whatever you want if it's helpful. See http://mirror.iycc.biz/grab-key Happy Trails, y'all. 
+
+* '''Ifireball''': I can't see why new software is needed here, this problem can be solved by simply having *.deb file that would add a file in /etc/apt/sources.list.d/, that can already be installed quite easily using GDebi, we should focus on making it easyer for 3rd party package maintainers to generate suce files rather then invent a new format.
+
+** '''JeromeHaltom''': Ifireball. Goodness. I think I agree with you, actually. That is, as long as there is a good way to initiate a post install action out of a deb file that can instruct the user to install some other packages. And upgrading between distros still needs to be considered.
+
+** '''ScottRitchie''': There were a few reasons given during discussion why a new format is superior to simply reusing .debs.  From memory:
+** With .apt files we don't rely on the third party to reimplement all the apt-repository generating code in their package, preventing code repitition.
+** With .apt files we make it much easier to display to the user in a standard way what the contents and implications are (ie, you are installing an apt repository) and present them with the proper options (install/don't install this package).  This is slightly superior to something like relying on the third party to use debconf properly.
+** With .apt files we create an infrastructure for non .deb distros to reuse the code.  In theory we could have a single .apt file allow for automatic update installation of a third party package for Ubuntu, Debian, derivatives, and any distro supporting apt-rpm.
+** .debs will need to change name (and therefore where the HTML link resides) at every update; .apt files can do this quietly.
+
+** ''JeromeHaltom''': Scott, do you mean to suggest /etc/apt/keys.d, or /etc/keys.d? I would not recommend /etc/keys.d, as it is unspecific.
+
+** '''PhilipGanchev''': Why can't we use the <nowiki>[[http://zero-install.sourceforge.net/matrix.html|Zero Install]]</nowiki> framework?  As the comparison on that page shows, it provides a number of advantages: non-root install, multiple versions coexist, conflict freedom and sandboxing of the applications.
+
+** '''JeromeHaltom''': Philip, because support an entire independent package system outside of apt and dpkg is far beyond the scope of this specification.
+
+** '''AndreGötz''': It would be nice to provide a Application to easily assemble such a apt file with key-signing and all the stuff for software-vendors.
+
+** '''RyanEgesdahl''': It's a good idea, really. However, I don't agree with having a set of keys to sign .apt files with. When Ubuntu starts signing third-party packages like that (even by proxy), then Ubuntu starts taking responsibility for the problems those packages might cause. Besides, that's the Microsoft way - sign things people pay money for and scare everyone when that doesn't happen. I think this project is actually a bit understated - there are a lot of things to be done in order to make it right. It's probably best if there's a separate key manager, and I don't know what you'd do about dependencies for a package that don't exist in any currently installed repository. I think this needs to be a "repository network" system that can do a better job of managing not only updated third-party packages but third-party repositories as well just to make sure things don't break.
+
+=== Old Comments ===
+* '''MatthewPaulThomas''': This seems to be a reinvention of <nowiki>[[http://autopackage.org/|AutoPackage]]</nowiki>, but with not so much portability.
+* '''ArwynHainsworth''': You mean <nowiki>[[http://autopackage.org/|AutoPackage]]</nowiki> is a reinvention dpkg/apt-get, right? :)
+* '''ArwynHainsworth''': The proposed idea as it stands has a HUGE security flaw. If the program that handles .apt files can add any generic repository is sees in the file, what is to stop l33tHax0rs & co. from creating a repository with a deb of a slightly patched kernel (or any other core system deb)? He doesn't even have to get the user to install it directly, all he has to do is get the user to add his repository (with a completely harmless and useful deb) and wait for the user to update. '''Solution:''' 1) Remove the ''Archive:'' tag completely. or 2) Only allow repositories to be added if they are on a whitelist.
+* '''Killerkiwi''': Id vote for only allowing the install if the list repo is in the sources.list else just display an error, "You need to enable the following repo to install 'foo'"
+* '''JohnMccabeDansted''': If you want to run 3rd party software you pretty much have to trust the third party, unless you constrain the software using something like Plash or SysTrace. I guess a whitelist of third parties might be useful, or a whitelist of public keys owned by people trusted to approve new repositories.
+* '''JeromeHaltom''': The last comment explains it. There is *no* answer to installing software on a user's PC that does not leave open the possibility for that software to be untrusted. None. It is currently an unsolvable problem. The entire goal is to install software that isn't already in Ubuntu, and thus it can't be considered trusted by Ubuntu. Either you make installing untrusted software impossible, or you ignore the problem. What this seeks to do however is provide an easier way, to do something people will do already.
+* '''TristanWibberley''': There needs to be several things happen, and in a particular order, I think:
+  1. *All* daemons in Ubuntu repositories or scripts/programs that will configure themselves to be run from a daemon, and all suid/sgid programs should be configured ''off'' by default. Programs that are supposed to be run with sudo should have to configure sudo to allow them so ''they'' are off by default too.
+  2. Do what '''Killerkiwi''' said.
+  3. Repositories should be configurable with a metadata-trust rating, whereby more trusted metadata in one repository will mark changes in other repositories - this prevents dependencies/conflicts/etc from stopping security updates.
+  4. Users should be able to have their own repositories and install roots so they don't have to screw with the main system repos.
+  5. Pre/postinstall scripts should be run in a strictly controlled environment where suid/sgid bits and daemons cannot be configured.
+* '''JeromeHaltom''': I am not trying to solve this problem. It is unsolvable, as stated earlier.
+  1. You can't control that. Point 4 makes it impossible.
+  2. Killerkiwi said to only allow repositories that are already listed. That completely defeates the point of the specification, which is to ADD NEW REPOSITORIES!
+  3. Too complicated and impossible to enforce because of point 4.
+  4. I seek to provide a method to distribute software that may require root... such as, for example: VMware. Given that, the install must run as root and must be able to add kernel modules. Given that, anything attempt to enforce security is useless, as it can be bypassed.
+  5. Again, point number 4.
+* '''TristanWibberley''':
+  1. Is easily possible since the Ubuntu repositories are controlled by the Ubuntu devs, and it is required to provide a predictable security boundary for those that will refuse to allow new repositories, but will want to allow packages in existing repositories to be installed via links in a web browser. IMHO a feature like this should not be available in Ubuntu without that first security feature.
+  2. The second thing you should do is what '''Killerkiwi''' said: "only allowing the install if the list repo is in the sources.list else just display an error", but then once that is done and the implications understood it would be safe to move on
+  3. ''Is'' possible to enforce for all repos where the repo administrator can be trusted not to provide trojans or to mess with the dpkg status file - but can't be enforced against malicious repository admins.
+  4. and,
+  5. are not needed to acheive what both you and I want, but they are further steps on the development of this feature.
+ I think we disagree on what is an acceptably high barrier to the inadvertant introduction of security holes and an acceptably low barrier to the removal of security holes.
+* '''JeromeHaltom''': I'm not sure if you're reading my proposal or somebody elses. You keep going on about Ubuntu repositories. You keep going on about not allowing this unless the repository is in sources.list. My proposal is contrary to those two. My proposal is about *automatically* adding lines to sources.list, because that is the entire point, installing software which is not in Ubuntu. My proposal is to avoid having users edit some silly text file on their own. If you don't like the idea of allowing users to install third party software on Ubuntu without hand editing some text file, then you need to present some sort of argument against that, not all this other stuff.
+* '''TristanWibberley''': The installation of third party software will normally require that dependencies be met from within the Ubuntu repositories, so management of Ubuntu packages needs to be a part of it. And since installing third party software under the direction of a resource at an URL will have to work on a third party repository that has already been added to sources.list, mere installation of Ubuntu packages from existing repositories is a proper subset of this feature. So I don't think it is either orthogonal, nor extraneous.
+
+ I ''do'' like the idea of installing third party software on Ubuntu without hand editing some text files and I am not trying to put the stoppers on it - I had even implemented the basic (insecure) version in less than 20 lines of bash when I suggested it on the lists (just after somebody proposed mere installation from existing sources via a new url scheme, a couple of weeks ago). I am trying to ensure that Ubuntu doesn't earn a reputation for being as insecure as Windows is. This feature is more complicated to get right than it appears.
+* '''JeromeHaltom''': Sure, but those dependencies will be met from the existing Ubuntu repositories, as you said. ISVs would distribute .apt files which provided specific support for specific Ubuntu releases. For instance, an ISV would provide a .apt file which would expose breezy software to a breezy user, compiled against breezy. Since ubuntu has defined and supported releases, this is feasible, and quite clean. The last point about security, in my honest opinion, is like trying to add 2+3 and get 4. It just doesn't work. You cannot both provide support for users to install software which requires kernel level access (VMware) and yet restrict it to make it safe. I may not be imagintive enough, or something. There are only a few solutions to this problem which I can see: 1) you either restrict users to installing only approved software, which guarentees it won't have an impact 2) you only allow users to install "certain" third party software that doesn't require root access 3) You come up with a system which sets up a virtual machine for every software install.   1. seems like limiting the user's choices, and is currently circumventable and currently circumvented (VMware provides it's own installer) 2. requires a central point by which all ISVs must vet their software, which is practically identical to 1)... either you keep up with all software and updates, or they'll just use their own systems anyways 3) impossible to do in any meaningful way, now and for the forseeable future.
+
+ In light of all of that, the only remaining way is to provide the user a method to do what they want to do, ensuring that at least the ISV is using an approved system to deliver the software, that we can vet. That system is apt and dpkg. It allows the user to use his existing tools to manage his installs and updates. apt itself is cross paltform and can deliver even RPMs, which makes it even more compelling. Defining a .apt standard file format could be used to deliver software to many different distributions. Yes, it doesn't go as far as autopackage, making the vendors job of testing against distros certainly time consuming. Implementation of the program in charge of this: GAptI would need to have a lot of community agreement as to the wording of the message. The current GAptI implementation I have written does what I think is a reasonable job: It explains to the user what is going on, and forces him to wait 15 seconds before he can hit Install. This in my opinion is a best case option.
+
+ Certainly I am not against considering furthur ways to bullet proof this process. The job of establishing a relationship with a third party repository is one which the user needs to be walked thru with the upmost care. The entire proposal, however, does rest on the approval of providing a GUI method by which a user can trust a currently untrusted third party repository.
+
+* '''TristanWibberley''': The thing I was most worried about with the dependencies was a third party package depending on a particular version of an Ubuntu package, which later turns out to have an exploitable hole. The application will probably still work with the new version so apt-get and friends should be made to support forced upgrades at the user's option without uninstalling packages in "lower priority metadata" repositories. The problem I see is not in malicious installed software, but thoughtless metadata issues in the third party repository preventing future upgrades of vulnerable packages.
+
+ The other concern I have is with any method where an url can install a package that's in even an already configured repository. Even though you trust the package and the repository, the fourth party providing the url could be aware of a flaw in a piece of software and get a user to install it from the trusted third party. The logs of the server that provided the aptfile contents (or logs of firefox's new thoughtless "ping" feature) will tell an attacker that the chance of finding an attackable machine at the logged IP address is very high. If packages default to having high privileges and running (eg daemons, or suid/sgid binaries), attacks will be pretty easy, since the user knows the software isn't a trojan and will happily install it without considering this possiblity. The solution is for Ubuntu provided repositories to not do that (I think that should be in the scope of this spec), and maybe to eventually (in another spec) use chroots and restricted mode shells to prevent pre/post install scripts from configuring things like that (and this part is well beyond the scope of this spec but I note it here to show that the problem should be solvable if it is valued).
+
+ The other things I mentioned earlier are just "future thoughts" (eg homedir installs), but I think the two security issues I mention just above are very real, and very dangerous.
+
+ The reason I think installation from preconfigured sources should be implemented and introduced before moving on to the full system (which when finished should be a ton more secure than the way people source their software in the Windows world) is to slow the development of mindshare in gdebi where people download arbitrary debs and install them without adequate warnings, or dependency metadata prioritising. But if you think that gdebi will not gain such widespread adoption that new users become ingrained with the "download and run anything" mindset of Windows users then I'm terribly bothered about the two stage approach.
+
+* '''TristanWibberley''': Moving to another topic, could this be given an initial stanza line that can be recognised as a file magic, like "Stanza: Apt" as the very first line of the file to specify that this is a stanza file and the format and interpretation of the stanzas it contains.
+
+* '''JeromeHaltom''': Third party packages should be properly developed and supported by those third parties. They should not depend on strict = versions of Ubuntu packages, and should follow the normal rules of packages. If they really don't work with newer versions, they should depend on >= base version | <= base version + 1. Otherwise, they will prevent a security upgrade. This moves into another point, isn't this a possibility that our general package tools need to handle. Update-notifier should make a point of saying "Package N is preventing an upgrade to your system. Your system may be out of date or open to a vulnerbility", or some such english. This is a case which could and probably should be handled now, if it's not already.
+
+ Your second concern is valid, but again rendered unsolvable by our current circumstances. A third party repository could force an install of a vulnerble Ubuntu package... or it more easily just install it's own software to take over the system. I don't think coding for the longest path attack serves much purpose here. It again rests on whether we want to allow third parties to initiate package installs period. Also, it likely will not be a policy for packages to be in a disabled state by default. This question has been brought up over and over again in both Debian and Ubuntu and has almost always ended with the same conclusion: the package wouldn't have been installed if the user didn't want it running. I can dig out some mailing list archives if you want.
+
+ I agree with the mime tag. I am searching for some common accepted syntax for doing this as the first line of a file. I think VI has been doing something for awhile.
+
+ Can we take new conversation to ubuntu-devel@? I have created a thread asking for opinions on this spec there and would like to get more parties involved. Seeing our discussion on ubuntu-devel may get more people involved.
+
+* '''KillerKiwi''' re adding to sources.list. it's my understanding that there is all ready a UI for adding a repo and its been promoted to the 'admin menu' in dapper (may be wrong  I havnt updated yet :) ), So I'm not suggesting reverting to editing the file, just an extra step the user must preform between clicking and adding a repo, much like installing extensions for firefox from non white listed sites requires white listing the domain first.
+
+ Also agree with '''TristanWibberley''' about file magic
+
+ Would also be nice to be able to specify more than one package to install (from the stated repo)
+
+ Lastly a thiredpartyapt script should be created (install.ubuntu.com/?package=firefox or something) linking to every package in the ubuntu repos allowing 1 click install and an easy link for posting in forums and wikis ;).
+
+* '''JeromeHaltom''': I implemented some of Tristan's suggestions by removing the PublicKey line and introducing signing of the entire file. This means that a .apt file can only add the apt-key that it was signed with. This is a small requirement, and goes a long way to prevent editing of a .apt file distributed by a third party. If it's edited, it can't be installed with the same key. It's not really preventing any security problems, as a malicious entity could still write his own .apt file, pointing to his own repository, signed with a key whose name exactly matches that of the original key. The user would see no difference.
+
+* '''JeromeHaltom''': Tristan, I think I finally grasped what you've been saying. I can't offer a proper solution to it though without bridging the identity gap between the web browser and gapti. My only idea there is a web browser extension which handles .apt links differently, calling gapti with the full path of the source of the file, and only allowing this to happen when the web site itself is HTTPS.  The .apt file would also need the expected path encoded into it. This would guarentee at least that the web site the user is viewing, and can verify identity of through the browser's SSL viewer was the distributor of the .apt file and the signer of the repository. This is obviously very hard to accomplish, though.
+
+* '''RobJCaskey''': Perhaps it's time we get AppArmor packaged and add some 'AptArmor' to synaptic, gnome-app-install, & gdebi? We could have policies and associated graphical icons to summarize which permissions a program requires to run and install.
+
+* '''JeromeHaltom''': AppArmor doesn't really help with this much. This program could still request full access at install time, and a user could still grant it. The fact is we don't know ahead of time what permissions an ISV requires. Won't prevent against rogue installs.
+
+* '''Engla''': OneClick/apt-plus is yet another implementation of this. They claim it alreay works with ubuntu. http://www.apt-plus.com/
+
+* '''KillerKiwi''': Oneclick/apt-plus is a protocol not a file/mimetype (apt-plus://tuxracer) but does indeed do this. Ethier or is fine with me but I understand some people have issues with using a protocol
+
+* '''JeromeHaltom''': OneClick/apt-plus also doesn't cover half of the ground this does. Looks like all it does is install a named package from an existing repository. Not much use for ISVs. Doesn't add new repositories, doesn't deal with keys, etc.
+
+* '''Engla''': About OneClick: It's true that what Jerome says. Still, I just wanted to collect another link and see if it could add anything. Anyway, isn't a web of trust for these keys feasible? Third parties represented as organizations or companies could be trusted by having a web of keys, where Ubuntu would allow/sign (however that works) 3rd parties asking for it. If we manage to have a safe but quick response time on this, it could be easier and more feasible to just sign a distributor's key and let them provide their own packages, rather than merging it into the ubuntu repositories.
+
+* '''JeromeHaltom''': Engla, I agree completely, and will implement this. I mentioned it in the Method section in a note. For keys which are not currently signed, the dialog would make the user wait some time period, 15 seconds or something, before it let htem proceed. It would display lots of warning messages and generally be hard to do. For a signed key, it would be easier. Perhaps it would say even "This software is guarenteed authentic by Ubuntu." Or something. Either way, it would have to be optional.
+
+* '''JeromeHaltom''': You all should check out GAptI. It is linked from the wiki article. You can download it with bzr and build a .deb from it.
+
+* '''JohnNilsson''': I don't think that messing with the user will be productive. The 15s this will just get people irritated, and will eventually be circumvented by som demanded command line switch, or simply a fork. Just inform the user, visibly, that installing untrusted software will taint the system and void any support.
+ On top of this, the web of trust can be used so that ubuntu uses different kyes for different kind of trust. "Trusted by ubuntu", "Supported by ubuntu" and other classes as needed.
+ In the end it's the ISV that should be botherd by distributing untrusted software, not the user.
+
+* '''ScottRitchie''': I think you should extend the specification to include more metadata.  Specifically: a description of the repository, optional metadata to help the OS choose a mirror (if any), and optional instructions for update-manager during a distro upgrade (perhaps where to download a new .apt file in case we need to change feisty to gutsy in the apt line).  Also, the apt file should be stored somewhere, like within /etc/apt, so it can be removed easily.  All in all, I really like it.
+
+* '''JeromeHaltom''': Scott, I agree. At the time I wrote the original spec I had not fully considered update-manager or how it relates to this. Somebody friendly and kind should take a look at update-manager and see how Ubuntu manages dist upgrades. What files do they install in -updates that cause update-manager to offer a new distro choice? As an aside, I'd like to think about some sort of recommendation for hard non-future dependencies. For instance, VMware is NOT compatible with a new kernel. Somebody at VMware has to rebuild kernel modules. Thus, a user should not update to a new distro that contains a new kernel until VMware has built their modules. The same goes for more than the kernel. That or breaking changes in a distro should never be allowed, and I don't think anybody likes this idea. A hard dependency on ubuntu-standard's version might be a good recommendation for this. Prevents the user from upgrading to Gutsy until his third party software is updated, or he makes some decision on what to do.
+
+* '''Mhall119''': Would it be possible to extend the sources.list file to specify a list of packages to look for in a certain repository?  That way adding a third-party repository to install package 'foo' will only look for updates to package 'foo' in that repository, and will ignore updates to, say, the Linux kernel from that repository.  Basically a package white-list for untrusted repositories.
+
+* '''JeromeHaltom''': Mhall119: I think this misses the point. That repository should not be distributing updates to Ubuntu packages. That's very, very bad.
+
+* '''ScottRitchie''': JeromeHaltom: No it isn't - the primary use case for Third Party Apt is replacing something like http://www.winehq.org/site/download-deb -- those are updates to the packages within Ubuntu.  ThirdPartyApt would be just as useful providing backports as it would additional software.
+
+* '''ScottRitchie''': Mhall119: There is no such thing as an "untrusted repository" - installing a package necessarily grants root level access to the system while running multiple package-defined scripts.  There is no security benefit from restricting certain packages from a certain repository.  It seems that what you want, however, can already be supplied by apt pinning (namely, preferring one repository over another even if the version number is lower).  We may want a graphical interface to manage pinning more carefully.
+
+* '''JeromeHaltom''': ScottRitchie: A number of things should be done for Wine. a) Wine should be included in Ubuntu and kept properly up-to-date, maybe even the winehq guys could volunteer to do it. This is how it was intended to work. b) WineHQ should distribute packages which are of distinct lines from the Ubuntu packages, and thus named differently, with conflicts against the existing Ubuntu versions so parallel installs are not possible. c) Wine should be removed from Ubuntu. ThirdPartyApt was not, in my mind, designed to make installing packages that already exist in Ubuntu easier. We already have Synaptic, Add/Remove, etc for that. It's meant for installing software which is wholey owned and controlled by another party: such as VMware, Photoshop, or other closed source applications. ThirdPartyApt is of limited use for open source applications, as those can just be directly included with Ubuntu itself.
+
+* '''ScottRitchie''': JeromeHaltom: A and B are both already done, by me personally.  The packages at WineHQ are versioned using a ~, such that an official Ubuntu package (of the same major version) will replace them - for instance you can go from the Wine 0.9.46 at winehq to the one built into Gutsy.  Wine, however, is updated every two weeks while Ubuntu is updated every six months.  Wine is improving very fast these days, and waiting six months to use a new Wine release is simply not acceptable to most users, which is exactly why they use my repository to get bi-weekly builds.  The use case is even stronger for open source programs that ''have'' to be up to date - a very good example is the multiplayer game Spring (http://spring.clan-sy.com), where every user needs to have the same version in order to play together.  When Spring makes a new release, Ubuntu users would be left unable to play for several months waiting for the new version to creep into the official repositories.
+
+* '''JeromeHaltom''': Then the wine packaging is decent in my opinion, as long as the Ubuntu and WineHQ packages are maintained together with close ties. What you want to avoid is making it acceptable for the two packages to have the same name but different lineages, as this leads to dependency problems. My application in Ubuntu might depend on wine, but it depends on Ubuntu's wine, with special Ubuntu modifications, and it will break with any other. It would be inaccurate to claim that the WineHQ version was compatible if it wasn't in fact compatible. As for Spring, I don't think, after hearing you, there is much of a good argument for including it in Ubuntu period. It will most likely be out of date by the time Ubuntu releases after waiting through a freeze. This is an interesting downside of the Ubuntu freeze/release process which I don't think has been considered too closely. I think in this case though, upstream Spring is the appropiate place to manage the package, and thus no consideration of conflicts with existing Ubuntu packages has to be considered. I don't think either of these make pinning required. I am starting to warm to the idea, though. After some thought I think it would be reasonable to pin packages listed on the Install line higher than Ubuntu, and all other packages lower.
+
+* '''ScottRitchie''': Spring has a real reason for integration in Ubuntu though - the game has a great single player mode.  There's nothing wrong with using an oldish version for that.  I agree about pinning having a use though, and it's a good idea to auto pin packages on the Install line. I think we should add graphical pinning management to the spec too, it definitely seems like it might be useful.
+
+* '''ScottRitchie''': Question: Can we integrate some form of having the .apt file update itself into the spec?  When Gutsy came out, users of the WineHQ apt repository have to go back to the website and redownload a later sources.list file replacing the "feisty" entries with "gutsy" ones.  It would be nice if Third Party Apt handled this automagically for when Hardy + 1 comes out.
+
+* '''JeromeHaltom''': Scott: I agree, this issue needs to be addressed. I would start though, before rolling it into this spec, examining if Ubuntu central has a proper way to do this. When you do a distro upgrade using Update-Manager, *something* fixes sources.list for you. What is it? How does it work? Can we integrate into it? If not, what would it take to bring it to that point?
+
+* '''ScottRitchie''': Another idea I had.  The .apt file should be able to update itself (from a standard directory on the apt server), but will behave differently and float some sort of warning if the format of the new apt file is newer than the system knows how to understand (say, we release ThirdPartyApt 2.0 on Hardy+2, and Hardy sees that file).  In that case, we should default Hardy to then searching for a different (say, .apt.1.0) file on the repository, and then use that as its .apt.
+
+* '''ScottRitchie''': At any rate, I envision this being very smoothly integrated into Synaptic.  Each third party repository could define its own icon, and rather than tagging with no icon or the Ubuntu icon for packages in Main, synaptic could also tag them with the third party repo icon (so, for instance, you could see the Wine package with the Wine icon).  We could then juice up the Synaptic->Repositories->Third Party tab to make it more interesting than a couple of checkboxes.  Unless there are any objections, I'm going to start editing this article and straightening out my thoughts in the design section.
+
+* '''Danegbo''': I like this specification, but I think we should (long-term -- version 2 or 3 of the spec) look toward supporting proprietary apps. That means more that your mention of getting the .apt file after payment because the .apt file could then be passed along freely. We need some other field like a generated install key which the download server could check againt a user list. Some way to verify the authenticity of the download, anyway. It needn't be too onerous. The .debs can be passed along, too. We just need to make it more difficult for non-payers to get automatic updates.
+
+* '''JeromeHaltom''': Danegbo, nothing is stopping somebody from a) providing apt repositoroties with keys in their urls and b) auto generating .apt files on demand.

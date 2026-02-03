@@ -1,0 +1,116 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+* '''Launchpad Entry''': https://launchpad.net/distros/ubuntu/+spec/network-magic
+* '''Created''':  by ScottJamesRemnant
+* '''Contributors''': ScottJamesRemnant, JeffBailey, MattZimmerman, MartinPitt
+* '''Packages affected''': network-manager, dhcdbd, ifupdown, netcfg, ubuntu-express, gnome-system-tools, glibc
+
+=== Summary ===
+
+Integrate NetworkManager and associated technologies to provide a better user experience when connecting/disconnecting to/from various networks. This should be done in a way which is backwards-compatible with `ifupdown` and other standard mechanisms in previous Ubuntu releases.
+
+=== Rationale ===
+
+Laptop users are able to move easily between networks, both wireless and wired; however currently updating their configuration requires use of administration tools and in some cases a root shell.  This should be largely automatic when possible, and when not it should be as simple as possible and not require complex operations.
+
+=== Use cases ===
+
+* Thom is a laptop user and frequently moves between several different wireless networks, at home and at work.  When he comes home his laptop should automatically select his home network as it has been used on it before; when he goes to work the next morning, his laptop should automatically select the work network.
+
+* Ian is also a laptop user, however it largely never leaves his house in which he has both a wired network and a wireless network.  When he plugs his laptop into the docking station, which has a cable connected, the laptop should select and use the wired network.  When he unplugs the laptop again it should instead select and use his wireless network.
+
+* Jeff Bailey is an Ubuntu developer, after three consecutive development summits at which this proposal has been discussed, he does not want to discuss it again.  He would like to see it implemented as simply as possible without burdening it with large additional changes or requirements.
+
+=== Scope ===
+
+This specification addresses the initial requirements for getting basic functionality into the Dapper Drake release; it does not address potential improvements and further integration that can be performed once that has been done.
+
+As the use cases are targetted at "desktop" uses, new packages will only be targetted for the ubuntu desktop seeds.  Further integration and harmonisation of network configuration will be addressed in other specifications, after the Dapper Drake release.
+
+=== Design ===
+
+A solution exists for these use cases in the form of <nowiki>[[http://people.redhat.com/dcbw/NetworkManager/|Network Manager]]</nowiki>.  This is implemented as a flexible architecture using dbus and hal to communicate between the parts running as root that have direct control over the interface and parts running in the user's session that can request changes.
+
+=== Implementation ===
+
+Packages already exist for Network Manager, created for previous releases and placed into the universe repository; these will need updating to the latest CVS code and any local patches reviewed and either sent upstream or dropped.
+
+In order to request and release DHCP leases, Network Manager sends dbus events which need to control the `dhcp3` client we use.  A tool for this already exists called `dhcdbd`, and is already packaged in universe.  This package should be updated to the latest upstream version and any local patches reviewed and either sent upstream or dropped.
+
+To make the least intrusive changes possible, instead of integrating Network Manager with the existing `ifupdown` system, we will only permit it to manage those interfaces left unconfigured.  This allows us to provide the functionality for the most common set of users without blocking on potentially complex and backwards-incompatible integration work in the `dapper` time-frame.  For later releases, we can perform further work towards a single method of network configuration.
+
+==== Code ====
+
+===== Network Manager backend =====
+
+We will need to create a NetworkManagerUbuntu backend by cargo-culting a combination of the existing RedHat and Debian backends that configures interfaces using the tools available in Ubuntu, such as `iproute`, and explicitly ignores those configured in `/etc/network/interfaces`.
+
+===== Network Hotplugging =====
+
+As part of the HardwareDetection and HardwareActivation specifications, the process of hotplugging devices becomes much simpler.  The `ifupdown` package will contain a `udev` rule to bring those interfaces up marked as "auto" in `/etc/network/interfaces`, whether that happens on boot or when the device is connected.
+
+This rule will be largely based on that currently shipped in the `hotplug` package.
+
+Those network interfaces that are to be managed by Network Manager will not be listed in this file, and will be activated by Network Manager as a result of the `hal` event (which itself is triggered by the `udev` event).
+
+===== Installer Changes =====
+
+The existing installer will continue to seed the configuration of the network card used for the installer, however netcfg will be modified to again write "auto" lines rather then "mapping hotplug".  This installer will only be used for server and expert installs which will not install Network Manager by default, so requires manual configuration of the network card.
+
+The Ubuntu Express installer will NOT seed this file, and instead will copy the `/etc/network/interfaces` file from the live filesystem which will contain the template text and the loopback device.  The Live CD will rely on Network Manager to manage the interface and configure it via DHCP, and in the case of static networks, the user can simply configure it with `gnome-system-tools` and have that copied to the installed system.
+
+===== Gnome System Tools =====
+
+`gnome-system-tools` provides a Networking control panel that currently described interfaces omitted from `/etc/network/interfaces` as "unconfigured" and "disabled".  These strings should be changed to indicate that the interfaces are "automatically configured" and that changing properties means the interfaces become "manually configured".
+
+===== Resolver issues =====
+
+Changing networks can also require a change of DNS server information, potentially changing the results of queries for local addresses.  Running applications only read the `/etc/resolv.conf` file the first time they do a DNS lookup, and the libc resolver will also cache answers to queries made.  A patch exists to check whether `/etc/resolv.conf` has changed on each query, and if so clear the cache and re-read it before continuing the lookup.
+
+http://sources.redhat.com/ml/libc-alpha/2004-09/msg00130.html
+
+This negates the existing dependency on a local nameserver, such as `bind9`.
+
+As the resolver will controlled entirely by `dhcp3` or static configuration, no need for the `resolvconf` tool is forseen.  This will therefore not be a dependency of this specification, although it will continue to work for those users who install it.
+
+==== Data preservation and migration ====
+
+For backwards compatibility with existing `/etc/network/interfaces` files, "mapping hotplug" lines will still be supported; albeit deprecated.
+
+Existing interface configuration will be left in this file, so Network Manager will not be enabled for those users upgrading from previous versions.  We can add an upgrade note informing users that if they wish to use it they simply need to uncheck the "Manual Configuration" checkbox in the Networking properties for those interfaces.
+
+=== Comments ===
+
+==== Non-libc readers of resolv.conf ====
+
+Relying on the libc patch to stat resolv.conf will mean that applications and libraries which read resolv.conf directly, rather than using the libc resolver, will also need patching if they are to work correct.  Applications and libraries to consider include at least:
+* adns (main, will definitely need patching to work, I am upstream and can help -iwj)
+* firedns (universe, will probably need patching)
+* libdjbdns (universe, will probably need patching)
+* firefox (main), mozilla (universe) etc.  (don't know about their DNS arrangements)
+* squid (main, don't know their DNS arrangements)
+and others I probably haven't thought of.  This should be announced on ubuntu-devel-announce, calling for people to add to and/or redact the list above.
+
+If we're serious about this it might be worth trying to find some ad-hoc automated way of logging, on an installed system, all processes that open /etc/resolv.conf or all processes that talk to the wrong address after it has changed.
+
+==== Virtual Private Network ====
+
+The NetworkManager also supports (via vpnc etc.) virtual private networks. It would be cool to add this to the usecases:
+
+* Johannes is a student and want to connect to the university's virtual private network. At home on his desktop computer he simply clicks on the NetworkManager's applet and adds the university's virtual private network. Now he can select if he want to connect to this network. -- Johannes2
+----
+==== Network Manager and KDE ====
+
+Until a native KDE client is written, the nm-applet requires gnome-keyring-daemon (or a patch for flat files) to store WEP keys.  This can be run with kde, but requires a small kde startup script to export the necessary gnome variables for the key ring deamon, as well as a script to shut it down. These can be found on the NM mailing lists.
+
+----
+
+CategorySpec

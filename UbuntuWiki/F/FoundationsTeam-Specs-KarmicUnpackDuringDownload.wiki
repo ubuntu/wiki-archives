@@ -1,0 +1,180 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+* '''Launchpad Entry''': UbuntuSpec:foundations-karmic-pre-unpacking
+* '''Created''': MichaelVogt
+* '''Contributors''': 
+* '''Packages affected''': apt, dpkg
+
+=== Summary ===
+
+Discussion of installing packages DURING the download of multiple packages, versus AFTER the download of all packages completes.
+
+=== Release Note ===
+
+Ubuntu can now install package faster by doing downloads and installs in parallel.
+
+=== Rationale ===
+
+When installing packages the download is a separate step from the unpack/configure. While downloading the cpu and disk are mostly idle. While installing the network is idle. Doing them in parallel is a good way to utilize both systems.
+
+=== User stories ===
+
+Joe installs some updates and is happy to see that his system applies the updates faster now.
+
+=== Assumptions ===
+
+=== Design ===
+
+The first task for this spec is to gather some data to find out what is actually taking the bulk of time during a install/upgrade. We need to gather a bootchart like diagram that gives us information about what package takes how long to unpack and to configure. Based on this we can then decide what is the optimal strategy for the parallelization.
+
+There are various ways to do the download/install in parallel. The options include:
+
+# partition the download into self-contained sets. when downloading one set is finished, start installing that and keep download the remaining sets in parallel. this requires code that idetifies the sets and some analysis how big they are and how many we have on a typical install/upgrade. Problematic with this is anything that uses the apt dpkg::pre-invoke handlers (like debconf, apt-listchanges).
+# download packages and when a download finishes start unpacking the deb immediately (either to a new dir location or to a special filename). A problem with that approach is that on unpack the preinst is also run, so we would need a new --pre-unpack option that would skip that (and think about if that is safe in all cases). Then dpkg needs to know about the pre-unpacked files and use them instead of unpacking the deb again.
+# download the debs and unzip them when they are finished downloading
+
+We also need to make sure that the space requirement calculation gets updated.
+
+=== Implementation ===
+
+In the initial phase of this spec we gather data to see how much there is to gain from doing the work in parallel and what bits of the package installation take how much time.
+
+The data gathering will be part of the non interactive version of the release upgrader. A new option (NonInteractive/DpkgProgressLog=(yes|no)" is provided that will write out a dpkg performance log as dpkg-progress.%i.log). It will contains the time, pkgname and dpkg action that is being performed (unpack, configure, trigger). Being able to run it non-interactive and unattended will ensure we can easily reproduce the measurements.
+
+In addition to that, libapt is modified to send status information on when dpkg is executed (it is run multiple times with --unpack and --configure) to be able to measure the overhead of the initial dpkg database reading. It will be a "pmstatus:dpkg-exec:%percent:Running dpkg\n" style message that can then be easily extracted from the progress log.
+
+This information is than processed with a tool (that needs to be written) that graphs this data. It may be worthwhile to gather data from /proc/stat, /proc/diskstat as well during the upgrade.
+
+=== Test/Demo Plan ===
+
+To test we perform a regular release upgrade with the feature turned on and off and compare the resulting file systems. They must be identical. We also time the upgrade and check how much time we won.
+
+=== BoF agenda and discussion ===
+
+==== UDS Session Notes ====
+
+The problem:
+    
+    Currently apt operations download every packages file; then do an apt-list changes, then run a dpkg on everything, and dpkg does what it needs to do, unpack, etc, in an order which depends partially on apt and dpkg.
+
+The proposal:
+
+    It may save substantial time to start installation as soon as packages have been downloaded and are ready for installation.
+
+Considerations:
+
+** Mark's original idea was pre-unpacking the files and leaving them in a state which is immediately usable by dpkg.
+
+** Colin suggested unpacking and not pre-unpacking (as in dpkg --complete); possibly similarly to downloading and installing as self-contained sets of packages become available for installation. This is because we can't leave the system in a half-upgraded situation in the case of an aborted download.
+
+** Mark points out that the unpacking approach doesn't have the dependency calculations themselves; you take advantage of the fact that.
+
+** Steve L. reminded us that the disk space requirements could go up give the fact that we are unpacking multiple packages. Ordering the downloads to match install order as closely as possible would be the best possible situation.
+
+** The scenario Mark proposes is a change to dpkg which allows it use a cache containing a pre-expanded package; if the cache isn't there, dpkg just goes on with installation as normal, but if it's there, then it is used.
+
+** We'd have to unpack into the same filesystem as the target directory; dpkg already creates subdirectories anyway. Mark points out that it's dangerous to trust this cache if an installation is aborted; underlined the need for some approach to ensure that the package is complete, the right version, etc.
+
+Considering the above, there was discussion around where to pre-unpack. Colin and Steve L. pointed out that dpkg already does this; they could just add a file that pointed out where we had stopped. Mark still thought that putting all the caches in a separate directory would be safer, but Colin says there are many reasons to just use the default dpkg name.
+
+** Lars points out that the amount of data installed outside of /usr is going to be minimal.
+
+** There is a UI issue with having apt and debconf (or anything which involves a user prompt) run together; there's a progress bar displayed for downloads, and running debconf would require displaying stuff on the console.
+
+** Adam pointed out that uncompressing (instead of the full unpacking) during download would definitely be a lot simpler, and possibly a win in itself, given the CPU cost of it. Lars however countered by saying that in general the writing to disk will be slower; Colin reminded us that .lzma decompression is significantly slower so might benefit more from this approach.
+
+** Colin discussed vendor hooks being added to dpkg this release.
+
+Next steps:
+
+** Profile dpkg steps; what takes the most time: uncompression, untarring, package configuration and maintainer scripts. Mark reminds us: the larger the download, the larger the benefit.
+
+** Profiling different compression mechanisms.
+
+** Michael points out that a prototype that just pre-unpackaged would not be too complicated to build.
+
+** Mark suggested doing a timing experiment on a release upgrade:
+## apt-get --download-only
+## unpack everything
+## start watch
+## install everything based on an unpacked set
+## stop watch
+ and comparing it to:
+## apt-get --download-only
+## start watch
+## install everything
+## stop watch
+
+==== notes:mvo ====
+
+unpack while downloading
+
+currently:
+* download all
+* install all (serialized)
+
+* use bootchart to profile the package install time
+
+Optimization ideas:
+* run dpkg --unpack to a different place while downloading
+* *but* preinst is also run and apt-listchanges/debconf assume all deb are downloaded
+* needs to be on the same filesystem
+
+* would have to parition the download into self-contained 
+  groups
+* big groups of pkgs are good (because dpkg database handling 
+  is slow)
+
+* next steps:
+** benchmark to figure out what really takes the time
+*** could be maintainer scripts
+*** could be unpack 
+*** could be configure
+** so figure out how much time saving we get
+
+* marks "cache" idea:
+** download package
+** when package downloaded (pre)unpack it into a "cache" area
+    (that can well be just the regular name/destination that dpkg 
+     uses anyway)
+** when finished all downloads, run dpkg normally
+** if anything fails blow away the cache
+** problem with this idea: needs a lot of diskspace
+** Cache design:
+    - add indexfile to /var/lib/dpkg/... that records what dpkg
+    has done in order to cleanly rollback
+    - new pre-unpacked, half-pre-unpacked, etc in the status file
+** Cache design(2):
+    - mark the pre-unpacked with a different filename (foo.preunpack.dpkg-tmp)
+    or (foo.preunpacked.$sha1.dpkg-tmp) to make cleanup easier
+** Cache design(3):
+    - unpack into a seperate dir
+
+Simple idea:
+* what about data.tar.gz unpacking in /var/cache/apt/archives
+  when a download is finished (profile this!)
+
+future idea (tricky):
+* split it up into paritions
+* when a download set is finished, keep downloading
+* install packages when a set is self-contained (while still downloading)
+* problems: debconf --preconfigure (that is optional but results in
+  questions during the install)
+* progress bar when a package is asking questions
+
+problems with the idea:
+* apt-listchanges
+* error handling
+* selinux labeling handling
+
+----
+CategorySpec

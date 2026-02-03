@@ -1,0 +1,265 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+{| class="wikitable"
+|-
+| <tablestyle="float:right; width:40%; background:#F1F1ED; margin: 0 0 1em 1em;" style="padding:0.5em;">'''Table of Contents'''<<BR>>
+|}
+
+* '''Launchpad Entry''': UbuntuSpec:packageselection-foundations-n-multiarch-support
+* '''Created''': SteveLangasek
+* '''Contributors''': SteveLangasek
+* '''Packages affected''': dpkg, apt, gcc, glibc, binutils, linux-libc-dev, update-manager, software-properties-gtk, synaptic?
+
+=== Summary ===
+
+Integrate support for cross-architecture installation of binary packages (particularly i386<->amd64, but also other combinations) in dpkg and apt.
+
+=== Release Note ===
+
+Ubuntu 11.04 introduces support for installing packages from multiple architectures on a single system.  This makes a wider array of 32-bit applications available to users of 64-bit Ubuntu.
+
+=== Rationale ===
+
+The current handling of 32-bit software on the amd64 architecture is unwieldy in the extreme.  A handful of libraries are packaged as "biarch" packages, building <code>-386</code> variants using <code>gcc -m32</code>; most do not, and as a result are only available if they're included in <code>ia32-libs</code>, a monstrous source package that has to be updated to be kept in sync with each change to one of the component libraries, and now contains so many libraries that its "source" package (consisting primarily of copies of the i386 binary packages) weighs in as a 550MB tarball.  Furthermore, many of these libraries have to be patched to specially handle running in a 64-bit environment because they load various plugins from a system path that is already occupied by the 32-bit library, resulting in added complexity in the code due to special-casing.
+
+In all cases, the libraries (and some executables) have to be repackaged as <code>amd64</code> packages, because dpkg and apt do not support sensible handling of cross-installation of <code>i386</code> packages.  This consumes archive space and developer time on an ongoing basis.
+
+=== User stories ===
+
+* Phil wants to run VMware Server on his 64-bit Ubuntu install, but it is only available as a 32-bit package.  He enables use of the 32-bit repositories on his system in the <code>Software Sources</code> configuration, then selects the vmware i386 package from the <code>Add/Remove</code> menu.  The dependencies on the i386 library packages are automatically resolved, including <code>libpam-modules</code>, and the packages are installed for him.
+
+* Denise is developing software for the ARM platform, cross-compiling it from her x86-64 desktop system.  She installs all of the build-dependencies as armel packages, builds her package, and tests it directly on her desktop running it under qemu via <code>binfmt-misc</code>.
+
+* Shawn installed his system using the 32-bit version of Ubuntu, but his hardware is 64-bit and he wants to switch over.  He manually installs the amd64 versions of dpkg and apt, replacing the i386 versions and changing which architecture is used as the default; then he installs the amd64 ubuntu-minimal package; then he installs the amd64 ubuntu-desktop package.  Over time the remaining i386 packages are replaced automatically on upgrade.
+
+=== Assumptions ===
+
+* The multiarch directory scheme required in order to make library packages co-installable will be a target for <nowiki>[[https://refspecs.linuxfoundation.org/FHS_3.0/fhs/index.html|Filesystem Hierarchy Standard 3.0]]</nowiki>/<nowiki>[[https://refspecs.linuxfoundation.org/LSB_5.0.0/LSB-Core-generic/LSB-Core-generic/book1.html|Linux Standard Base 5.0 Core]]</nowiki> standardization in the future; but even if it does not become a standard, multiarch is preferable to the status quo, which also uses non-standard library directories for amd64 and is much more complex at the packaging level.
+
+* Since Debian Policy prohibits declaring shared libraries as <code>Essential: yes</code>, it is assumed that any undeclared dependencies on <code>Essential</code> packages on the part of multiarch packages is satisfied by the binaries from the native architecture, and there is no need to multiarch-ify any of the <code>Essential</code> packages except where other packages declare versioned dependencies on them.
+
+* Dependencies, Build-Dependencies, and Recommends within an existing architecture <code>foo</code> will continue to remain closed over the set of packages declaring either <code>Architecture: foo</code> or <code>Architecture: all</code>.
+
+=== Design ===
+
+==== Filesystem layout ====
+
+In order to seamlessly accommodate more than one ELF ABI on a system, the library for each (soname,ABI) pair must have a unique path on the filesystem.  The FHS attempts to address this for the amd64 case by requiring that /usr/lib be reserved for 32-bit libraries, with 64-bit libraries located in /usr/lib64. This design has a number of shortcomings:
+
+* This is not forwards-compatible with any future ABI changes, which would require further design work and further modification of packages to handle the addition of new paths.  (Indeed, this is already a concern for the MIPS architecture which has three distinct ABIs in use in parallel.)
+* The amd64 architecture must be special-cased in the library packaging, as the only architecture that uses /usr/lib64 instead of /usr/lib.  (Two pre-existing 64-bit Linux ports, Alpha and IA-64, also used /usr/lib for their 64-bit libs.)  This is unnecessary added complexity.
+* It does not address emulation use cases, such as qemu, which could integrate much better and more efficiently with the system if the packages for a qemu arch were co-installable.
+
+The current design used by Debian and Ubuntu also fails on a key point where the FHS layout does not:
+
+* The path for x86 and x86-64 libraries varies depending on whether the system is natively 32-bit or 64-bit, so translating paths at install time is insufficient for the general case because some libraries need to embed plugin paths in the binaries themselves.
+
+Multiarch seeks to address all of these issues, at the expense of a one-time transition, by migrating  libraries to subdirectories that include the architecture triplet as part of the path:
+
+<pre>
+   /lib/i386-linux-gnu
+   /lib/x86_64-linux-gnu
+   /usr/lib/i386-linux-gnu
+   /usr/lib/x86_64-linux-gnu
+</pre>
+
+Further rationale for this layout can be found at <nowiki>[[http://err.no/debian/amd64-multiarch-3]]</nowiki>.
+
+==== Binary package control fields ====
+
+Although a simple change to a configuration option (<code>dpkg --force-architecture</code>) is sufficient to permit installation of packages built for another architecture, more information is needed if we want package managers intelligently to resolve the dependencies for these packages.  Some dependencies on other packages, such as on ELF libraries, can only be satisfied by a package of the same architecture ("x on x" or "same" dependency); others, such as dependencies on an interpreter used by a maintainer script, can be satisfied by a package of any architecture as long as it's functional ("x on any" or "foreign" dependency).
+
+Pre-multiarch, dependency resolution is restricted to packages with the same architecture (or <code>Architecture: all</code> packages) and a package of the same name but a different architecture is assumed not to be co-installable.  Multiarch introduces a new binary package field <code>Multi-Arch</code> which has to be set on any package wanting a behaviour from pre-multiarch behavior.
+
+If the field is present, the semantics are as follows. Here, "co-installable" means that the package can be installed on the same system as a package of the same name and different architecture.
+
+<pre>
+Multi-Arch: no
+</pre>
+** The package is '''not''' co-installable and it must '''not''' be used to satisfy the dependency of any package of another architecture than its own.<<BR>><<BR>>This is the pre-multiarch behavior.
+
+<pre>
+Multi-Arch: same
+</pre>
+** This package '''is''' co-installable and it must '''not''' be used to satisfy the dependency of any package of another architecture than its own.<<BR>><<BR>>Often used for library packages.
+
+<pre>
+Multi-Arch: foreign
+</pre>
+** The package is '''not''' co-installable and '''should''' be allowed to satisfy the dependencies of a package of another architecture than its own.<<BR>><<BR>>If a package is declared <code>Multi-Arch: foreign</code>, preference should be given to a package for the native architecture if available; if it is not available, the package manager may automatically install any available package, regardless of architecture, or it may choose to make this an option controlled by user configuration.
+
+<pre>
+Multi-Arch: allowed
+</pre>
+** The package is '''not''' co-installable and '''should''' be allowed to satisfy the dependencies of a package of another architecture than its own whose dependency on this package is annotated with <code>:any</code>.<<BR>><<BR>>This permits the reverse-dependencies of the package to annotate their Depends: fields to indicate that a foreign architecture version of this package satisfies their dependencies, but does not change the resolution of any existing dependencies. This value was introduced in order to prevent any packages from incorrectly annotating dependencies as being architecture-neutral without coordination with the maintainer of the depended-on package. See below for the example of the Python package.
+
+Setting a value of <code>Multi-Arch: same</code> on a package which is <code>Architecture: all</code> is considered an error.  <code>dpkg-deb</code> must refuse to generate a .deb with this combination of values.  Behavior when trying to install such a package is undefined.
+
+Because the handling of packages without a <code>Multi-Arch</code> field remains the same, it is possible to introduce multiarch support incrementally to packages, starting at the bottom of the dependency tree and working upwards, with no flag days or requirements for shlibs bumps affecting non-multiarch packages:
+
+* A package for a foreign architecture is only installable if all of its (recursive) dependencies are either marked as multiarch or do not have corresponding packages installed for the native architecture.  An incomplete multiarch conversion for a given dependency tree is equivalent to the status quo.
+* Attempting to install a foreign arch package with a pre-multiarch package manager will fail (unless <code>--force-architecture</code> is specified); but dependencies within existing architectures will remain closed over the set of packages for that architecture (including <code>Architecture: all</code> packages), so multiarch does not impose any requirement to upgrade the package manager first before upgrading between releases.  Multiarch packages will only be pulled in upon manually configuring the package manager to use them, following an upgrade, and therefore will not be needed to satisfy dependencies during a dist-upgrade.
+* Packages for the native architecture which have the <code>Multi-Arch</code> field set will always have their dependencies satisfiable by other packages within that architecture; therefore installing a package for the native architecture with a package manager which is not multiarch-aware will continue to give correct results, even when that package declares itself to be multiarch.
+
+==== Extended semantics of per-architecture package relationships ====
+
+Whether a dependency needs to be satisfied within a single arch or can be satisfied by a package of a foreign architecture is a property of the dependency relationship, not of the package fulfilling that dependency.  ''In general'' dependencies on a given package will all be of one type or the other, so most packages will declare <code>Multi-Arch: foreign</code>, <code>Multi-Arch: same</code>, or not declare the <code>Multi-Arch</code> field at all.
+
+However, there will be cases where a single package has reverse-dependencies of both sorts.  An example of this is the <code>python</code> package: there are packages which depend on it to use it as an interpreter (a foreign-arch relationship), and there are packages which depend on it because they provide loadable, ELF DSO language extensions for the language (a same-arch relationship).  A single field on the depended-on <code>python</code> package is insufficient to express both relationships.
+
+To address this case, the python package declares itself as <code>Multi-Arch: allowed</code>, and an extension to package relationship fields is introduced:
+
+<pre>
+Depends: python:any
+</pre>
+
+This value in the binary stanza of a <code>debian/control</code> file declares that a package's dependency on <code>python</code> may be satisfied by a package of any architecture, so long as the <code>python</code> package declares itself as <code>Multi-Arch: allowed</code>.  This introduces a new dependency syntax using the colon (<code>:</code>) character, which is disallowed in package names, followed by the special value <code>any</code>.  No other values following the colon, including values matching known architectures, are addressed by this implementation, and behavior when encountering such values in a binary package's control file is undefined.  (It is recommended that dpkg and apt treat other such package relationships as unsatisfiable.)  This means that declaring relationships on packages of a ''specific'' foreign architecture is currently unsupported.
+
+It is worth noting that existing package management tools will be unable to interpret and satisfy package relationships of this format, even when the desired package is available.  Consequently, it is recommended to defer use of such package relationships in the archive for a full release cycle following the package management implementation.  This restriction is not expected to be a significant impediment to the deployment of multiarch packages, because most packages which are targets of interest for multiarch don't depend on interpreters outside of the <code>Essential</code> set.
+
+For the cases of common language interpreters in the base system (<code>perl</code>, <code>python</code>), it is expected that the available package helpers will facilitate conversion of these dependencies, which are already generated at package build time.
+
+==== Dependencies involving Architecture: all packages ====
+
+Pre-multiarch, architecture-dependent packages may depend on <code>Architecture: all</code> packages and assume that the transitive dependencies will be resolved using packages of the same architecture or other packages that are <code>Architecture: all</code>.  To avoid breaking this assumption, <code>Architecture: all</code> packages will, at least initially, be treated as equivalent to packages of the native architecture for all dependency resolution.  This means that for an <code>Architecture: all</code> package to satisfy the dependencies of a foreign-architecture package, it must be marked <code>Multi-Arch: foreign</code> or <code>Multi-Arch: allowed</code>.
+
+==== Architecture-independent files in multiarch packages ====
+
+Today, there are a number of reasons for which library packages ship files that should be shared across ABIs (i.e., "architecture-independent" files):
+
+* config files
+* documentation files (<code>/usr/share/doc/<package>/{copyright,changelog} </code>)
+* data files
+
+Debian/Ubuntu policy already states that files whose names do not change with each soname change should not be included in the shared library package; so in general it is already wrong to ship config files and data files in a shared library package, though the practical impact of this varies.  (For instance, the soname of glibc is not expected to change any time in the future, so the libc6 package currently unapologetically ships helper binaries, config files, and man pages in the shared library package.)  However, <code>/usr/share/doc/<package></code> is expected to be provided by ''every'' package installed on the system, so a general solution is needed for multiarch packages that must be co-installable while shipping architecture-independent files.
+
+Implementing this involves an implicit <code>Replaces: ${self}:other (<< ${binary:Version})</code> in all multiarch packages.  In addition, multiarch packages are required to be kept in lockstep; i.e., an implicit <code>Breaks: ${self}:other (!= ${binary:Version})</code>.  If more than one architecture of a package is present on the system, this will prevent either package from being configured unless they are all at the same version.
+
+In addition, <code>dpkg</code> will implement an internal checksum database for files it installs, and reference counting for files shared by multiarch packages.  Multiarch packages with differing versions of any file will also be treated as declaring reciprocal <code>Breaks</code>.
+
+==== The future of bi-arch packages ====
+
+A number of existing packages in the archive have an <code>Architecture:</code> field declaring one architecture, while containing code compiled for another architecture.  This is most commonly the case for those architectures which have natural 32-bit/64-bit complements; e.g., 32-bit x86 code packaged as <code>Architecture: amd64</code>, or 64-bit x86 code packaged as <code>Architecture: i386</code>.
+
+The vast majority of such packages will be obsoleted by multiarch.  However, there are a very small number of cases, such as bootloaders, where these cross-architecture packages have legitimate reverse-dependencies; so in order to maintain dependency closure within the architecture, it is necessary to continue cross-building these packages.
+
+This means, in particular, that the <code>gcc-multilib</code> package must continue to remain available on such architectures, along with biarch versions of any libraries it depends on.  The set of libraries is limited to those built from <code>gcc</code> source, plus <code>libc6-dev-i386</code> (or equivalent).  The <code>gcc-multilib</code> package is also relevant to third-party developers who wish to be able to compile code using <code>gcc -m32</code>; while <code>gcc -m32</code> could also be implemented using multiarch packages, the existing multilib solution already addresses this use case without the need for additional design.
+
+Where packages that contain cross-built code of this nature do '''not''' have reverse dependencies in the archive, consideration should be given to dropping the package for the architecture in question and supporting its installation as a multiarch package instead.  There should be no migration considerations for these packages, because with the exception of the runtime linker, biarch and multiarch packages should have disjoint paths for all of their files, and no conflicts or replaces should be needed.
+
+==== apt sources ====
+
+Users should have control over which packages files are downloaded from each apt source, to avoid unnecessary network traffic for Packages files that will not be used or are known not to exist.  This implies that the syntax of <code>/etc/apt/sources.list</code> must be extended, to permit specifying which architectures to grab for each source.
+
+It is proposed to implement this by using the unused Vendor field for extra options and using <code>arch=</code> followed by a list of comma-separated architectures ; e.g.:
+
+<pre>
+deb [arch=i386,amd64] http://archive.ubuntu.com/ubuntu/ karmic main restricted
+</pre>
+
+The Vendor field <code>[Vendor]</code> was added to apt a long time ago but never used for anything. Older apt will just ignore it completely.
+
+<code>sources.list</code> entries not annotated with an architecture name will be interpreted as applying to all configured architectures by default.
+
+An extension to the apt commandline syntax is also needed to permit explicit selection of an architecture for a package.  Again, we use the architecture name separated from the package name by a colon, preceding any version (<code>=pkg_version</code>) or target release specifier (<code>/release</code>).  This can be parsed unambiguously because the colon is a forbidden character in package names.
+
+=== Implementation ===
+
+==== Code Changes ====
+
+Support for the <code>Multi-Arch</code> field should be added to dpkg ASAP so that it will be propagated to the Packages files without the need for a time-consuming transition from <code>XB-Multi-Arch</code> to <code>Multi-Arch</code>.  (Cf. the Vcs-* fields, for which there are still a number of packages declaring X-Vcs-* in the archive.)
+
+==== Migration ====
+
+Once multiarch is available in the archive, it is expected that biarch support for amd64 will begin to regress immediately, with <code>ia32-libs</code> ceasing to be useful in short order.  Users will need to be pointed to the use of multiarch as an alternative.
+* <code>update-manager</code> can enable multiarch automatically if ia32-libs or other well-known biarch packages are present.
+* <code>software-properties-gtk</code> should provide an easy way to manually enable multiarch, at least for the majority use case of i386 packages for amd64 systems.
+** label: "Include 32-bit packages in available software"
+* The release notes should indicate how to manually adapt <code>/etc/apt/sources.list</code> (or other config file, as appropriate?) to enable multiarch sources.
+
+=== Test/Demo Plan ===
+
+It's important that we are able to test new features, and demonstrate them to users.  Use this section to describe a short plan that anybody can follow that demonstrates the feature is working.  This can then be used during testing, and to show off after release. Please add an entry to http://testcases.qa.ubuntu.com/Coverage/NewFeatures for tracking test coverage.
+
+This need not be added or completed until the specification is nearing beta.
+
+=== Unresolved issues ===
+
+The following issues have been identified as out-of-scope for the present specification and may be considered targets for future spec work.  Each of these are dependent on having a base implementation of multiarch, but do not impact the design or implementation of multiarch in the package manager and are therefore not considered blockers for the present spec.
+
+==== Co-installable -dev packages ====
+
+It would be useful for developers working in a cross-build environment to be able to use library packages for the target architecture on their build systems without modification, and to be able to install these packages without removing the corresponding native packages (e.g.: <code>libc6-dev</code>, which is a dependency of <code>gcc</code> itself).  This requires an architecture-qualified filesystem layout specification for architecture-dependent headers, and support for said layout in the toolchain, but otherwise imposes no requirements on the package manager beyond those identified in the present spec. This is covered in MultiarchCross.
+
+==== Co-installable packages for executables ====
+
+Co-installation of executables would potentially make it possible to reuse a single disk image on systems of multiple architectures with no modification.  This could be implemented on top of multiarch using architecture-qualified paths for executables, but would require an additional mechanism (such as kernel support, or boot-time symlinking) to implement PATH handling.
+
+==== Autodetection of supported ABIs ====
+
+This spec does not define a mechanism for indicating which foreign ABIs are supported on a given system.  For the initial implementation, it is assumed that users will manually designate the architectures that they wish to opt in to.  In the future, this may be extended to permit packages to indicate that they provide an implementation of a given ABI (e.g., <code>Package: qemu-sparc</code>, <code>Implements: sparc</code>) to support autoconfiguration of the package manager, but this is not required for the first implementation.
+
+==== Architecture-independent packages that can only be generated on one architecture ====
+
+A number of packages contain binary, architecture-specific data which must be generated using a toolchain for a particular architecture, but which are then used on other architectures (e.g., treated as opaque binary data for a bootloader or an emulator).  Currently these packages are distributed as <code>Architecture: all</code>, but this doesn't tell us which architecture the package needs to be built on, and buildds will normally build packages using the equivalent of <code>dpkg-buildpackage -B</code>.
+
+Since dependency closure within an architecture is an explicit goal of this spec, changing these packages away from <code>Architecture: all</code> to show which architecture they should be built on would conflict with this goal.  It may also conflict with the goal of allowing packages to declare which ABIs are supported on the system, mentioned above, by creating logical dependency loops.  Another proposal under discussion is to annotate these packages with a <code>Build-Architecture</code> field; it is recommended to use that instead.
+
+==== Partial architectures ====
+
+Some biarch complements, such as <code>powerpc64</code> and <code>s390x</code>, are not relevant as native architectures because they are special-purpose ABIs that always exist in combination with another ABI that is more appropriate for general-purpose computing (<code>powerpc</code>, <code>s390</code>).  It is useful to implement these as architectures in order to be able to build needed library packages for them without requiring package changes, but these architectures probably ''should not'' be closed under dependencies.
+
+Defining the correct handling of such partial architectures is out of scope for this spec, but should be an area of specification work in the near future because there are library packages in the archive which must already support these ABIs via biarch packaging.
+
+==== Architecture-specific Conflicts/Replaces ====
+
+We assume that <code>Conflicts:</code> relationships apply to a package of any architecture with the specified name, but in some cases, one package may have overlapping files with another package only when the two packages are of the same architecture; e.g., in the case of a library ABI change without an soname change.  It may be useful for the first package to declare a <code>Conflicts:</code> only with the second package of the same architecture.  However, the cases where this is relevant are expected to be very few, so consideration of a syntax extension for <code>Conflicts</code> (and <code>Replaces</code>) is deferred until after the initial implementation.
+
+==== Binary NMUs ====
+
+As versions must match exactly across architectures, packages declaring Multi-Arch: same can no longer be binNMUed for single architectures, because this would render them uninstallable on some systems. Possible solutions include always scheduling binNMUs on all architectures, or creating an exception for versions differing only in parts following "+b" (however, appropriate handling for the different changelogs would then be required). Progress on this is covered in DebianBug:758616
+
+=== Related bugs ===
+* Bug:112937
+* DebianBug:758616
+
+=== BoF agenda and discussion ===
+
+A number of other designs were considered at various points, during UDS and elsewhere.  They are documented here for reference, including the rationale for discarding them (if known).
+
+==== Allow official packages to have cross-architecture deps ====
+
+In some cases, it would reduce package duplication in the archive if packages were allowed to explicitly depend on packages from another architecture.  This option was rejected in favor of maintaining a small number of biarch packages in the archive, because:
+* The number of affected packages is small.
+* There would be a significant implementation cost on the archive side to replicate the existing support for archive integrity checks (britney and/or dak, soyuz and/or checkrdepends, and many other tools would need to become multiarch-aware).
+* Trivial implementations of this would involve significant bloat to the Packages files, and non-trivial implementations would likely add significant cost to the already-expensive Packages file generation.
+
+==== Permit packages without Multi-Arch set to satisfy foreign dependencies ====
+
+An earlier draft suggested that packages without the <code>Multi-Arch</code> field set should be interpreted as satisfying dependencies in a cross-architecture manner.  This was unsatisfactory because it would require a flag day to ensure that, when a package's dependency ''did'' need to be satisfied by a package of the same architecture, it was not incorrectly satisfied by an older, pre-multiarch version of the package.
+
+==== Require separate -common packages for all multiarch packages ====
+
+Other options for handling of architecture-independent data associated with library packages have been proposed in the past, which require minimal changes to dpkg in order to deal with file conflicts.  One of these options which has gained some traction previously is to require each multiarch lib package to have a separate <code>Architecture: all</code> "-common" package to contain the shared files.  This would require no support at the dpkg level for coping with file conflicts since there would be none, but it has significant disadvantages:
+* It requires large and potentially fragile per-package changes to implement.
+* It increases the size of the Packages file for all users.
+Since dpkg must be modified in any case in order to support the <code>Multi-Arch</code> field, it is considered preferable to also special-case the handling of file conflicts in dpkg instead of requiring intrusive per-package changes.
+
+==== Reuse bracket notation for multiarch dependency declarations ====
+
+Earlier revisions of this document specified that packages would depend on <code>python [same]</code> instead of <code>python:same</code>.  Future work in this area for building cross-toolchains will require the ability to specify build dependencies on packages of a specific, foreign architecture, in which case it will not be possible to reuse the bracket notation (<code>[]</code>) due to a collision with the current syntax for specifying architecture-specific build dependencies.  Therefore this spec has been updated to use an entirely new syntax, for consistency with this future work.
+
+==== Permit flag days for interpreters, reducing the number of packages to touch ====
+
+Earlier revisions of this document proposed optimizing for the common case regarding interpreters, letting interpreters declare themselves as Multi-Arch: foreign and requiring those packages that need the interpreter to have a matching architecture for DSO loading declare this is their dependencies.  This has been removed in the latest revisions because it implies a flag day for these related packages, which was considered undesirable.
+
+----
+CategorySpec

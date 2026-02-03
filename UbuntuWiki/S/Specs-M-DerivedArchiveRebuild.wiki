@@ -1,0 +1,172 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work.
+* A '''full compressed version''' of the wiki is available on archive.org
+|}
+
+__TOC__
+
+
+* '''Launchpad Entry''': UbuntuSpec:arm-m-derived-archive-rebuild
+* '''Created''': 2010-05-18
+* '''Contributors''': JamesWestby
+* '''Packages affected''':
+
+=== Summary ===
+
+We want a way to rebuild an archive, having the ability to modify packages inside the rebuild without those changes instantly being seen in the main archive, and then the ability to merge them back at a later date. This allows for easier experimentation due to requiring less infrastructure to be set up for testing.
+
+=== Rationale ===
+
+There is often a desire to rebuild all or part of an archive, either for testing, or to prepare a transition. Currently this must either be done as part of the archive itself, disrupting other work, or infrastructure must be cobbled together, making it harder to experiment.
+
+In particular this is useful for ARM due to the desire of some people to rebuild everything to e.g. enable new compiler options only suitable for newer hardware.
+
+=== User stories ===
+
+** Richard is a toolchain developer and wants to rebuild an archive with an experimental version of the toolchain to help with validating it. He requires to provide the updated toolchain to be used, and the ability to modify packages just in the rebuild to test fixes. He doesn't wish to consider all packages, just some that will provide interesting results without being overwhelming.
+** Andrea is a toolchain packager who is preparing to switch to a recently released toolchain in a distribution. She wishes to rebuild the whole archive with the new toolchain to see what issues it may cause. She also wishes to update some of the packages in the rebuild with fixes where appropriate. Once the testing is complete she wishes to push the updated toolchain to the main archive, and also merge back all the fixes made to other packages.
+** Matthias is another toolchain packager, who wishes to ensure that an archive will rebuild in its current state. Changes in the toolchain since a package was last built may mean that a package will not build any more. This harms the maintainability of the archive, and so must be found before release.
+
+All of the above use cases require that the results of the rebuild are available for some time in order that the results can be tested. They should be available as normal apt archives so that e.g. image building tools can easily be used against them.
+
+=== Assumptions ===
+
+** We have <nowiki>[[Specs-M-ARMDeveloperEnvironment]]</nowiki> to give us derived archives.
+
+=== Design ===
+
+Launchpad has copy archives, these allow for rebuilds to happen, based on the current state of a different archive. Combined with a PPA this can also do rebuilds based on a different toolchain. Currently all the packages in the source archive are copied, but this is undesirable as often limited feedback is desired. We will extend this feature in Launchpad to allow copying a subset of packages, probably based on package sets.
+
+For the other two use cases, it is required to go further than this. The following is how we would pursue the full solution, but we will not deliver this in the 10.11 cycle.
+
+The first part of the full solution will involve derived archives. These are archives which start off as a copy of the parent archive, but can receive uploads that override what was taken from the parent archive. These are exposed as normal archives, which can be viewed and modified similarly to a primary archive. <nowiki>[[Specs-M-ARMDeveloperEnvironment]]</nowiki> covers them in more detail.
+
+In addition there should be a facility for rebuilding a package in the rebuild archive, even if it has already succeeded (known in Debian as a binNMU). This allows for testing the rebuild of a package cheaply, without having to create further derived archives.
+
+There should also be facilities for copying packages from the parent archive(s) in to the child. This can be used to test new uploads in the child archive environment. Some archives may in fact want this to happen automatically, with an upload to the parent being copied to the child and build records being created there. There should be some way to prevent automatic copying of packages from the parent to the child if some condition is met, so that changes can be preserved in the child.
+
+Also the delta between the two archives should be visualisable, and it should be straightforward to merge changes between the two archives.
+
+For each of our use cases:
+
+** Richard would create a derived archive (perhaps including just a subset of the parent), including the binaries, and then upload the new toolchain to it. He would then request rebuilds of all the packages he was interested in. He could then upload new versions of packages as desired.
+** Andrea would do a similar thing, probably using the whole archive. She would also be able to visualise the difference between the two archives, and merge in new uploads to the parent archive so that she was always testing the latest. In addition she would be able to easily push the new toolchain and the changes she had made back to the parent archive if she had permission.
+** Matthias can make use of copy-archives in Launchpad, but can also use the pieces described above to achieve them same result. He would create a derived archive, including the binaries, and then request a rebuild of every package.
+
+=== Implementation ===
+
+Launchpad copy archives will be extended to allow selecting packagesets to restrict the packages copied to the new archive. It will also be made to use the LP job system to create the archive, so that it can be requested via the database, rather than by running a script on a particular machine. Following that we will add an API to request the creation of a copy archive, accessible by LP admins for now. We can also add a web interface to do this. We will also have to discuss resource requirements with the sysadmins, as if there are lots of copy archives created it would be expensive in terms of disk space and buildd time.
+
+The following is an idea for how we could implement the further parts of the spec in a later cycle.
+
+Creating a derived archive is covered in <nowiki>[[Specs-M-DerivedArchiveRebuild]]</nowiki>.
+
+Rebuilding a package that has succeeded, requires some additions to that spec. There are two ways to achieve this, the first being a source change just adding a new changelog entry to increase the version. That is fairly expensive though. The cheaper option is to just create new build records that request a build, and indicate the new version number that should be used at build time to override the one taken from <code>debian/changelog</code>.
+
+The first method can be scripted outside of the archive, so we will provide a script do that, as it will work anywhere, and crucially where there is no build farm.
+
+The second method requires some archive changes. We will have the ability to create a new build record where there is an existing binary package. We will also extend the build records to indicate the version number that should be used for the binary package, so that whatever performs the build can make use of it.
+
+==== UI Changes ====
+
+There will be UI changes required in Launchpad if that is to have derived archives, but the details of that are covered elsewhere.
+
+The client-side tools covered in <nowiki>[[Specs-M-ARMDeveloperEnvironment]]</nowiki> will need to interface with that, and may want explicit support for rebuild archives if there are lots of common steps to creating one.
+
+There will also be UI additions to allow for the build records to be created through the web UI if supported.
+
+Creation of copy archives is not exposed in the LP API. We will decide whether to do this based on feedback from engineers, but at present we will just document how to do it through the command line/by asking an LP admin.
+
+==== Code Changes ====
+
+The code changes needed were to implement the full spec in 10.10 would be:
+
+The code changes required as additions to <nowiki>[[Specs-M-ARMArchiveBranching]]</nowiki> are:
+
+** A way to create build records for successful builds (optionally for a subset of architectures). Creating a new build record for pending or failed builds should not be supported (unless that is the way a retry of a failed build is done).
+** The ability to mark whether an archive has a build-farm servicing it, which should prevent the above being done.
+** Inclusion of an optional version in the build record to indicate the version that should override what the changelog says.
+** HTML and API additions to make this request.
+
+In addition a script to perform a sourceful change and upload of a requested set of packages, optionally including binary builds will be provided.
+
+==== Migration ====
+
+There is no data to migrate.
+
+=== Test/Demo Plan ===
+
+Here are some tests that should be performed:
+
+** Tests of the script that makes the sourceful upload, in both binary build and pure source modes.
+** Creating a build record over both web UI and API.
+** That the build record for such a build then contains a version that is suitable for the rebuild.
+
+=== Unresolved issues ===
+
+This should highlight any issues that should be addressed in further specifications, and not problems with the specification itself; since any specification with problems cannot be approved.
+
+=== BoF agenda and discussion ===
+
+Two ways to do rebuilds:
+
+** Launchpad
+** Some way involving a cluster managed by a friendly debian guy
+
+Problems:
+
+* rebuild tests compete with ppa builds
+** builder hardware, pretty good though
+** soyuz scaling issues
+*** process-upload serialization (should be fixed soon)
+* would like to do this for ARM
+** cross compiling will not work
+** hardware is slow (OO.org takes ~2 days)
+** qemu on even very fast hardware is too slow
+** the qemu-with-a-cross-compiler underneath approach has legs, but isn't ready yet
+
+Use cases for rebuilds:
+
+* verifying the tool chain works
+** lucid all builds with its own toolchain
+** how much does the new version of gcc break?
+* we want to rebuild the archive with a new tool chain
+** here we keep the results
+** can be because of optimizations, or a bad compiler flag in previous builds
+** needs something like a binNMU if the results go back into the same archive
+** important to be able to measure the differences
+
+"scorched earth" rebuilds to do with build dependency loops -- session later in the week
+
+The context here is doing rebuilds for Launchpad-managed archives.
+
+Iterated rebuids are useful.
+
+Some part of the process involves running a script on a DC machine that takes an
+hour -- difficult to expose through Launchpad.
+
+Diskless archives?
+
+The variance of ARM architecture leads towards the requirement of assigning
+builds to particular builders.  Builder pools are related, but existing spec
+does not cover this.  In general, there is a need to store more data about
+buildds.
+
+Something about checking if a build uses swap, and general performance
+monitoring of builds.
+
+We could always build into a derived archive, and possibly copy back into the
+source archives.
+
+===== ACTIONS =====
+
+* implement binNMUs in Launchpad
+* API exposure for copy-archive in Launchpad
+* implementing derived archives would help too
+ 
+See Launchpad bug 245594
+----
+CategorySpec
