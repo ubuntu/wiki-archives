@@ -8,32 +8,34 @@ This is a public, readonly archive of the source text for two deprecated Ubuntu 
 As these wikis were very large, we sorted each into alphanumeric subdirectories,
 to improve search and navigation on GitHub.
 
+Tarballs are also available as release assets. These contain multiple page
+versions, images, attachments, and other data that could not be included in the
+repository directly.
+
 ## Purpose of these archives
 
 These archives are intended to serve two purposes:
 
 1. Preserve an important part of Ubuntu history in a way that's easy to access
-1. Make pages available to contributors and teams who may need to copy, download, or migrate pages
+1. Make pages available to contributors and teams who may need to copy,
+   download, or migrate them
 
-## Limitations
+## Limitations of the text-based archive
 
-We have needed to remove content, including images, attachments and versions, to reduce space requirements. 
-
-To make the pages more readable on GitHub, we have converted the markup to MediaWiki style. This
+1. We have needed to remove content, including images, attachments and versions, to reduce space requirements.
+1. To make the pages more readable on GitHub, we have converted the markup to MediaWiki style. This
 conversion is not perfect, and you may encounter formatting and rendering errors.
+1. This archive is not intended to be used for general reference or to be maintained with working links. Most links are wrapped in `<nowiki>` tags and will not work.
+1. The index for the larger wiki is too long for GitHub to render fully. To view the complete index, you must view the `raw` file. In a local copy, you can use the index for navigating to the files; for example, using `g f` in Vim.
 
-Links (internal and external) don't work. This archive is not intended to be used for general reference.
-Most links are wrapped in `<nowiki>` tags and will not work.
+If 1 and 2 are a problem, use the tarballs provided as release assets.
 
-The index for the larger wiki is too long for GitHub to render. To view the complete index, you must view the `raw` file.
-In a local copy, you can use the index for navigating to the files; for example, using `g f` in Vim.
-
-## For most people: text-only wiki archives
+## Suitable for most use-cases: text-only wiki archives
 
 The original wikis were built using the Moinmoin wiki engine.
 To make archives that were readable and searchable on GitHub, the following modifications were made:
 
-1. Removed any files that were not content pages
+1. Removed any files that were found to be empty or contain spam
 1. Removed any version of a page that wasn't the latest version
 1. Removed named parent folders for pages and transferred the name to the relevant file
 1. Removed URL encoding from filenames
@@ -41,9 +43,7 @@ To make archives that were readable and searchable on GitHub, the following modi
 1. Added a top-level warning to all pages about limitations of the wiki
 1. Sorted pages in each wiki into alphanumeric folders (GitHub truncates long lists of files)
 
-As these wikis were very large, they are sorted into alphanumeric subdirectories for better rendering and navigation on GitHub.
-
-## For completionists: wiki tarballs
+## For the completionists: wiki tarballs
 
 Compressed tarballs of the wikis are available as GitHub release assets.
 
@@ -52,16 +52,9 @@ The source pages are unmodified, so they use Moinmoin syntax.
 
 The `Community Help Wiki` is provided as a single tarball.
 
-The `wiki.ubuntu.com` archive exceeds the GitHub asset limit by an order of magnitude.
-For this reason, the tarball is split into smaller parts.
-
-### TODO
-
-- [ ] Remove or fix obvious empty, broken, or unimportant pages
-- [ ] Check for spam pages
-- [ ] Make full archives available on archive.org
-- [ ] Link to full archives on archive.org (when/if available)
-- [ ] Decision about index READMEs (useful?)
+The `wiki.ubuntu.com` archive exceeds the GitHub asset limit by an order of
+magnitude. For this reason, the tarball is split into smaller parts, which can
+be re-assembled before extraction.
 
 ## Gallery
 
