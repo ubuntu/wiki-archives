@@ -28,12 +28,7 @@ Most links are wrapped in `<nowiki>` tags and will not work.
 The index for the larger wiki is too long for GitHub to render. To view the complete index, you must view the `raw` file.
 In a local copy, you can use the index for navigating to the files; for example, using `g f` in Vim.
 
-## Full archive
-
-Full archives, including all of the data and attachments, as well as source files in the original
-syntax, will be made available on archive.org .
-
-## How the wikis were archived
+## For most people: text-only wiki archives
 
 The original wikis were built using the Moinmoin wiki engine.
 To make archives that were readable and searchable on GitHub, the following modifications were made:
@@ -45,15 +40,27 @@ To make archives that were readable and searchable on GitHub, the following modi
 1. Converted Moinmoin wiki syntax to MediaWiki syntax, which renders on GitHub
 1. Added a top-level warning to all pages about limitations of the wiki
 1. Sorted pages in each wiki into alphanumeric folders (GitHub truncates long lists of files)
-1. Created an README for each wiki that provides an index of the pages
 
-As these wikis were very large, they are sorted into alphanumeric subdirectories.
+As these wikis were very large, they are sorted into alphanumeric subdirectories for better rendering and navigation on GitHub.
+
+## For completionists: wiki tarballs
+
+Compressed tarballs of the wikis are available as GitHub release assets.
+
+These include images, attachments, and page versions.
+The source pages are unmodified, so they use Moinmoin syntax.
+
+The `Community Help Wiki` is provided as a single tarball.
+
+The `wiki.ubuntu.com` archive exceeds the GitHub asset limit by an order of magnitude.
+For this reason, the tarball is split into smaller parts.
 
 ### TODO
 
-- [ ] Manually remove or fix obvious empty, broken, or unimportant pages
+- [ ] Remove or fix obvious empty, broken, or unimportant pages
+- [ ] Check for spam pages
 - [ ] Make full archives available on archive.org
-- [ ] Link to full archives
+- [ ] Link to full archives on archive.org (when/if available)
 - [ ] Decision about index READMEs (useful?)
 
 ## Gallery
