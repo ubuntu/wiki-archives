@@ -35,7 +35,7 @@ If 1 and 2 are a problem, use the tarballs provided as release assets.
 The original wikis were built using the Moinmoin wiki engine.
 To make archives that were readable and searchable on GitHub, the following modifications were made:
 
-1. Removed any files that were found to be empty or contain spam
+1. Removed any files that were empty, stubs, or that contained spam
 1. Removed any version of a page that wasn't the latest version
 1. Removed named parent folders for pages and transferred the name to the relevant file
 1. Removed URL encoding from filenames
