@@ -8,6 +8,10 @@ This is a public, readonly archive of the source text for two deprecated Ubuntu 
 As these wikis were very large, we sorted each into alphanumeric subdirectories,
 to improve search and navigation on GitHub.
 
+> [!TIP]
+> There are a very large number of pages in this archive.
+> To find a page or topic, use the search function on GitHub.
+
 Tarballs are also available as release assets. These contain multiple page
 versions, images, attachments, and other data that could not be included in the
 repository directly.
@@ -19,6 +23,12 @@ These archives are intended to serve two purposes:
 1. Preserve an important part of Ubuntu history in a way that's easy to access
 1. Make pages available to contributors and teams who may need to copy,
    download, or migrate them
+
+> [!CAUTION]
+> The content in these wikis have been archived and are readonly.
+> They have been archived for historical reasons and to aid content migrations. 
+> The wiki pages are not maintained and may not be reliable. **Do not use them as documentation.**
+> There may be formatting issues associated with a syntax conversion necessary for rendering on GitHub. 
 
 ## Limitations of the text-based archive
 
