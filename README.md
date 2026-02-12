@@ -10,11 +10,32 @@ to improve search and navigation on GitHub.
 
 > [!TIP]
 > There are a very large number of pages in this archive.
+> 
 > To find a page or topic, use the search function on GitHub.
 
 Tarballs are also available as release assets. These contain multiple page
 versions, images, attachments, and other data that could not be included in the
 repository directly.
+
+## Table of Contents
+
+- [Archive of Ubuntu wikis (2004-2026)](#archive-of-ubuntu-wikis-2004-2026)
+  - [Purpose of these archives](#purpose-of-these-archives)
+  - [Limitations of the text-based archive](#limitations-of-the-text-based-archive)
+  - [Suitable for most use-cases: text-only wiki archives](#suitable-for-most-use-cases-text-only-wiki-archives)
+  - [For the completionists: wiki tarballs](#for-the-completionists-wiki-tarballs)
+  - [Gallery](#gallery)
+    - [The two wikis in 2026](#the-two-wikis-in-2026)
+      - [wiki.ubuntu.com](#wikiubuntucom)
+      - [Community wiki](#community-wiki)
+    - [wiki.ubuntu.com through the ages](#wikiubuntucom-through-the-ages)
+      - [2004](#2004)
+      - [2006](#2006)
+      - [2008](#2008)
+      - [2010](#2010)
+      - [2012](#2012)
+      - [2014](#2014)
+      - [2026](#2026)
 
 ## Purpose of these archives
 
@@ -25,18 +46,23 @@ These archives are intended to serve two purposes:
    download, or migrate them
 
 > [!CAUTION]
+> 
 > The content in these wikis have been archived and are readonly.
-> They have been archived for historical reasons and to aid content migrations. 
+> 
+> They have been archived for historical reasons and to aid content migrations.
+> 
 > The wiki pages are not maintained and may not be reliable. **Do not use them as documentation.**
-> There may be formatting issues associated with a syntax conversion necessary for rendering on GitHub. 
+> 
+> There may be formatting issues associated with a syntax conversion necessary for rendering on GitHub.
 
 ## Limitations of the text-based archive
 
 1. We have needed to remove content, including images, attachments and versions, to reduce space requirements.
 1. To make the pages more readable on GitHub, we have converted the markup to MediaWiki style. This
-conversion is not perfect, and you may encounter formatting and rendering errors.
+conversion is not perfect, partially due to inconsistencies in the original sources. You may encounter formatting and rendering errors.
 1. This archive is not intended to be used for general reference or to be maintained with working links. Most links are wrapped in `<nowiki>` tags and will not work.
 1. The index for the larger wiki is too long for GitHub to render fully. To view the complete index, you must view the `raw` file. In a local copy, you can use the index for navigating to the files; for example, using `g f` in Vim.
+1. As GitHub may truncate information, use its search function as much as possible
 
 If 1 and 2 are a problem, use the tarballs provided as release assets.
 
