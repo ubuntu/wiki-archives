@@ -38,13 +38,15 @@ These archives are intended to serve two purposes:
 
 > [!CAUTION]
 > 
-> The content in these wikis have been archived and are readonly.
+> The content in these wikis has been archived and is readonly.
 > 
-> They have been archived for historical reasons and to aid content migrations.
+> The wikis have been archived for historical preservation and to aid content migrations.
 > 
 > The wiki pages are not maintained and may not be reliable. **Do not use them as documentation.**
 > 
 > There may be formatting issues associated with a syntax conversion necessary for rendering on GitHub.
+>
+> If you need pages closer to their original format, download tarballs from **Releases**.
 
 ## Limitations of the text-based archive
 
