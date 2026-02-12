@@ -1,6 +1,6 @@
 # Archive of Ubuntu wikis (2004-2026)
 
-This is a public, readonly archive of the source text for two deprecated Ubuntu wikis:
+This is a public, readonly archive of the source text for two (soon to be) deprecated Ubuntu wikis:
 
 - **UbuntuWiki**: archived from `wiki.ubuntu.com`
 - **UbuntuCommunityHelpWiki**: archived from `help.ubuntu.com/community/CommunityHelpWiki`
