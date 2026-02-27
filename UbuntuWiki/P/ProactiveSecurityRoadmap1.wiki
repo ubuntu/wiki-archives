@@ -1,0 +1,156 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+== Proactive Security Roadmap 1 ==
+
+=== Status ===
+
+** Created:  by JohnMoser<<BR>>
+** Priority: LowPriority<<BR>>
+** People: <<BR>>
+** Contributors: JohnMoser<<BR>>
+** Interested: <<BR>>
+** Status: DistroSpecification<<BR>>
+** Branch: <<BR>>
+** Malone Bug: <<BR>>
+** Packages: <<BR>>
+** Depends: <<BR>>
+
+=== Introduction ===
+
+Establish a first-step strategy for implementing proactive security features in Ubuntu.
+
+=== Rationale ===
+
+As stated in <nowiki>[[UbuntuDownUnder/BOFs/ProactiveSecurityRoadmap]]</nowiki>, We want to reduce the risk of security holes in Ubuntu systems by reducing the number of potential attack vectors and find general solutions for preventing common classes of vulnerabilities. This confines the impact of actual vulnerabilities to a minimum.  The amount of stuff we can do is massive; therefor, this specification choses a small set of useful enhancements to implement first as Stage 1 of the entire process. 
+
+Visuals:  <nowiki>[[http://img306.imageshack.us/img306/4461/basicexploitattacktree3hi.png|Normal]]</nowiki> vs. <nowiki>[[http://img306.imageshack.us/img306/3024/protectedexploitattacktree7mg.png|Protected]]</nowiki> (protections:  address randomization; position independent executables; memory protection policy; stack smash protector)
+
+=== Scope and Use Cases ===
+
+* We will patch the Ubuntu kernel to provide enhanced control over address space layout randomization.
+
+* We will implement SELinux policy to supply enhanced enforcement of protections currently available to make reasonable security guarantees possible.
+
+* We will implement position independent executables to close a potential attack vector which would allow common attacks to evade address space layout randomization protection, which is also needed before reasonable security guarantees are possible.
+
+* We may implement heap base randomization by porting it from Fedora Core and RHEL, which is also needed to make reasonable security guarantees possible.
+
+* We will implement stack protection utilizing the facilities available in mainline gcc 4.1, including FORTIFY_SOURCE and the stack smash protector derived from ProPolice.  This gives effective protection, but no real guarantees.
+
+* Users may find that some programs need fixes as a result of these protections, and so we will provide a method to disable SELinux policy at runtime.  Policy updates can later be issued to adjust protections per-binary as a work-around until these programs are fixed.
+
+* Users may find some programs need fixes as a result of FORTIFY_SOURCE and the stack protector.  This normally indicates a security hole or bug in these programs; but may indicate a bug in gcc.  The only way to deal with this is to fix the bug or rebuild the program without the protection.
+
+=== Implementation Plan ===
+
+==== Data Preservation and Migration ====
+
+Does not apply here.
+
+==== Packages Affected ====
+
+`Kernel`:
+* Add heap randomization as from Fedora Core/RHEL.
+** This can break some things.  Notably, Emacs was reported to break on Fedora from this.
+* Patch the kernel for adjustable address space randomization
+** Adjustments would cause the area over which these segments are randomized to be of size ''PERIOD'' * 2^''n'', where ''PERIOD'' is 16 for the stack and 4096 for the heap and mmap() base.
+** Large order randomization as used in PaX could be activated this way.
+** Smaller order randomization could be used to avoid breakage without outright disabling entropy on fragile programs.
+** A patch should be sent to the linux kernel mailing list for inclusion.
+** This could be deployed without any real run-time changes and still allow developers to test high-order ASLR.
+** Initial knobs can be system-wide via kernel command line parameters
+** ''heap-rand=n'':  Give ''n'' bits of randomization for the heap.
+** ''stack-rand=n'':  Give ''n'' bits of randomization for the stack.
+** ''mmap-rand=n'':  Give ''n'' bits of randomization for the stack.
+** Future control knobs would include per-architecture entropy and per-policy through SELinux.
+
+`SELinux Policy`: 
+* Hide memory addresses from map files
+** This prevents information leakage about other tasks' memory space layout, which would otherwise be useful to local attackers for nullifying the protections given by address space layout randomization
+** Probably can show these if the process reading is owned by current->euid (''AND in the same SELinux security context''?), since the process will have the same privileges anyway.
+** We can gain the same effect by hiding other users' (''and contexts''?) process directories from /proc.
+* Employ a strict memory protection policy across the system.
+** execstack:  Prevent processes from making their stack executable.
+** execheap:  Prevent processes from making their heap executable.
+** execmem:  Prevent processes from making anonymous mappings, shared memory, and writable file mappings executable.
+** execmod:  Prevent processes from making the .text segments from libraries and the main executable writable.  This applies as a file permission; the others are per executable process.
+* Disable problematic protections only for the specific packages which they affect.
+
+`gcc`:
+* Activate FORTIFY_SOURCE and -fstack-protector to provide stack smash protection to all code.
+** ''-fstack-protector is in Edgy as GccSsp''
+* Activate PIE compilation for all binaries
+** Incurs approximately 1% performance overhead in the main executable on i386
+** 0.99% overhead from PIC (position independent code, the type used in position independent executables)
+** -fomit-frame-pointer gives a 5% performance increase; this is lost in any PIC, but Ubuntu does not utilize this optimization
+** Overhead on other platforms is negligible, i.e. 0.02% on x86-64
+** Performance overhead only affects run time in the main executable
+** Profiling via ''oprofile'' shows this accounts for 5-10% of code run on the system ever (mostly Xorg), so overall real overhead is 0.3-0.6%
+** Profiling of individual processes shows mostly 0.02% or less code is executed in the main executable.
+** Common sense supports that most heavy lifting such as encoding/decoding audio/video, compression/decompression, and screen painting happens in libraries anyway, which are not affected by PIE
+* Disable these protections in specific cases
+** Some packages break with PIE or SSP or FORTIFY_SOURCE
+** Any breakage due to PIE needs to be reported to package upstream
+** Any breakage due to SSP or FORTIFY_SOURCE needs to be examined
+** May indicate a security hole or bug in the package, which needs to be reported upstream and fixed
+** May indicate a bug in gcc, which needs to be reported upstream; work-around by disabling the protection for affected packages
+
+=== Outstanding Issues ===
+These outstanding issues need to be considered; however, they are out of the scope of this stage.  These considerations will become important for Stage 2.
+
+* Brute forcing ASLR is possible for fast-respawning daemons or fork()ing daemons like Apache.
+** Brute forcing relies on doing hundreds or thousands of attacks per second.
+** Wide distributions of attacks also suffer from this.
+** If one of 2048 states allows an attacker to exploit i.e. a Gaim bug, and 10,000 users are running Gaim and get attacked once, about 5 will be exploited.
+*** ''I purposely chose this example because Gaim currently has an executable stack on i386 and x86-64; a buffer overflow leading to shellcode injection will meet this exact scenario.''
+** There are some potential ways to deal with this, which should be researched and developed in the future.
+
+* Long-term storage security should be considered
+** EFS for FUSE can allow home directories to be encrypted; they are decrypted transparently by mounting EFS over them when the user logs in.  Although this won't protect data from malicious processes when the user is logged in (i.e. Firefox gets broken into), it will prevent systems such as laptops from being compromised if physically accessed while the user is logged off.
+
+There are also a few political considerations that need to be examined.
+
+* We can diagram protections logically, mathematically, and graphically to show whether or not they give security guarantees and what those guarantees are; however, we probably do not want to commit ourselves to those guarantees, at least not without waiting a few years for all of the experts to give their comments on it.
+* Low vs High entropy address randomization is a heavily debated topic, and implementation may be subject to politics.
+** High entropy on i386 and other 32-bit tends to break a few things that try to mmap() 2 gig ranges in one big chunk etc.
+** Low entropy is easily brute forcable, but <nowiki>[[http://www.stanford.edu/~blp/papers/asrandom.pdf|so is our best bet on i386]]</nowiki>.
+** We should be able to make this adjustable anyway, and crank it up for everything that doesn't generally care via SELinux policy eventually.
+* We want to support SELinux out of the box.
+** There is a <nowiki>[[SELinux|separate BoF]]</nowiki> about this topic. It should be noticed that Secure Computing reaffirmed his patent right on SELinux "Type Enforcement" technology. They allow to use SELinux freely on anything but firewalls, vpn and authentification servers etc. See <nowiki>[[http://www.securecomputing.com/pdf/Statement_of_Assurance.pdf|SSC Statement of assurance]]</nowiki> and <nowiki>[[http://lwn.net/Articles/6267/|LWN article]]</nowiki>. What's our position in regard to this patent ?
+** The last patent appears to have expired 20 June 2006.  I don't think we care anymore; but we should really take a closer look and make sure other patents don't exist.
+** We should later evaluate RSBAC or GRsecurity as potentials SELinux alternatives for ACL. See. <nowiki>[[http://gentoo-wiki.com/Access_Control_Comparison_Table|Gentoo's ACL Comparison Table]]</nowiki>
+
+There are also a few technical issues that need solving before this stage is complete.  Breakage issues will mainly be solved during development and testing; the problems they cause are usually very transparent, as the typical result is that the kernel complains loudly by terminating the offending application.
+
+* The SELinux memory protections are going to break a few packages, and these need to disable those protections for themselves.
+** Java
+** Mono
+** Qemu
+** All 3D apps if the nVidia GLX library is being used
+** We should put 3D apps in their own role and disable these SELinux protections by default for it
+** Users should be able to quickly enable the protections if they are using a Mesa/DRI driver; Fedora Core 5 has a tool for quick configuration of SELinux policy by checking/unchecking policy rules.
+* The SELinux memory protections rely on a working NX bit, which is not available on most i386.
+** The NX bit emulation from Exec Shield could be ported; but it will only protect the stack, and can not be guaranteed to stay in effect due to design limitations.
+** i386 with an NX bit--including newer processors and i386 on x86-64--has a real NX bit that is put to use.
+
+=== Comments ===
+JohnMoser:  GrSecurity has a rudimentary but good brute force deterrance scheme, which makes fork() enter a queue that gets one execution per 30 seconds when called if a PaX kill or segmentation fault is encountered in a child fork() process with the same executable image.  This causes one fork() to occur every 30 seconds.  As expected, this is a hugely visible denial-of-service attack; but hey, we're making broken code safe, it's not going to be pretty so don't try.  Obviously this DoS can only occur if an already existing security hole is attacked, so clean programs are unaffected.  '''It may be possible to devise a less intrusive model that is almost as effective'''.
+
+=== Links ===
+Here are some useful links that should also be considered.
+
+<nowiki>[[http://www.gentoo.org/proj/en/hardened/gnu-stack.xml|Hardened Gentoo guide to executable stacks]]</nowiki>.  This guide explains to Gentoo developers the basics of removing executable stacks from the system.  This is important to get SELinux execstack/execmem/execheap/execmod permissions working properly.  For example, currently a kernel running with the mprotect() from PaX prevents proper logging in; these four SELinux permissions are together almost functionally equivalent with PaX mprotect().  The issue is that libgcrypt.so has an execstack bit, and these kinds of restrictions (SELinux execstack in particular) make glibc abort loading the binary due to not gaining an executable stack.
+
+The reason behind the executable stack bit must be ascertained and corrected, whether it be an inappropriate marking, a trampoline, or bad assembly code.  This will require a small, dedicated team akin to the one Gentoo has; collaboration with Gentoo's Hardened team may be extremely beneficial.
+
+<nowiki>[[http://www.gentoo.org/proj/en/hardened/pax-utils.xml|pax-utils]]</nowiki>.  Useful guide to using PaX utils, which help in finding certain anomolies in elf binaries, such as executable stacks and .text relocations.
+
+<nowiki>[[http://danwalsh.livejournal.com/6117.html|SELinux helps to discover bugs in Fedora]]</nowiki>

@@ -1,0 +1,154 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+
+* '''Launchpad Entry''': https://launchpad.net/distros/ubuntu/+spec/gcc-ssp
+* '''Created''': 2006-06-14 by MartinPitt
+* '''Contributors''': MartinPitt, MatthiasKlose, JamesTroup, JeffBailey
+* '''Packages affected''': `gcc-4.1`, all
+
+=== Summary ===
+
+gcc 4.1 comes with SSP now, which is a nice technology to mitigate exploitability of many buffer overflows. This greatly enhances security in the time between publication of a vulnerability and the USN.
+
+=== Rationale ===
+
+A considerable percentage of arbitrary code execution vulnerabilities result from buffer overflows; about half of them occur due to overflowing a stack variable. While this does not avoid the necessity of issuing USNs, it provides effective zero-day protection for a subset of vulnerabilities, and since it is now in gcc upstream, it is very cheap for us to enable and support. 
+
+=== Use cases ===
+
+* Pitti reads about a stack buffer overflow in Firefox. However, backporting the fix to our current stable release takes a while. Users of our stable release can live for a while with Firefox crashing when visiting a malicious web site, but they do not want to be subject to arbitrary code execution until an USN is published.
+
+=== Scope ===
+
+This affects all packages in all components.
+
+=== Design ===
+
+SSP provides a technology to stop exploitability of this class of vulnerabilities by (1) reordering stack variables and (2) adding a 'canary' (a random number) to the bottom of the stack, which is checked when the function is returned, so that attempts to overwrite the return pointer are detected and stopped.
+
+SSP itself has been around for some years and thus has matured quite a bit, and many distros are using it by default already. Therefore this should not be a major risk, since we are merely catching up with existing technology.
+
+=== Implementation ===
+
+RedHat and gentoo are using SSP by default for years, so we do not expect much breakage potential. So we will build packages with SSP enabled  right from the start in Edgy, so that we have much time to discover breakage. If it is not trivial to fix a package for SSP, we can disable it by building it with `fno-stack-protector`.
+
+We will not rebuild the archive in one shot. So in the unlikely event that SSP will cause many regressions, we can immediately revert enabling it and just have to rebuild a relatively low number of packages.
+
+==== testing ====
+
+The following dapper packages have been tested with SSP enabled (built with `gcc-4.1` and `-fstack-protector` under edgy):
+
+{| class="wikitable"
+|-
+| perl
+| ok
+|-
+| python
+| ok
+|-
+| apache2
+| ok
+|-
+| php5
+| ok
+|-
+| postgresql-8.1
+| ok
+|-
+| firefox
+| ok
+|-
+| mysql-dfsg-5.0
+| ok
+|-
+| glib2.0
+| ok
+|-
+| gtk+2.0
+| ok
+|-
+| glibc
+| ok
+|-
+| mono
+| ok
+|-
+| ghc6
+| ok
+|-
+| xorg
+| 
+|-
+| kernel
+| does not link since SSP uses external symbols provided by `libssp.so`
+|}
+
+Before enabling SSP by default we will ensure that all those packages work flawlessly with SSP.
+
+==== gcc changes ====
+
+* Merge back libssp-dev into gcc, so that we do not have to add it as build dependency to packages.
+
+This would mean to change `gcc-4.1` to enable `-fstack-protector`.
+
+=== Archived discussion ===
+
+==== Option 1: change gcc default behaviour ====
+
+Pros:
+* Guarantee reproducability of builds in all cases.
+* Avoid gcc wrappers which have shown to cause problems in the past.
+
+Cons:
+* It breaks current upstream kernel builds and potentially other direct usages of gcc. Kernel is by far the most important use case. Upstream should change the default options to build with `-fno-stack-protector` by default.
+* It is not conformant to upstream gcc behaviour.
+
+==== Option 2: dpkg gcc wrapper ====
+
+Short-term solution for Edgy:
+* Add gcc wrappers to `dpkg-dev`: `/usr/lib/dpkg-dev/{cc,c++,gcc,g++,gcc-4.1,g++-4,1}` and add this directory to `$PATH` in `dpkg-buildpackage`.
+* The wrappers call `/usr/bin/gcc -fstack-protector "$@"`. (Similar for other program names)
+* This will still break `debian/rules build` reproducability. We need to decide whether we officially declare that this use case is not supported (which is certainly fine for the edgy experiment), or it's temporarily broken until the long-term solution below is implemented.
+
+Generic long-term solution:
+* Change all source packages to provide a general initialization hook (like using `debian-source-make` instead of `make`, or `@include`ing a common file). This should be done in accordance with Debian. MartinPitt will start a discussion with Debian. 
+* This will allow us to do other global changes without changing all source packages again.
+
+Pros:
+* Does not change gcc default behaviour.
+* Provides us with a framework to do other global build changes in the future.
+Cons:
+* Reintroduces gcc wrappers when we just got rid of the last one; according to AdamConrad, they were the source of much grief.
+* Does not guarantee local build reproducability (direct debian/rules invocation).
+
+==== Decision ====
+
+After discussing the options with several people, it was decided that we will enable SSP by default in gcc proper (option 1).
+
+=== Record of problems ===
+
+* building libgcc with SSP causes segfaults in stack unwinding, thus gcc libraries are now built without SSP.
+* `yaboot` does not link against libc, built without SSP.
+* `xserver-xorg-input-synaptics`: dies with undefined symbol `__stack_chk_fail_local`, no idea where this comes from ; SSP disabled for now (<nowiki>[[https://launchpad.net/bugs/54357|bug report]]</nowiki>)
+* gdm freezes: recompiling xorg-server and xserver-xorg-video-ati with -fstack-protector works around it; SSP should be disabled for now (<nowiki>[[https://launchpad.net/bugs/54650|bug report]]</nowiki>)
+* glibc treats ssp specially - it already detects that gcc has ssp and enables it in the places where it will work.  The fix is to set CC = gcc-4.1 -fno-stack-protector, and glibc will add -fstack-protector to the end on files where it needs it.
+* wine (0.9.19 uploaded to edgy) does not work with stack-protection. Compiling with -fno-stack-protected solved this problem temporarily. (see: https://launchpad.net/distros/ubuntu/+source/wine/+bug/56965)
+* dietlibc doesn't compile with stack-protection.
+* `silo` does not link with libc, built without SSP.
+* `memtest86+` does not link with libc, built without SSP.
+* `lmv2` seems to have random crashes when built with SSP. disabled.
+* `parted` crashes on sparc.
+* `iptables` has some modules which die with undefined symbol `__stack_chk_fail_local` (<nowiki>[[https://launchpad.net/bugs/66681|bug report]]</nowiki>)
+* `mknbi` does not link against libc, built without SSP.
+* `syslinux` does not link against libc, built without SSP.
+
+----
+CategorySpec

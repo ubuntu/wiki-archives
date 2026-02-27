@@ -1,0 +1,186 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+
+''Please check the status of this specification in Launchpad before editing it.  If it is Approved, contact the Assignee or another knowledgeable person before making changes.''
+
+* '''Launchpad Entry''': UbuntuSpec:networkless-installation-fixes
+* '''Packages affected''': apt, apt-setup, ubiquity
+
+=== Summary ===
+
+A networkless installation in ubiquity is currently not as smooth as
+it could be. One of the issues is the apt network timeout.
+
+=== Release Note ===
+
+The package management system is now more robust against unusual
+network setups and will no longer take a long time to timeout when
+a network connection to the package repository server cannot be
+established during install.
+
+=== Rationale ===
+
+Installing without network is very common and should be as painless as possible. Nevertheless, when a network is available, the installer should take the opportunity to install language packs that are not available on the local installation medium.
+
+=== Use Cases ===
+
+ 1. Bob installs Ubuntu in a language not available on the CD without a network connected. The installer pauses briefly while it tries to download language packs, but continues without undue delay.
+
+=== Current status in libapt ===
+
+The current implementation in libapt will set the acquire state to
+pkgAcquire::Item::Stat``Transient``Network``Error if it encounters a
+"Timeout", "Tmp``Resolve``Failure" or "Connection``Refused" error. 
+
+On a Transient``Network``Error, libapt will stop trying to download items
+for any sources.list deb/deb-src pair after trying to download the
+Release.gpg file. The connection timeout can be controlled via
+"Acquire::http::Timeout".
+
+On a system with no network at all the resolver will exit quickly with
+"Resolve``Failure". On a system with working DNS but blocked access to
+the archive the Acquire::http::Timeout will be run for each
+deb/deb-src pair. 
+
+That is currently 9 times because of the way the sources.list is
+written (lines for "main restricted","universe","multiverse" for each
+archive,security,gutsy-updates). It could be collapsed to 3 times if
+the sources.list would contain one "main restricted universe
+multiverse" line for each "archive, security, updates".
+
+One problem currently is that translations are queued for download as
+well and timeout. This should be fixed for hardy. A workaround is to
+set APT::Acquire::Translation=none.
+ 
+=== Design ===
+
+libapt should be fixed to remember previous network failures on a
+given host (in the same apt-get call) and give up immediately.
+
+apt-setup currently feeds a single source line to apt for each line it
+wants to add to the sources.list. Instead, if it is not going to
+comment out lines on failure, it should pass the entire output of each
+generator to apt in a single chunk.
+
+This means, that in the worst case we timeout on 3 network sources
+(archive.ubuntu.com, security.ubuntu.com, archive.canonical.com). With
+a timeout of 10s per source this is 30s. To mitigate this further,
+apt-setup should use a cancellable debconf progress bar while running
+apt-get update (and map Cancel to SIGINT), in order that a user can
+explicitly cancel an update which will never complete.
+
+ubiquity should fetch the network proxy from gconf immediately before
+running apt-setup, rather than relying on gksu to have passed it
+(which requires the user to have set the proxy before starting
+ubiquity). In addition, since in Hardy we will default to running
+ubiquity standalone, we will add an option to ubiquity's Advanced
+dialog to set the HTTP proxy.
+
+Finally, we should return to ensuring that sources.list lines are
+never commented out on failure, which has been the intention in Ubuntu
+installations for some time but stymied by the lack of implementation
+of this specification.
+
+=== Code ===
+
+One outstanding problem is currently that apt-pkg/deb/debmetaindex.cc unconditionally
+adds translation indexes to the fetcher (debReleaseIndex::GetIndexes()). This needs
+to be fixed.
+
+The next apt version (0.7.9ubuntu7) merges the required support for
+improved timeout handling. It will remember resolve failures and
+connection timeouts and fail immediately if the same hostname is 
+tried again in the resolver case or the same IP in the connection
+refused case.
+
+apt-setup 1:0.31ubuntu5 feeds the output of each generator to `apt-get update` in a single block, and does not comment out sources.list lines if this fails.
+
+ubiquity 1.7.7 will fetch proxy configuration from gconf if possible immediately before configuring apt, and includes a proxy configuration section in the Advanced dialog of the GTK frontend. I've sent mail asking for a corresponding Qt implementation.
+
+=== Results ===
+
+With the following sources.list:
+
+<pre>
+deb http://archive.ubuntu.com/ubuntu/ hardy main restricted
+deb-src http://archive.ubuntu.com/ubuntu/ hardy main restricted
+
+deb http://archive.ubuntu.com/ubuntu/ hardy-updates main restricted
+deb-src http://archive.ubuntu.com/ubuntu/ hardy-updates main restricted
+
+deb http://archive.ubuntu.com/ubuntu/ hardy universe
+deb-src http://archive.ubuntu.com/ubuntu/ hardy universe
+
+deb http://archive.ubuntu.com/ubuntu/ hardy-updates universe
+deb-src http://archive.ubuntu.com/ubuntu/ hardy-updates universe
+
+deb http://security.ubuntu.com/ubuntu/ hardy-security main restricted
+deb-src http://security.ubuntu.com/ubuntu/ hardy-security main restricted
+
+deb http://security.ubuntu.com/ubuntu/ hardy-security universe
+deb-src http://security.ubuntu.com/ubuntu/ hardy-security universe
+
+deb http://archive.canonical.com/ubuntu/ hardy-partner universe
+deb-src http://archive.canonical.com/ubuntu/ hardy-partner universe
+</pre>
+
+With the new apt, the three test cases take:
+
+<pre>
+No network at all
+0.02user 0.03system 0:00.05elapsed 101%CPU (0avgtext+0avgdata 0maxresident)k
+
+no working DNS (port 53 DROP)
+0.05user 0.02system 0:00.06elapsed 115%CPU (0avgtext+0avgdata 0maxresident)k
+
+DNS but no access to archive.ubuntu.com (port 80 DROP)
+0.04user 0.01system 1:00.11elapsed 0%CPU (0avgtext+0avgdata 0maxresident)k
+</pre>
+
+It is run with -o Acquire::http::timeout=20. It takes 3 times 20 seconds
+because each individual IP that archive.ubuntu.com is providing is tried.
+All three hosts are tried in parallel.
+
+Comparing with the old behavior (DNS and network down stay the same):
+<pre>
+DNS but no access to archive.ubuntu.com (port 80 DROP)
+0.03user 0.02system 8:00.06elapsed 0%CPU (0avgtext+0avgdata 0maxreside
+</pre>
+
+Tests added to apts source test/networkless-install-fixes.
+
+=== Test/Demo Plan ===
+
+The following network problems can occur:
+* no network at all
+* no working DNS
+* DNS but no connection to the outside world
+* firewall rules that reject packets
+* firewall rules that drop packets
+
+The first two (the most common cases) and the last case should result
+in really fast timeouts with the current code already (this needs to
+be verified). The remaining cases are problematic and need to be
+fixed.
+
+We need to set up a test framework so that we can monitor how well we
+do (possibly use a VM/emulator). Both ubiquity and d-i should be
+tested for correct behavior.  The SIGINT handler in apt also needs to
+be tested; all the tests need to go into the apt regression test
+suite.
+
+=== Comments ===
+
+So if I choose Russian as my native language and my internet connection is down and Ubuntu installs in English because it's the default language, how happy do you think I'd be? Do you think I'd be impressed with Ubuntu? --Brettalton
+ This is to be addressed by HardyLanguageSelectorImprovements. Fundamentally it's always going to be awkward if the language isn't on the CD and there's no network access, but that spec will help us do better. --ColinWatson
+
+----
+CategorySpec

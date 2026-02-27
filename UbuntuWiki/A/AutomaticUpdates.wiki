@@ -1,0 +1,125 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+
+* '''Launchpad entry:''' https://launchpad.net/distros/ubuntu/+spec/unattended-package-upgrades
+* '''Created:'''  by MichaelVogt
+* '''Contributors:''' DanielBurrows, GustavoNiemeyer, ReinardTartler
+* '''Packages affected:''' `apt`, `python-apt`
+
+=== Summary ===
+
+Automatic Updates - automatic installation of (security) updates, possibly even when the current user has no sudo privileges
+
+=== Rationale ===
+
+When ubuntu is used by a user without sudo privileges, he cannot upgrade it
+with security updates. This can mean that a machine will be vulnerable to security
+risks for a prolonged period of time. Also, some people just don't care about
+updates and other technical stuff. They just don't want to be bothered and
+want ubuntu to keep itself updated and secure.
+
+=== Use cases ===
+
+Alice runs a Ubuntu/stable system and has broadband. She is not interested in the system a lot but wants to get timely security updates automatically. 
+
+Bob runs Ubuntu/stable on a server and wants an easy way to automaticaly check/install security updates nightly. 
+
+Malone runs a server and is very conservative. He only wants to install security upgrades manually after he read the changelog of all packages.
+
+=== Scope ===
+
+This spec describes a tool which will allow unattended package upgrades for a certain set of packages on a ubuntu system.
+
+=== Problems ===
+
+There are various problems associated with unattended upgrades. The debian packages are not designed for unattended upgrades. Various things may require user intervention. 
+
+Problems:
+* package may prompt in the postinst script (using the read command)
+* package may ask questions with debconf
+* conffile questions may be asked by dpkg
+
+Fortunately, there are only few packages that ask prompt using "read". But especially for universe, it can not be guaranteed that they do not do this. Important packages like the kernel, libc, etc do it still.
+
+Debconf questions can be tackled by running with it with the `noninteractive` frontend.  
+
+Conffile questions may come up if a package ships with an insecure configuration by default and the conffile is updated in the package, but the user modified that conffile (security upgrades like this happend in the past).
+
+=== Design ===
+
+To address the above problems, a policy for security upgrades must be put into place. Packages must be prepared to adhere to it.
+
+The policy should include:
+
+* don't prompt
+* do the right thing if debconf is set to non-interactive
+* no changed conffiles (if not *absolutely* required)
+
+We will limit ourselves to security upgrades for the installed distro (origin: $disto-security).
+If anything is installed/upgraded that does not come from ubuntu-security, we will ignore it. Conffile changes must be detected before the package is actually installed; if they occur, the package must not be installed, but be kept back. A logfile for each upgrade (or keep-back) should be written to /var/log/auto-upgrade (to be confirmed). For kept-back upgrades, the update-notifier icon should show up. 
+
+=== Implementation ===
+
+The actual unattended upgrade tool will be written in python with python-apt. It will check for available upgradeable packages and check if they originate from $distro-security (e.g. dapper-security). If so, it will simulate an install in its cache and check that
+# all dependencies (that may be required to install) come from security as well
+# no removals are required (and the cache does not break from this change).
+It will then download the packages and examine them for possible conffile prompts. Any package that would prompt will be kept back. The rest is installed if possible. 
+
+The tool will be tied into the apt cron-job we have already have. The cron job will be extended to have a APT::Periodic::Post-Run-Hook (to be confirmed) with a list of commands that are executed after the regular APT::Periodic actions. This will ensure that the Packages list is always up-to-date, and that the packages are already downloaded to the cache (if the user selected that). 
+
+With the hook in the apt.cron script, we can ship the unattended upgrade tool in a seperate package.
+
+Alternatively a option like APT::Periodic::Upgrade-Interval for the automatic upgrades can be added to the cron-job directly. This means that the python-apt code would have to be shiped with apt and the user must have python-apt installed to make it useful (if python-apt is not installed, it must output a error to the log).
+
+==== Code ====
+
+No production code has yet been written. The code below gives an overview of what is planed. It will try to upgrade the various upgradeable packages and see how that affects the cache. This is not final, but it shows what is planed.
+
+{{{#!python
+import apt
+
+def check_changes_for_sanity(cache):
+	if cache.BrokenCount != 0:
+		return False
+        for pkg in cache:
+		if pkg.markedRemove:
+			return False
+                if (pkg.markedInstall or pkg.markedUpgrade) and \
+                pkg.candidateComponent != "breezy-security":
+                        return False
+        return True
+
+cache = apt.Cache()
+pkgs_to_upgrade = []
+for pkg in cache:
+	if pkg.isUpgradable() and \
+           pkg.candidateComponent == "dapper-security":
+		pkg.markUpgrade()
+		if check_changes_for_sanity(cache):
+			cache.clean()
+			assert cache.BrokenCount == 0 and \
+			cache.InstallCount == 0 and cache.RemoveCount == 0
+			for pkg2 in pkgs_to_upgrade:
+				pkg2.markUpgradable()
+		else:
+			pkgs.append(pkg)
+
+}}}
+
+=== Outstanding issues ===
+
+* update-notifier would need a way to determine whether (and why) the pkg database is locked.  Write an informational file next to the dpkg lock when acquiring it?
+*** Stale locks may be a problem.  Frontends should catch SIGINT and cancel their locks; the boot process should remove any stale locks.
+
+* flock has advisory locks which can be used on a directory you cannot write in.
+** DoS? -- one option would be to use an advisory lock to inform user processes, but not to make that the locking protocol between APT frontends; i.e., it should be entirely advisory for frontends; only the main fcntl lock should be mandatory.
+----
+CategorySpec

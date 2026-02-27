@@ -1,0 +1,378 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+== DHCP Load balancing/Failover with two Edubuntu/K12LTSP servers ==
+
+'''Note:'''  ''This document is written from an Edubuntu (Feisty or 7.04) perspective with regard to paths...simply change the paths and configuration file names to reflect those in K12LTSP (as of K12LTSP 5 it was '''/etc/dhcpd-k12ltsp.conf''' instead of '''/etc/ltsp/dhcpd.conf''')''
+
+The idea behind setting up a DHCP failover/load-balance system for Edubuntu is to use two identical servers to spread the load and provide a little bit of a safety net in the event of the failure of one of the servers.  In this situation (you can adjust as you see fit) we will assume that the Edubuntu servers are set up with a single network interface connected to the LAN and that the Edubuntu servers will be supplying the DHCP for the entire LAN.  Given that, let's begin...
+
+1.) Setup your Edubuntu servers...I recommend making them as identical as possible.
+
+2.) Upon reboot be sure to STOP the dhcp service on both servers so that we can set up the new configuration
+
+3.) Now...decide which server will be the "primary" and which will be the "secondary"  (there is no urgency to this...you simply need to know which is which)
+
+==== Ummm, why would I want to do this? ====
+
+As I mentioned above, one reason is to spread the load.  Another is to provide a bit of a safety net in the event that your DHCP server goes down.  In an Edubuntu server installation (or K12LTSP) often times folks simply install another server on a separate subnet or private LAN and set up additional thin-clients in that manner.  With this method you can add another server to your existing network and let the servers split the load by alternately booting the thin-clients.  The way this works (in layman's terms) is that Server A and Server B share the same range of IP addresses.  An algoritm is used to hand out IP addresses in an alternating fashion.  Thin-client #1 will get it's IP address and thus boot image from Server A, whereas Thin-client #2 will get it's IP address and image from Server B...and so on.  In a perfect world...a computer lab coming online in the morning would boot in this fashion...Server A...Server B...Server A...Server B...Server A...Server B...and so on.  That's the load balancing part.  You also gain a measure of fault tolerance in the fact that should Server A go down...Server B is there to pick up the slack until Server A returns.  (yes...any thin-clients connected to Server A when it goes down will need to reboot, but once they do Server B will give them an IP address and they can continue) And vice-versa...  The DHCP daemon on each server continually polls the other to see if it is up or down...if one goes down the other switches into "partner-down" mode and handles all DHCP requests until it comes back online.  Pretty cool huh?  B)
+
+==== Requirements, caveats, and gotcha's ====
+
+This will only work with '''two''' machines, a primary and a secondary.  You will need to decide how to serve home directories and users.  This actually works very well in a situation where the users and home directories "live" on a third server.  In my case I use a Samba/LDAP server running on an Ubuntu Server 7.04 as my central point of authentication and to host and export the users home directories to the Edubuntu servers.  (View a simple diagram here as part of another document: http://www.vcsvikings.org/smbldap-diagram ) The Edubuntu servers mount the exported /home to /home and thus the home directories appear as though they are a part of the Edubuntu server, but in reality they "live" on the Samba/LDAP server.  The Samba/LDAP server also is a Windows primary domain controller and allows authentication from Windows servers and clients.  In my case, NO users or user data lives on the Edubuntu servers, thus making upgrading of these servers very easy.  You can find out more about how to set up your own Samba/LDAP server using the easy "smbldap-installer" by visiting http://www.majen.net/smbldap  I wrote the original how-to several years ago, but Matt Oquist used his fantastic scripting abilites to take the original 36 page how-to and create a simple easy-to-use script that will set up a Samba/LDAP server for you in minutes!  You can also set up slave LDAP servers and BDC's with the smbldap-installer script as well!  So...with all that in mind...let's get started!  :-)
+
+===== First a note on copying =====
+
+You'll see below that I mention copying certain configuration files from one server to the other.  This is encouraged when appropriate as it lessens the chance of a silly mistake or typo.  I simply use scp to do this.  (make sure you have openssh-server installed)
+
+<pre>
+scp filename root@xx.xx.xx.xx:/path/to/place/file
+</pre>
+
+Example:
+
+<pre>
+cd /etc/ltsp/
+
+scp dhcpd.reserved root@10.0.15.253:/etc/ltsp
+</pre>
+
+Hope this helps make things easier!  Ok...here we go...
+
+=== Let's begin with the "primary" dhcp server ===
+
+We need to set up the configuration files for this server.  I will provide the samples from my own installation...obviously you will need to tweak it for your situation.  I also make liberal use of "includes" in an effort to make it easy to "scp" files from one server to another as I make changes.  With some exceptions, these files are generally the same between the two servers.
+
+'''Let's start with the dhcpd.conf file located at /etc/ltsp/dhcpd.conf'''
+
+Open it with your favorite editor.  For simplicity sake...we will use gedit
+
+<pre>
+sudo gedit /etc/ltsp/dhcpd.conf
+</pre>
+
+Below is a sample dhcpd.conf file (in my case, the primary server is 10.0.14.253...the LAN has two gateways also running DNS and they are 10.0.0.1 and 10.0.10.10)
+
+'''NOTE:''' this file '''CANNOT''' be copied "as-is" to the "secondary" server as it is indigenous to the "primary" server '''ONLY'''
+
+<pre>
+
+    default-lease-time            521600;
+    max-lease-time                521600;
+    ddns-update-style none;
+    allow booting;
+    authoritative;
+    include "/etc/ltsp/dhcpd.failover";
+    include "/etc/ltsp/dhcpd.ltspboot";
+    include "/etc/ltsp/dhcpd.reserved";
+    include "/etc/ltsp/dhcpd.subnet";
+    option subnet-mask            255.255.240.0;
+    option broadcast-address      10.0.0.255;
+    option routers                10.0.0.1, 10.0.14.253, 10.0.10.10;
+    option domain-name-servers    10.0.14.253, 10.0.0.1;
+    option domain-name            "mydomain.com";
+    option option-128 code 128 = string;
+    option option-129 code 129 = text;
+    option option-221 code 221 = text;
+    use-host-decl-names       on;
+    option log-servers        10.0.14.253;
+
+</pre>
+
+====== Now for the first "include" file /etc/ltsp/dhcpd.failover...let's create the file ======
+
+<pre>
+sudo gedit /etc/ltsp/dhcpd.failover
+</pre>
+
+Below is my sample dhcpd.failover file for the "primary" server (you can copy this and put in your own IP addresses...the name "dhcp" is fine as it's not a hostname or anything...note that my secondary server is 10.0.15.253)
+
+'''NOTE:''' this file '''CANNOT''' be copied "as-is" to the "secondary server" as this file is for the "primary" server '''ONLY'''...the one on the "secondary" server will be a little ''different''.
+
+<pre>
+
+failover peer "dhcp" {
+       primary;
+       address 10.0.14.253;
+       port 519;
+       peer address 10.0.15.253;
+       peer port 520;
+       max-response-delay 30;
+       max-unacked-updates 10;
+       mclt 3600;
+       split 128;
+       load balance max seconds 3;
+}
+
+</pre>
+
+====== Ok, let's move on to the next "include"...the dhcpd.ltspboot file ======
+
+<pre>
+sudo gedit /etc/ltsp/dhcpd.ltspboot
+</pre>
+
+Below is my '''dhcpd.ltspboot''' file which includes the information for the thin-clients to get their boot image (if you are using Edubuntu 7.04 "Feisty Fawn" you can copy this exactly as it is)
+
+'''NOTE:''' this file '''CAN''' be copied to the "secondary" server "as-is"
+
+<pre>
+option root-path "/opt/ltsp/i386";
+
+if substring( option vendor-class-identifier, 0, 9 ) = "PXEClient" {
+        filename "/ltsp/i386/pxelinux.0";
+}
+else{
+        filename "/ltsp/i386/nbi.img";
+}
+</pre>
+
+====== Now let's work on the next "include" file /etc/ltsp/dhcpd.reserved (this is where the reserved IP addresses are assigned) ======
+
+<pre>
+sudo gedit /etc/ltsp/dhcpd.reserved
+</pre>
+
+This file may be quite large depending on the number of "reserved" IP addresses you have.  Reserved IP addresses are common for such things as servers, printers, wireless access points, and other machines that you want to have the SAME IP address at all times.
+
+Below is a short sample of a dhcpd.reserved file
+
+'''NOTE:''' this file '''CAN''' be copied to the "secondary" server "as-is"
+
+<pre>
+host workstation001.mydomain.com {
+        hardware ethernet 00:03:93:21:55:99;
+        fixed-address 10.0.0.201;
+    }
+    host workstation002.mydomain.com {
+        hardware ethernet 00:03:93:21:41:9d;
+        fixed-address 10.0.0.202;
+    }
+    host workstation003.mydomain.com {
+        hardware ethernet 00:03:93:20:f0:43;
+        fixed-address 10.0.0.203;
+    }
+    host workstation004.mydomain.com {
+        hardware ethernet 00:03:93:21:96:f9;
+        fixed-address 10.0.0.204;
+    }
+    host workstation005.mydomain.com {
+        hardware ethernet 00:03:93:21:50:dd;
+        fixed-address 10.0.0.205;
+    }
+    host workstation006.mydomain.com {
+        hardware ethernet 00:03:93:21:a8:81;
+        fixed-address 10.0.0.206;
+    }
+    host workstation007.mydomain.com {
+        hardware ethernet 00:03:93:21:b9:29;
+        fixed-address 10.0.0.207;
+    }
+    host workstation008.mydomain.com {
+        hardware ethernet 00:03:93:20:ef:39;
+        fixed-address 10.0.0.208;
+    }
+</pre>
+
+====== Now let's work on the last "include" file... /etc/ltsp/dhcpd.subnet ======
+
+<pre>
+sudo gedit /etc/ltsp/dhcpd.subnet
+</pre>
+
+This file is where you declare your subnet and range for DHCP
+
+'''NOTE:''' this file '''CANNOT''' be copied "as-is" to the "secondary server" as this file is for the "primary" server '''ONLY'''...the one on the "secondary" server will be a little ''different''.
+
+Below is a sample from my server
+
+<pre>
+  subnet 10.0.0.0 netmask 255.255.240.0 {
+     pool {
+        failover peer "dhcp";
+        range 10.0.7.1 10.0.9.252;
+        deny dynamic bootp clients;
+        }
+
+        use-host-decl-names       on;
+        option log-servers        10.0.14.253;
+}
+</pre>
+
+'''Believe it or not, that's it for the "primary" server...now let's move on to the "secondary" server'''
+
+=== Let's set up the "secondary" dhcp server ===
+
+'''Let's start again with the dhcpd.conf file located at /etc/ltsp/dhcpd.conf'''
+
+Once again we will use gedit, however, you can use your favorite editor.
+
+<pre>
+sudo gedit /etc/ltsp/dhcpd.conf
+</pre>
+
+Below is a sample dhcpd.conf file (in my case, the secondary server is 10.0.15.253...the LAN has two gateways also running DNS and they are 10.0.0.1 and 10.0.10.10)
+
+'''NOTE:''' this file '''CANNOT''' be copied "as-is" from the "primary" server as it is indigenous to the "secondary" server '''ONLY'''
+
+<pre>
+
+default-lease-time            521600;
+max-lease-time                521600;
+ddns-update-style none;
+allow booting;
+authoritative;
+
+include "/etc/ltsp/dhcpd.failover";
+include "/etc/ltsp/dhcpd.ltspboot";
+include "/etc/ltsp/dhcpd.reserved";
+include "/etc/ltsp/dhcpd.subnet";
+
+option subnet-mask            255.255.240.0;
+option broadcast-address      10.0.0.255;
+option routers                10.0.0.1, 10.0.15.253, 10.0.10.10;
+option domain-name-servers    10.0.15.253, 10.0.0.1;
+option domain-name            "mydomain.com";
+option option-128 code 128 = string;
+option option-129 code 129 = text;
+option option-221 code 221 = text;
+use-host-decl-names       on;
+option log-servers        10.0.15.253;
+
+</pre>
+
+====== Now for the first "include" file /etc/ltsp/dhcpd.failover...let's create the file ======
+
+<pre>
+sudo gedit /etc/ltsp/dhcpd.failover
+</pre>
+
+Below is my sample dhcpd.failover file for the "primary" server (you can copy this and put in your own IP addresses...the name "dhcp" is fine as it's not a hostname or anything...note that my "primary" server is 10.0.14.253)
+
+'''NOTE:''' this file '''CANNOT''' be copied "as-is" from the "primary server" as this file is for the "secondary" server '''ONLY'''...the one on the "primary" server will be a little ''different''. ''(note the changes in IP addresses to reflect the fact that this is the "secondary" server AND the fact that the last few lines that existed in this file on the "primary" server are now missing...they are not necessary on the "secondary" server)''
+
+<pre>
+
+failover peer "dhcp" {
+        secondary;
+        address 10.0.15.253;
+        port 520;
+        peer address 10.0.14.253;
+        peer port 519;
+        max-response-delay 30;
+        max-unacked-updates 10;
+}
+
+</pre>
+
+====== Ok, let's move on to the next "include"...the dhcpd.ltspboot file ======
+
+<pre>
+sudo gedit /etc/ltsp/dhcpd.ltspboot
+</pre>
+
+Below is my '''dhcpd.ltspboot''' file which includes the information for the thin-clients to get their boot image (if you are using Edubuntu 7.04 "Feisty Fawn" you can copy this exactly as it is) This file will most likely be identical on both servers.
+
+'''NOTE:''' this file '''CAN''' be copied from the "primary" server "as-is"
+
+<pre>
+option root-path "/opt/ltsp/i386";
+
+if substring( option vendor-class-identifier, 0, 9 ) = "PXEClient" {
+        filename "/ltsp/i386/pxelinux.0";
+}
+else{
+        filename "/ltsp/i386/nbi.img";
+}
+</pre>
+
+====== Now let's work on the next "include" file /etc/ltsp/dhcpd.reserved (this is where the reserved IP addresses are assigned) ======
+
+<pre>
+sudo gedit /etc/ltsp/dhcpd.reserved
+</pre>
+
+This file will be identical between the "primary" and "secondary" servers...you can copy the one from the "primary" if you wish (in fact to avoid errors I recommend it...and I recommend '''ALWAYS''' working with the one on the "primary" server and then copying to the "secondary" server as good practice)
+
+Below is a short sample of a dhcpd.reserved file
+
+'''NOTE:''' this file '''CAN''' be copied from the "primary" server "as-is"
+
+<pre>
+host workstation001.mydomain.com {
+        hardware ethernet 00:03:93:21:55:99;
+        fixed-address 10.0.0.201;
+    }
+    host workstation002.mydomain.com {
+        hardware ethernet 00:03:93:21:41:9d;
+        fixed-address 10.0.0.202;
+    }
+    host workstation003.mydomain.com {
+        hardware ethernet 00:03:93:20:f0:43;
+        fixed-address 10.0.0.203;
+    }
+    host workstation004.mydomain.com {
+        hardware ethernet 00:03:93:21:96:f9;
+        fixed-address 10.0.0.204;
+    }
+    host workstation005.mydomain.com {
+        hardware ethernet 00:03:93:21:50:dd;
+        fixed-address 10.0.0.205;
+    }
+    host workstation006.mydomain.com {
+        hardware ethernet 00:03:93:21:a8:81;
+        fixed-address 10.0.0.206;
+    }
+    host workstation007.mydomain.com {
+        hardware ethernet 00:03:93:21:b9:29;
+        fixed-address 10.0.0.207;
+    }
+    host workstation008.mydomain.com {
+        hardware ethernet 00:03:93:20:ef:39;
+        fixed-address 10.0.0.208;
+    }
+</pre>
+
+====== Now let's work on the last "include" file... /etc/ltsp/dhcpd.subnet ======
+
+<pre>
+sudo gedit /etc/ltsp/dhcpd.subnet
+</pre>
+
+This file is where you declare your subnet and range for DHCP
+
+Below is a sample from my "secondary" server (Note the change in the log servers IP address)
+
+<pre>
+  subnet 10.0.0.0 netmask 255.255.240.0 {
+     pool {
+        failover peer "dhcp";
+        range 10.0.7.1 10.0.9.252;
+        deny dynamic bootp clients;
+        }
+
+        use-host-decl-names       on;
+        option log-servers        10.0.15.253;
+}
+</pre>
+
+'''Well that's it!'''  Now you'll need to restart the dhcpd service on each server.
+
+<pre>
+/etc/init.d/dhcp3-server start
+</pre>
+
+If everything has been done correctly...it will start without any errors and you'll now have a really cool dhcp load-balance/failover solution!
+
+Check out the following sites for more information on dhcp failover (I used them when I first began using this method a few years ago)
+
+http://www.madboa.com/geek/dhcp-failover/
+
+http://www.lithodyne.net/docs/dhcp/dhcp.html

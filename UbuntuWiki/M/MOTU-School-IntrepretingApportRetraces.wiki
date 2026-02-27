@@ -1,0 +1,118 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+This session was presented by Emmet Hikory on 26/6/08.
+
+<pre>
+[11:10] <persia> Today, we'll be looking to understand, and hopefully discover a solution for Bug #180363 in nicotine
+[11:10] <ubottu> Launchpad bug 180363 in nicotine "nicotine crashed with IndexError in _parse()" [Undecided,New] https://launchpad.net/bugs/180363
+[11:10] <persia> To help follow along, I encourage everyone to collect a text editor, and the hardy nicotine source.
+[11:11] <persia> So, apport is the incredibly useful tool that is installed on all our machines to allow us to get better quality bug reports, especially for crashes.
+[11:12] <persia> When a program crashes, apport notices, and prepares a crash report.  When so enabled, it prompts the user to submit the crash report to launchpad as a new bug.
+[11:13] <persia> There, the apport-retracer system will review the bug, possible determine it to be duplicate, and help with additional information (e.g. retraced stacktrace with symbols for stripped binaries).
+[11:14] <persia> Apport bug reports typically explain the type of crash in the title, have some information in the description, along with basic information about the package version, installed Ubuntu version, and user environment.
+[11:14] <persia> This is followed by a single comment with a number of attachments, representing further information apport collected from the user system.
+[11:15] <persia> For this bug, we have four attachments: Dependencies.txt, ProcMaps.txt, ProcStatus.txt, and Traceback.txt, which seems fairly normal for python crash bugs.
+[11:16] <persia> Dependencies.txt shoes the entire tree of recursive dependencies for the crashing package.  This can be useful to determine if someone has upgraded to the latest version, or if the bug appears to also be in a dependency, which version of the code one ought inspect.
+[11:17] <persia> ProcMaps.txt shows the local address space for associated objects (libraries, data) used by the application.  I've never found this useful, but it may provide insight in cases of library symbol contention and the like.
+[11:18] <persia> ProcStatus.txt provides information about the process itself, including the pid access permissions, memory allocations, and permissions/capabilities.  In general, I usually only check this to make sure the memory allocations (Vm* are not overly large  (100s of GB), which may indicate a runaway memory leak.
+[11:19] <persia> Lastly, we have what I consider most interesting, Traceback.txt, which explains the call stack at the time of the crash, and will guide the investigation of the code towards determining the problem exactly.
+[11:20] <persia> Are there any questions about the basic format of a python apport-crash bug?
+[11:21] <james_w> not from me
+[11:23] <norsetto> persia: perhaps few words about ThreadStacktrace.txt and Registers.txt ?
+[11:23] <persia> OK.  Now, when triaging an apport crash bug, it's important to make sure it's complete.  If there isn't a trace, or it is unreadable, it may need to be retraced, or if the bug is old, it may be worth asking the submitter to submit an updated crash report.
+[11:24] <persia> norsetto: Those happen in other languages, but good point.
+[11:24]  * persia grabs a bug with those attachments
+[11:26] <persia> OK.  If we look at bug #242674, we can see a few more attachments.
+[11:26] <ubottu> Launchpad bug 242674 in pidgin "pidgin crashed with SIGSEGV in g_object_notify()" [Undecided,New] https://launchpad.net/bugs/242674
+[11:27] <persia> CoreDump.gz is the snapshot of the process memory when it crashed.  Most of the time, you won't need to use this.
+[11:27] <persia> ProcEnviron.txt provides some of the environment variables that are set
+[11:28] <persia> Registers.txt contains the state of the processor registers at the time of the crash (which is typically only meaningful for very low-level crashes).
+[11:29] <persia> Stacktrace.txt is similar to Traceback.txt, except that it's a C-style stacktrace, rather than a python-style traceback.
+[11:29] <persia> ThreadStacktrace.txt is a stacktrace of all the currently running threads in the application, which can be interesting if there is thread contention.
+[11:31] <persia> For triage, I tend to consider that there is often mostly sufficient information provided by apport itself.  If the information is complete (no ?? in the traces, see bug #239842 for an example of this issue), one can likely understand the issue.
+[11:31] <ubottu> Launchpad bug 239842 in vlc "vlc crashed with SIGSEGV in rawmemchr() with rm stream" [Undecided,New] https://launchpad.net/bugs/239842
+[11:32] <persia> When I triage them, I often try to put a short summary of the issue in a comment before setting "Triaged", explaining where or why it crashed, as a result of the code investigation.  Often, the code investigation is sufficient to produce a small patch, which makes a welcome attachment.
+[11:33] <persia> Any other questions about the format of a apport bug, or the basic information provided?  (When we're done with this, we'll be investigating the nicotine but more deeply)
+[11:35] <persia> OK.  Now, let's take a deeper look at our source code and the Traceback.
+[11:36] <persia> The first thing to note is that the version of nicotine has changed between the time the bug was reported, and our current source.
+[11:37] <persia> This means that the line numbers will not be reliable.  This is very frequently true when investigating apport crashes.
+[11:37] <persia> Often, the best solution is to search the file for the relevant section.
+[11:37] <persia> So, When reviewing a Traceback, we start at the top, and process downwards.
+[11:38] <persia> Each step represents another layer of nested function, and leads to the crash.
+[11:39] <persia> The first error is in /usr/bin/nicotine.  Looking at the source, there is a python script at the top level also named nicotine.
+[11:40] <persia> Generally, this will be the same file.  In those cases where the file we seek is not immediately available, I usually use a construction like `find . -$(filename) -print` to get the file in the source.
+[11:41] <persia> OK.  The Traceback says that we want line 152, which is supposed to be "result = checkenv()".
+[11:41] <persia> In our newer source, line 152 is "import locale", which is clearly not the issue.  If we scroll down from here a bit, we can find "result = checkenv()" at line 191.
+[11:43] <persia> Although sometimes source will have multiple lines with roughly the same content, we can be fairly confident this is the correct line because it is still in the root source, rather than being in a specific function (and the Traceback reports "in <module>"
+[11:44] <persia> At this point, we'd like to get some idea as to what we expect for result.  Scrolling down a bit first we can see that no result will continue the program, and any result will print the result and exit.
+[11:44] <persia> Next, we'll look for the definition of checkenv()
+[11:45] <persia> This is up at line 49, and we'll be looking for a gettext call in checkenv()
+[11:45] <persia> gettext is exceedingly commonly used, with the shorthand _(), which makes it a little hard to read the message.
+[11:47] <persia> We can guess that there are about 40 extra lines added, given the difference between lines 152 and 191 from our previous search, so we want to look for something somewhere between lines 90 and 130 (although this is inexact)
+[11:49] <persia> To help us know which is the right line, we can look further down the traceback.  While sometimes the error is in the library (gettext in this example), we ought first search our code.
+[11:50] <persia> Reading the Traceback, it calls gettext, which calls dgettext, which calls translation, which calls _init__, which calls _parse, which crashes.
+[11:50] <persia> The final error message tells us that the list index is out of range.
+[11:51] <persia> This looks like an attempt to translate a plural word that couldn't find the right information in the translation file.
+[11:53] <persia> Now, reading 40 lines of code to determine which might have a poor plural translation will be an exercise in frustration.
+[11:53] <persia> Luckily, launchpad keeps a copy of every source package ever uploaded, so we can look back to see which line we really wanted.
+[11:53] <persia> If we go back to the main bug page, and click "nicotine", we go to the nicotine package page.
+[11:54] <persia> On this page, we can scroll down through the versions until we find 1.8.2+dfsg-1ubuntu1.  Clicking on this headline takes us to the summary page for this version, where we can examine it.
+[11:55] <persia> In this case, line 90 is close to the string "You do not have Python Vorbis bindings installed.
+[11:55] <persia> Others will not be able to see the lengths and the bitrates
+[11:55] <persia> of Ogg Vorbis files that you share. You can get the from
+[11:55] <persia> http://www.andrewchatham.com/pyogg/.
+[11:55] <persia> If you're using Debian, install the python-pyvorbis package."
+[11:56] <persia> Returning to our current source, we can see that string starting from line 111
+[11:56] <persia> Now, we know the issue is with the hungarian translation, because our bug page says "LANG=hu_HU.UTF-8".
+[11:57] <persia> Our source package has a languages/hu directory, containing nicotine.po, which holds the translations.
+[11:58] <persia> Here, we can find that there is a translation available, from around line 4469
+[11:59] <persia> My Hungarian isn't very strong, so I'm going to trust that the translation is likely correct (although it may not be).
+[11:59] <persia> However, I do know that in order to check for the crash, I need to test with a hungarian locale, and try with the python-pyvorbis package uninstalled.
+[12:00] <persia> As a result, I can now uninstall python-pyvorbis, and execute `LANG=hu_HU.UTF-8 nicotine` to try to reproduce the crash.
+[12:00] <persia> If it breaks, we can describe the problem in detail (or if we know Hungarian, Python, or gettext maybe track it down).
+[12:01] <persia> If it works properly, we can document that it worked properly under that set of conditions, ask the submitter to verify it works for them, and suggest installing the python-pyvorbis package as a workaround.
+[12:01] <persia> Any questions about the Traceback review, and the process of discovering the problem?
+[12:03] <siretart> excellent description of how to track that particular issue down!
+[12:03] <persia> siretart: Thank you.
+[12:05] <persia> Anyone?
+[12:06] <persia> It would really benefit from someone adding a comment about the cause of the problem, and testing to see if it can be replicated locally.  If anyone knows Hungarian, Python, or gettext, they may be able to provide more insight.
+[12:06] <norsetto> well, it seems that all translations are f*d up, all those msgid are marked as obsolete
+[12:07] <persia> norsetto: Thank you :)
+[12:07] <siretart> when working on crasher bugs for packages xine, vlc or mplayer, I get a lot of bugs like bug #103756
+[12:07] <ubottu> Launchpad bug 103756 in xine-lib "Editing names of mp3 on nautilus" [Undecided,New] https://launchpad.net/bugs/103756
+[12:08] <siretart> how am I supposed to triage them?
+[12:09] <siretart> I don't really expect from the casual reporter to actually understand how to do a proper retrace
+[12:09] <persia> siretart: For cases like that, it would be good to educate the submitter to use gnome-open (or the equivalent) to open the crash report, which ought trigger apport.
+[12:10] <james_w> you should close the bug and ask them to submit it using apport. apport-cli -c "/var/crash/..." or double clicking in nautilus will file it properly so that apport can do it's thing.
+[12:10] <siretart> okay, I see
+[12:10] <siretart> close with wontfix or invalid?
+[12:10] <james_w> Invalid
+[12:10] <siretart> ok
+[12:10] <persia> Invalid, with a comment requesting them to use apport to open a new bug.
+[12:11] <persia> (using the same crash report).
+[12:11] <james_w> explain that you are only closing it as the above procedure will open a new bug report, you are not rejecting their bug.
+[12:13] <persia> In cases where the retracer cannot find the symbols (?? in the trace), it usually means that no ddeb exists for the version the submitter is using.  In these cases, verify that there are ddebs for all dependencies available for the release the submitter is using, and then ask them to replicate, opening a new bug.
+[12:14] <norsetto> what about adding explicit dbg packages? Seems like a good idea to do for packages which have frequent crashes
+[12:14] <siretart> I'm providing -dbg packages for ffmpeg and xine packages. does apport get confused by those?
+[12:14] <siretart> norsetto: :)
+[12:14] <norsetto> siretart: ;-)
+[12:16] <persia> I don't actually know if apport gets confused: I'll suggest asking pitti, but I seem to remember something about apport handling those from the changelog at some point: might check the code first.
+[12:16] <persia> apport does get confused if the package doesn't call dh_strip somewhere in debian/rules: manual stripping or failure to strip binaries are the most common cause of failed retraces.
+[12:17] <persia> While -dbg packages are incredibly helpful in cases where submitters are expected to produce their own stacktraces, they have little benefit for an apport-enabled environment.
+[12:19] <persia> Any further questions?  We're a little over time (Sorry that I started late), but I'd like to make sure everyone's questions are answered before we close.
+[12:20]  * norsetto hands over a boquet of flowers to persia
+[12:21] <pleia2> great session persia :)
+[12:21] <james_w> thanks persia
+[12:22] <persia> Thanks everyone for attending.  Please feel free to ask me in #ubuntu-motu if there are any future questions about tracking down a specific trace, or in #ubuntu-bugs if you have triage questions.
+[12:22] <siretart> indeed, thanks for the session persia.
+</pre>
+
+These logs have been slightly edited for clarity.

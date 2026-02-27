@@ -1,0 +1,323 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+I am doing random gcc optimization tests using POVRAY 3.6.1 and povbench, because I noticed on the Geode GX CPUs disabling Partial Redundancy Elimination makes a big difference according to nbench.  Tests for this are being run on the Geode, here are some results on an Athlon 64 2800+ 1.8GHz CPU with 32-bit Ubuntu.
+
+Some of these optimizations are tested against nbench as well.  The nbench output is lain out as below.  Note the lack of timing information; nbench measures iterations over time, it does not execute a standard workload.
+
+<pre>
+TEST                : Iterations/sec.  : Index vs.   : Index vs
+                    :                  : Pentium 90  : AMD K6/233
+========================== Results vs. P90 ===========================
+INTEGER INDEX       : ipn
+FLOATING-POINT INDEX: fpn
+========================= Results vs. K6/233 =========================
+MEMORY INDEX        : mkn
+INTEGER INDEX       : ikn
+FLOATING-POINT INDEX: fkn
+</pre>
+
+=== Baseline ===
+Our baseline test is ''-march=pentiumpro -O2''.  All tests will be based on these flags and compared with them.
+
+<pre>
+CFLAGS:  -march=pentiumpro -O2
+</pre>
+
+<pre>
+POVRAY
+Size:  1690532
+
+Total Scene Processing Times
+  Parse Time:    0 hours  0 minutes  3 seconds (3 seconds)
+  Photon Time:   0 hours  0 minutes 51 seconds (51 seconds)
+  Render Time:   0 hours 39 minutes 46 seconds (2386 seconds)
+  Total Time:    0 hours 40 minutes 40 seconds (2440 seconds)
+
+real 2439.94
+user 2220.05
+sys 1.02
+</pre>
+
+<pre>
+NBENCH
+Size:  50190
+
+NUMERIC SORT        :           811.5  :      20.81  :       6.83
+STRING SORT         :          106.84  :      47.74  :       7.39
+BITFIELD            :      3.7162e+08  :      63.75  :      13.32
+FP EMULATION        :          80.408  :      38.58  :       8.90
+FOURIER             :           17329  :      19.71  :      11.07
+ASSIGNMENT          :          19.418  :      73.89  :      19.17
+IDEA                :            2799  :      42.81  :      12.71
+HUFFMAN             :          1318.4  :      36.56  :      11.67
+NEURAL NET          :          28.155  :      45.23  :      19.02
+LU DECOMPOSITION    :           935.2  :      48.45  :      34.98
+=================================================================  ==
+INTEGER INDEX       : 43.239
+FLOATING-POINT INDEX: 35.083
+=================================================================  ==
+MEMORY INDEX        : 12.354
+INTEGER INDEX       : 9.748
+FLOATING-POINT INDEX: 19.458
+</pre>
+
+=== Individual Tests ===
+The below results are sorted in order of impact on CPU time.  The most effective optimizations are at the bottom.  The time function used is USER time, because other processes can affect real time and locking or preemption in kernel can affect system time.  The user timer is only run while the process is executing in user space, and so (''aside from context switch and cache miss effects'') should be relatively unaffected by other programs multitasking on the same CPU.
+
+Trying PRE on a normal x86 (Athlon 64, Ubuntu 32-bit) gives the below, a notable slow-down.  Note the size reduction as well, which is slightly interesting.
+
+nbench noticed no size change; it did benefit in some areas, and lose in others.
+<pre>
+CFLAGS:  -march=pentiumpro -O2 -fno-tree-pre
+</pre>
+
+<pre>
+POVRAY
+Size:  1678564
+
+Total Scene Processing Times
+  Parse Time:    0 hours  0 minutes  3 seconds (3 seconds)
+  Photon Time:   0 hours  0 minutes 54 seconds (54 seconds)
+  Render Time:   0 hours 41 minutes 58 seconds (2518 seconds)
+  Total Time:    0 hours 42 minutes 55 seconds (2575 seconds)
+
+real 2574.16
+user 2282.52
+sys 1.09
+</pre>
+
+<pre>
+NBENCH
+Size:  50190
+
+NUMERIC SORT        :          1118.1  :      28.68  :       9.42
+STRING SORT         :          107.24  :      47.92  :       7.42
+BITFIELD            :      3.6778e+08  :      63.09  :      13.18
+FP EMULATION        :          80.248  :      38.51  :       8.89
+FOURIER             :           16796  :      19.10  :      10.73
+ASSIGNMENT          :          19.315  :      73.50  :      19.06
+IDEA                :          2792.2  :      42.71  :      12.68
+HUFFMAN             :          1315.3  :      36.47  :      11.65
+NEURAL NET          :          28.025  :      45.02  :      18.94
+LU DECOMPOSITION    :          943.56  :      48.88  :      35.30
+=================================================================  ==
+INTEGER INDEX       : 45.144
+FLOATING-POINT INDEX: 34.769
+=================================================================  ==
+MEMORY INDEX        : 12.305
+INTEGER INDEX       : 10.543
+FLOATING-POINT INDEX: 19.284
+</pre>
+
+The ''-fgcse-after-reload'' optimization, from -O3, produces alright results.  The decrease in use time was insignificant but at least it didn't get slower.  This is off at -O2 because it takes longer to compile, mainly because the compiler makes another pass at the tree.
+<pre>
+CFLAGS:  -march=pentiumpro -O2 -fgcse-after-reload
+Size:  1690532
+
+Total Scene Processing Times
+  Parse Time:    0 hours  0 minutes  3 seconds (3 seconds)
+  Photon Time:   0 hours  0 minutes 53 seconds (53 seconds)
+  Render Time:   0 hours 39 minutes 12 seconds (2352 seconds)
+  Total Time:    0 hours 40 minutes  8 seconds (2408 seconds)
+
+real 2408.71
+user 2219.74
+sys 0.78
+</pre>
+
+Global Common SubExpression options for store-moves and load-after-store eliminations produce minimal results as well, probably because of their limited scope.  These optimizations can make certain code slower, namely runtime-computed gotos (a gcc extension), and so the gains are not worth it.  Combining with -fgcse-after-reload may help, as these optimizations are GCSE and thus may find more to optimize in a second pass.
+<pre>
+CFLAGS:  -march=pentiumpro -O2 -fgcse-sm -fgcse-las
+Size:  1690532
+
+Total Scene Processing Times
+  Parse Time:    0 hours  0 minutes  3 seconds (3 seconds)
+  Photon Time:   0 hours  0 minutes 50 seconds (50 seconds)
+  Render Time:   0 hours 38 minutes 43 seconds (2323 seconds)
+  Total Time:    0 hours 39 minutes 36 seconds (2376 seconds)
+
+real 2375.51
+user 2219.07
+sys 0.48
+</pre>
+
+''-frename-registers'' and ''-fweb'' each turned out significantly slower; so I tried combining them.  Note these two make debugging impossible, so won't ever be used in Ubuntu anyway.
+<pre>
+CFLAGS:  -march=pentiumpro -O2 -fweb -frename-registers
+Size:  1690532 bytes
+
+Total Scene Processing Times
+  Parse Time:    0 hours  0 minutes  3 seconds (3 seconds)
+  Photon Time:   0 hours  0 minutes 52 seconds (52 seconds)
+  Render Time:   0 hours 38 minutes 39 seconds (2319 seconds)
+  Total Time:    0 hours 39 minutes 34 seconds (2374 seconds)
+
+real 2373.75
+user 2193.01
+sys 0.47
+</pre>
+
+Also attempted were a number of loop optimizations which may or may not help.
+<pre>
+CFLAGS:  -march=pentiumpro -O2 -ftree-loop-im -ftree-loop-linear -ftree-loop-ivcanon -fivopts -ftree-vectorize
+Size:  1690532
+
+Total Scene Processing Times
+  Parse Time:    0 hours  0 minutes  2 seconds (2 seconds)
+  Photon Time:   0 hours  0 minutes 50 seconds (50 seconds)
+  Render Time:   0 hours 37 minutes 30 seconds (2250 seconds)
+  Total Time:    0 hours 38 minutes 22 seconds (2302 seconds)
+
+real 2302.69
+user 2192.70
+sys 0.24
+</pre>
+
+The ''-fivopts'' optimization was extremely helpful, decreasing user mode execution time by about 41 seconds.
+<pre>
+CFLAGS:  -march=pentiumpro -O2 -fivopts
+size:  1686436
+
+Total Scene Processing Times
+  Parse Time:    0 hours  0 minutes  2 seconds (2 seconds)
+  Photon Time:   0 hours  0 minutes 52 seconds (52 seconds)
+  Render Time:   0 hours 37 minutes 31 seconds (2251 seconds)
+  Total Time:    0 hours 38 minutes 25 seconds (2305 seconds)
+
+real 2305.11
+user 2179.27
+sys 0.78
+</pre>
+
+The ''-fmodulo-sched'' optimization causes a slight decrease in code size.  More importantly, though, operations are sped up a lot, user execution time decreasing by 61 seconds.
+
+On nbench, this optimization produced a small general slow-down.
+<pre>
+CFLAGS: -march=pentiumpro -O2 -fmodulo-sched
+</pre>
+
+<pre>
+POVRAY
+Size:  1686436
+
+Total Scene Processing Times
+  Parse Time:    0 hours  0 minutes  2 seconds (2 seconds)
+  Photon Time:   0 hours  0 minutes 52 seconds (52 seconds)
+  Render Time:   0 hours 36 minutes 46 seconds (2206 seconds)
+  Total Time:    0 hours 37 minutes 40 seconds (2260 seconds)
+
+real 2260.39
+user 2159.57
+sys 0.29
+</pre>
+
+<pre>
+NBENCH
+Size:  51090
+
+NUMERIC SORT        :          706.71  :      18.12  :       5.95
+STRING SORT         :          104.96  :      46.90  :       7.26
+BITFIELD            :      3.4961e+08  :      59.97  :      12.53
+FP EMULATION        :          80.128  :      38.45  :       8.87
+FOURIER             :           16455  :      18.71  :      10.51
+ASSIGNMENT          :          19.362  :      73.68  :      19.11
+IDEA                :          2936.3  :      44.91  :      13.33
+HUFFMAN             :          1426.3  :      39.55  :      12.63
+NEURAL NET          :            27.9  :      44.82  :      18.85
+LU DECOMPOSITION    :           937.2  :      48.55  :      35.06
+=================================================================  ==
+INTEGER INDEX       : 42.645
+FLOATING-POINT INDEX: 34.403
+=================================================================  ==
+MEMORY INDEX        : 12.022
+INTEGER INDEX       : 9.711
+FLOATING-POINT INDEX: 19.081
+</pre>
+
+The final optimization, ''-ffast-math'', may in some cases introduce slight inaccuracy into floating point calculations produced by programs compiled using it.  In some cases--such as audio and video players, Web page rendering engines, or image decoders--any such loss is imperceptible; however, with complex cases such as software 3D or multi-phase image processing, insignificant errors that ultimately round out can be introduced at the beginning of the pipeline and by the end of the pipeline make several tenths of a percentage point difference, creating easily perceptible changes.  Performance wise, user time decreased by 104 seconds, 4.7%.
+
+nbench actually increased in size, rather than decreasing.  It also decreased its overall Index measurements.
+<pre>
+CFLAGS: -march=pentiumpro -O2 -ffast-math
+</pre>
+
+<pre>
+POVRAY
+Size:  1671176
+
+Total Scene Processing Times
+  Parse Time:    0 hours  0 minutes  3 seconds (3 seconds)
+  Photon Time:   0 hours  0 minutes 51 seconds (51 seconds)
+  Render Time:   0 hours 36 minutes 19 seconds (2179 seconds)
+  Total Time:    0 hours 37 minutes 13 seconds (2233 seconds)
+
+real 2232.96
+user 2116.68
+sys 0.34
+</pre>
+
+<pre>
+NBENCH
+Size:  51541
+
+NUMERIC SORT        :             819  :      21.00  :       6.90
+STRING SORT         :          106.64  :      47.65  :       7.38
+BITFIELD            :      3.5768e+08  :      61.35  :      12.82
+FP EMULATION        :          81.767  :      39.24  :       9.05
+FOURIER             :           17410  :      19.80  :      11.12
+ASSIGNMENT          :          18.795  :      71.52  :      18.55
+IDEA                :          2723.3  :      41.65  :      12.37
+HUFFMAN             :          1289.2  :      35.75  :      11.42
+NEURAL NET          :          28.298  :      45.46  :      19.12
+LU DECOMPOSITION    :          905.76  :      46.92  :      33.88
+=================================================================  ==
+INTEGER INDEX       : 42.646
+FLOATING-POINT INDEX: 34.824
+==================================================================  ==
+MEMORY INDEX        : 12.058
+INTEGER INDEX       : 9.690
+FLOATING-POINT INDEX: 19.314
+</pre>
+
+=== Dramatizations ===
+Using the above, I have produced two further tests.  The first is a dramatization of all tests giving positive results except ''-ffast-math''; the second includes ''-ffast-math''.
+
+The first test, without ''-ffast-math'', almost reached the same user time.  It completed slightly faster in real time; but that can likely be attributed to multitasking.  The total gains are 97 seconds, 4.4%.
+<pre>
+CFLAGS:  -march=pentiumpro -O2 -fgcse-after-reload -fgcse-sm -fgcse-las -fweb -frename-registers -ftree-loop-im -ftree-loop-linear -ftree-loop-ivcanon -ftree-vectorize -fmodulo-sched
+Size:  1690532
+
+Total Scene Processing Times
+  Parse Time:    0 hours  0 minutes  3 seconds (3 seconds)
+  Photon Time:   0 hours  0 minutes 49 seconds (49 seconds)
+  Render Time:   0 hours 36 minutes 12 seconds (2172 seconds)
+  Total Time:    0 hours 37 minutes  4 seconds (2224 seconds)
+
+real 2224.13
+user 2123.40
+sys 0.34
+</pre>
+
+The second test rolls ''-ffast-math'' into the optimization set, which interestingly enough inherits the reduced size from the above ''-ffast-math'' test.  A size reduction of 19356 bytes, or 1.14%, can be seen.  As expected, execution time also decreased; a total of 172 seconds are saved with this optimization set, 7.7%.
+<pre>
+CFLAGS:  -march=pentiumpro -O2 -fgcse-after-reload -fgcse-sm -fgcse-las -fweb -frename-registers -ftree-loop-im -ftree-loop-linear -ftree-loop-ivcanon -ftree-vectorize -fmodulo-sched -ffast-math
+Size:  1671176
+
+Total Scene Processing Times
+  Parse Time:    0 hours  0 minutes  3 seconds (3 seconds)
+  Photon Time:   0 hours  0 minutes 48 seconds (48 seconds)
+  Render Time:   0 hours 35 minutes 11 seconds (2111 seconds)
+  Total Time:    0 hours 36 minutes  2 seconds (2162 seconds)
+
+real 2161.91
+user 2048.30
+sys 0.28
+</pre>

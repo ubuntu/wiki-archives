@@ -1,0 +1,137 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+=== /etc/mongrel/mongrel_cluster.yml  --> symlinked also to /var/www/railsapp/config/mongrel_cluster.yml ===
+<pre>
+user: www-data
+group: www-data
+cwd: /var/www/railsapp/
+address: 172.17.129.165
+port: "8001"
+environment: development
+pid_file: /var/www/railsapp/log/mongrel.pid
+log_file: /var/www/railsapp/log/mongrel.log
+servers: 2
+</pre>
+
+=== /etc/apache2/apache2.conf ===
+This starts proxy balancer if more than one mongrel is running for a rails app, with a single mongrel instance this is NOT needed.
+<pre>
+<Proxy balancer://mongrels>
+  BalancerMember http://172.17.129.165:8002
+  BalancerMember http://172.17.129.165:8001
+</Proxy>
+
+<Location /balancer-manager>
+   SetHandler balancer-manager
+</Location>
+</pre>
+
+=== /etc/apache/sites-available/railsapp ===
+<pre>
+<VirtualHost *>
+       ServerName railsapp
+       DocumentRoot /var/www/railsapp/public
+       <Directory "/var/www/railsapp/public">
+               Options FollowSymLinks
+               AllowOverride None
+               Order allow,deny
+               Allow from all
+       </Directory>
+
+       RewriteEngine On
+
+#### Check for maintenance file. Let apache load it if it exists
+       RewriteCond %{DOCUMENT_ROOT}/system/maintenance.html -f
+       RewriteRule . /system/maintenance.html [L]
+
+#### Let apache serve static files
+       RewriteCond %{DOCUMENT_ROOT}%{REQUEST_URI} -f
+       RewriteRule (.*) $1 [L]
+
+#### Rewrite index to check for static
+       RewriteRule ^/$ /index.html [QSA]
+
+#### Rewrite to check for Rails cached page
+       RewriteRule ^([^.]+)$ $1.html [QSA]
+
+#### Redirect all non-static requests to cluster
+       RewriteCond %{DOCUMENT_ROOT}/%{REQUEST_FILENAME} !-f
+       RewriteRule ^/(.*)$ balancer://mongrels%{REQUEST_URI} [P,QSA,L]
+
+#### Rewrite rule for single mongrel
+
+#### RewriteRule ^/(.*)$ http://ipofmongrel%{REQUEST_URI} [P,QSA,L]
+
+#### Don't do forward proxying
+       ProxyRequests Off
+
+#### Enable reverse proxying
+       <Proxy *>
+               Order deny,allow
+               Allow from 172.28.150
+       </Proxy>
+
+#### (for mongrels in a cluster) Pass other requests to mongrel instance (this name should be the same as the balancer you named in apache2.conf
+       ProxyPass / balancer://mongrels
+       ProxyPassReverse / balancer://mongrels
+
+#### (for a single mongrel) Pass other requests to mongrel instance (this name should be the same as the balancer you named in apache2.conf
+#### ProxyPass / http://ipofmongrel:port
+#### ProxyPassReverse / http://ipofmongrel:port
+
+#### we want apache to serve our static files, so that monrel doesnt work so hard
+       ProxyPass /images !
+       ProxyPass /stylesheets !
+       ProxyPass /javascripts !
+
+       Alias /images /var/www/railsapp/public/images
+       Alias /stylesheets /var/www/railsapp/public/stylesheets
+       Alias /javascripts /var/www/railsapp/public/javascripts
+
+#### set our log location
+       ErrorLog /var/www/railsapp/log/error.log
+#### loglevel should not be debug for production servers
+       LogLevel debug
+       CustomLog /var/www/railsapp/log/access.log combined
+       ServerSignature On
+
+#### Deflate
+       AddOutputFilterByType DEFLATE text/html text/plain text/xml application/xml application/xhtml+xml text/javascript text/css
+       BrowserMatch ^Mozilla/4 gzip-only-text/html
+       BrowserMatch ^Mozilla/4.0[678] no-gzip
+       BrowserMatch \bMSIE !no-gzip !gzip-only-text/htm
+</pre>
+
+=== /var/www/railsapp/config/database.yml ===
+
+<pre>
+common: &common
+   adapter: mysql
+   host: localhost
+## you can also specify a remote db and port
+## host: ip/hostname
+## port: either comment it out for defaul mysql port, or specify a custome one
+   username: 
+   password: 
+   
+
+development:
+   database: railsapp_dev
+   <<: *common
+
+production:
+   database: railsapp_prod
+   <<: *common
+
+test:
+   database: railsapp_test
+   <<: *common
+</pre>

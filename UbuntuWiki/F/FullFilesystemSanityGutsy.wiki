@@ -1,0 +1,242 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+
+''Please check the status of this specification in Launchpad before editing it.  If it is Approved, contact the Assignee or another knowledgeable person before making changes.''
+
+* '''Launchpad Entry''': UbuntuSpec:full-filesystem-sanity-gutsy
+* See also: BootLoginWithFullFilesystem
+
+=== Design ===
+
+==== Summary ====
+
+The desktop system should handle disk full situations gracefully.
+
+This spec has a broad and ambitious scope and its fixes may not be complete or may regress.  We will therefore also pursue BootLoginWithFullFilesystem which is intended to give the user a robust recovery path.
+
+''See <nowiki>[[#Implementation]]</nowiki> below for details of how to carry out this testing.''
+
+==== Use Case ====
+
+Michael is an Ubuntu user, and downloads huge numbers of  files and fills his disk.  This should only prevent him saving further files to the disk, and may cause some applications that he starts to fail.  It should not stop the general desktop from  operating normally.
+
+If Michael reboots, the computer should boot up normally and allow him to login.  It should warn him that he has no free disk space.  The general desktop should still operate normally; however applications may prevent him from saving files, or may not function.
+
+If he uses the file manager to free up disk space, he should  be able to immediately resume using his computer normally; saving files from applications, and using those that cannot operate without writing to disk, and he should not need to reboot or log in again or restart any application.
+
+==== Rationale ====
+
+Current disk full behaviour in Ubuntu is very poor.  BootLoginWithFullFilesystem (also targeted for gutsy) will fix the worst problems and at least allow the user to recover, but we would like the system not to misbehave and not to need rebooting.
+
+==== Approach and Scope ====
+
+This is an ambituous goal.  Without a fully automatic functional test of every component in the system, and comprehensive agreement and support from all upstreams, complete success will be unattainable and future regressions will occur and be difficult to detect.  However, we expect to be able to find and fix the most important cases and expect them to regress only slowly:
+
+We will concentrate on core software (defined here as software which is installed by default and which runs between power-on and the user's desktop readiness including the file manager).  We hope that filesystem full misbehaviour we discover and fix will be regarded as bugs by upstream and regress relatively rarely.
+
+(Here "misbehaviour" and "bug" refer to violations of the intent of the Use Case, specified above.)
+
+We propose to create a test environment which will allow us to monitor the software under test during startup and use.  This will identify the specific programs and subsystems which attempted to write to disk but failed to do so; we will then apply ad-hoc techniques (including debugging, ad-hoc testing and source code inspection) to ensure that each such identified case does not constitute or trigger a bug.
+
+==== Other applications ====
+
+As time permits, the same tests can be performed on specific other applications of interest.  OpenOffice.org is an obvious candidate.
+
+Firefox (and other programs in the Mozilla suite) are not expected to be tractable: the Mozilla profile management system is known to regularly write to disk and not to handle out of disk space conditions well.  The profile management system itself is unsuitable for handling disk full in a coherent way, and upstream do not seem to have the resources or priorities which would allow these problems to stay fixed for any length of time.
+
+==== Assumptions ====
+
+If we find and fix a disk full bug in the software we really care about, it is unlikely to regress so quickly that the manual work done pursuant to this spec quickly becomes irrelevant.
+
+==== Detailed Design ====
+
+The current plan is to use an ad-hoc LD_PRELOAD or libc modification which logs all writes which return ENOSPC in a special tmpfs; if desired this same intervention can also be used to simulate disk fullness.  The instrumentation will start at the execution of the real /sbin/init (ie, upstart in our case).
+
+For each failed write discovered in this way, it will be determined in an ad-hoc manner whether or not the failure has broken the software in question or whether it starts working normally again after the failure.  These determinations may involve:
+* Testing the programs' functionality after the disk full condition has ceased
+* Inspection of the source
+* Ad-hoc tests and per-program test harnesses
+* Argument based on the program's function and observed behaviour during the test
+as appears to be appropriate in each case
+If in fact it turns out that there is a bug in the program, this bug will be fixed if practical.
+
+A record will be kept of each failed write which is discovered, and what the resolution was (ie, why it was concluded that there is no problem, or the bug number(s) of fixed bugs, etc) and these reports will be tabulated in a suitable format on a wiki page or similar.
+
+==== Release Note ====
+
+* Ubuntu's core programs were tested in a disk full situation.
+   The following programs' behaviour was improved: ''details TBD''
+
+==== Test/Demo Plan ====
+
+This specification mainly consists of testing.  By its nature, such complex and ad-hoc tests are difficult to reproduce.
+
+For bugs that are reported as having been fixed (see above), it will be possible to demonstrate that the fix has taken as follows:
+* Fill up the disk (as root)
+* Reboot and log in
+* Run the application in question
+* Make the disk no longer full
+* Start the application again if it failed to start before
+* Observe that the application works normally (if relevant, observe that the specific functionality which was stated to be broken after disk full is now working properly)
+
+==== Discussion, rationale, Q&A ====
+
+''ScottJamesRemnant: comparison to other techniques of logging, e.g. inotify or linux audit system?''
+ Other possible approaches to logging include:
+* inotify: this is one approach but would involve processing all disk writes in an intrusive way; changing the libc is fairly straightforward
+* strace/subterfugue: it is known that the system does not work entirely correctly when everything is run under strace (and it has the same problem as inotify)
+* kernel change: this is a possibility but kernel hacking is harder than libc hacking and the consequences of mistakes are more sever.
+* Linux audit system: I have a low opinion of this architecture and functionality and it seems like the results would be overcomplex
+ - iwj
+
+''<nowiki>[[Warbo]]</nowiki>: As well as applications I think this should eventually include daemons which may run at bootup too, especially ones which download things (MLDonkey, BOINC, etc. if they don't behave sanely already), since they may fill up any freed space immediately (P2P transfers can easily work until zero bytes are left, then pause until more space becomes available, then eat that up too, for example). I know this spec is just for default applications for now, but it is important to remember that many daemons start up at boot and could cause some headaches. :)''
+
+ Yes, daemons which start in the default install are included.  I have clarified this by making clear that the instrumentation affects the whole system.  However, software which is not installed and run by default will not be checked as part of this plan.  Ideally the instrumentation parts developed, if nontrivial, will be made available for future retest and for (eg) universe developers to test their packages.  -iwj
+
+=== Implementation ===
+
+The design above was found to work reasonably well.
+
+==== Setup instructions ====
+
+To set up an instrumented testbed:
+
+# Select or install the testbed system.  This should not be an installation you care about as it will be put at risk of being made unuseable, unbootable and hard-to-fix.  There should be at least one partition on the hard disk which is not part of the test installation - this will be used for writing the logs.
+# Ensure that the testbed has only the most generic libc version installed.
+# Apply the patch (see below) to glibc and build the result.
+# Replace /lib/libc-2.*.so on the testbed with the corresponding file from the generic libc package you just built.  Do not install the whole package, just the libc-2.*.so file.  Ensure you overwrite the file with a tool which writes to a temporary file and then renames over the top, rather than overwriting in place.  rsync is a good choice.
+# On the testbed `strace -o id.strace id >/dev/full` and you should see in id.strace id getting ENOSPC from write and then attempting to open `/etc/enospck.log` which fails with ENOENT.
+# On the testbed mount your extra partition and choose where the logfile will go.  Create the logfile, world-writeable, and make an appropriate symlink.  Eg, <pre>
+mount /media/sda5
+touch /media/sda5/enospck.log
+chmod 666 /media/sda5/enospck.log
+ln -s /media/sda5/enospck.log /etc/
+</pre>
+ 1. Now retry the strace above.  You should find that a suitable log entry has been written about id failing to write to /dev/full.
+
+==== Testing ====
+
+The testbed instrumentation is then set up and you can perform whatever disk full tests you like.  Every dynamically linked program which gets ENOSPC from one of the wrapped system calls (see below) will be logged.
+
+If you want to test booting you will need to manually edit the initramfs script to mount your logging partition early enough.  Adding an appropriate scriptlet to `/usr/share/initramfs-tools/scripts/init-bottom/` is a plausible way to do this; I did it by wrapping /sbin/init with a shell script which called mount and then exec'd the real init.
+
+Suitable tests include making the disk full with dd after boot, and booting with a full disk.  Note that the shutdown scripts have a tendency to make a bit of extra space, so booting from rescue media or from another install on the same machine is a better way to fill the disk for boot testing.
+
+Note also that you have to be root to fill the disk properly.
+
+==== Patch ====
+
+The glibc patch wraps certain syscalls and if they return ENOSPC writes an entry to /etc/enospck.log (if that file exists).  To use it, one installs the modified glibc and makes /etc/enospck.log a symlink somewhere appropriate.  This catches all accesses after the symlink target's filesystem is mounted (currently, simply a filesystem in /etc/fstab).
+
+The patch is against glibc 2.5-10ubuntu1 but applies fine to  2.5-11ubuntu1, which latter was used for the test.  NB that only the files libc-2.5.so from the resulting package should be taken; for reasons I do not propose to investigate, installing the resulting .debs results in an unuseable system.
+
+The syscalls wrapped are: mkdir, link, open, write, writev, symlink (and the 64bit and internally-used-by-glibc versions of these).
+
+The patch is <nowiki>[[attachment:glibc.patch]]</nowiki> and is also available at least for the moment at http://www.chiark.greenend.org.uk/~ijackson/enospck/glibc.patch
+
+==== Results ====
+
+I have booted a system with a modified glibc and a full disk.  
+The resulting log and the patch can be found at
+ http://www.chiark.greenend.org.uk/~ijackson/enospck/glibc.patch
+ http://www.chiark.greenend.org.uk/~ijackson/enospck/enospck.log
+at least temporarily.
+
+I have rerun these tests with glibc 2.6.1-1ubuntu1 on 2007-08-30.  By the hackery described above I was able to track all writes after init was executed.  Here are the results, which are remarkably pleasant:
+
+===== User experience =====
+
+* Booting OK
+* Login OK
+* Warning notifcation bubble appears, OK
+* File manager: able to navigate and delete files.
+* '''Applications not yet tested'''
+* '''Logout failed''' - window manager seemed to crash and not get restarted
+* Shutdown OK
+* When system restored to sanity, login still OK (desktop data seems to have survived)
+
+===== Failed writes =====
+
+{| class="wikitable"
+|-
+| '''Program'''
+| '''File'''
+| '''Analysis'''
+| '''Action taken'''
+|-
+| dd
+| /root/fill/more
+| Testing side-effect only.
+| none needed
+|-
+| dd
+| /home/ian/full
+| Testing side-effect only.
+| none needed
+|-
+| gdm
+| /home/ian/.Xauthority
+| gdm has fallback which works properly.
+| none needed
+|-
+| gdm
+| /home/ian/.xsession-errors
+| Logfile only
+| none needed
+|-
+| dhclient3
+| /var/lib/dhcp3/dhclient.eth0.leases
+| Affects only IP address reuse on subsequent boot.  Code review did spot some programming errors which are not likely to cause problems in most practical situations.
+| Debian bug #440200
+|-
+| gconfd-2
+| /home/ian/.gconf/*/%gconf.xml.new
+| 
+| 
+|-
+| gconfd-2
+| /home/ian/.gconfd/saved_state
+| 
+| 
+|-
+| gnome-panel
+| /home/ian/.recently-used.xbel.ING2XT
+| 
+| 
+|-
+| mkfontscale
+| /home/ian/.gnome2/share/cursor-fonts/fonts.dir
+| 
+| 
+|-
+| mkfontscale
+| /home/ian/.gnome2/share/fonts/fonts.dir
+| 
+| 
+|-
+| trackerd
+| /home/ian/.local/share/tracker/tracker.log
+| 
+| 
+|-
+| x-session-manag
+| /home/ian/.ICEauthority
+| Not used by anything we care about
+| 
+|-
+| xdg-user-dirs-g
+| /home/ian/.gtk-bookmarks.UBZ7XT
+| 
+| 
+|}
+
+----
+CategorySpec

@@ -1,0 +1,142 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+=== How to write an ltsp 5 plugin ===
+
+To build the client environment on a ltsp server, a script called ltsp-build-client is used. It 
+creates the client chroot in /opt/ltsp/$ARCH, bootstraps a base system, installs all ltsp-client 
+related packages and sets the necessary defaults. 
+
+==== Plugins ====
+
+All steps the ltsp-build-client script goes through are held in a directory driven plugin system that looks like:
+
+<pre>
+/usr/share/ltsp/plugins/ltsp-build-client/common
+/usr/share/ltsp/plugins/ltsp-build-client/Ubuntu
+</pre>
+
+Plugins in the distro specific directory override plugins in the common directory.
+Optionally, the admin can install or override common or distro
+plugins in /etc/ltsp/plugins/ltsp-build-client. 
+
+'''NOTE:  Plugins are "sourced" not "executed", so be careful to avoid such things
+as "exit" in your plugin scripts'''
+
+So if you want to have a special netboot environment that does very specific things, you can do all your modifications through a plugin you put into /etc/ltsp/plugins/ltsp-build-client.
+
+For the fun of it, we'll write a plugin that adds the --kiosk option to ltsp-build-client and creates an ltsp environment which will make all clients booting from it a web kiosk.
+
+==== Plugin Modes ====
+
+There are several modes in which these plugins are called:
+
+commandline:
+
+  Builds the list of commandline arguments supported by the loaded plugins
+
+configure:
+
+  Sets variables for commandline options that are set
+
+before-install:
+
+  Before the initial chroot is built
+
+install:
+
+  Where the initial chroot is built (debootstrap, on debian systems)
+
+after-install:
+
+ Additional package installation(ltsp-client), tweaks, etc.
+
+finalization:
+
+ The last steps needed, such as installing kernels, copying the kernels and network bootable images into the tftp dir, installing the server's ssh keys into the chroot, etc.
+
+==== Variables ====
+
+* $ARCH - the servers architecture
+* $BASE - the basic directory used for ltsp chroots (defaults to /opt/ltsp)
+* $CHROOT - the name of the chroot we create in the $BASE dir (by default substituted with $ARCH)
+* $ROOT - will always point to the client dir (/opt/ltsp/$CHROOT), use it where appropriate
+
+==== Hints ====
+
+For operations in the client environment where no locales are set you should always prefix your commands and scripts with LC_ALL=C, that avoids the annoying locale warnings from packages/commands.
+
+To execute a command in the client environment use the following syntax:
+
+<pre>
+ LC_ALL=C chroot $ROOT <command>
+</pre>
+
+This way you can do all operations you are used to from a normal ubuntu commandline system.
+
+==== The design ====
+
+Fortunately the /usr/share/doc/ltsp-server/workstation doc of the ltsp-server package already has a basic design description of a kiosk mode, we'll use that one and add firefox and a custom ~/.xsession to it.
+
+==== The code we will put into /etc/ltsp/plugins/ltsp-build-client/30-kiosk ====
+
+<pre>
+case "$MODE" in
+    commandline)
+##### add a commandline switch to ltsp-build-client (advanced "false" means 
+##### we dont expect any value, callig --kiosk is enough, we could enhance
+##### the plugin to use --kiosk kde for example to install kdm and konqueror
+##### instead if we'd set it to true
+        add_option "kiosk" "`eval_gettext "a simple webkiosk mode."`" "advanced" "false"
+        ;;
+    configure)
+        if [ -n "$option_kiosk_value" ]; then
+####### set an environment variable we can pick up later
+            KIOSK="True"
+        fi
+        ;;
+    after-install)
+        if [ -n "$KIOSK" ]; then
+####### install the webbrowser and a display manager that 
+####### is capable to do a timed autologin in the client environment
+            LC_ALL=C chroot $ROOT apt-get $APT_GET_OPTS install gdm firefox
+
+####### make the necessary directories writeable to the booted client
+            echo 'copy_dirs="$copy_dirs /home"' >> $ROOT/etc/defaults/ltsp-client-setup
+            echo 'rw_dirs="$rw_dirs /var/lib/gdm"' >> $ROOT/etc/defaults/ltsp-client-setup
+
+####### create a kiosk user
+            LC_ALL=C chroot $ROOT adduser --disabled-password --gecos ,,, kiosk
+
+####### create a default xsession for that user
+            echo "#!/bin/sh" > $ROOT/home/kiosk/.xsession
+            echo "/usr/bin/firefox --fullscreen" >> $ROOT/home/kiosk/.xsession
+
+####### create a custom configuration for gdm
+            cp $ROOT/etc/gdm/gdm.conf $ROOT/etc/gdm/gdm-kiosk.conf
+            
+####### do some sed magic to enable autologin
+            sed -i s/AutomaticLoginEnable=false/AutomaticLoginEnable=true/ $ROOT/etc/gdm/gdm-kiosk.conf
+            sed -i s/AutomaticLogin=/AutomaticLogin=kiosk/ $ROOT/etc/gdm/gdm-kiosk.conf
+            sed -i s/TimedLoginEnable=false/TimedLoginEnable=true/ $ROOT/etc/gdm/gdm-kiosk.conf
+            sed -i s/TimedLogin=/TimedLogin=kiosk/ $ROOT/etc/gdm/gdm-kiosk.conf
+            sed -i s/TimedLoginDelay=30/TimedLoginDelay=10/ $ROOT/etc/gdm/gdm-kiosk.conf
+
+####### set the new alternative we created as default config
+            LC_ALL=C chroot $ROOT update-alternatives --install /etc/gdm/gdm-cdd.conf gdm-config-derivative /etc/gdm/gdm-kiosk.conf
+        fi
+        ;;
+esac
+
+</pre>
+
+Now running sudo ltsp-build-client --kiosk will create a kiosk environment for you. Additionally this plugin can be extended to install kdm and konqueror. An advanced task would be to tweak the $ROOT variable automatically from the configuration phase to be /opt/ltsp/kiosk.
+
+Note that you need ip forwarding enabled on the server so the clients have an internet connection if you run gdm and firefox locally, also a nameserver should be supplied through your dhcpd.conf setup in /etc/ltsp.

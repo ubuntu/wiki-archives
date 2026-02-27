@@ -1,0 +1,220 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+== USPLASH ==
+
+Usersplash/microsplash/Ubuntusplash
+
+A program that has some of the ideas of the 'usplash' specifictions can be found at http://splashy.alioth.debian.org and is called 'splashy'.  At the time of this writing, Splashy is most focused in Ubuntu and Debian, but it's known to work just as well with many other Linux distributions.
+
+100% userspace graphical boot system.  Brings together hacks/commandswitches/appendages to several programs for a smooth and droolable bootup sequence for the average desktop user.  If anything goes wrong, failure to console is a requirement.
+
+The rough idea is to leave console messages on tty1, but switch to another Virtual Terminal (tty8) and then write directly to the framebuffer (/dev/fb0).  On failure/exit, chvt is called to return the active terminal to tty1 and the user may switch at any time by pressing Alt+F1.  X11 is started in the background on tty7, but ''not switched to''.  When GDM has loaded a chvt (change virtual terminal) to tty7 is made.   In addition to avoiding this startup delay, the startup video mode is changed to match the mode X is running in, no Grub/boot loader screen is used;  and smooth fades through black are used to cover mode changes.
+
+{| class="wikitable"
+|-
+| grub/yaboot/silo
+| be silent unless a key is pressed or something goes wrong (no splash!!!)
+|-
+| init
+| be quiet
+|-
+| fsck/sulogin
+| notify on interaction request
+|-
+| xserver
+| background start
+|-
+| gdm
+| fade and ready-notification
+|-
+| poweroff/shutdown/reboot
+| fade notify 1 second before reboot
+|}
+
+usplat is simple and started from initrd.  usplashd is complex, started /etc/inittab.  communication is done by called usquirt which passes messages through a Unix Domain Socket mounted on a tmpfs filesystem on /etc/usplash/.control
+
+==== grub ====
+FILESYSTEM: NONE
+
+Hack grub to make it be quiet.  A fade out would be uber-cool, but we'll still have a video mode switch so I'm not sure if it is worth it.  In addition, we are going to skip the grub menu entirely (except on keypress), so it will look to the user like we are going directly to splash.
+
+grub needs to be configured to:
+** pass `quiet' to kernel
+** pass `console=tty1' (this explicitly disables bad /dev/console behaviour
+
+To get framebuffer, one of the following needs to be setup by software to be passed in:
+** video=xxx
+** vga=xxxx
+
+Else we probably won't have a framebuffer (of a decent size) to spew to!
+
+Off-topic: Somebody pointed out that it's important to have a chain-loader to run the existing Windows installation, or such.
+
+==== kernel ====
+FILESYSTEM: NONE
+
+If 'quiet' is specified on the kernel command line, there will be no text output until INIT loads. (NO PATCHES!!! YEAH!!!)
+
+==== initrd ====
+FILESYSTEM: INITRD (ro)
+
+Before INIT loads (first thing in the initrd) we'll have a small utility (usplat) that changes virtual terminal and draws a splash.
+TODO:
+** change the one line of text in the initrd script to "Starting Ubuntu..." instead of "Inittool-1.0.4...", and/or remove completely the message.  Ideally, it should be able to go straight from the BIOS screen to the usplat logo.
+
+==== usplat ====
+
+Simple image cat'er to /dev/fb0
+
+** write small static splash utility (usplat?) and get it in the initrd
+*** attempt to open /dev/fb0 and detect failure
+*** ioctl to check if framebuffer && PACKED && (TRUECOLOUR || PESUDO_COLOUR)
+*** ioctl to get fb size and depth
+*** stat directory given on commandline
+**** iterate files and check if suitable_pcx(fd)
+*** load largest PCX that will fit on the screen
+*** ioctl to change vt
+*** reset cursor
+*** bitblt image to 8/16/24 bit and fade in
+*** MAKE SURE ALL FILE DESCRIPTORS ARE CLOSED!!!!!!
+*** (exit, leaving the image up)
+
+==== init ====
+FILESYSTEM: / (ro)
+** make init be quiet (so that the user can run usplashd without usplat)
+** <strike>redirect stdout/stderr to /dev/tty1 (don't start usplashd if this fails, ie. serial console, etc)</strike>.  Done with console=tty1 PaulSladen
+** mod inittab to start usplashd at the appropriate time
+
+MattZimmerman: the serial console case is tricky; many systems have serial consoles, but also virtual VGA consoles (headless, but with a graphics adapter).  Typically, the kernel is configured (console=) to send /dev/console output to both the serial port and the VGA console 
+
+usplashd is started by being placed at the top of /etc/inittab.
+
+==== usplashd ====
+FILESYSTEM: / (ro [tmpfs-rw], then rw)
+usplashd handles all the rest of the interaction (animation, etc).  All drawing, etc will be done as non-root.
+
+usplashd handles the main graphical startup, this includes startup icons, progress bars and fading out to X.  It has handles shutdown/reboot graphics after GDM has quit.
+
+usplashd will do the following:
+
+** chvt (8?)
+** mount tmpfs to /etc/usplash
+** create UNIX Domain socket @ /etc/usplash/.control
+** !!!FORK!!!
+** parent monitors for death of child and change of virtual terminal
+** child (re-)shows the static splash
+** child drops privileges
+** child monitors UNIX Domain socket to receive events
+** child handles events (ie. show animation, exit, etc)
+** child monitors for any keypress and fades to black then dies (switching to tty1)
+** child fades to black then dies on exit event
+** child throws static splash then dies on SIGTERM (ie. shutdown or reboot)
+
+** if child dies, remove socket/tmpfs and exit
+
+==== usplashd-notify ====
+FILESYSTEM: / (ro, then rw)
+This is a small utility that sends one way messages to usplashd via its UNIX Domain socket on the command line.  
+
+==== initscripts ====
+FILESYSTEM: / (ro, then rw)
+All initscripts use output functions (clean output).  If the initscript needs user interaction (ie fsck), call usplashd-notify, which will switch back to the correct terminal and then exit.
+
+This can be done from runlevels.  in the
+<code>for SCRIPT in /etc/rcX.d/* ; do ...</code>
+loop, calls can be made to usquirt with the striped name of each initscript that is being started or stopped.
+
+==== gdm ====
+FILESYSTEM: / (rw)
+** When gdm is ready, call usplashd-notify to switch to tty7 (usplashd ).  This will work with unpatched GDM/xserver since they will just chvt 
+** Attempt hardware gamma fade in (nick code from xscreensaver/utils/fade.c)--only seems to work on some graphics drivers, so cool if it works and not a failure if it doesn't.
+** gdm should fade+switch VT on shutdown/logout too.
+
+==== Further ideas ====
+
+Carlos Fenollosa added:  Perhaps we can take a look to <nowiki>[[http://fedora.redhat.com/projects/additional-projects/rhgb/|rhgb project from Fedora]]</nowiki>
+
+PaulSladen adds: RHGB (Red Hat Graphical Boot) is a separate product which runs GTK-on-X-on-vesafb.  Whilst the idea of using high-level libraries (GTK+) is quite appealing, it does pull in fairly heavy dependencies, CPU usage for those dependencies and startup latency (eg. the X server loading).
+
+Fabian Zeindl adds: Another similar project: http://dev.gentoo.org/~spock/projects/gensplash/.
+Does all the things, old bootsplash from SuSE does, but has a much better concept to include jpegs, custom controls like progressbars etc. at startup, and will maybe get in the mainstream kernel some time.
+
+There is a
+<nowiki>[[http://www.mail-archive.com/debian-desktop@lists.debian.org/msg00359.html|thread on debian-desktop]]</nowiki>
+debating
+<nowiki>[[http://dev.gentoo.org/~spock/projects/gensplash/|fbsplash]]</nowiki> (aka gensplash) vs usplash.  The splashutils 'splash_helper' program can run as a daemon, and simple 'echo' statements can be used to drive it.  If the rc scripts could load a 'hook' script that can overload the output functions, it would be easy to make this a drop-in package, modulo the simple kernel patch.
+
+The <nowiki>[[http://www.suspend2.net/|Software Suspend 2]]</nowiki> system is fbsplash compatible, and has a brand new "user-ui" interface, a user-space program for displaying suspend and resume progress.  It works great, and looks nice.  If a theme is chosen that matches the fbsplash theme, they blend perfectly.
+
+Other links:
+* [Initramfs]
+* <nowiki>[[http://gentoo-wiki.com/HOWTO_fbsplash|HOWTO_fbsplash]]</nowiki> on the Gentoo MediaWiki
+* <nowiki>[[http://dev.gentoo.org/~spock/projects/gensplash/archive/contrib/|fbsplash on other distros]]</nowiki>
+* <nowiki>[[http://www.kiskeyix.org/downloads/debian-embelisher/|debian-embelisher]]</nowiki> (please read his disclaimer before you use it).
+
+On the plus side RHGB allows the X cursor which keeps people happy.
+
+From JohnMoser Fri Feb 4 23:36:13 +0000 2005
+From: John Moser
+Date: Fri, 04 Feb 2005 23:36:13 +0000
+Subject: vt8?
+Message-ID: <20050204233613+0000@https://www.ubuntulinux.org>
+
+Does the vt have to be the next available?  It should be possible to have it be vt12; in fact, I remember using chvt to change to TTY13 to get X sessions not switchable to by ALT+F13 (non-existant function key) after making more than 6.  Does the vt have to be within the first 12?
+
+From TacoWitte Thu Mar 10 13:34:24 +0000 2005
+From: Taco Witte
+Date: Thu, 10 Mar 2005 13:34:24 +0000
+Subject: quiet init scripts
+Message-ID: <20050310133424+0000@https://www.ubuntulinux.org>
+
+Maybe the ideas from http://bugzilla.ubuntu.com/show_bug.cgi?id=6794 can be used to make the init scripts quiet in a clean way.
+
+From LucaGreco Sat Apr 23 19:26:14 +0100 2005
+From: Luca Greco
+Date: Sat, 23 Apr 2005 19:26:14 +0100
+Subject: About "mount tmpfs to /etc/usplash"...
+Message-ID: <20050423192614+0100@https://www.ubuntulinux.org>
+
+Isn't better to mount to /var/tmp/usplash or some other directory under /var?
+
+----
+There is no point in reinventing the wheel when it comes to using vga16fb. The debian installer already uses that video mode, and to handle it, the '''bogl''' library is used. Bogl is very small and supports some (primitive) drawing functions and also loading images. It also supports displaying utf8 text. Instead of creating a new way of drawing stuff, displaying images and writing utf8 to vga16fb, bogl should be used. An added bonus is that any improvements in it (beautifying progressbars perhaps), could also automagically benefit the existing installer with no extra work.
+
+About mounting a tmpfs. I assume the only reason why the tmpfs is needed is for having a unix socket for communicating. Since the plan is to use unidirectional communication over the socket, tmpfs+socket isn't really needed. A simple '''fifo''' will suffice. A program doesn't need write access to the disk to be able to write to a fifo (as long as the filedescriptor already exists), hence the need for tmpfs is eliminated. Using a fifo is very straight forward and still quite flexible. 
+
+- MikkoVirkkilä (mvirkkil)
+
+----
+From SimonSantoro Sun Apr 24 23:18:07 +0100 2005
+From: Simon Santoro
+Date: Sun, 24 Apr 2005 23:18:07 +0100
+Subject: Start gdm early
+Message-ID: <20050424231807+0100@www.ubuntulinux.org>
+
+Fedora is trying to drop rhgb and start gdm as soon as it is ready. This sounds like a good idea to me, and would make a bootsplash useless.
+https://bugzilla.redhat.com/bugzilla/show_bug.cgi?id=151952
+
+  We can't start gdm until fsck is complete, and that may take an indeterminate amount of time. rhgb adds a significant amount of time to startup - if we can do a splash without a performance hit, then it's worth just going for it.
+
+Viper550:
+
+There is no need to have the splash go all the way through startup. On Windows XP, the bootup is very simliar to what we have now:
+-Blank Screen
+-Video Mode Changes
+-Graphical Splash
+-Another Blank Screen
+-Video Mode Changes
+-Blank screen...with Cursor
+-Login Screen
+Why work on having Usplash go all the way through startup? This is a waste of time if you are making this friendly to new users. This is what they are used to, so we should get used to it too!
+
+p.s. Usplash is pretty slick, now why doesn't SuSE does their splash the same way?

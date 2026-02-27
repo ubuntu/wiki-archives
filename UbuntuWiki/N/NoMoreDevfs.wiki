@@ -1,0 +1,86 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+
+* '''Launchpad Entry''': https://launchpad.net/distros/ubuntu/+spec/no-more-devfs
+* '''Created''':  by ColinWatson
+* '''Contributors''': ColinWatson, ScottJamesRemnant
+* '''Packages affected''': autopartkit cdrom-detect hw-detect iso-scan lilo-installer lowmem mdcfg mountfloppy nobootloader oldsys-preseed os-prober partconf partitioner partman-base partman-crypto partman-md partman-target rootskel s390-dasd sibyl-installer userdevfs
+
+=== Summary ===
+
+As of Ubuntu 5.10 (and to some extent still in 6.06), the Ubuntu installer relies on devfs pathnames, which are non-standard. We should stop using them.
+
+=== Rationale ===
+
+Many components of the Ubuntu installer (both text-mode and graphical) are descended from code that was written in Debian for use on Linux 2.4, where the installer used devfs. In fact, the same code upstream still optionally runs on Linux 2.4. As a result, there are various assumptions of devfs pathnames scattered around the codebase, which require extra support code in udev just for the installer (and udev's support for enumerated devices is sometimes unreliable, so should be avoided), break Ubiquity in the event we accidentally run across it, and cause confusion. We should make all installer code work in the absence of devfs paths.
+
+=== Use cases ===
+
+This is an infrastructure specification; there are no concrete use cases, although this work will probably fix a number of complicated bugs in the area of installer hardware detection.
+
+=== Scope ===
+
+Remove hardcoded device paths where possible; otherwise introduce abstraction layers that can cope with either devfs or normal device paths. Where possible, ensure that the modified code will still work with devfs, so that the code can be contributed upstream.
+
+=== Design ===
+
+As a general guide, the following paths are devfs-style: `/dev/discs/*`, `/dev/ide/*`, `/dev/scsi/*`, `/dev/md/*`, `/dev/vc/*`, `/dev/loop/*`, `/dev/rd/*` (when used to describe ramdisks). `/dev/md/*` is OK anyway as these device nodes are handled entirely by mdadm based on what is specified on its command line, and that naming scheme is preferred. The following paths which at first glance look suspicious are in fact safe for use with udev: `/dev/mapper/*`, `/dev/cciss/c*d*` (but not `/dev/cciss/host*/*` or `/dev/cciss/disc*/*`), `/dev/evms/*`.
+
+=== Implementation ===
+
+==== Code ====
+
+lilo-installer looks at `/dev/md/*`; this needs to be checked for correctness '''[ok]'''. There are some other device path handling fixes in Ubuntu which should be pushed upstream '''[done]'''.
+
+While the `bootfs_no_dev` code in sibyl-installer is correct, it is unused and should be removed unless it's going to be used very soon '''[done]'''.
+
+s390-dasd has commented code which uses `/dev/dasd/<number>/device`; this should be changed to try `/dev/dasd<number>` too '''[changed upstream to use sysfs]'''.
+
+`autopartkit/mapdevfs.c` is correct because it's only turning devfs names into real ones, but why doesn't it use the perfectly good function from libdebian-installer? '''[done]'''
+
+`cdrom-detect/debian/cdrom-detect.postinst` looks at `/dev/cdroms`; it should find CD devices using `/sys/block` instead.
+
+`hw-detect/disk-detect.sh` has a fallback case if `parted_devices` is not available that checks for `/dev/discs` to find out whether any disks have been detected; `lowmem/partman/init.d/05lowmem_modules` does the same thing. This should check through `udevinfo -e` for `ID_TYPE=disk`, or some equivalent check. '''[done]'''
+
+`iso-scan/debian/iso-scan.postinst` looks at `/dev/discs` to find block devices; it should scan through `/sys/block` instead.
+
+`mdcfg` and `partman-md` have many `/dev/md/*` assumptions; as discussed above, these should generally be OK since `mdadm` handles all its own device creation. However, this still might be inconsistent with the installed system, so we should check that. '''[ok]'''
+
+`mountfloppy` looks through `/dev/floppy`, `/dev/scsi`, `/dev/ide`, and `/dev/disc` (sic) for devices; this should be fixed for udev by borrowing `/sys/block` handling code from `os-prober` '''[done]'''. It also tries `/dev/floppy/0` as a default floppy device, and should be fixed to try `/dev/fd0` too '''[done]'''.
+
+`nobootloader`'s Pegasos case parses devfs-style IDE and SCSI device names to work out the host, bus, target, etc. If `/sys/block` is available, it should parse `basename $(readlink /sys/block/*/device)` instead. '''[done]'''
+
+`oldsys-preseed` looks for device names based on paths (relative to `/dev`) that it fetches from `/proc/mtd`. Since this comes straight from the kernel, it should be sane if we switch off devfs, but the implementor should verify this.
+
+`os-prober`'s `parse_proc_mdstat` function relies on partition names matching `/part`, so will break. This filter should be corrected to something more reliable. '''[done]'''
+
+`partconf` uses `/dev/md/*` and `/dev/evms/*`; as above, these should be checked '''[ok]'''. It parses `/dev/ide/*` and `/dev/scsi/*` paths to generate human-readable descriptions of them (an older version of the code in `partman-base/definitions.sh`); this should be adapted to handle `/dev/hd*` and `/dev/sd*` too '''[done]'''. `fstab-common` contains devfs-style fallback device names, which are used in case the CD or floppy cannot be found in `/proc/mounts`; some other scheme should be found for this '''[too hard, will have a flag day in the event that partconf-using arches move away from devfs paths]'''.
+
+`partitioner`'s `get_all_disks` function looks through `/dev/discs`. This should be replaced with essentially the same code as in `parted_devices`. (This is code duplication, but `partitioner` is obsolete and will eventually be removed; it's currently used for a few architectures where `partman` is too slow. The reason to bother modifying it is to establish consistent device handling anywhere that new developers might look for example code.) '''[this is a fair amount of effort; warning added in a comment instead]'''
+
+`partman-base`'s `humandev` function handles `/dev/md/*`, but should possibly handle `/dev/md*` as well '''[no need]'''; it handles `/dev/loop/*`, but should handle `/dev/loop*` as well (note that Dapper's `udev` got this wrong) '''[done]'''; it handles the devfs-style form of `/dev/cciss/*`, but needs to handle the normal form as well '''[done]'''. The script that starts up `parted_server` has cosmetic sorting code that handles `/dev/ide/*` and `/dev/scsi/*`, but should handle `/dev/hd*` and `/dev/sd*` as well '''[done]'''.
+
+`partman-crypto` uses `/dev/loop/*` in a few places (although, curiously, it seems to handle `/dev/loop*` elsewhere). We should investigate this and see if it needs to be changed to try `/dev/loop*` too. '''[done]'''
+
+`partman-target` iterates over `/dev/cdroms` and `/dev/floppy`; this should use `/sys/block` and check for `ID_TYPE=cd` or `ID_TYPE=floppy` respectively in `udevinfo` output if available '''[done]'''. Floppy enumeration also needs to check `/dev/fd*` '''[done]'''. It iterates over `/dev/scsi/host*` when looking for usb-storage devices, and should just look through `/sys/block` for devices with the `usb-storage` driver '''[done]'''.
+
+`rescue` iterates over `/dev/discs` and presents a list of those partitions to the user. It should iterate over `/sys/block` and work out device names from that instead if possible. '''[done]'''
+
+`rootskel`'s bootfloppy init script looks through `/dev/floppy` and `/dev/scsi` for storage devices; it should look through everything in `/sys/block` too '''[done]'''. The `detect-console-linux` script needs to be educated about non-devfs-style serial and virtual terminal device names '''[done]'''. `init-udev-devices` creates `/dev/rd`, `/dev/vc`, and `/dev/tts` (for the benefit of busybox init which needs these to start up), and should either just create the non-devfs device names too or perhaps copy `/lib/udev/devices`; the implementor should investigate the exact requirements of busybox init here '''[done]'''. `src/sbin/init` cleans up some nodes in `/dev/vc/*` in a serial terminal corner case and should clean up the corresponding `/dev/tty*` nodes too '''[done]'''.
+
+`userdevfs` creates many devfs-style device nodes as a compatibility shim for systems that have neither devfs nor udev. While this arguably does not matter since the d-i codebase will continue to support (though not require) devfs paths, it would probably be a good idea to switch these device nodes to non-devfs paths once the rest of the codebase has been fixed, to encourage more installer developers to account for non-devfs paths.
+
+=== Old note kept for reference ===
+
+The following is a pared-down list of suspicious uses of /dev (note that this was generated from an upstream d-i tree, so contains packages not relevant to Ubuntu): <nowiki>[[attachment:d-i-dev.txt]]</nowiki>
+
+----
+CategorySpec

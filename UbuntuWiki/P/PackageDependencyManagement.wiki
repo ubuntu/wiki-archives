@@ -1,0 +1,103 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+== Package Dependency Management ==
+
+* '''Launchpad Entry''': https://launchpad.net/distros/ubuntu/+spec/dependency-removal
+* '''Created''':  by MichaelVogt
+* '''Contributors''': MichaelVogt, DanielBurrows
+* '''Packages affected''': apt, aptitude
+
+=== Introduction ===
+
+This specification describes an enhancement to the information the system
+stores about packages that are installed locally. The goal is to improve the
+ability of systems to evolve over time to continue to reflect the current
+Ubuntu release.
+
+These primary improvements are envisaged:
+
+ 1. The system needs to have some idea '''why''' a package was installed. Some of the higher-level package management tools, such as `Aptitude`, already do something similar to this. They track, for example, whether or not a package was installed because of a specific request by the system administrator, or to satisfy the dependencies of a package that was being installed. This allows them to offer to remove those dependency packages when the chosen package is removed later.
+
+ 1. Over time, it is inevitable that the Ubuntu team may choose to change the open source products preferred for specific functionality in an Ubuntu system. For example, the Ubuntu developers might choose to migrate from `Postfix` to `Nullmailer`, or from `Esound` to `Polyp``Audio`. For new installations that presents no problem, someone installing the new release will simply get the new apps. However, for someone upgrading, it will be necessary to identify whether or not the user has modified any configuration files for the relevant app, and if not, to migrate the system to the new app.
+
+=== Rationale ===
+
+Over time, a Linux system accumulates a substantial amount of cruft.
+Traditionally, installing a package requires installing its dependencies.
+Later, when that package is upgraded, new dependencies might be introduced
+and older ones dropped, but in most systems the old package dependencies are
+never uninstalled. The end result is a plethora of unwanted and un-needed
+libraries and supporting packages which take up disk space and potentially
+also slow down the day to day operation of the computer.
+
+These improvements will make it easier to keep Ubuntu systems lean-and-mean
+over a series of releases, leaving only those packages which the Ubuntu team
+recommends, the packages explicitly selected by users, and the necessary
+dependencies required to support those packages.
+
+=== Scope and Use Cases ===
+
+The following use cases illustrate the ideas in this spec:
+
+ 1. Annabel has installed openldap, and all of its dependencies were automatically installed on her system. Now she is going to remove it from this system using a different package manager. That package manager identifies packages that were installed purely in support of openldap, and offers to remove those too.
+
+ 1. Jimmy installed Breezy, and has now updated to the next release. During the update, no matter which package management tool he uses, old dependencies will be removed and new ones installed. There should be no old libraries left on his system once the upgrade is complete.
+
+ 1. Jack is upgrading from Breezy to the next Ubuntu release. His system has postfix installed, because that was the default mail server in Breezy, but he has never modified its configuration and so when he does the update, postfix is removed and replaced with newmailer, the Ubuntu team's chosen replacement for postfix in the new release.
+
+=== Design ===
+
+For use case 1, we are going to mark each package `automatic` if it was installed only to satisfy a dependency. If a package is removed later, a `mark-and-sweep` algorithm is run that marks any package that is a direct or indirect dependency of a given root-set (essential+manually installed). Any package that is not marked is not required by a manually installed package and can be safely removed. Use case 2 will be converted because the installer will install packages based on their task information. The library dependencies will be pulled in automatically and marked auto. So on the next upgrade, any library that is no longer used on the system will be suggested to be removed automatically.
+
+The use cases 3 is already adressed by the upgrade tool from the AutomaticUpgrade spec.
+
+Currently, all packages installed by the installer are installed via aptitude with a matcher for the task "ubuntu-desktop". That means that the auto-flag is set for a lot of the libraries but not for the installed applications. That means that, e.g.,  removing ubuntu-desktop will *not* result in the suggestion to automatically remove all of its dependencies when it was installed by the installer. If a user later install kubuntu-desktop (on the installed system), the auto-flag will mark all dependencies of kubuntu-desktop as `auto` and removing kubuntu-desktop will result in the suggestion to remove those dependencies. 
+
+A open issue here is that the live-cd is build with apt-get install ubuntu-desktop (resulting in a lot of auto-flags set) and that ubuntu-express installer will copy that to the harddisk. Either we need to fix the live-cd builder to use aptitude (it has a matcher that matchs all dependencies of a given package) or install in the debian-installer with aptitude install ubuntu-desktop as well (to have consistent behaviour between the two install methods). The reason that the installer installs ubuntu-desktop that way is to avoid suprises for the user when removing ubuntu-desktop results in the suggestion to remove huge amounts of software. But OTOH it's correct to mark them auto. If we start using Recommends for ubuntu-desktop this is less of a issue.
+
+=== Implementation Plan ===
+
+For the use cases Number 1 the automark feature of aptitude needs to be ported to libapt. It should be easily accessible to all the frontends (apt-get.cc, synaptic, aptitude, python-apt) and "just work" for the frontends (if they use pkgDepCache::MarkInstall()). There should be a "mark inaccessible packages" function. The pkgDepCache should provide both an auto-installed predicate and reachable predicate. These two can be easily used to collect all packages to be auto-removed.
+ 
+==== Data Preservation and Migration ====
+
+The current flags in aptitude will be converted automatically on the first run of aptitude. Apt has a state-file in /var/lib/apt/extended_states that includes information like this:
+<pre>
+Package: openoffice.org2-math
+Auto-Installed: 1
+</pre>
+
+This information could later be used for smart as well. Ideally, the information would be extensible (everyone should preserve tags it doesn't know) and accessible through libapt-pkg API.
+
+For upgraded system no auto-installed information will be available initially. We should probably provide a cli-tool (written in python-apt) to help the user to update their "auto-installed" information. One useful feature would be to mark all packages in the "libs" section as auto-installed. It should also support "mark-auto" and "unmark-auto" commands. The GUI frontends should make it easy to mark specific packages as auto-installed so that this feature is easily available for non-power-users as well.
+
+==== Packages Affected ====
+
+The `apt` package needs to be improved to provide support for the marking of automatic dependencies. This feature needs to be exported so that frontends like synaptic, python-apt can use it too. Ideally no modification to the frontends should be necessary to have the "auto-installed" flag working.
+
+==== User Interface Requirements ====
+
+A new "apt remove --auto" command will be added that removes unused automatically installed packages. 
+
+Aptitude will work as before, synaptic will present packages that can be removed automatically via the "status"-view but it will not mark them for removal automatically. Adept will probably have a filter for the "auto-removable" packages as well.
+
+=== Implementation status ===
+
+A implementation is available via bzr from the http://people.ubuntu.com/~mvo/bzr/apt/auto-mark/ branch; it adds support for tracking automatic packages into the apt library and into apt-get. Close cooperation with Daniel Burrows (the aptitude author/maintainer) is taking place; he branched from the initial port and added the missing bits that he needed for aptitude. python-apt code is written as well, and a branch of aptitude exists which makes use of the new apt features and migrates its automatic markings to the global state file. All the code needs testing, and other frontends need to display and make use of this additional information.
+
+=== Comments ===
+
+* Does smartpm already handle this?  Sadbfl stated the possibilty of using smart for Edgy, and there is a spec located at https://launchpad.net/distros/ubuntu/+spec/smartpm   Has a discision been made on which package manager is to be used in Edgy? - LukasSabota
+* mvo: we are working on something similar for smart, see http://lists.labix.org/pipermail/smart-labix.org/2006-June/001206.html
+* What about this case : I installed package A that came with dependency B. Now I'm compiling C myself that needs B, no problem but if I remove A prior to that I might still think I need B. Would I have a way to keep it without reinstalling it just after ? - John
+* John, I think that in that case, you should install B manually before removing A. Well, not actually ''install'' it, since it's already installed, but tell your package manager that you want it installed. With the current aptitude, an "aptitude install B" will suffice to mark B as manually installed. I think this should be the desired behavior in future implementations, too.
+----
+CategorySpec

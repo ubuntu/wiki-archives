@@ -1,0 +1,115 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+
+* '''Launchpad Entry''': https://launchpad.net/distros/ubuntu/+spec/thinclient-local-devices
+* Created:  by JaneWeideman
+* '''Contributors''': OliverGrawert, Václav`milauer, ScottBalneaves
+* '''Packages affected''': 
+*** ltspfs/ltspfsd
+*** ltsp-server
+*** ltsp-client
+
+=== Summary ===
+
+This specification describes how block devices on a thin client, such as usb memory sticks, floppies (both USB and Legacy) and cdrom drives (USB, ATAPI, SCSI) can all be accessed from the users session, which is running on the server.
+
+=== Rationale ===
+
+Ubuntu's LTSP currently doesn't support local block devices on thin clients. If you plug in a usb stick, usb storage capable camera, CD rom or floppy on the Thin Client, you don't have access to the device at all. An implementation to handle this was developed in LTSP-4.2.
+
+=== Use cases ===
+
+Scott uses a LTSP Thin Client and wants to copy files from a CD rom he burned at home. He puts the CD into the drive of his thin client and it shows up on his desktop just like it does on his Ubuntu desktop at home.
+
+Jane has taken a bunch of photos with her usb storage capable digital camera for use in her art class. Jane's school runs an Edubuntu LTSP server in the classroom. She plugs in her camera and gets a popup that shows the pictures that are on the camera.
+
+Willy brought his documents he wrote at home on a floppy to his office where Ubuntu LTSP runs and where he works on a thin client. Willy inserts the floppy into the local floppy drive and clicks on the floppy icon on his desktop. He then can edit the files using OpenOffice and when he saves the documents, they are saved back to the floppy disk.
+
+=== Scope ===
+
+* Block devices that interact in the normal manner with udev to be automounted.
+* We won't handle special-function or character devices for Dapper. (i.e. cdrom burning or PDA syncing)
+   
+=== Design ===
+
+The current udev/kernel structure already solves the raw automounting of the device on the thin client, ltsp.org designed a program called lbus that forwards a notification about new appearing devices on the client to the users session on the server.
+
+The actual data transfer is done by a fuse based network filesystem called ltspfs. A daemon called ltspfsd runs on the client, a client program called ltspfs executed in the session of the user on the server does the mounting over the network. Both are purely userspace programs, and only rely on fuse, which Ubuntu already ships by default.
+
+When a notification from lbus running on the client is received by the lbus process listening in the users session on the server, ltspfs mounts the device into a subdir of /media/$USER which is owned by the user in 0700 mode.
+
+=== Implementation ===
+
+A description of the existing implementation can be found on the following pages in the ltsp.org wiki: <<BR>> <nowiki>[[http://wiki.ltsp.org/twiki/bin/view/Ltsp/LtspFSAutomount|LtspFSAutomount]]</nowiki> <<BR>> <nowiki>[[http://wiki.ltsp.org/twiki/bin/view/Ltsp/LtspFS|LtspFS]]</nowiki>
+
+To integrate localdevs into Ubuntu LTSP, we'll need the following changes to the existing ltspfs:
+
+* An additional rules file for udev, to be inserted at 88-ltspfs in /etc/udev/rules.d/, to pick up inserted block devices and write the fstab entries.
+* Modify ltspfsd to use `/var/run` rather than `/tmp` to store its state
+* Additional script(s) to handle the updating of the `/var/run/fstab` entries.
+* The ltspfsd daemon as is.
+* mounter and unmounter scripts that mount from `/var/run/fstab`, and ignore /etc/fstab (see example below).
+* The lbuscd daemon.
+* The lbus_event_handler.sh script needs to create /media/$USER/ and do the automounting in that dir instead of the users homedir.
+
+==== Issues: ====
+
+* We can't use the $DISPLAY variable to find out the host name:
+** Instead, we can fall back to the SSH_CONNECTION environment variable if $DISPLAY points to localhost
+* lbus isn't packaged yet. A package that creates the lbussd and lbuscd binary packages needs to be created, ltsp-client needs to depend on the lbuscd package, the lbussd package needs to be pulled in by the ltsp-server package.
+* ltspfs-mounter and unmounter scripts need to be included in ltspfsd package.
+* Handling of LOCAL_STORAGE=True/False needs to be added to the ltsp-client-setup initscript in the ltsp-client package. (indeed that also needs to be documented as a lts.conf parameter)
+* We need to patch the ltspfs-mount and ltspfs-umount scripts to only look in /tmp/fstab.
+* '''Critical:'''
+https://launchpad.net/distros/ubuntu/+source/gnome-vfs/+bug/50554 needs to be fixed 
+* We've had a comment or two on the LTSP mailing list that codepages aren't supported under LTSPFS.  We'll need to implement that in keeping with Ubuntu's i18n nature by adding glib's g_string functions for the string handling in ltspfs.  -- ScottBalneaves
+
+==== Code ====
+
+keybuk suggested the following udev rules for handling fstab:
+
+<pre>
+ACTION=="add", SUBSYSTEM=="block", ENV{ID_FS_TYPE}=="?*", \
+     RUN+="add_fstab_entry %k $ENV{ID_FS_TYPE}"
+ACTION=="remove", SUBSYSTEM=="block", RUN+="remove_fstab_entry %k"
+</pre>
+
+<pre>
+
+sed -i -e "|^/dev/$1 |d" /tmp/fstab
+
+MOUNTPOINT=/media/ltsp-$1
+
+echo "/dev/$1 $MOUNTPOINT $2 defaults 0 0" >> /tmp/fstab
+</pre>
+
+<pre>
+
+sed -i -e "|^/dev/$1 |d" /tmp/fstab
+</pre>
+
+ScottBalneaves suggests changing the ltspfs_mount script to the following, to avoid using /tmp/fstab at all:
+
+<pre>
+grep $1 /tmp/fstab | while read DEV MOUNTPOINT TYPE OPTIONS DUMP PASS; do
+   mount -t ${TYPE} -o ${OPTIONS} ${DEV} ${MOUNTPOINT}
+done
+</pre>
+
+=== BoF agenda and discussion ===
+
+** Stability status of ltspfs not currently known.  Update 17.6.2006: ltspfs is in current version of LTSP (4.2), and deployed.  Reports coming back are positive, and the code's proven quite stable.  Apart from i18n, things are looking good. -- ScottBalneaves
+** ltspfs designed for this scenario: copes better with unexpected media removal, etc.
+** There is a bug in LTSP-4.2 which prevents the second user who logs into a terminal to mount devices. Consider this in your testing.
+*** This bug was fixed as of LTSP-4.2 r2.  Updates have been pushed out to users and are in CVS.
+
+----
+CategorySpec

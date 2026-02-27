@@ -1,0 +1,246 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+* '''Launchpad Entry''': UbuntuSpec:kernel-abi-package-handling
+* '''Created''': 2008-06-02
+* '''Contributors''': MartinPitt, MichaelVogt, TimGardner
+* '''Packages affected''': `apt`, `linux`, `linux-meta`, device drivers
+
+=== Summary ===
+
+We propose a generalized replacement of `linux-meta` by improving the
+package manager and using dependency fields. This makes the upgrade to
+a new kernel ABI automatically apply to installed third-party drivers
+as well, and ensures that `apt` itself ensures consistency of the
+packages. This provides a way to support third-party driver packages and 
+eases kernel maintenance.
+
+=== Rationale ===
+
+Currently, linux-meta provides a rather manual way to upgrade kernel driver packages (such as l-u-m) to a new kernel ABI. However, this is problematic in several ways:
+
+* It needs to be maintained manually and even with it, people often install de-sync linux and driver packages.
+* It forces/encourages us to throw all third-party drivers into a single monolithic package which is hard to maintain (e. g. l-r-m).
+* It does not apply to anything that is not covered by l-meta itself (linux-{ubuntu,restricted,backports}-modules), such as virtualbox-ose-modules, a lot of other already packaged drivers, and most importantly, packages from third-party driver repositories.
+
+=== Use Cases ===
+
+* Jon uses VirtualBox on Intrepid. After Intrepid gets a new kernel
+ ABI 2.6.26-07, update-manager automatically installs the matching
+ `virtualbox-ose-modules-2.6.26-07-generic` package, too.
+
+* James buys a new Dell server which needs a backported SCSI driver
+ which is not yet available in the Hardy kernel. Dell maintains a
+ repository with this driver for Hardy, and updates it when Hardy gets
+ a new kernel ABI. James just runs a normal dist-upgrade, which
+ installs a new kernel ABI, but the Dell update is not yet available.
+ His machine continues to boot with the old kernel.
+
+ On the next day, the upgraded Dell driver is available, and James'
+ daily upgrade automatically pulls in the SCSI driver for the new
+ kernel ABI. James reboots the machine, which starts the new kernel.
+
+* Lynn needs a piece of restricted firmware for her Wifi card. But she does not need to install any proprietary graphics driver for her laptop with an Intel chipset. On a kernel update she has a lot less to download than her friends who use the nvidia driver.
+
+=== Scope ===
+
+By this design, third-party drivers which are critical for booting, but are not provided for a new ABI, can prevent a new kernel ABI to become the default on boot. Thus the solution here should be applied only to drivers which we officially support and control in our own archive. If a third party guarantees (by contractual obligation) to keep up with our kernel ABI bumps, they can use this 
+schema as well.
+
+If a driver is not critical for booting, this schema will work, since the driver would just be installed once it becomes available, but it does not prevent the new kernel from becoming the default.
+
+Community-provided drivers should use <nowiki>[[http://linux.dell.com/dkms/dkms.html|DKMS]]</nowiki>. Drivers are shipped in source form, and DKMS cares about automatic installation/rebuild for new kernel ABIs. Thus these drivers do not need to be updated in lockstep with kernel ABI bumps. Thus DKMS is the right tool for drivers which do not need to be officially certified (which is only done for binary packages), and which are not supported officially by Canonical/Ubuntu.
+
+=== Design ===
+
+This problem has two major parts:
+
+ 0. Automatically install new packages which provide a driver (or the kernel itself) for a new kernel ABI, if the package was installed for the older ABI.
+** Introduce a "package series" concept to `apt` and put related
+  drivers into package series, so that newly available driver versions
+  for new ABIs are installed automatically by apt's dependency
+  resolution.
+  
+** Reduce the current `linux-meta` to a simple package `linux` which
+  just pulls in the new ABI. This continues to provide a means for us
+  to control which ABI is the default one, and when to switch, but
+  maintenance becomes vastly easier.
+
+ 0. Decide when enough drivers have been installed for the new ABI to switch the boot default to the new kernel.
+
+** Driver packages which are essential for booting declare a package field `X-Boot-Essential: Yes`.
+
+** A new script `/etc/kernel/postinst.d/zz_default_kernel` looks at
+  the currently installed packages and flips the boot default to the
+  new kernel once all `X-Boot-Essential: Yes` packages are available
+  for the new ABI which were available for the currently running ABI.
+
+=== Implementation ===
+
+==== New package installation ====
+
+===== Definition =====
+
+Introduce a new supported package header `Package-Series:` which gets
+evaluated by apt's dependency resolver.  A package is automatically
+marked for installation IFF for all of its declared `Package-Series:`
+there is at least one installed package which is already in that
+series.
+
+According to Michael Vogt, this can be implemented in libapt by
+transforming the newly available package series members into virtual
+dependencies (in apt's internal model). Then we can use the existing
+transitive dependencies resolver, so that the implementation should
+not become too tricky, and possibly even cover aptitude automatically.
+
+===== Usage for kernel packages/drivers =====
+
+Package series can be used in two dimensions:
+* `ABI`: Put all drivers for a particular kernel ABI into a series `linux-abi-2.6.XX-Y`.
+** Needs default version metapackages only for `linux-image-2.6.XX-Y-generic` itself, under the kernel team's control.
+** ''problem:'' package greedy, it pulls in all available drivers for that ABI, even the ones users do not need.
+ 
+* `driver`: Put all ABI versions for a particular driver into a series `kmod-drivername`.
+** Automatically keeps track of which drivers are installed and which shouldn't be installed
+** Seamlessly applies to `linux-image` itself, too, no `linux-meta` necessary at all any more.
+** ''problem:'' ABI greedy, since it pulls in all available ABIs, even the
+  ones you just have removed (if we are not fast enough with NBSing old ABI
+  versions, or do not yet want people to upgrade to a newer one automatically)
+
+We get the desired behaviour if we use both groupings at the same
+time. Every driver declare two package series, one for the ABI and one
+for the driver name:
+
+ <pre>
+ Package: linux-image-2.6.24-18-generic
+XB-Package-Series: linux-generic, linux-abi-2.6.24-18
+
+Package: linux-image-2.6.24-18-openvz
+XB-Package-Series: linux-openvz, linux-abi-2.6.24-18
+
+Package: nvidia-glx-2.6.24-18
+XB-Package-Series: kmod-nvidia, linux-abi-2.6.24-18
+</pre>
+
+In this solution we still need a single `linux-default-abi` to point to the new default
+ABI, to trigger the update to -19:
+
+ <pre>
+ Package: linux-default-abi`
+XB-Package-Series: linux-abi-2.6.24-19
+</pre>
+
+This will automatically trigger the update of all installed flavours
+to 2.6.24-19. This package can easily be built from the `linux` source
+itself, so that the `linux-meta` source package can disappear
+entirely.
+
+===== Other usages =====
+
+This new "Package Series" feature is not specific to the kernel. It
+seems generally useful for packages where multiple versions are
+available at the same time. For example, for various reasons our
+postgresql server package is called `postgresql-8.3`, and there are a
+handful of extensions (e. g. `postgresql-pljava-8.3`). With package
+series, the update to a new major version can be made much smoother,
+so that the upgrade of the server to `postgresql-8.4` will
+automatically pull in `postgresql-pljava-8.4`.
+
+===== Upgrade Example =====
+
+Suppose we have a linux image (just one flavour) and two drivers ''nv'' and
+''ati''. The user installed ''nv'', but does not need ''ati''.
+
+Originally we just have one kernel ABI version 1. There are the following
+packages (green: installed, red: not installed, yellow: newly available):
+
+{| class="wikitable"
+|-
+| <#CCFFCC> `linux-default` <<BR>> `PG: linux-abi-1`
+| <#CCFFCC> `linux-1` <<BR>> `PG: linux, linux-abi-1`
+| <#CCFFCC> `nv-1`<<BR>> `PG: kmod-nv, linux-abi-1`
+| <#FFCCCC> `ati-1` <<BR>> `PG: kmod-ati, linux-abi-1`
+|}
+
+Now a new kernel ABI version 2 is introduced, and all drivers get updated for
+it. linux-default is not yet changed, though:
+
+{| class="wikitable"
+|-
+| <#CCFFCC> `linux-default` <<BR>> `PG: linux-abi-1`
+| <#CCFFCC> `linux-1` <<BR>> `PG: linux, linux-abi-1`
+| <#CCFFCC> `nv-1`<<BR>> `PG: kmod-nv, linux-abi-1`
+| <#FFCCCC> `ati-1` <<BR>> `PG: kmod-ati, linux-abi-1`
+|-
+| 
+| <#FFFFCC> `linux-2` <<BR>> `PG: linux, linux-abi-2`
+| <#FFFFCC> `nv-2`<<BR>> `PG: kmod-nv, linux-abi-2`
+| <#FFFFCC> `ati-2` <<BR>> `PG: kmod-ati, linux-abi-2`
+|}
+
+This will not trigger the installation of `linux-2` or any driver, since there
+is no package installed which is already in the `linux-abi-2` PG. 
+
+Now `linux-default` gets flipped to `linux-abi-2`. This will trigger selection
+of all packages which are also in that series, but only those drivers which were
+installed before. I. e. `ati-2` will not be installed because the `kmod-ati` is
+not installed, but the already present `kmod-nv` member will pull in
+`nvidia-2`:
+
+{| class="wikitable"
+|-
+| 
+| <#CCFFCC> `linux-1` <<BR>> `PG: linux, linux-abi-1`
+| <#CCFFCC> `nv-1`<<BR>> `PG: kmod-nv, linux-abi-1`
+| <#FFCCCC> `ati-1` <<BR>> `PG: kmod-ati, linux-abi-1`
+|-
+| <#CCFFCC> `linux-default` <<BR>> `PG: linux-abi-2`
+| <#CCFFCC> `linux-2` <<BR>> `PG: linux, linux-abi-2`
+| <#CCFFCC> `nv-2`<<BR>> `PG: kmod-nv, linux-abi-2`
+| <#FFCCCC> `ati-2` <<BR>> `PG: kmod-ati, linux-abi-2`
+|}
+
+Please note that the updating of `linux`, the drivers, and `linux-default` does
+not need to happen in lockstep due to the `/etc/kernel/postinst.d/` script.
+Above mechanism is purely for the "pull in new ABI versions" part of the
+old `linux-meta`.
+
+===== Obsoletion =====
+
+If a third-party driver package ceases to be useful/supported, and
+should not be automatically upgraded any more, this needs a final
+"terminator" upload which drops the package series. The package should
+the be put into `Section: oldlibs` and otherwise be empty, so that
+deborphan and similar tools can eventually clean it up. 
+
+NB that the automatic removal of transitional packages is an
+orthogonal problem which is not limited to driver packages at all, and
+not covered in this specification. But since those packages are empty,
+they have a neglectible cost on the installed system.
+
+==== Default kernel selection ====
+
+** Move the kernel symlink handling in `linux-image-*.postinst` into
+  separate script `/etc/kernel/postinst.d/zz_default_kernel`. This
+  should be shipped in an already existing "kernel infrastructure"
+  package which can be maintained more easily than updating the kernel
+  itself, or possibly a new package `linux-common`.
+  
+** Create a new debhelper script `dh_linux` which automatically
+  generates the code for running `/etc/kernel/postinst.d/`, using
+  dpkg-triggers for efficiency. In 8.04 this is hardcoded in
+  `linux-image-*.postinst`.
+
+** The `linux-image-*` and all kernel driver packages use
+  `dh_linux` in their debian/rules. This should be done by the
+  autopackaging in dkms as well.
+
+----
+CategorySpec

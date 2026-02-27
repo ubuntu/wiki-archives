@@ -1,0 +1,145 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+
+This is wikified version of Google Summer of Code  2007 application by Krzysztof Lichota, which is available at:
+http://www.mimuw.edu.pl/~lichota/soc2007-prefetch/application.html
+
+Project for this task is registered in Launchpad at https://launchpad.net/prefetch
+Implementation is done in Google Code project: http://code.google.com/p/prefetch/
+Progress can be traced at: http://code.google.com/p/prefetch/wiki/Soc2007Progress
+
+* '''Launchpad Entry''': https://blueprints.launchpad.net/ubuntu/+spec/file-prefetching
+* '''Created''':  by KrzysztofLichota
+* '''Contributors''': KrzysztofLichota
+* '''Packages affected''': 
+
+=== Summary ===
+Disk access is one of the main reasons of slow application startup. Ubuntu's main competition (Windows XP) has been providing for a long time a feature to analyze application and system startup and prefetch necessary files into memory when application is started again <nowiki>[[http://www.microsoft.com/technet/prodtechnol/winxppro/evaluate/xpperf.mspx#E1G]]</nowiki>. Also files are reorganized on disk for faster access during system boot and application startup. Currently, although several attempts has been made, there is no such end-to-end, automatic solution for Linux systems and I want to implement it.
+
+=== Rationale ===
+ There were some attempts to provide boot and application startup prefetching, but all have some problems and none of them works as expected.
+ 
+==== Ubuntu boot readahead ====
+Ubuntu currently (checked on Ubuntu Dapper) includes boot scripts which can analyze and prefetch files during boot. It works quite well in general, but has the following problems:
+* Analyzing boot is done using inotify and has high overhead, so it is not suitable for use on every boot. Also, when analysis is done, prefetching is not performed, so user notices slowdown at boot.
+* Works on whole files, not on only relevant parts, so it has higher memory requirements. This causes problems on machines with less RAM and might even slow down boot on such machines.
+* It does not notice order of read files, files to prefetch are sorted by disk position and fetched all at once at boot. Using fetching of only necessary files in proper order, memory requirements might be lowered and cache usage optimized on machines with less RAM.
+Other important features:
+* Works purely in userspace.
+* Uses readahead() system call to prefetch file into cache.
+
+==== Preload ====
+preload <nowiki>[[http://sourceforge.net/projects/preload]]</nowiki> developed as part of Google Summer of Code 2005 aimed to provide preloading of file based on statistical analysis by corellation of applications (possibly multiple) and files they use.
+The idea is unsuitable for speeding up application startup for the following reasons:
+* It runs as daemon, wakes up every 20 seconds to see if files should be preloaded. It cannot react to application starting in this 20 seconds interval.
+* It analyzes what applications are running together and fetches their files. It might work for applications which are started during login as this is predictable, but it does not work well for applications which are started on user demand, for example Firefox or OpenOffice. 
+* It analyzes /proc/pid/maps to see what files are used by application, so it does not notice files accessed using read() system call.
+
+Other important features:
+* Works purely in userspace.
+* Uses standard readahead() syscall to fetch cached files.
+
+==== Bootcache/filecache ====
+Bootcache <nowiki>[[http://code.google.com/p/pagecache-tools/]]</nowiki> has been developed as part of Google Summer of Code 2006 <nowiki>[[http://code.google.com/soc/2006/kde/appinfo.html?csaid=1F587222C2BBB5F4]]</nowiki>. It concentrates on kernel side of prefetching by providing facilities for faster readahead and analysis of page cache.
+It contains some interesting features:
+* Adds open-by-inode to Linux kernel which allows faster readahead (without directory lookups).
+* Contains some improvements to ioprio (I/O prioritization) to make readahead have smaller impact on currently running applications requests.
+* Adds dumping state of file cache for processes, which is later used for checking which files to prefetch.
+* It contains "poor man's defrag" to group files on disk, using "copy to directory and hardlink in previous position" trick.
+
+However, it also has some problems:
+* It does not intercept automatically application startup, so user must manually set up prefetching and analyzing.
+* Poor man's defrag is not complete defragging solution, it works only on whole files and has limited capabilities of laying out files as it relies on behaviour of old and new kernel blocks allocator. It also can create only one group of files.
+* As it uses only kernel file cache for analysis, it cannot speed up stat() calls which are used massively during application and system startup. It also cannot prefetch filesystem metadata (inodes, block maps,etc.) and open-by-inode skips prefetching directories. Fetching this data is sequential - for example in order to open file, system must perform directory lookup (waiting at each stage for reading directory entry), then order inode read (wait for it), order indirect blocks reads (wait for it at each level) and finally read a block. While caching makes this process much faster, during application startup such delays might add up and contribute to larger startup delay.
+* It uses kernel file cache as indicator which files were read, but it does not mark the order in which files were accessed. During application startup file which is necessary first might be read last, especially for applications reading large set of files (like OpenOffice.org). 
+* In low memory conditions, files can be purged from cache before analyzer notices they were read.
+* Open-by-inode poses security threat if it is used by normal users, as it bypasses directory based access checks.
+* It uses fadvise64(POSIX_FADV_WILLNEED) and user-level threads to do prefetching, prefetching threads have to fight for processor with all others, slowing down prefetching effectiveness and using CPU for context switches.
+
+==== Conclusions ====
+Currently available solutions, while providing partial solutions, do not provide complete and automatic solution for prefetching. In particular:
+* None of them is able to intercept application startup automatically, analyze its behaviour and prefetch necessary files in efficient manner.
+* There is no complete defragging solution to lay out files on disk in groups which should be fetched together.
+* None of them provides lightweight tracing facility which can be used during each boot.
+
+=== Use cases ===
+
+=== Scope ===
+I would like to concentrate on delivering prefetching solution for everyday use by casual users, leveraging prior  solutions where appropriate and providing missing parts of complete and automatic prefetching:
+* Hook into application startup for analysis and prefetching. 
+* Add lightweight tracing solution for booting and application startup.
+* Add offline tool to change layout of files on disk for faster prefetching.
+* Add prefetching of filesystem metadata.
+
+Implementation will be concentrated on most important parts (subject to analysis of benefit and implementation complexity) with the main goal to deliver working automatic solution at the end of project, leaving less obvious benefits as secondary goals. Filesystem specific parts will be done for ext3 as default file system in Ubuntu and most often used for desktops. 
+
+=== Design ===
+==== Hooking into application startup ====
+If possible, I will use existing solution such as binfmt to run appropriate hooks.
+If it is not possible, I will patch kernel sources appropriately.
+Hooks will be run in kernel or user space, depending on analysis of efficiency and security of both solutions.
+Existing prefetching tools (from bootcache or direct kernel facilities) will be reused for prefetching part.
+Tracing will be done using lightweight tracing facility (described below) or, if found better (or time is short), existing bootcache tracing facility will be used.
+ 
+==== Lightweight tracing solution ====
+Providing read tracing with minimum overhead should be possible, similarly to blktrace facility already present in kernel. According to my preliminary tests, blktrace does not incur significant overhead during boot, although it logs several records for each read and write, so logging only reads and metadata accesses should not have high impact.
+ 
+Metadata reads and reads tracing will be implemented as patch for ext3 module and kernel (if necessary). Generic parts which can be used for other filesystems or other uses will be moved into common module or kernel.
+ 
+==== Tool to change layout of files ====
+ I have done investigation of tools for changing disk layout on Linux systems and could not find any proper solution, possibly because changing layout of files on disk is risky. e2defrag (part of ext2 utilities) has not been developed for years and currently is not usable and even dangerous (it might destroy filesystem if run on ext3 filesystem). 
+ 
+I have decided to start from scratch and implemented a prototype of tool to move file blocks for ext3 filesystem. Currently it is able to locate free area on disk of appropriate size and move data blocks and indirect blocks of selected files to it, in given order. The code is here <nowiki>[[http://lichota.net/~krzysiek/projects/e2moveblocks/]]</nowiki>. It uses e2fslib library, used also by current ext2/3 tools (like e2fsck). It lacks inode relocation and I will investigate if it is necessary and in such case I will add it.
+Finally I will improve it to the point it can be used safely on desktop computers, with common options used for ext3 in Ubuntu, add extensive tests and seek review by ext3 developers. If possible, I will try to submit it to ext2 tools distribution.
+ 
+This tool will be hooked into shutdown scripts for automatic changing layout of files during shutdown. If possible, I will reuse for it scripts already used by bootcache.
+ 
+Layout of files on disk will be set using simple policy (group files needed only by one application in one area, group common files for applications in another area), based on boot and application startup traces.
+If time permits, some more advances policies can be tested. Tool will be designed in such way that testing various policies is possible, for further research.
+ 
+==== Prefetching of filesystem metadata ====
+If time permits and preliminary analysis shows it is feasible, I will add simple caching facility to ext3 filesystem module to prefetch metadata blocks and instrument code to satisfy such reads from cache.
+ 
+==== Deliverables ====
+Deliverables (in order of importance): 
+* Lightweight tracing facility for boot time analysis and integration into Ubuntu boot scripts. 
+* Analysis of impact of tracing facility on boot speed.
+* Hooks for analyzing and prefetching during application startup.
+* Analysis of impact of application startup analysis and prefetching on application startup.
+* Tool to change layout of files on disk and integration into Ubuntu shutdown scripts.
+* Comprehensive correctness tests for file layout tool.
+* Analysis of effect of changing layout of files on application start and system boot.
+If time permits: 
+* Facility for caching and prefetching ext3 filesystem metadata.
+* Analysis of effect of caching and prefetching metadata.
+* Analysis of prefetching files in parts during boot (for lower memory load and faster prefetching of early needed files).
+
+=== Roadmap ===
+* April - May 2007: establishing contact with Ubuntu developers, ext3 developers and bootcache developers, submitting disk layout tool for review by ext3 developers
+* 1st half of June: implementation of tracing facility and integration with Ubuntu boot scripts, analysis of impact on boot time.
+* 2nd half of June - 1st half of July: implementation of hooking into application start, analysis of impact and performance of prefetching during application start.
+* 2nd half of July - improving disk layout tool, intensive testing and analysis of impact.
+* August - in case of slips, time to fix problems, otherwise implementing metadata prefetching and partial prefetching during boot. 
+* September and later - writing a paper describing results of analysis for later submission to Linux conferences, improving things which were identified as problems during analysis of implemented solution.
+
+=== Implementation ===
+
+==== Code ====
+
+==== Data preservation and migration ====
+
+=== Outstanding issues ===
+
+=== BoF agenda and discussion ===
+* Systemtap (kprobes) might be an alternative to blktrace (blktrace seems more than enought to do the job, though)
+
+----
+CategorySpec

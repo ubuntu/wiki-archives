@@ -1,0 +1,191 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+== DLoop ==
+
+=== Like cloop, but using multiple files ===
+
+The UbuntuExpress LiveCD is going to contain a copying-based installer based on `casper`  This will provide a ''Graphical'' option for users wanting a simple install now that they've "tried Ubuntu out".
+
+To reduce shipping costs, it's likely that the UbuntuExpress enabled LiveCD will be the only CD shipped to users by post for Breezy.  To make it more widely usable, the LiveCD will also include enough `.debs` for a base-server system to be installed using the classic text-installer route.  These extra `.deb` (containing duplicated information) will add an estimated 70MB to the CD size.  This goes over the 650MB limit and will likely mean that some software (eg. Win FLOSS) will need to be dropped or the CD size increased to 700MB.
+
+This increase in size comes from duplicated data (once in the LiveCD filesystem, and once in the `.deb`).
+
+==== Freeing unused cloop blocks ====
+
+One of the disadvantages with the device-mapper approach is that files that are created and then deleted continue to take up space in memory;  as the number of temporary files that have been touched increases, RAM gets exhausted.  When building the original cloop, unused blocks are zeroed and these in turn compress to nothing (effectively a sparse file).  When a file is written, the block becomes used and is stored in memory---however, there is no signal from the ''filesystem to the device'' that the block is free, can be "zeroed" and even "compressed" (made sparse) again.
+
+The ext2/3 code in the Linux Kernel by default spreads files around to maximise the use of contigious blocks of space.  This does not help the situation at all;  virtually guaranteeing that every fresh write will result in more RAM being used.
+
+To continue with the device-mapper approach (which I personally love), the following hooks---or a variation---need to be added:
+
+** Ext3 -> Signal device that a block can be 'sparsed'
+** Device-mapper journalling support to free this block.
+
+Alternatively, a slightly more CPU intensive, but generic and easier way would be ensure the following occur.
+
+** Ext3 to zero unused blocks as they are made available
+** Device-mapper to check all written-back blocks to see if they are NULL.  (A more generic way would be to ignore the special case of all-zero and do a check/compare against a hash table of other block contents on that device).
+
+Patches to do the zerofree exist because of security aspects;  <nowiki>[[http://www.uwsg.iu.edu/hypermail/linux/kernel/0401.3/1058.html|ext2 secure deletion patch]]</nowiki>,   <nowiki>[[http://intgat.tigress.co.uk/rmy/uml/linux-2.6.9-free.patch|linux-2.6.9-free.patch]]</nowiki>,
+<nowiki>[[http://intgat.tigress.co.uk/rmy/uml/sparsify.html|overview page]]</nowiki>.
+
+=== Using the device-mapper ===
+
+A `dm-remapper` module (or perhaps the existing `bbr` bad-blocks remapper module) that can effectively do hard-linking of inodes containing duplicate content (or just the all-zero case to start with).  By performing the remapping at this stage, it short-circuits having to free memory at lower levels since the unused will get zeroed, then redirected at an existing zero block, before hitting `dm-snapshot` and using up any precious RAM.
+
+Another module `dm-zlib` can take care of uncompressing actual blocks.  A system could be added to support writing back compressed blocks by providing an ''append'' file or device;  however this might be better tied in with `dm-snapshot` and provide a separate way of 'archiving+compressing' a snapshot after use.
+
+Right at the bottom of the stack, the device-mapper can already be used to page in and aggregate multiple existing files into one device address range (allowing a single device built out of multiple `.debs`, for instance).
+
+The keys here are:
+{| class="wikitable"
+|-
+| '''Layer'''
+| '''Rôle'''
+| '''Overview'''
+|-
+| ext3
+| filesystem with zerofree
+| filesystem allowing marking of unused/freed areas
+|-
+| dm-remapper
+| inode hardlinker
+| recognising duplicate 64kB blocks (especially ones filled with zeros, maybe possible with the existing bad-block remapper `dm-bbr`
+|-
+| dm-snapshot
+| copy-on-write
+| allows writing to the otherwise read-only device
+|-
+| dm-zero
+| zero blocks
+| mapped onto all areas of the disk-image that aren't used
+|-
+| dm-deflate
+| uncompression
+| needs a device, offset, length.  Can be programmed to uncompress existing `cloop` archives with userspace doing the parsing
+|-
+| dm-linear?
+| pass-through
+| can be mapped onto common-case and uncompressible blocks that are more efficient to pass straight through
+|-
+| dm-bzip2?
+| heavier compression
+| maybe more effective for some areas of the disk accessed less often.  text/documentation would really benefit
+|}
+
+** <nowiki>[[http://people.redhat.com/agk/talks/FOSDEM_2005/|agk's FOSDEM2005 slides]]</nowiki>
+
+Currently, the magic dm-snapshot code used in casper is:
+<pre>
+    losetup $LOOP_DEVICE $BACKING_FILE
+
+    BACKING_FILE_SIZE=$(blockdev --getsize "$LOOP_DEVICE")
+    MAX_COW_SIZE=$(blockdev --getsize "$COW_DEVICE")
+    CHUNK_SIZE=8 # sectors
+
+    if [ -z "$COW_SIZE" -o "$COW_SIZE" -gt "$MAX_COW_SIZE" ]; then
+        COW_SIZE=$MAX_COW_SIZE
+    fi
+
+    echo "0 $COW_SIZE linear $COW_DEVICE 0" | \
+        dmsetup create $COW_NAME
+
+    echo "0 $BACKING_FILE_SIZE snapshot $LOOP_DEVICE $COW_DM_DEVICE p $CHUNK_SIZE" | \
+        dmsetup create $SNAPSHOT_NAME
+</pre>
+
+Or simply:
+
+<pre>
+    losetup /dev/cloop0 /cdrom/casper/filesystem.cloop
+    echo 0 3GB linear /dev/ram1 0 | dmsetup create casper-cow
+    echo 0 3GB snapshot /dev/loop0 /dev/mapper/casper-cow p 2048 | dmsetup create casper-snapshot
+    mount -o noatime /dev/mapper/casper-snapshot /target
+</pre>
+
+==== Starting point ====
+
+It would be really good to avoid this data duplication and keep both the LiveCD ''and'' installer options without wasteing space:
+
+* `.deb`'s are archives of gzip compressed tarfiles.
+* Multiple gzip blocks act as one gzip stream.
+
+To create a `dloop` you start off with:
+
+* Huge LiveCD `ext3` image.  (3GB in size, `partimage -e` is used to zero unused-blocks).
+* A Pile of `.deb`'s likely to contain duplicate information to the big filesystem image (eg.  they were used to create it!).
+
+This input is identical to a `cloop` setup, except for the provision of the extra `.deb`s as starting points.
+
+==== Procedure ====
+
+ 1.  Explode each `.deb`, extracting the tarball and take the md5sum of each 64kB block of ''file'' data.  Realigning at the start of each file within the tarball (after the 512 byte header blocks).
+ 2.  Walk LiveCD filesystem image and take md5sum of each 64kB block.
+ 3.  Compare md5sums of uncompressed 64kB blocks to find ones that are duplicated in both a `.deb` and in the filesystem image.
+ 4.  Compress all 64kB blocks ''not'' found in a `.deb` and append this to a new `dloop/base` file.  This will contain mostly filesystem inode data (not part of real files) and any files created during the installation process.  To reduce complexity, this would include any files <64kB in size where the half-used block would not match against a `.deb` part.
+ 5.  Open a `dloop/index` binary file and write `cloop` style offsets to this file, along with an additional file-number.
+ 6.  Open a `dloop/files` file and append the name the `base` file, such that it matches the index of file-number noted in `5.`
+ 7.  Repack each `.deb`
+   a. Extract the `data.tar.gz`
+   a. Make a note of what 64kB ''runs'' are referenced from the filesystem image
+   a. Compress tar stream up until the point that a 64kB block is needed.
+   a. Compress each referenced 64kB block separately and record the offset from the start of the output stream
+   a. Reinsert the new `data.tar.gz` into the `.deb`
+   a. Resign `.deb` with new ''dloop-cd-repacker-key'' (if required).
+   a. Add the offset of `data.tar.gz` within the `.deb` to each recorded offset from step `d.`
+ 8.  Append the name of the `.deb` to `dloop/files`
+ 9.  Append the offsets recorded during recomrpession to `dloop/index`
+ 10. There are now a handful of files that ''together'' form the equivalent of a classical `cloop` image.
+ 11. Create updated `Packages.gz` with a list of the `.deb` files contained on the CD.
+
+=== Implementation ===
+
+ 1.  A kernel driver is required, based on the existing kernel `cloop` driver.  This existing driver can be modified slightly to accept reading from ''multiple'' input files, instead of just one.  Small adjustments will have to be made it its structure handling so that it selects the correct source file to find a give block in, before `seek()`ing to it
+ 2.  A tool is required that can md5sum each 64kB block within the big filesystem image.
+ 3.  A tool is required that can extracted `data.tar.gz` from a `.deb`, gunzip and parse the `tar` stream to calculate the md5sum of each 64kB that is part of a file.
+ 4.  A tool is required that can compare matching blocks.
+ 5.  A tool is required that can compress each unmatched block from the filesystem image and record the offset.
+ 6.  A tool is required that can recompress a tar-stream such that the gzip-stream/zlib data is restarted on each 64kB block that is matched to the big file, recording the offsets.
+ 7.  A tool is required that can repack the `.deb`.
+ 8.  A tool is required that can adjust the recorded offsets based on new location for the `data.tar.gz` within the `.deb`.
+
+=== Notes ===
+
+A nice side-effect of `dloop` is that data duplicate files would be combined, but in a way still compatible with the `dm-snapshot` capability used to allow a writeable LiveCD.
+
+Only the `.deb` files presented would be searched for duplicates.  For example, the following options are possible:
+
+** Put only base `.deb` packages on the CD.  The smaller amount of duplicate-dat will be used where possible, but the main `dloop/base` will still end up containing most of the filesystem and be greater than 400MB in size.
+** Show the `dloop` creation program a list of `.deb` packages known to actually be in the filesystem (eg. only those in `ubuntu-desktop`, but not `ship-seed`).
+
+==== Further improvements ====
+
+It would be best to keep `dloop` simple at first, the following would be sensible additions:
+
+* Support for uncompressed 64kB blocks (direct mapping onto an existing file).
+* Gzip `dloop/files`.  This is a binary file mostly full of zeros and self-similar data.  It's likely to compress down from 4MB to less than 1MB.  This would be uncompressed into kernel memory as the base data-structure.
+
+Medium Level ideas that might be useful, even if the `.deb` weren't shipped.
+
+* If the WinFLOSS installation software files use a zlib-compatible algorithm for compressing the installation files, teach the `dloop` creation-software about this format, including how to find the start of files and how to repack them.  This would bring massive gains, particularly with OpenOffice where alot of the file data is duplicated between Win32 and Unix.
+** In the case of Firefox and OpenOffice, both of these use `.jar` files (aka `.zip` files) to store most of their internal files.  This are unlikely to compress further and are likely to be ''stored''.  These could be mapped directly between the installer `.cab` and the copy in the filesystem image.  Therefore it may just be worth presenting these as additional search files to the `dloop` packer and seeing if it finds the matches by itself.
+** `.zip` files within a self-executing file maybe compatible
+** Using a `.tar.gz` compatible installer under windows maybe possible.
+
+Complicited ideas with deminishing returns:
+
+* Add support for longer compressed blocks than 64kB (eg.  up to 512kB)
+* Add support for bzip2 compressed blocks (also supported within the `.deb` format)
+* Investigate ''start decompressed at'' and ''skip'' offsets to allow the the use of non-repacked `.deb` files at the cost of having to decode much longer runs of data (the whole `data.tar.gz` at worst case, just for a small amount of information).
+
+==== Comments ====
+
+Created: PaulSladen, 2005-05-11.  The idea has been swimming around in my head for several months.

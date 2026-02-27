@@ -1,0 +1,167 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+== Deal with maintainer script failures in packages ==
+
+* '''Launchpad Entry''': https://blueprints.launchpad.net/ubuntu/+spec/maintainer-script-failures
+* '''Packages affected''': apt, update-manager
+
+=== Summary ===
+
+Ubuntu should deal better with maintainer script (postinst, postrm,
+etc) failures during install/upgrade/remove of packages. There are a
+lot of situations where a failure is not critical but it still breaks
+installation/upgrades. This is especially important for complex
+scenarios like upgrades.
+
+=== Release Notes ===
+
+=== Use Cases ===
+
+* Robert has some third party package installed that causes a failure during the upgrade. The error is reported and the upgrade continues just fine. 
+
+=== Scope ===
+
+Make libapt deal better with failures in maintainer scripts.
+
+=== Research ===
+
+The following problems were found during edgy->feisty: http://tinyurl.com/2c5npp and dapper->edgy http://tinyurl.com/3btaat
+
+Here is a collection of failures:
+
+* failures where invoke-rc.d fails during the upgrade: #107739 (prerm), #107820, #108347 (postinst), #75946 (prerm), #104921 (prerm)
+* hotkey-setup 109679 (prerm)
+* segfault in maintainer script: #108091 (postinst)
+* emacs-package-install failing: #108384 (postinst)
+* grub poinst failure: #108576 (postinst)
+
+=== Design ===
+
+In general the problem to recovery gracefully from failing maintainer
+scripts is unsolvable with the current paradigm as a maintainer
+script can alter the system state in all possible ways. In practise
+however there are some heuristics we can apply to make the impact of
+most of these failures small (there are some failure cases where
+little can be done though).
+
+Failing maintainer scripts lead to two problem problems:
+ 1. apt stops after dpkg returned a error. This can lead to a unbootable system or a system where core components are in a inconsistent state (nvidia kernel modules are upgraded but nvidia X driver is not making X fail)
+ 2. apt will complain and not apply updates if a system has broken dependencies (this includes security updates) because one core assumption is that the system is always in a state without broken dependencies. It can deal just fine with packages that are not configured yet.
+
+In addition to dealing with the failure situation we should try to 
+make sure that it happens less often (given the amount of packages
+we have it can not be avoided entirely).  
+
+Better recovery is also important, a "plugin" for the FriendlyRecovery
+mode will be added that will be able to bring a broken system into a
+supported configuration.
+
+=== Implementation ===
+
+A approach to solve problem (1) is a "DPkg::StopOnErrors" apt
+option. If that is set to false apt will keep runing dpkg in --unpack,
+--configure mode even if packages fail during the install/upgrade. The
+disadvantage of this mode is, that it can lead to error chains because
+packages that depend on other packages are tried to be configured when
+the dependant package failed to configure. Additional logic should be
+added to avoid that dpkg tries to unpack/configure those packages that
+are known to fail. This will be used on a desktop system. 
+
+On a server system we offer the user the choice to stop the upgrade on
+the first error so that he can manually recover. The assumption is
+that the server admins will be more experienced with the low-level
+packaging tools. When anything but the "postinst" script fails, we can
+roll back to the currently installed package usually and mark it
+"keep".  Even with broken packages we should ensure (if at all
+possible) that at the end of the upgrade, at least the kernel, X and
+firefox are in a good state so that the user can get help online.
+
+In addition to that there are some low-hanging fruits here to avoid
+failures in the first place. A lot of them are caused by invoke-rc.d
+failing. We can patch invoke-rc.d or add a rc-policy.d that checks for
+a environment variable like "RELEASE_UPGRADE_IN_PROCESS" and will not
+restart the daemon in that case (or restarts them but ignores failures). A
+daemon that fails to restart is not critical as we have to reboot
+after the upgrade anyway.
+
+The FriendlyRecovery plugin will be the release-upgrader in text
+frontend mode with some added logic. In addition to the regular
+features it will ask about the desktop environment used if it can't
+auto-detect it and it will be able to work even when some packages are
+in broken dependency state. Special care must be taken to ensure that
+X gets properly installed. For a home user a machine without X is
+broken (FUBAR) and he will reinstall. This becomes less of a issue
+with the BulletProofX spec.
+
+For problem (2) the apt algorithms and the new aptitude resolver will
+be investigated to see if that problem can be fixed. The scope for
+this fix can be as limited as to allow apt to still be able to
+calculate upgrades that involve upgrading package (regular security
+upgrades) and install some new packages (kernel security upgrades that
+break the ABI).
+
+=== Some Example cases ===
+
+Fixed by ignoring invoke-rc.d errors: #107739, #107820, #108347
+
+Segfault in hplip postinst (actually in update-python-modules):
+script again. Leaving it unconfigured (and its rdepends) will do no harm.
+
+The hotkey-setup breakage #109679 on thinkpads where no thinkpad-keys
+daemon is running:
+http://librarian.launchpad.net/7469561/hotkey-setup_0.1-17ubuntu10.debdiff
+Leaving this package and the dependant ubuntu-desktop in unconfigured
+state would not harm the system in any way. Can be easily fixed via a SRU.
+
+Mailman breakage (#108978) when /var/lib/mailman/qfiles is not
+empty. The right approach here is to set mailman on "keep" and carry
+on with the rest of the upgrade.
+
+dmsetup fails in "update-initramfs -u" (#109625). The reason why this
+fails is unclear.
+
+=== Future work ===
+
+It should be investigated if a different order of installing the
+packages helps us. A ordering by "main","universe" first and then
+"required", "essential", "optional", "extra". It is likely that
+effectively we have this ordering already because usually the
+important packages are highest down the dependency chain anyway.
+
+=== BOF discussion ===
+
+It was discussed to "lie" to apt and mark a package that failed to
+configure as installed. This would make apts assumption that the system
+has no broken dependencies satisfied again. This inconsistency will
+lead to confusion and should not be implemented.
+
+A dpkg option "--ignore-maintainer-script-failures" was
+discussed. This is equivalent of just deleting the maintainer script
+and install/remove the package again so that the broken script gets
+ignored. Not a desirable course of action.
+
+Another breakage is with packages generated by checkinstall. The plan
+would be to change checkinstall so that packages created by it
+identify themselves in some way, via a change in the description or
+dropping a file in /usr/share/doc. Then the update-manager could check
+to see if any such packages have been installed and warn the
+user/remove those packages as needed.
+
+It may be worth considering to define a concept of "trust metrics" with
+various repositories.  This trust metric should be a sliding scale,
+decided by Ubuntu developers. Thus certain trusted 3rd party
+developers who have considered updates in their package building can
+have their users not being warned.  
+
+=== Test Plan ===
+
+Upgrade known failure cases and see if the changes described here fix
+the behaviour.

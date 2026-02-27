@@ -1,0 +1,234 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+
+* '''Launchpad Entry''': https://launchpad.net/distros/ubuntu/+spec/teardown
+* '''Created''':  by ScottJamesRemnant
+* '''Contributors''': ScottJamesRemnant, JeffBailey, MattWilson, JonathanRiddell
+* '''Packages affected''': `sysvinit`, most with init scripts.
+
+=== Summary ===
+
+This specification proposes changing the majority of init scripts to be not called at system shutdown or reboot, and instead rely on the processes being correctly terminated and killed by the `sendsigs` script.
+
+=== Rationale ===
+
+The shutdown process currently takes an unreasonably long time because many scripts are run that do nothing, at the cost of a `fork` and `exec` of a shell, and scripts that simply send the `TERM` signal to a process -- which is true for all processes at the end of the sequence anyway.
+
+Things would be a lot faster if the only scripts run at shutdown and reboot were those to perform controlled shutdowns of daemons that may have unwritten state and save any necessary machine state such as the hardware clock.
+
+=== Use cases ===
+
+* Matt is a laptop user, when he shuts down his laptop he doesn't want to have to wait for almost a minute before the laptop has actually powered off.
+=== Scope ===
+
+This specification has the potential to touch all init scripts in the archive to adjust their defaults, however it should not absolutely require that this be done to ensure correct operation.
+
+=== Design ===
+
+SystemV-init does not require that a kill script actually exists in `rc0.d` or `rc6.d` for all services that are started in other runlevels, they are only needed if you actually need to perform an action on shutdown.  The logical choice for implementing this specification therefore is to modify packages to ''not'' place a symlink in these directories if they do not need to be explicitly stopped on shutdown.
+
+This design was chosen over others because it fails in a non-damaging way.  Other alternatives included adding new "fast shutdown" runlevels or "shutdown" arguments that services which needed to be explicitly stopped would have to take advantage of.  While these would have a smaller difference, it would mean that data would be lost until that package is modified.
+
+=== Implementation ===
+
+By policy, packages are recommended to use `update-rc.d` to maintain the symlinks to their init scripts; and most pass the argument `defaults` to indicate that they would like to be started in runlevels 2 through 5 (user runlevels) and stopped in 0 (shutdown), 1 (single user) and 6 (reboot).  A typical invocation would look like:
+ <pre>
+update-rc.d mydaemon defaults 22
+</pre>
+
+This would be changed to only stop the script in runlevel 1, and leave it running after a switch to runlevel 0 or 6.  Without modifying `update-rc.d`, this call would become:
+ <pre>
+update-rc.d mydaemon start 22 2345 . stop 22 1 .
+</pre>
+
+Which is rather more verbose, and more prone to causing difficulty with later policy changes.  Given the requirement that we don't end up with temporary data loss, it seems prudent to not change `defaults` but instead add a new `multiuser` option.  The invocation would then become:
+ <pre>
+update-rc.d mydaemon multiuser 22
+</pre>
+
+The justification for the name is that the script would be started in all multi-user runlevels (2 through 5) and explicitly stopped if the system switches to single user.
+
+'''DEPRECATED:''' The `multiuser` mode is deprecated in Intrepid. See <nowiki>[[https://lists.ubuntu.com/archives/ubuntu-devel-announce/2008-June/000430.html|the announcement]]</nowiki>.
+
+==== debhelper ====
+
+Packages using the debhelper `dh_installinit` command would be modified to call it as:
+ <pre>
+dh_installinit -- start 20 2345 . stop 80 1 .
+</pre>
+
+==== Shutdown scripts in ubuntu-desktop ====
+
+The dependencies of the `ubuntu-desktop` meta-package install the following set of symlinks; each is discussed and decided whether or not this script should be kept.
+
+{| class="wikitable"
+|-
+| K01gdm
+| Stops the display manager if not already done so; usually this is unnecessary because it is the user's session exiting that causes the shutdown or reboot, however experienced users may still call `shutdown` explicitly.  We don't want the user using their X session during a reboot, so it seems prudent to keep this.
+| Keep
+|-
+| K01usplash
+| Resets `usplash` timeout and prints a "shutting down message", etc. Keep for now
+| Keep
+|-
+| K11anacron
+| Only sends the `TERM` signal and does not wait for completion, this is performed anyway by `sendsigs` so this script is redundant.
+| Remove
+|-
+| K11atd
+| Only sends the `TERM` signal and does not wait for completion, this is performed anyway by `sendsigs` so this script is redundant.
+| Remove
+|-
+| K11cron
+| Only sends the `TERM` signal and does not wait for completion, this is performed anyway by `sendsigs` so this script is redundant.
+| Remove
+|-
+| K19cupsys
+| Only sends the `TERM` signal and does not wait for completion, this is performed anyway by `sendsigs` so this script is redundant.
+| Remove
+|-
+| K20acpi-support
+| Does not perform any action necessary given the power is about to go away.
+| Remove
+|-
+| K20apmd
+| Only sends the `TERM` signal and does not wait for completion, this is performed anyway by `sendsigs` so this script is redundant.
+| Remove
+|-
+| K20bittorrent
+| Only sends the `TERM` signal and does not wait for completion, this is performed anyway by `sendsigs` so this script is redundant.
+| Remove
+|-
+| `K20dbus`
+| Only sends the `TERM` signal and does not wait for completion, this is performed anyway by `sendsigs` so this script is redundant.
+| Remove
+|-
+| `K20festival`
+| Only sends the `TERM` signal and does not wait for completion, this is performed anyway by `sendsigs` so this script is redundant.
+| Remove
+|-
+| `K20hotkey-setup`
+| Does not perform any action necessary given the power is about to go away.
+| Remove
+|-
+| `K20laptop-mode`
+| Disables laptop mode and causes any outstanding writes to be written to the disk.  Important.
+| Keep
+|-
+| `K20makedev`
+| Does nothing, waste of a `fork`/`exec`/`shell`.
+| Remove
+|-
+| `K20nvidia-kernel`
+| Does nothing, waste of a `fork`/`exec`/`shell`.
+| Remove
+|-
+| `K20powernowd`
+| Only sends the `TERM` signal and does not wait for completion, this is performed anyway by `sendsigs` so this script is redundant.
+| Remove
+|-
+| `K20rsync`
+| Only sends the `TERM` signal and does not wait for completion, this is performed anyway by `sendsigs` so this script is redundant.
+| Remove
+|-
+| `K20ssh`
+| Only sends the `TERM` signal and does not wait for completion, this is performed anyway by `sendsigs` so this script is redundant.
+| Remove
+|-
+| `K21acpid`
+| Only sends the `TERM` signal and does not wait for completion, this is performed anyway by `sendsigs` so this script is redundant.
+| Remove
+|-
+| `K21hplip`
+| Only sends the `TERM` signal and does not wait for completion, this is performed anyway by `sendsigs` so this script is redundant.
+| Remove
+|-
+| `K25hwclock.sh`
+| Saves the time back to the hardware clock.  Necessary.
+| Keep
+|-
+| `K50alsa-utils`
+| Saves the mixer settings back to the soundcard.  Necessary.
+| Keep
+|-
+| `K74bluez-utils`
+| Sends `TERM` signals and does not wait for completion, this is performed anyway by `sendsigs` so this script is redundant.
+| Remove
+|-
+| `K86ppp`
+| Hangs up the modem, and terminates any PPP link.  Probably useful for politeness purposes, and I can forsee hardware that fails to actually hang up the line unless told to do so.
+| Keep
+|-
+| `K88pcmcia`
+| Does nothing with our shipped kernel, waste of a `fork`/`exec`/`shell`.
+| Remove
+|-
+| `K88pcmciautils`
+| Does nothing, waste of a `fork`/`exec`/`shell`.
+| Remove
+|-
+| `K89klogd`
+| Sends the `TERM` signal and does not wait for completion, this is performed anyway by `sendsigs` so this script is redundant.  Removes files from a tmpfs which is going to be killed by the power anyway.
+| Remove
+|-
+| `K90sysklogd`
+| Only sends the `TERM` signal and does not wait for completion, this is performed anyway by `sendsigs` so this script is redundant.
+| Remove
+|-
+| S01linux-restricted- modules-common
+| Does nothing, waste of a `fork`/`exec`/`shell`.  Ironic given that effort has been put into making it a start script, rather than a stop one.
+| Remove
+|-
+| `S20sendsigs`
+| A very useful script, sends `TERM` and `KILL` to all running processes; so performs the job most of them were doing in their own scripts anyway.
+| Keep
+|-
+| `S30urandom`
+| Saves the random number seed, useful.
+| Keep
+|-
+| `S31umountnfs.sh`
+| Unmounts network filesystems, needed to ensure that we can unmount others and also to make sure writes are flushed and for politeness reasons.
+| Keep
+|-
+| `S35networking`
+| Debatable; there's no particular reason to take care to bring down network hardware and there's nothing in our default install that performs any useful action.  We don't release DHCP leases anyway, etc.  For now I recommend removing this, and putting it back later if it causes problems.
+| ???
+|-
+| `S40umountfs`
+| Required otherwise data loss can ensue.
+| Keep
+|-
+| `S60umountroot`
+| Absolutely required, otherwise data loss can ensue.
+| Keep
+|-
+| `S90halt` or `S90reboot`
+| Actually perform the system halt or reboot, required.
+| Keep
+|}
+
+==== Common services ====
+
+* '''Apache''': Performs a controlled shut down of the running Apache web server.  While a web server is normally not likely to have unflushed writes, modules such as `mod_perl`, `mod_python` and PHP might; so it's important that we do allow a controlled shutdown.
+
+* '''PostgreSQL''', '''MySQL''', etc.: Database servers almost always have unflushed writes.  Always perform a controlled shut down.
+
+* '''Postfix''', etc.: Mail servers almost always have unflushed writes and should be given the opportunity to finish dealing with an incoming connection, always perform a controlled shut down.
+
+==== Interaction with ReplacementInit ====
+
+The ReplacementInit specification proposes changing the underlying init system to something else, which may have a different mechanism for specifying when scripts start and stop.  However that specification also requires that existing init scripts and their symlinks be honoured, so the best way to keep the Debian difference the smallest is to tackle this from the `update-rc.d` side and not convert the init scripts to a newer format unless necessary for additional features under that specification.
+
+Any replacement init system would still have the equivalents of the `sendsigs` tool or script.
+
+----
+CategorySpec

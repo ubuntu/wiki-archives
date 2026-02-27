@@ -1,0 +1,85 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+==== Background ====
+Modern power management is handled via ACPI, a spec designed by various companies (Microsoft, Intel, Phoenix, HP, etc).  It contains information about the given system's hardware, including details on how to suspend/resume (and hibernate).
+
+To use suspend, an operating system must first configure wake-up events (things like the power button, lid-button, etc).  These are listed in <code>/proc/acpi/wakeup</code> (though it may not always list the power button).  To toggle a given device, one can echo it to the file:
+ <code>echo "MODM" > /proc/acpi/wakeup</code>
+
+To enter suspend, the OS writes the desired state to <code>/sys/power/state</code>.  Assuming the "mem" suspend, the kernel does the following:
+* logically ejects all CPUs except boot processor
+* disables devices
+** call suspend() functions (saving configuration registers)
+** enter D3 state (consuming 0 or nearly 0 power)
+* read ACPI FADT (fixed address descriptor table) magic values
+* write ACPI registers with magic values
+* BIOS enters "system management mode", directly interacting with the hardware
+** PTS: prepare to sleep
+** GTS: go to sleep
+** may cause BIOS to cut power to various power planes
+* wake-up event occurs
+* BIOS checks for resume vs new boot
+* BIOS runs kernel's wake-up code and re-enters the kernel
+* enable devices
+** enter D0 state (working)
+** restore configuration registers
+* logically re-inject all CPUs
+
+Above the kernel layer, user-space must do work before handing off control to the above kernel procedures.  Currently Ubuntu uses /etc/acpi/sleep.sh to enter/leave suspend mode.  HAL makes calls to this script when reacting to various key presses or power management events.  The goal is to move to <code>pmutils</code> in Hardy.
+
+The call stack:
+* gnome-power-manager
+* hal
+* /etc/acpi/sleep.sh
+* /sys/power/state
+* kernel
+* BIOS
+
+Bad packages (swsusp, hibernate) can interfere with /etc/acpi/sleep.sh, so make sure they are purged.
+
+<code>/sys/power/state</code>
+* S1 = "standby" (stop processor and keep power on to everything)
+* S2 (never implemented, seen as the same as S3)
+* S3 = "mem" (save and restore processor state via memory, keeping some things powered -- suspend)
+* S4 = "disk" (save and restore processor state via disk, keeping nothing powered -- hibernation)
+* S5 = Power off, no state saved
+
+==== Debugging ====
+* Biggest problem is graphics hardware
+** try suspend without restricted devices (nvidia, fglrx)
+** kernel doesn't know how to handle graphical devices
+** BIOS knows how to restore graphics state
+** via 16 bit segmented mode, C000:xxxx contains the visible 64k video ROM.
+** starting execution at C000:0003, normally re-POSTs the video BIOS (<code>/usr/sbin/vbetool post</code>)
+*** more difficult in 64bit mode, since 16bit calls need to be emulated.
+*** some memory is in 3-4G range, which requires remapping when emulating to avoid hitting the kernel which is mapped in the same space.
+** video BIOS may have paged POST code out of C000 window
+** nvidia BIOS rewrites ROM to just return to stop re-POSTing
+
+* try suspend from console (via <code>/etc/acpi/sleep.sh</code>)
+** make sure you're logged out of Xorg (or run sleep.sh with "force" argument)
+** if the video BIOS isn't left in a sane state, returning to Xorg may hang the hardware
+** tests capslock on resume (if no capslock, kernel hung)
+** if backlight doesn't come back on, video BIOS probably didn't reinitialize
+** if screen is blank, but has a backlight, try hitting enter or switching between virtual terminals
+** try in single-user mode (via appending "single" to the grub kernel boot options)
+** for details on actions, try <code>bash -x /etc/acpi/sleep.sh >/root/sleep.log 2>&1</code>
+** look at <code>dmidecode</code> information that matches settings in <code>/usr/share/acpi-support/*.config</code>
+
+* if single-user mode console suspend or resume fails
+** enable PM trace (<code>echo "1" > /sys/power/pm_trace</code>) which will write device hashes to the system timer
+** attempt to suspend
+** after the failure, on reboot, examine the dmesg output for "device hash" entries to track down the device that hung the system during resume.
+** be aware that this will reset the system clock, and fsck will freak out ("has gone without a fsck for 31337 days").  consider <code>tune2fs -c 0 /dev/your/filesystems</code>.
+
+* can you resume multiple times?
+----
+CategoryDocumentation

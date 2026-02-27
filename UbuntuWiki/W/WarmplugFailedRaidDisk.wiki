@@ -1,0 +1,85 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+== Replacing a failed RAID disk ==
+This guide has been written for Ubuntu Gutsy, but may work on older releases as well. Please edit this text if you have experience applying the procedure to another Ubuntu release.
+
+If you have set up a RAID-1 or RAID-5 device, one harddisk can fail without interrupting your system. If you do not have a spare disk already installed, you have to replace the failed disk. Of course you could simply shutdown, replace the disk and reboot. If you have SATA devices however, a more elegant procedure is available, which does not require a reboot. Some SATA mainboards even support hotplug, but I am going to use warmplug, which should be available on all SATA mainboards. The procedure involves the following steps:
+
+* Deactivate the failed device
+* Physically disconnect and replace the failed drive
+* Remove the failed drive from the RAID
+* Rescan the bus to detect the new drive
+* Partition the new drive
+* Add the new drive to the RAID
+
+=== Deactivate the failed device ===
+Assuming the drive just experienced a head crash and is still reachable on the SATA bus, you have to find out which path in <code>/sys/class/scsi_disk/*/device/</code> corresponds to your failed device in order to shut it down. If the drive is completely dead, not reachable on the SATA bus anymore and powered down, you can skip this step. Use the output from
+<pre>
+$ cat /proc/mdstat
+</pre>
+to identify the device node of the failed disk. It will have "(F)" appended.
+Before deactivating the hard disk, obtain some information to make the identification of the physical disk easier. Assuming the failed drive is <code>/dev/sdc</code> do:
+<pre>
+$ sudo smartctl -i /dev/sdc
+</pre>
+The smartctl command is provided by the <code>smartmontools</code> package.
+You can then look for a directory named "block:DEVICENODE" in <code>/sys/class/scsi_disk/*/device/</code>. For this example, let us assume the path is <code>/sys/class/scsi_disk/3\:0\:0\:0/device/</code>. Deactivate your device as follows (adjust the path):
+<pre>
+$ echo 1 | sudo tee /sys/class/scsi_device/3\:0\:0\:0/device/delete
+</pre>
+You should hear the disk spinning down.
+=== Physically disconnect and replace the failed drive ===
+If you do not have LEDs indicating a failed disk, you can use the model name and serial number your obtained above using smartctl. If your device is so damaged that it removed itself from the SATA bus, use the model and serial numbers of your remaining disks to identify the failed drive. Simply execute (adjust the path):
+<pre>
+$ sudo smartctl -i /dev/sda
+</pre>
+for all you remaining devices.
+Unplug the failed drive and install the new disk. Connect the SATA cable before connecting the power cable. Your disk will spin up immediately, but will remain invisible for the system.
+=== Remove the failed drive from the RAID ===
+Assuming that <code>/dev/md0</code> is your RAID device, remove all detached drives from the array using:
+<pre>
+$ sudo mdadm /dev/md0 --manage --remove detached
+</pre>
+=== Rescan the bus to detect the new drive ===
+Assuming that you connected your new disk to the same cable your failed drive was attached to, you can replace the number after host in the path below with the first number in the path you used to disconnect the drive. In this case this would be 3.
+<pre>
+echo "- - -" | sudo tee /sys/class/scsi_host/host3/scan
+</pre>
+If you connected the new drive somewhere else and you do not know the host number, just try all available paths. AFAIK this should be safe, at least in my case it was. Your new drive should now show up in /dev. For this example let us assume the node /dev/sdd was assigned to it.
+=== Partition the new drive ===
+You have to recreate the partition table of the old drive using fdisk (or something else like gparted), or at least make sure that the partition you use is at least of size "Used Dev Size" shown when running:
+<pre>
+$ sudo mdadm -D /dev/md0
+</pre>
+=== Add the new drive to the RAID ===
+Assuming that the new partition you created is /dev/sdd2, execute the following (adjust the path to match your setup):
+<pre>
+$ sudo mdadm /dev/md0 --add /dev/sdd2
+</pre>
+Now confirm that your array is rebuilt. Do a
+<pre>
+$ cat /proc/mdstat
+</pre>
+and make sure the output is similar to:
+<pre>
+Personalities : [linear] [multipath] [raid0] [raid1] [raid6] [raid5] [raid4] [raid10] 
+md0 : active raid5 sdb2[1] sda2[3] sdd2[2]
+      311789312 blocks level 5, 64k chunk, algorithm 2 [3/2] [_UU]
+      [=============>.......]  recovery = 69.9% (109023656/155894656) finish=18.2min speed=42832K/sec
+</pre>
+The output should show the progress bar above.
+
+Please note that the device node (/dev/sdd in this case) will probably change after a reboot. The kernel device mapper (software RAID) is smart about that, but make sure not to use the /dev/sd* device nodes in /etc/fstab. You should use the UUIDs instead. If the new UUIDs are not available in /dev/disk/by-uuid after adding the new disk execute
+<pre>
+$ sudo udevtrigger
+</pre>
+----
+CategoryHardware

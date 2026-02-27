@@ -1,0 +1,109 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+
+''Please check the status of this specification in Launchpad before editing it.  If it is Approved, contact the Assignee or another knowledgeable person before making changes.''
+
+* '''Launchpad Entry''': UbuntuSpec:apt-avahi
+* '''Packages affected''': apt
+
+=== Summary ===
+
+This specification describes a functional enhancement to `apt-get` which attempt to locate package files on the local network via mDNS before resorting to download from the Internet.
+
+=== Release Note ===
+
+`apt-get` now attempts to download package files from other computers on your network, when available.  This occurs with the help of the new `apt-share` service.  This mechanism uses no authentication and only allows read access to package files through `apt-share` by name, not by path.  Those responsible for network security baselines should familiarize themselves with this service and specifically address it in their policies, whether allowing it or mandating its removal.
+
+=== Rationale ===
+
+Any computer network should have more than one computer; if multiple computers on the same segment each run Ubuntu, they can reduce the load on external access to the Internet and on the mirrors by sharing downloaded packages between each other.
+
+=== Use Cases ===
+Several use cases exist.
+
+* Ed has a small business with 40 employees, all running Ubuntu on their company laptops.  The servers run Ubuntu Server in another subnet.  Whenever employees come in in the morning, their laptops carry in any package updates done the previous night from home; any employees getting updates from the office get their packages from other employes' laptops.  Any other updates not already cached in this way come from the Internet or from any desktop machines present in the office.  Servers have to get updates from the Internet, but share them between each other.
+* Hobbsee has 7 kids, each with their own computer, 3 of which use laptops; 2 running Kubuntu, 4 running Ubuntu, and 1 running Xubuntu.  She runs Kubuntu herself, while her husband's personal laptop runs Ubuntu.  Rather than having 9 machines updating at the same time, all of the core packages come from other machines on the network after the first download.  The Kubuntu machines share KDE packages, while the Ubuntu machines share GNOME packages.
+* pitti has a 128K Internet line and it takes forever to perform a dist-upgrade.  Keybuk has just upgraded his laptop and has a 1GiB package cache.  While visiting, Keybuk connects to pitti's home network to browse the Internet; pitti performs a dist-upgrade and all of his packages come from Keybuk's computer, making the download extremely fast.
+
+=== Assumptions ===
+
+* The local network has higher or equal bandwidth compared to the external network.  Numerous individuals proved this assumption in 1956 with the proof of the max-flow min-cut theorem in graph theory.
+
+=== Design ===
+
+The system should publish information about packages to the local network.  The design should address both package list consistency and package file availability.
+
+We can address package list consistency by publishing the latest package list for a repository.  The retrieving system must verify the validity of the Package file.
+
+Package file availability should come specifically from the package file name.  The cache should behave in such a way as to maximize the availability of current packages on the network.
+
+=== Implementation ===
+
+The system will use mDNS/Avahi to publish information about packages to the local network.
+
+When a system performs a package list update, it can advertise what it just updated to the local subnet and when, allowing other systems to sync their package list automatically.  Note that a system should only obtain its package list in this manner when it sees a newer package list on the network; when a system wants to update the package list specifically (''update-manager, apt-get update''), it should still update as normal.
+
+The retrieving system must verify the Package file against the Release file, and the Release file against Release.gpg.  The publishing system must publish all of these.
+
+The publishing system must identify the Package file for a repository by distribution and category (i.e. gutsy main).
+
+Package file availability should come specifically from the package file name; specifically reject any file name with a '/' in it, do not try to work around it.
+
+`apt-get` maintains a package cache in `/var/cache/apt/packages` already, with various options to prune this directory when it grows too large or contains old files.  The cache should exhibit the below behavior to maximize usefulness in this environment.  Note more useful cache behavior may exist.
+
+* Automatically prune package files for older versions of the same package first (i.e. prune apport-0.96 and apport-0.97 if the cache contains apport-0.98)
+* Prune the least recently used package first when pruning completely
+* Determine package availability on the network before pruning a package completely (i.e. if you have the deb for apport-0.98 and nobody else does, try removing a slightly more recently used package, to a point)
+* Determine package need on the local network before pruning any package file (i.e. if you have an old OpenOffice.org, find out if anyone is running an older version of Ubuntu that needs to update to it; if so, try to store it in their cache instead of yours)
+
+When a system needs a list of packages, it should locate all nodes with that package on the network ''and'' all nodes that need that package.  These nodes should then negotiate an agreement to avoid multiple nodes downloading the same package at the same time.  Overall, each node should have as few connections to manage as possible; by distributing the actual packages each node fetches, the availability of packages saturates more quickly (i.e. more systems have a scarce package by the time the list of needed packages starts running thin).
+
+For packages not on the local network, only one node should use the Internet to fetch a package at once, and then it should fetch the most needed package.  It can transfer this package to another node during the download, on the fly.  This type of propagation allows at least two nodes to have the complete package if not more by the time the first has finished downloading it, avoiding a network shock where all systems start downloading that package from the system grabbing it from the Internet.
+
+For packages on the local network, each system should get a list of other systems which currently have the package.  They should then attempt to distribute access between these systems, downloading from the least-utilized wherever possible.  On switched networks, this keeps as few nodes accessing any given node at once as possible; switches physically isolate network circuits, so having 1:1 relationships between local network connections and mutually uploading/downloading packages effectively multiplies total network bandwidth by 2n for n hosts.
+
+==== UI Changes ====
+
+Synaptic needs to expose an option to disable this.
+
+==== Code Changes ====
+
+`apt` needs to use improved cache management to optimize this.
+
+`apt` needs to have all this stuff added to it.
+
+The Ubuntu developers need to create a new daemon to publish this service through Avahi and work with the `apt` cache.
+
+==== Migration ====
+
+Ubuntu should enable this feature by default.
+
+=== Test/Demo Plan ===
+
+Seeding the `apt` cache with a full update on two computers, half on each, and then updating the package list on one from a local repo would trigger this.  Removing the connection to the Internet would force `apt` to fail if this mechanism failed to work properly.
+
+=== Outstanding Issues ===
+
+=== BoF agenda and discussion ===
+
+* This spec needs some clean-up, and better addressing of how to manage cache.
+
+==== Comments ====
+
+* This sounds like Apt-Zeroconf http://trac.phidev.org/trac/wiki/AptZeroconf --SamTygier
+** Interesting.  There was some stuff about cache management above; at a glance I'm not sure if Apt-Zeroconf covers a proper cache management scheme.  It also doesn't seem to have anything about getting the network to stay in sync or try to avoid connections that would de-optimize switched networks.  Most importantly, it runs an http server; doesn't MDNS/Avahi allow passing data across itself?  Good start but could go farther.  --JohnMoser
+* This is what debtorrent-tracker does, it allows apt to manage distributed packages.
+  The user then, just needs to run debtorrent-client, to use the local network cache. -- BUGabundo
+* Also I don't agree with cleaning cache with no user input. I sometimes want to keep old versions of debs, so I can force older versions. -- BUGabundo
+* apt-zeroconf worked fine for a while (probably around 8.04 and 8.10 releases) and did what is described in the use-cases above. @BUGabundo for the usecase described I think there is not the need to tweak stuff like this. don't think about your geek needs, but average user needs.  Since we are talking about Free-as-in-speech and Free-as-in-beer software here, this feature should ship default with any ubuntu distro and should also be available during system install. (so you can get all the packages from the local net when re-installing a pc!)--epe
+
+----
+CategorySpec

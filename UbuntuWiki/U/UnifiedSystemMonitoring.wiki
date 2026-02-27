@@ -1,0 +1,122 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+* '''Launchpad Entry''': <nowiki>[[https://blueprints.launchpad.net/ubuntu/+spec/unified-system-monitoring]]</nowiki>
+* '''Created''':  * '''Contributors''': BogdanButnaru
+* '''Packages affected''': gnome-system-monitor, gnome-power-manager, bootchart, linux (probably)
+
+=== Summary ===
+
+This specification describes the way Ubuntu should gather and record run-time measurements of itself and the machine it's running on. It also describes a set of tools and libraries to facilitate displaying this information to the user. Think of it as extending ''top'' and ''System Monitor'' with a long-term history feature.
+
+=== Rationale ===
+
+Modern computers have many ways of measuring their run-time properties (e.g. temperature, battery charge, processor voltage and frequency). Most OS also allow measuring many of their parameters while running (e.g. resource usage and availability).
+
+Most operating systems have tools that allow viewing some of these properties. The venerable program ''top'' is an example, as is the Gnome System Monitor or the Gnome Power Manager. Most of these tools have been written with a single purpose in mind; this is a noble thing in principle, but in this case it causes several problems.
+
+The first problem is data availability. Most monitoring programs have been written to allow monitoring the instantaneous value of some parameters. This means most have no or very limited features for recording the data over long periods of time. In particular, a common problem is that monitoring is done only when requested, not continuously. (The Gnome Power Manager is a notable exception. However, it only remembers info until shut-down.)
+
+The other problem is data accessibility: each program generates data separately, usually in it's own format, so it is difficult for users to view and even analyze it. In particular, tools like the Gnome System Monitor's resource usage graphs are only useful for rough estimates.
+
+Bottom line: a single (modular) "monitoring daemon" could run continuously and accumulate information in a consistent way. The process can be managed with a unified interface, and a library with a few well-chosen utils and widgets would make tools like the Gnome System Monitor much more useful without huge efforts.
+
+=== Use Cases ===
+
+** Bogdan is intermittently annoyed by sound stuttering, lack of responsiveness and other performance issues. However, by the time he opens a console and runs ''top'', or he opens the System Monitor, the problem disappears. (These operations naturally take more time when the system is loaded.) However, he can just rewind the history a bit because the System Monitor has access to detailed logs of '''what happened during the last few hours'''.
+
+** George recently noticed the boot process takes longer, but he doesn't know exactly why. He installs ''bootchart'', which has access to '''already recorded, medium-detail logs''' of the last few weeks, and uses bootchart's tools (customized versions of generic widgets) to investigate. He notices that his boot got slower by a 20 seconds on a certain date. He then uses Synaptic's new history panel to check what updates happened before that date, and quickly has a likely suspect.
+
+** Linus wants to know if the new IO scheduler added to the kernel is really better. He can easily '''use the performance logs from a large number of users''' (properly anonymized, gathered by a <nowiki>[[http://popcon.ubuntu.com/|Popularity Contest]]</nowiki>-like tool) from a couple of months before and after the update, and can run more meaningful statistics than on a limited test system.
+
+** On a whim, Dexter takes a look at his computer usage logs, and notices interesting patterns in the delays when he leaves his computer unattended. He gathers '''already-accumulated data from other willing users''', writes his doctoral thesis on the subject, and develops a smarter algorithm for turning off the display and for locking the screen. The world energy usage lowers by a few hundred gigawatt. The global cost of security breaches is lowered by many millions of dollars. ~-(Note: By this time, Ubuntu is the dominant OS, in no small part due to its excellent monitoring facilities. <nowiki>[[https://bugs.beta.launchpad.net/ubuntu/+bug/1|Bug #1]]</nowiki> has been closed for some time.)-~
+
+=== Scope ===
+
+This specification covers feature specifications for Ubuntu. However, the features developed would likely be useful for other Linux distributions.
+
+Implementing this specification will likely result in developing or choosing a ''standard'' for data recording, writing a ''daemon'' to gather such data, writing a set of "input modules" used by the daemon to obtain the data, and writing a library of commonly-used ''tools and widgets'' for visualizing and manipulating the logs.
+
+=== Design ===
+
+Note: this specification is a very early approximation. It is written from the point of view of the user rather than the developer. The author expects it to change significantly after input from developers.
+
+This specification describes two mostly independent deliverables. The first is a system-wide data-collection service, together with several pluggable modules for collecting data, configuration files and control scripts. The second is a library of small utilities for handling the logs, widgets and applications for viewing and searching through these logs, and changes to already-existing applications that use this type of functionality. The relation between the two parts must be only (a) the format of the logs and (b) the control & configuration interface of the service.
+
+This specification is currently incomplete, in that it does not yet specify precisely these interfaces and logs. Please help with enhancing it.
+
+The next section describes what is the expected behavior of the two elements.
+
+==== Data-collection service: Braindump ====
+
+A system-wide daemon is started as early as possible after the system starts. It enters a loop where, each second, it reads the entire set of values it is configured to read, records them in a in-memory log, and goes to sleep. As soon as the partition with /var becomes writable, these in-memory logs are saved to disc, while attempting to minimize interference with other processes.
+
+In order to read an observable value, the daemon has a registered set of "probes", each measuring a certain set of parameters. This is because there are many different types of things to record, at different times. These would be added and removed as they are made available or disappear, and as configured by the administrator. For instance, just after start-up only a limited set of probes will be available (e.g., CPU usage, memory availability and process behavior), and more will become available during running (e.g., disc access, network IO, and more, as modules are loaded, hardware is plugged in, and new probes are added by the administrator).
+
+Each probes will only output a numeric value (or, more likely, several). Example: a decimal representing the percentage time the processor was used for the last second interval, the amount of memory used, the battery charge. The "collector" daemon maintains a list of values for each probe, and at each step collects an entire set of values. 
+
+The lists must be held in memory, for speed. Constant disk access would be undesirable, especially for laptops, because it would prevent disks from spinning down. Thus, we'll need to be able to record at last an hour of info in memory. There are two simple optimizations: first, most of this data will compress very well (if it were random, we wouldn't need to gather it), so a low-priority thread can apply a simple compression to everything older than a few minutes. Second, once we have some data we can watch for any disc access, and schedule a flush (with low-priority IO) after the first one. This way the disk spin-down is not greatly affected.
+
+High-frequency (1 sec) data can take up lots of space really quick, but it's not necessary for very long. This means that we can take the logs older than a certain threshold (a few days) and compress them by reducing the frequency, say, to once every five minutes.
+
+===== Cost estimate =====
+
+Assume 32 bits per observed value, 100 values monitored, 1 Hz. This means ~1.5 MB per hour; this could be easily kept in RAM on new machines, sometimes for more than an hour (on a battery-running laptop, we'll flush only when memory is full or disk is accessed by something else). With a 100 MB hard-drive budget we could keep almost three days of history at this frequency, even without compression. For older data we aggregate it to lower frequency. This means each day we'd have to load the data from three days ago, about 40 MB of saved data, aggregate it (it only takes simple interval averaging, usually) and output ~140 kB of 5-minute frequency data. With another 100 MB, we could archive these low-frequency logs for almost two years. 
+
+To resume: 400 bytes/second recorded, about 1.5 MB per hour. Every day, with low priority, re-read and process (linear time) 40 MB of days-old data and archive it with lower frequency. With 200 MB of disk space we have 5-minute data (for 100 values) for the last two years, and 1-second data for the last three days. 
+
+Simple compression will probably further reduce the space (or lengthen the time) by at least a factor of two, more likely by an order of magnitude. Also, many values don't need 32 bits precision (e.g. temperature sensor); for the rest it's reasonable: processor occupancy--for a 1GHz CPU 32 bits can give us 1-cycle precision each second; for gigabit Ethernet 32 bits can give us bitcount each second. Most things are rarely that quick or fully used.)
+
+Of course, we could have several levels of frequency-compression, for example 50 MB each for 1 second, 10 second, 1-minute, 5-minutes.
+
+===== Examples =====
+
+Examples of data we will want to record with this daemon:
+** everything ''top'' or ''System Monitor'' records: process counts, memory usage, processor usage, page faults, i/o, network usage.
+** everything the Power Manager is interested in: battery state, power usage, processor frequency & voltage, power used by USB devices, etc.
+** everything the computer has sensors for: temperatures, ambient light, orientation/movement/acceleration, vibration, maybe GPS.
+** user statistics: number of keys/buttons pressed, distance traveled by the cursor -- useful for measuring user behavior, useful for instance for the power manager. (This and the acceleration/GPS sensors also pose some privacy issues.)
+** partition usage, SMART hard-disk monitoring info.
+** WiFi connection strength, lost packages count, other miscellaneous signals.
+
+Many of these signals would have interesting relationships with a very different kind of observable: events. For instance, the Power Manager is also interested in things like suspend/resume, lid closed, screen turned off, power adapter plugged-in/unplugged, etcetera. In the general case we would be interested in many similar events: network connection changes, peripherals plugged-in/unplugged, programs started/terminated, users logged-in, etc. I don't know for sure how these should be recorded, if you've worked on Power Manager or anything similar please give some input.
+
+Returning to time-sequence signals, another thing we need to consider is level of detail. It would be harder, but it's probably very useful to record per-process observation for some probes, like resource usage. This increases the complexity significantly. (However, the volume of data is only increased a lot for servers; users rarely have more than a dozen processes actually doing anything interesting at any time, the rest will compress ''very'' well.) The biggest problem is that new processes will be started and stopped all the time, so we'll have thousands of short (usually) data streams, not only the dozens of session-long streams.
+
+===== Privacy and Security =====
+
+Much of the data gathered can be sensitive. It is probably safe to assign all data streams the same sensitivity that the "probes" have. For instance, currently the utility "top" can access lots of statistics without super-user privileges. There is little reason to further limit access to the long-term data gathered from the same sources. (After all, it could be recorded in parallel by someone interested.) However, everything non-privileged users cannot observe should be by default restricted to all but the super-user. (It can be made accessible to all users that originally could see it, but this is likely complicated.) In particular, GPS and even accelerometer data and user input are very sensitive. (Security & privacy experts are welcome to make a more detailed analysis.)
+
+===== Precision and Performance =====
+
+Obviously the precision of the recorded info is dependent on the probes' quality. However, the precision of the sampling needs some attention. Ideally a real-time scheduled process should gather the data to memory buffers, and a low-priority background process would handle compression, writing to disk, and old-data aggregation. However, a lot of care is needed to avoid the obvious risks:
+
+The sampler process needs to call each probe every second. Normally each execution would take very little time: each probe only needs to copy several values (which the kernel already calculates) to a buffer. The amount of data gathered each step is small (less than a kB in our example above), thus the cost for all data gathering is likely comparable to the process-switch, for well-written probes. (The compression, disk-writing and down-sampling will take longer, but they're not high-priority tasks.)
+
+However, if any of the probe modules is naughty, it can starve other processes. On the other hand, if the collector process is not real-time, then the sampling can become imprecise in exactly the most interesting moments: high load.
+
+==== External programs: Braindump ====
+
+We'll need several tools to be able to actually used the gathered data:
+** Libraries: many programs will need to read the saved logs. We'll need standard libraries to read log files. These contain more than just lists of numbers. We need to carefully remember what is recorded, the frequency, the unit of measurement, if and how it was re-sampled etc. There may be various compression methods and representations, too.
+** Utilities: it will likely be useful to extract a part of the system logperiods to a file. Something like "sysmon-extract /var/sysmon/processor/voltage --from=yesterday --sample=1min --output-file=lastday.log" will surely needed. Basic operations will be cropping a log (before, after, between), "projection" (choosing or removing an observable from a parallel set), and resampling. Also, converting some measurements to and from text representations. (Text is nice for humans, but it's hard to use for these long-term recordings.)
+** Widgets: a few types of graphs will be used by many programs, with different data-types. For example, the resource usage graphs of the System Monitor are conceptually identical with those of the Power Manager. Something like what BootChart does will also be interesting for System Monitor. The basic operations -- rendering several parallel (at the same time) series of data, with a legend and scale, selecting, zooming in and out or panning on a time interval -- will be common to almost every such application, with some details changing (like the 'channels' displayed).
+** We might even want a generic application to allow visualizing and comparing logs, independent of their type.
+** Administration tools: The users will need to pick what is recorded, with what precision, if and when it is resampled, where to put the logs, how big they may get, who can read them.
+
+=== Outstanding Issues ===
+
+This specification needs help from a few experienced people to advance to an implementable state:
+** Anyone with kernel/real-time daemons experience is asked to better evaluate how much this kind of collector would cost in terms of resources, and what exactly it can be expected to do. (And maybe how...)
+** Someone who worked on (or is at least very familiar with) the Gnome System Monitor, Gnome Power Manager or BootChart or anything similar should enter all real-world experience observation they might have. The best candidates for implementing and using this specification are they themselves.
+** Anyone who worked with recording or processing this kind of data streams (medium latency, low volume, but long time) is welcomed to help us with hints. In particular, representation formats, compression, metadata, organizing the (potentially many) streams into files and folders. Text is nice, but I don't think it works for a long-time recording; binary representations are smaller, easier to read (even when compressed). Some sort of mip-mapping might be interesting for zooming. Also, many relevant utils and libraries probably already exist, we should take advantage of them.
+
+----
+CategorySpec

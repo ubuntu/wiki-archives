@@ -1,0 +1,142 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+
+* '''Launchpad Entry''': <nowiki>[[https://features.launchpad.net/distros/ubuntu/+spec/ext3-shutdown-forcedcheck]]</nowiki>
+
+=== Summary ===
+
+Check ext2/ext3/ext4 partitions at shut-down, rather than start-up to avoid 'losing the lottery'.
+
+=== Rationale ===
+
+The third extended filesystem (ext3) is Ubuntu's default partition type, and also Linux' one, so it is with good reason that people want to use it. The only reproach that can be done to it compared to its main competitor Reiserfs is that it regularly runs a check (every 30-odd mounts or 180 days), whether it was cleanly unmounted or not.
+
+The idea is to leverage this 'issue' by losing time doing the periodical check at shutdown when the user has gone home or to sleep, rather than at boot time. The startup check of course remains, in case the filesystem was not cleanly unmounted.
+
+It is also possible to limit the shutdown time to by cleverly organizing the partition checks over time.
+
+=== Use cases ===
+
+* Matt desperately needs to read that e-mail so he can go to his meeting that started 5 minutes ago, and he has to wait for 80G of filesystems to be checked before his laptop will boot
+
+=== Scope ===
+
+There are two levels of functionality envisaged here: basic and advanced.
+
+==== Basic ====
+
+Run the periodical ext2/ext3/ext4 partitions check when they are being unmounted or re-mounted read-only. Because they were already mounted, this should never fail. The code is the same as exists in checkfs and checkroot.
+
+==== Advanced ====
+
+Make sure checks do not happen all at once, to limit the shutdown postponing, by checking some ahead of time (maybe only for those in /etc/fstab).
+
+=== Design ===
+
+==== Basic ====
+
+The behaviour is similar to that in the checkfs and checkroot scripts. It is to be incorporated into the umountfs and umountroot scripts, including not checking when running on batteries.
+
+If upstart comes to have a separate checkfs script that is run whenever a partition is mounted, the change could become as simple as adding the checkfs action to the unmount event and nothing else 8-)
+
+==== Advanced ====
+
+(braindump)
+
+On top of the basic functionality, if no partition required checking, a list can be created, ordered by mounts left and size (in this order, both ascending). If, for any entry, the partition order in the list exceeds the mount count left, the first partition in the list is checked and the script exits.
+
+Why not check more? Well, we ideally want to check only one at a time, and some partitions might be mounted only occasionally, so let's not be needlessly greedy!
+
+This functionality will be incorporated into the umountfs script only.
+
+A simple and straightforward way to deal with / (which cannot be checked in umountfs) is to artificially set the mount count to max, to force umountroot into running the check.
+
+We could also simply play with mount counts and limits to make sure when two checks happen on the same day that it does not happen again.
+
+=== Implementation ===
+
+==== Code ====
+
+Implemented in bash script.
+
+==== Data preservation and migration ====
+
+Not applicable.
+
+=== Comments ===
+
+==== TheDoctorWhat comments ====
+How will this save time?  If you tell a computer to shutdown and it takes 30 minutes because it's fsck'ing, how will that help?  Sure, startup is fast but if you have a laptop and you tell it to shutdown, then usually you'll be moving it or power is low or something; you want it down quickly.
+
+Will the new init replacement (upstart) remove some of this issue?  For example: if the 80GB partition is not mounted till later in the boot processes, will the fsck run later and in the background?
+
+From a usability point of view, the huge wait is unacceptable.  I suppose something where the fs can be mounted and then be checked and fixed while it's mounted would be ideal.  But that would require a lot of work.
+
+Maybe you could schedule a "maintenance" fsck via anacron or something?  For some of the fsck's you can run it on a mounted filesystem.  Optionally marking the fs read only would work too.  LVM lets you take a snapshop of the filesystem, you could use that and do an fsck on that to see if you need to do a serious fskc...
+
+ - TheDoctorWhat
+
+ HerveFache: it is only meant to save time '''on startup''' or '''on mount''', and waste it at shutdown or unmount instead. If you're running on batteries, fsck is skipped anyway. In the case of mounting a partition, same problem: better get access to the files you need quickly. I agree that ext* behaving differently is a solution and it '''is''' possible to disable the checks altogether, but I don't really know what risk ensues...
+
+ TheDoctorWhat: Just so I'm clear; This is *only* addressing the case
+ where someone has -i or -c set in e2fsck.  This is not to address the
+ fsck when the disk is powered down unexpectedly? 
+
+  HerveFache: Precisely, this is not about recovery, only periodical checks (rationale now updated to make it clear).
+
+==== DanielPittman comments ====
+This seems essentially pointless.  It is hard to predict if a user will suffer more from a long delay starting the computer or shutting it down.  For example, if you are on a UPS, running on battery, a long shutdown is not desirable -- and not detected by the current infrastructure.  In some cases, where building infrastructure provides the UPS it is not possible to monitor it from the machine at all.
+
+Also, your logic is weak: you suggest that running a regular fsck, compared to other file systems which do not do this, is a failing of ext3.  It is, rather, a deliberate choice: running a regular scan for corruption is a trade-off of time for data security.  You are likely to detect faults before earlier, resulting in less damage.
+
+A better proposal might be to look at an infrastructure where *all* filesystems are routinely checked on a time or mount count basis -- or not, depending on end user preferences.  ext3 could then fold into that infrastructure.
+
+That would give a chance to explain to the end user the trade-off this makes (occasional delays vs data security), and allow them to make a choice, if they wish, to adjust the counts or times, or even to disable the feature entirely.
+
+It is also worth noting that other file systems that use more dynamic data structures are more, not less, prone to data loss if minor file system damage is undetected.  They would benefit more than ext3 does, in all likelyhood, from this preventative maintenence.
+
+ HerveFache: well, sure we could change the other filesystems to do regular checks, but this is really not the point of this spec, so let's see your first paragraph: I do not think it pointless because I usually leave my computer shut down as I leave the building; it can then run as many checks as it wants I don't care.
+
+ The UPS case is interesting although off-topic (and really not the usual, as in 99.9%+ of the time, case). What we would really want then is a way to force the check '''not''' to happen, and again this is easier to decide at shutdown than at startup because the user was having access to the system, and might have chosen the 'quick shutdown' option (see JohnMccabeDansted's comment below).
+
+==== JohnMccabeDansted comments ====
+An approach that would complement this one would be to allow the user to interrupt the fsck and have it rescheduled for later. It shouldn't make any difference if the partion is only checked every 31 or 32 mounts.
+
+ HerveFache: I think this would be of great help, independently of
+ whatever else we do.
+
+ TheDoctorWhat: I really like this.  It would need some care in it's
+ design.  If the fsck is a preventative fsck (-i or -c), then:
+** It should be postponed if the system is on battery (upc or laptop)
+** Display a message explaining why preventative fsck's are good.
+** To interrupt, it should be something like type a word, instead of
+     doing a control-c.  If the user misses the fsck or something
+     silly like that, they'll kill the wrong thing. Using control-c
+     during startup scripts is asking for disaster. :-)
+** When interrupted, it should give a confirmation prompt along with
+     an option to change how ofter the prevntative fscks are run.  We
+     don't want users to get into the habit of bypassing the
+     confirmation screen. The best way is to let them turn it off or
+     change it *now* while they are thinking about it and are being
+     irritated about it.
+ If the fsck is due to dirty umount, it will be similar to above
+ except:
+** It will never be automatically be postponed.
+** The verbiage should reflect the more urgent nature of this fsck.
+** If the user opts to interrupt the fsck, they will be offered the
+     choice to mount the filesystem read-only instead of read-write.
+** I guess if the filesystem is read-only, we could run fsck in the
+     background.
+
+   HerveFache: I suggest this gets its own spec ;-)
+
+----
+CategorySpec

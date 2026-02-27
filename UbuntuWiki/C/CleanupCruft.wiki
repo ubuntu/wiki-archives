@@ -1,0 +1,249 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+* '''Launchpad Entry''': UbuntuSpec:cleanup-cruft
+* '''Created''': 2008-06-02
+* '''Contributors''': LarsWirzenius
+* '''Packages affected''': update-manager
+
+=== Summary ===
+
+Update-manager cleans up after upgrading a system, but does not get
+all the cruft. People who upgrade without update-manager (apt-get,
+aptitude, synaptic, adept, ...) don't have their systems cleaned up
+at all. This affects especially people participating in the development
+of Ubuntu.
+
+This spec proposes extracting the cleanup code from update-manager into
+a new, independent tool, provisionally called '''system-cleaner''',
+possibly still part of the same source tree, but usable without the
+update-manager user interface. Additionally this spec proposes
+augmenting the tool to provide a fuller, more satisfying cleaning
+experience.
+
+=== Release Note ===
+
+The new tool '''system-cleaner''' will remove cruft from the system:
+old kernel versions, transitional packages, unnecessary packages,
+and so on.
+
+=== Rationale ===
+
+Ubuntu (and Debian) work hard to make sure a once-installed system
+can always just be upgraded, without having to be re-installed.
+This works quite well, but sometimes cruft gets left behind:
+
+* old kernels
+* old library packages
+* transitional packages
+* packages installed because something depended on them, but now nothing does
+* now-unsupported packages that used to be part of the default install
+* deprecated dotfiles in user home directories
+* packages that are removed, but not purged, and have configuration files
+* .dpkg-old/new files (from dpkg conffile handling)
+* random leftover files belonging to old versions of or removed packages
+* changes the default installation, such as mount options (relatime)
+* remove old thumbnails from ~/.thumbnails
+
+This cruft doesn't harm the system, it merely takes up some space. Not
+always a lot of space, but it would be good to clean it up. Some things,
+like the ever-growing list of kernels, affect the user experience: there
+should be no need for the user to have more than one, working kernel, by
+default, in the normal situation.
+
+According to its author, the update-manager program should not be used
+to clean up systems. Cleaning up is potentially dangerous, and if
+update-manager seems risky, people won't use it. Thus, a separate tool
+should be developed.
+
+=== Use Cases ===
+
+* Rene installed his Ubuntu server using Warty Warthog, and has been upgrading to every new release ever since, using update-manager. During the several years that has passed, every bit of the hardware has been replaced. He now has a long list of kernels to select from in the grub menu, some of which don't even boot anymore. He would like to know what he can safely remove.
+* Edith installed her system using Hardy Heron, and is now developing Intrepid Ibex, upgrading with apt-get every day. She also often installs new stuff, to verify bugs reported against them. Her development system is starting to feel rather bloated from all the installed stuff, and she'd like to clean it up.
+
+=== Assumptions ===
+
+=== Design ===
+
+There are many kinds of cruft. For example, the logic to remove old
+kernels is completely different from the logic to .dpkg.old files.
+Also, different kinds of cruft may need different kinds of attention
+from the user: perhaps one of the kernels is still needed in some
+situations?
+
+All kinds of cruft can be handled by the same overall scenario:
+# identify cruft
+# warn user of cruft
+# get confirmation or rejection from user about each piece of cruft
+# remove cruft that is confirmed for removal
+It should be possible for the user to specify "always remove all cruft
+automatically" once, of course, so that only the first and last step
+are actually taken.
+
+The proposed design is thus based on plugins. Each plugin implements
+operations to identify cruft, and the main program then handles all
+the user interaction. Plugins will be bundled with the software, and are
+essentially invisible to the user, but separating them means they will
+be easier to develop and test. It is currently unclear whether other
+packages may add plugins: for example, the installer might add a plugin
+to add the relatime option to fstab, or it might be better and simpler to
+just include this plugin, too, in the system-cleaner package.
+
+Cruft can be packages to purge or individual files to remove, or
+commands to run. The user will be presented with a list of cruft, and
+the reason they are considered cruft. The human-readable reasons are
+provided by the plugins.
+
+Since not all kinds of cruft are equal, the user may specify that some
+kinds of cruft should not be cleaned up automatically. For example,
+cleaning up stuff in user home directories should not be done automatically.
+Even reading through user home directories is suspicious behavior.
+The user should explicitly request such cleaning to be done. Thus, plugins
+have states:
+* always identify, offer to clean up any cruft found
+* always identify, user has to request cleanup of any cruft found
+* user has to request identification, any cruft is offered to be cleaned up
+* plugin is disabled, user has to enable to even see it in the UI
+
+==== Command Line User Interface ====
+
+Synopsis for the command line interface:
+
+    system-cleaner [options] command
+
+where ''command'' is one of the following:
+* identify
+* clean
+* list-plugins
+and options are:
+* --no-act: change nothing, but otherwise act normally
+* --interactive: ask about each piece of cruft before removing it
+* --enable=plugin: enable a specific plugin
+* --disable=plugin: disable a specific plugin
+
+==== Graphical User Interface ====
+
+FIXME: This is a rough first draft of the GUI. Usability experts will need
+to help with making it good.
+
+The system-cleaner graphical user interface consists of a normal top-level
+window with a main menu at the top, and the main part of the window
+containing a cruft listing. The main menu is straightforward, and has 
+items for starting a scan for cruft,
+starting removal of cruft, and editing of preferences (really: setting
+plugin states).
+
+The cruft listing is a list (GtkTreeView). Each row in the list describes
+some piece of cruft: a package, filename, or something else. The row
+gives additional information to help the user decide whether something
+can be removed: for a package, it would give the short description. Additional
+details may be requested via a popup menu. Additionally, for each piece
+of cruft, the amount of disk space to be freed if it is removed is shown,
+and a plugin-provided explanation of why the cruft is cruft.
+
+Rows in the list are grouped: transitional packages in one group, 
+obsolete packages in another group, etc.
+
+For each piece of cruft (row in the list), the user may toggle a button
+to specify whether the cruft is to be removed or not. Depending on plugin
+states, the toggle is on or off by default.
+
+=== Implementation ===
+
+There is code in update-manager to do some of the cleanup. This needs
+to be used as a base.
+
+Plugins are classes derived from a systemcleaner.Plugin base class. The
+classes are placed in /usr/share/system-cleaner/plugins, in Python
+modules (foo.py) or packages (foo/_``_init_``_.py). The plugin manager
+imports any such modules and packages and instantiates any plugin classes
+in them automatically.
+
+Both the command-line and graphical user interfaces will be developed
+in parallel. Both are deliverables for intrepid.
+
+==== Plugins ====
+
+For intrepid, the following plugins will be developed, in this order:
+* remove old kernels
+* remove .dpkg-old/new files
+* remove transitional packages
+* remove runtime library packages nothing depends on
+
+===== Remove old kernels =====
+
+The newest kernel package (and the running kernel, if different) will be kept, the others removed.
+
+===== Remove .dpkg-old/new files =====
+
+Look for files with .dpkg-old or .dpkg-new suffixes under /etc,
+and remove them.
+
+===== Remove transitional packages =====
+
+Develop heuristics for identifying transitional packages. Then
+remove such packages.
+
+===== Remove runtime library packages nothing depends on =====
+
+Runtime library packages (libfoo, but not libfoo-dev) are generally
+only needed when programs use them. Identify such packages that
+nothing depends on, either via package dependencies, or by dynamic
+linking (check for binaries in /usr/local and /opt).
+
+Since such heuristics can be wrong for a fair number of developer-type
+people, it may be best to have this plugin by default be in the
+"identify but don't remove" state.
+
+==== UI Changes ====
+
+Once the GUI exists, an entry to the System -> Administration menu will
+be added.
+
+==== Migration ====
+
+Users will be pointed at the new tool in release notes.
+
+=== Test/Demo Plan ===
+
+The short form of the test plan is:
+* create instances of each released Ubuntu version (in chroot or kvm)
+* upgrade them to hardy/intrepid
+** LTS to LTS
+** otherwise to each successive release 
+* run system-cleaner
+* compare system before and after system-cleaner
+** file list in the filesystem
+** file contents
+** package list
+* flag any differences that are not (manually) whitelisted
+* verify that the system still boots
+
+=== Outstanding issues ===
+
+* Files belonging to users (/home, /usr/local) will initially be ignored
+ by system-cleaner. Dealing with them may be best dealt with by adding a
+ new tool, user-cleaner, which each user may run on their own. At the
+ very least, such cleaning needs to be done very carefully, and be 
+ explicitly requested. Deleting user files without being asked to do so
+ is not an acceptable situation.
+
+* some cruft is more difficult to clean up after upgrades due to
+ lack of context (e.g. no knowledge of previous state); libapt could
+ record previous state in its extended_states file. Update-manager
+ can deal with this on its own since it knows the state of the system
+ before and after the upgrade.
+
+=== See Also ===
+
+* <nowiki>[[KernelTeam/removing-old-kernels]]</nowiki>
+
+----
+CategorySpec

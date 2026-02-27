@@ -1,0 +1,127 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+=== Status ===
+
+See https://launchpad.net/distros/ubuntu/+spec/automated-testing-deployment
+
+=== Contents ===
+
+=== Summary ===
+
+Arrange for the machinery described in AutomatedTesting, and implemented in the autopkgtest package, to run regularly on the Ubuntu archive.
+
+The resulting setup will consist of:
+
+ 1. A xen-based virtualisation service meeting the specification in AutomatedTesting (and using dmsetup to provide a copy-on-write block device so that we can restore the filesystem after use)
+ 2. An automatic package selection, driver, and reporting system, which will select a package to test, install the necessary software in the testbed (via the virtualisation service above), run the test, and report the results.
+
+These will ideally be delivered as part of the autopkgtest package so that any system with a suitable Xen (and LVM) installation can fairly easily be made into a test runner server.
+
+=== Overall tasks ===
+
+ 1. Select package to test
+ 2. Invoke testrunner:
+    1. start virtualisation environment
+    2. install packages etc. to set up environment to be as needed
+    3. run tests
+ 3. Report results
+    1. via email
+    2. via webpage (nice to have / future task)
+    3. including historical data (nice to have / future task)
+
+=== Use cases ===
+
+* Preventing regressions: A nameless developer fixes a bug in a package and writes a test to ensure that it stays fixed. This test needs to be run regularly to detect regressions, and more frequently when the package or its dependencies have changed - as these are the things that will most likely trigger regressions. On the other hand missing dependencies could lead to a starvation issue so an extremely simple 'run the tests in all packages in alphabetical order in a loop' approach may be the best angle to take.
+ 
+* A Ubuntu user who is interested in helping our development offers some spare machines of theirs to run tests. They install the test runner logic and configure it with their launchpad account. After they start the service, it pulls a package to run, runs it on their machine, and reports the result back to launchpad. This is likely a second-phase feature to implement but may allow the testing service to scale much more widely with low security impact considerations.
+ 
+=== Parts that already exist ===
+
+* AutomatedTesting chroot-based virtualisation server (in autopkgtest package)
+* AutomatedTesting test-runner basic implementation (autopkgtest)
+* A single test for testing the test setup with (in mawk)
+ 
+=== Parts that need to be created ===
+
+* Infrastructure for automatically creating Xen virtual instances on a suitable Xen and LVM-enabled system.  (partially done; will live in autopkgtest package)
+* Xen/LVM/dm-based virtualisation server according to AutomatedTesting interface (partially done; will be in autopkgtest package)
+* Machinery for selecting which package to test.  Initially this will be very simplistic (round robin) but there should be an interface for providing a more sophisticated scheduler.
+* Machinery for reporting results.  Initially, send an email to an address mechanically derived from existing control information.  The email will contain raw transcripts from the test runner setup.  Later there will be more sophisticated reports including historical data, machine-readable individual test results (where available), etc.
+* autopkgtest needs to be enhanced to be able to automatically install dependencies and/or build the package to test.
+* Lots more tests!
+
+==== Prerequisites / system administrator setup ====
+
+In the initial deployment, the Xen/LVM/dm virtualisation server will require certain LVM volumes, with autopkgtest-specified names, to be created in advance by the system administrator.  This is simpler and safer than attempting to perform these operations automatically.
+
+For ease of use in simple setups a trivial script will be supplied to create these volumes in a default configuration.
+
+==== Xen instance/image creation ====
+
+This will be achieved with a simple script which uses pbuilder and hence debootstrap to construct a "chroot" in a filesysem in an LVM volume; this is briefly used with chroot in the hosting system to copy in ssh authorisation and network configuration information, etc.
+
+This script will also write an appropriate instance configuration file and start the Xen machine once and then suspend it to create an image which can be resumed for each test as required.
+
+==== Xen/LVM virtualisation server ====
+
+This is a riff on the chroot-based virtualisation server, using ssh instead of dchroot to run commands on the target.  The common code (for dealing with targets which are basically controlled by running shell commands in them) will be factored out.
+
+The Xen-specific parts are glue which instructs Xen to resume the instance created during setup and knows how to instruct Xen to shut down again.  Because the image will be resumed more than once the filesystem must be put back, so steps will be taken to avoid allowing the use of the Xen instance virtualisation scheme without a filesystem copy-on-write facility (eg by failing if a dangerous set of options is selected).
+
+The filesystem copy-on-write will use the snapshot dm driver directly from dmsetup.  The snapshot will be a nonpersistent snapshot backed by an LVM volume.  See References below.  (Additionally, some minimal documentation for dm snapshot will be added to the dmsetup package for the benefit of future developers who wish to make use of dm snapshot.)
+
+The Xen and LVM/dm machinery will be capable of recovering from uncontrolled terminations of the testing arrangements; care will be taken to ensure that nothing is done which cannot be safely and reliably undone idempotently.  However, the Xen-based virtualisation server should not be "crash-only"; it must make reasonable attempts to shut down the testbed virtual machine when it dies or is killed, to avoid the testbed consuming the machine's hardware resources indefinitely.
+
+==== autopkgtest enhancements ====
+
+autopkgtest is not currently capable of:
+* Finding or installing the .deb to be tested
+* Constructing a built source tree (by building the package in th e testbed if necessary).
+These features are required for unattended operation on the archive.  Additional command-line options to adt-test-run will be provided to allow the new management program to select these behaviours.
+
+If virtualisation target is used to perform a build it should be restored before running the test, so that effects of the build (eg, installation of dependencies) do not compromise the test.
+
+=== Related topics ===
+
+It would be good to test the packaging bits (clean install, removal, purging, upgrade) with a system similar to `piuparts`.  This is something that the autopkgtest runner should be capable of triggering, for which autopkgtest needs to allow a package to specify tests to be run on ''other'' packages.  (This is not a goal of the present deployment exercise but will be considered on an "as time allows" basis.)
+
+==== Package selection and reporting ====
+
+There will be a management program which is responsible for running the adt-test-run test runner for each package.  The management program will be capable of choosing and running and reporting one test, or doing so in an infinite loop (and means will be provided to stop it in a controlled manner).
+
+The manager will call out to a program which will be expected to specify the next package to test; the simple interface here will be invented as required during development and can be extended later, but the intent is that initially the "next package" program will simply pick the next package in the list.
+
+The manager will call out to another program to report the test results; the initially provided reporter will select an appropriate email address and mail the results there.  Again, the interface will be invented as required during development and will be extended as needed later.
+
+=== Need for root in the Xen host ===
+
+The design here assumes that the test-runner setup tools and the test-runner itself have free access to root privilege on the Xen host.    This is acceptable in the currently planned deployment but will be problematic for eventual deployment on the buildds.
+
+So, here we identify the purposes for which root on the host is used and the intended plan for buildd deployment:
+
+During setup, they use this for:
+* Extensive LVM manipulations during fs image creation
+* pbuilder/debootstrap during fs image creation
+* Extensive LVM and Xen manipulations during image creation
+The easiest solution to these problems is to generate the images (both fs and xen suspend) somewhere else and simply provide them to the test-running system.
+
+During test runs, they use root for:
+* dm-setup for the COW LVM (including setup, teardown, error handling, etc.)
+* Xen instance resume and stop (which implicitly includes arrangements for the virtual network connection between the host and guest).
+These functions can be provided via sudo or userv.
+
+=== References ===
+
+Filesystem copy-on-write will be provided by using the devmapper snapshot driver to make a cow copy of the underlying image.  Documentation (such as it is) about the behaviour of dm can be found at http://linuxgazette.net/114/kapil.html and https://www.redhat.com/archives/dm-devel/2004-July/msg00071.html and another example in casper eg at http://people.ubuntu.com/~tfheen/bzr/casper/trunk/debian/casper.initramfs.
+
+Subunit http://www.robertcollins.net/unittest/subunit/ is potentially a useful protocol for reporting the test status. Its moderately human readble, and very machine readable. There is a python runner-side implementation which allows managing and presenting the test results in python.
+
+XenEnabledKernel would be a nice fit because it would make the Xen-based virtualisation system much easier to install (otherwise, setting up a test runner system involves installing an appropriate Xen kernel and hypervisor by hand).

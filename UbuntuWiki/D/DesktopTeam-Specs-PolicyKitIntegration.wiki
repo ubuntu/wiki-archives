@@ -1,0 +1,230 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+
+''Please check the status of this specification in Launchpad before editing it.  If it is Approved, contact the Assignee or another knowledgeable person before making changes.''
+
+* '''Launchpad Entry''': UbuntuSpec:policykit-integration
+* '''Packages affected''': policykit, policykit-gnome, hal, gnome-mount, gnome-volume-manager, gnome-power-manager, system-tools-backends, gnome-system-tools, ubuntu-meta
+
+=== Summary ===
+
+The Gnome world starts to heavily use PolicyKit in their latest versions, and we get more and more requests to support it.
+
+For Hardy we want to gently introduce it and discuss the security, usability, and maintenance ramifications of it. We ship PK by default and use it instead of our home-grown libpam-foreground, as well as for gnome-mount and hal.
+
+=== Release Note ===
+
+The user-visible behaviour does not change drastically, thus this is
+not really worth mentioning in the release notes.
+
+=== Rationale ===
+
+Applications which use gksu today (such as gnome-system-tools or
+mounting an internal hard disk) currently run with root privileges.
+PolicyKit allows these to run as normal user with just getting a
+particular bit of extra privileges, so they can be controlled better,
+and in a more flexible way.
+
+PolicyKit also provides the possibility of only allowing a particular
+privilege to an ''active'' (foreground) session, which provides a more
+robust and upstream supported variant of `libpam-foreground`, which we
+can then stop maintaining.
+
+=== Use Cases ===
+
+* John attempts to mount his Windows partition on the internal hard
+ disk. When he gets the authentication dialog, he chooses to keep
+ this privilege forever (not just for the currently running
+ session), since he uses this very often.
+
+* The Smith family has one home laptop with several running
+ sessions for the family members. Whenever an user plugs in a USB key,
+ it is assigned to the user in the foreground session.
+
+* David prefers to use gedit when editing his configuration file /etc/X11/xorg.conf. When saving his changes, he gets an authentication dialog that asks for his password.
+
+=== Design ===
+
+==== Rollout ====
+
+* Put `policykit` and `policykit-gnome` packages into Hardy main.
+* Configure PolicyKit to consider members of the `admin` group and
+ administrators, instead of only the root user (which is disabled in
+ Ubuntu).
+* Enable PolicyKit and ConsoleKit configure options in hal. With
+ this, hal function calls like power and mount operations can be
+ protected with PK access control.
+
+==== Replacing libpam-foreground ====
+
+The only users of libpam-foreground at the moment are
+gnome-power-manager and gnome-volume-manager. Before doing any action
+they query `/bin/check-foreground-console` and inhibit the action if
+it returns false. However, this does not really enforce this policy
+(since any other application can invoke the dbus calls even in an
+inactive session), and requires us to maintain `libpam-foreground`
+which never got any upstream adoption, and the respective patches in
+g-p-m and g-v-m. We would even need to patch `nm-applet` to do the
+same, since network-manager has the same problem. Thus:
+
+* Drop libpam-foreground.
+* Drop our related patches in g-v-m and g-p-m.
+* Restrict the power/mount/network hal dbus functions to only be
+ allowed to the currently active session (which is then enforced by
+ hal through ConsoleKit).
+
+==== gnome-mount ====
+
+In Gutsy, gnome-mount carried a large patch to check if the mount
+operation failed due to insufficient privileges (which happened when
+attempting to mount an internal fixed disk as normal user), and call
+itself through gksu with appropriate arguments in that case. Since
+upstream supports PK integration, we use that in Hardy instead:
+
+* Drop the gksu patch.
+* Use the upstream code to acquire the mount privilege through PK.
+
+==== Security considerations ====
+
+Once you compromise the user account of an administrator with a Trojan
+horse, then there are many ways to extend that to other users and
+root. The easiest way is to just produce a dialog with a reasonable
+(bogus) reason and ask for the password. This will probably work with
+the vast majority of users, and it is principally hard to avoid, thus
+we do not cover this interactive case here.
+
+The more interesting side of this is avoiding ways to steal the
+password or privileges in a way that does not leave any traces, which
+is why this deserves some deeper analysis:
+
+===== Weaknesses when using gksu: =====
+
+* Administrative applications run with root privileges and thus have
+ a strong security boundary to user session processes; the latter
+ cannot spy into the application's memory, `ptrace()` it, etc.
+
+* Since we use sudo TTY tickets for usability reasons, any user
+ application can `ptrace()` gnome-session or the invoking `bash` (if
+ the app was started through sudo in a Terminal) and execute sudo
+ commands without the need for a password.
+
+* gksu has several implementation bugs and design flaws:
+** It does not `mlock()` the password in memory, and even carelessly
+  copies it around several times.
+** It provides a command line option `--message` which completely
+  replaces the text in the dialog, so that you cannot rely on it
+  displaying the actual command which will be executed. In other
+  words, Trojans do not even need to fake the user interface, they can
+  just use it as it is and set a plausible message.
+** It does not protect itself from being `ptrace()`d, so any user
+  process can read its memory to steal the password.
+** It is not installed with any sgid/suid bits and thus integrity
+  checks, so that you can use any other gksu-like frontend in
+  arbitrary paths.
+
+* Target applications run with full root privileges, including the
+ entire UI, which is much more than necessary. Most applications only
+ need a particular bit of administrative functionality.
+
+To mitigate these, `gksu` would need a major design and implementation
+overhaul. In the past we made an explicit design decision to keep TTY
+tickets for usability reasons, so this is not going to change.
+
+===== Weaknesses when using PolicyKit: =====
+
+* Applications which call administrative dbus function calls run as
+ normal user session programs and thus have no security boundary
+ towards other processes. This means that any other user process can
+ trivially `ptrace()` them and use their current PolicyKit privileges.
+
+* `/usr/lib/policykit-gnome/polkit-gnome-manager` (the Gnome UI that asks
+ for the password) also runs with normal user privileges, and thus is
+ subject to `ptrace()` attacks and password stealing.
+
+Contrary to gksu, there are no TTY tickets. The PolicyKit daemon
+assigns privileges based on the PID and executable name (to defend
+against PID reuse/wrapping). Also, the application only gets one
+particular privilege instead of full root powers.
+
+To mitigate above two weaknesses, polkit-gnome-manager and
+applications which use PK should defend themselves against `ptrace()`.
+
+Thus using PK generally provides slightly better proactive security
+than gksudo (notwithstanding the fact that Trojans can do whatever
+they want with just a tad of social engineering anyway, see above).
+
+=== Implementation ===
+
+==== Rollout ====
+
+* <nowiki>[[https://wiki.ubuntu.com/MainInclusionReportPolicyKit|Main inclusion report]]</nowiki> 
+ has been written and approved.
+* Administration group is configured in
+ `/etc/PolicyKit/PolicyKit.conf` by setting
+
+ <code><define_admin_auth group="admin"/></code>
+
+==== ptrace() protection ====
+
+The easiest way to achieve this at runtime is to do
+`prctl(SET_DUMPABLE, 0)`. After that, other processes like strace or
+gdb cannot attach to this process any more and grab the password from
+memory.
+
+This is by far not reliable: You can attach `gdb` to the process
+before it reaches the `prctl()`, and either just stay connected or
+patch it out. More robust methods would be:
+
+* Mark the binary in a way that it is started as non-dumpable right
+ from the beginning, by setting an ELF header flag or AppArmor rule.
+ However, a local trojan could just copy the binary to somewhere
+ else, patch it out, and run it from there.
+
+* Install the application as 'setgid ptrace', check that it is
+ setgid, and drop the additional privilege right at program start.
+ However, the same attack from above (copy, patch out, run copy) still
+ works. In addition, this would require very intrusive packaging
+ changes, and look pretty confusing.
+
+A local trojan can always spoof credible gksu/PK dialogs itself, so
+this is only a mild stop-gap measure anyway and thus does not warrant
+intrusive hacks. Solving this problem properly would involve a
+complete MAC lockdown of desktops, which we do not want to do at least
+right now for usability reasons.
+
+Thus we go with the `prctl()` approach.
+
+For Hardy, this affects many more application than just the ones using
+PolicyKit: gksu, ssh, gnupg, gnome-screensaver, and others which store
+passwords into their memory.
+
+==== Migration ====
+
+A somewhat delicate point is the definition of an 'administrator'.  So
+far the definitive place in Ubuntu was `/etc/sudoers`, but PolicyKit
+is not able to parse this and decide about who is an administrator.
+Also, `sudoers` can be much more fine-grained than just assigning the
+`ALL` privilege to an user, but this configuration does not map at all
+to PK privileges (which are abstract and arbitrary concepts like
+"mount a fixed internal disk" or "suspend the machine" and not tied to
+executables).
+
+The default Ubuntu setup is to grant full sudo privileges to members
+in `admin`, which maps well to the change outlined above.
+
+=== Test/Demo Plan ===
+
+ 1. Call System → Administration → Users and Groups. You immediately get a read-only view of the current users and groups without being asked for your password immediately. Press "Unlock", you'll get a dialog for entering your password for authentication. After that you can change settings.
+
+ 1. The same authentication dialog should also appear if you try to mount an internal fixed hard disk partition in the computer place or the drivemount applet.
+
+----
+CategorySpec

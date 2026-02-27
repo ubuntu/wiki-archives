@@ -1,0 +1,160 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+
+* '''Launchpad Entry''': https://launchpad.net/distros/ubuntu/+spec/sane-installer-keyboard
+* '''Created''':  by ColinWatson
+* '''Contributors''': ColinWatson, TollefFogHeen
+* '''Packages affected''': kbd-chooser, ubiquity, oem-config, console-tools, console-data, console-setup, keymapper, cdebconf-keystep
+
+=== Summary ===
+
+Get rid of the console/X keymap confusion in our installers, and the various problems it causes.
+
+=== Rationale ===
+
+Currently, we configure the keyboard on installation by selecting a console keymap (either from a list or by asking the user to press some keys), and then having `xserver-xorg` automatically generating an X keymap from that later on. This sort of works, but is fragile and buggy. Furthermore, there are currently many more possibilities for X keymaps than console keymaps, and the live CD installer cannot let you test a console keymap since you're running in X, and therefore it is forced to duplicate keymap generation code from `xserver-xorg`.
+
+Some work has been done by interested Debian developers to revamp keyboard configuration so that we can simply select an X keymap and then generate a console keymap from that on the fly as required, which would be a vast improvement. Investigate the current status of this work, help it along where necessary, and figure out how to tie it into our text-mode and live CD installers.
+
+=== Use cases ===
+
+* Users of keymaps for which nobody has ever bothered to write a console keymap would like to be able to type at the console as well as at X. (Particularly common on Mac keyboards.)
+
+* Colin would like to burn his reimplementation of bits of `xserver-xorg.config` in Ubiquity.
+
+=== Scope ===
+
+Anything to do with how the installer configures the console and X keymaps.
+
+=== Survey of existing tools ===
+
+==== Core console utilities ====
+
+Debian is apparently switching from `console-tools` back to kbd at present. Since console keyboard tool maintenance has historically been spotty and you take what you can get, we should investigate and probably follow whatever happens here if it comes before Edgy's upstream version freeze.  `console-setup` needs either `kbd` or `console-tools`. A reimplementation might not, but of course it would then need to recreate the infrastructure.
+
+==== Ubuntu-specific utilities ====
+
+Several releases ago, we implemented a "press keys to discover your keymap" mode in the installer. This consists of two components:
+
+* `keymapper` builds a decision tree from all existing keymaps, and provides an interpreter for that decision tree that requests the user to press one of a group of keys; the answer to each request prunes the decision tree until only one possible keymap remains.
+
+* `cdebconf-keystep` is a plugin for the installer's debconf frontend that provides a newt interface to `keymapper`.
+
+These utilities are currently only used for console keymaps, although they do include some X keymap support.
+
+==== New console keymap utilities ====
+
+`console-setup` (see <nowiki>[[#links|Useful links]]</nowiki> below) consists, among other things, of a console font infrastructure (modernised to get rid of duplicate fonts where not needed; console fonts have a maximum of 512 glyphs so e.g. all ISO-8859-* fonts can be consolidated) and a `ckbcomp` utility which works roughly like `setxkbmap` but compiles to loadkeys format. There are other support utilities too. The utilities are written in Perl, which means that they cannot be used directly in d-i for `kbd-chooser`.
+
+==== Size constraints ====
+
+Size comparison of all current console keymaps, all current X keymaps, and all current X keymaps precompiled to console keymaps:
+
+.tar.gz of console keymaps: 260684 bytes
+
+.tar.gz of X keymaps: 291589 bytes (or 247210 bytes with only keycodes, rules, symbols)
+
+.tar.gz of X keymaps precompiled to console keymaps: 1168124 bytes
+
+It's obvious that `ckbcomp` makes no attempt to optimise for size; typical entries in its output have 64 entries per keycode, representing all possible combinations of modifiers. This could be optimised. That said, we would have to include all xkb data, whereas it's possible to drop large chunks of console keymap data depending on the architecture.
+
+=== Design ===
+
+At present, we seem to have a choice between the ideal solution and something we can implement now.
+
+Right now, `ckbcomp` implements its own XKB rules parsing in Perl. This is obviously not ideal, and it would be much better if it were using an XKB parsing library common with X, so that for example if new keycode symbolic names are added to X then they only need to be implemented in one place. Thus, we would like to write such a library and push it upstream so that X uses it (nothing sensibly reusable exists at present).
+
+On the other hand, `ckbcomp` has the advantage of working already, and by comparison with the existing situation in Dapper it doesn't make the quantity of duplication any worse (it moves duplication from new keymaps to new symbols, and the latter are much less frequent). It makes sense to use this to precompile console keymaps in the first instance and switch to parsing XKB on the fly once an appropriate library is available.
+
+This leads to the following pair of parallel implementation plans. We will definitely execute the first to ensure that we get at least something workable, and go as far along the second path as we can.
+
+=== Implementation ===
+
+==== Precompilation ====
+
+Teach `console-setup` to create reduced keymaps from XKB data, separating out basic keymaps from keymaps representing each Xkb``Options possibility. According to the `console-setup` author, such keymap fragments can be concatenated to produce complete working keymaps. '''[done upstream]'''
+
+Construct `console-keymaps-*` udebs from `console-setup`. '''[done upstream, console-setup-*-ekmap]'''
+
+Turn `console-setup`'s config script (which is in shell, so suitable for use in the installer) into the core of a `kbd-chooser` replacement, and add any other pieces which are needed, such as `setupcon`. `console-setup`'s config script sets various `console-setup/*` debconf questions, which can eventually replace the old `debian-installer/keymap`. '''[done upstream]'''
+
+Teach `keymapper` and `cdebconf-keystep` to be able to select new-style keymaps. Since they can already mostly handle X keymaps, this should be relatively straightforward (i.e. a matter of iterative debugging rather than writing lots of new code). '''[done]'''
+
+Make sure translations (from `xkeyboard-config`) are available for the X keymap models, layouts, and variants as far as possible.
+
+Ensure that the new debconf questions are copied to the installed system by `pkgsel` so that `xserver-xorg.postinst` can use them. '''[done, actually in a console-setup post-base-installer hook]'''
+
+Adapt anything in the installer which uses `debian-installer/keymap` to be able to use the new questions if available.
+
+Modify `xserver-xorg.postinst` to use these new questions if available instead of the lookup table based on `debian-installer/keymap`; eventually, that lookup table can be removed. '''[done]'''
+
+Modify `ubiquity` to use the new console keymaps, and remove the mapping to X keymaps, since `console-setup` will do that now. '''[done]'''
+
+Modify `oem-config` to use the new console keymaps. '''[done]'''
+
+Replace `kbd-chooser` with `console-setup-udeb` in the d-i initrd once everything works without it, and drop `console-keymaps-*` udebs from `console-data`. '''[done]'''
+
+Upstream (Anton) is willing to implement at least some parts of this. We expect that we'll have to deal with `keymapper` and `cdebconf-keystep` ourselves, and may want to get involved in large chunks of the installer integration.
+
+==== Additional console-setup changes ====
+
+Some changes are required to make `console-setup` work as smoothly as possible with X configuration. We will:
+
+* Modify `console-setup` to be able to read the current X configuration from `/etc/X11/xorg.conf` if its own keyboard layout configuration is not present. '''[done in console-setup.config as part of the upgrade path]'''
+* Remove `XKB*` variables from `/etc/default/console-setup` by default. (However, to cope with the server install case where X isn't installed, they still need to be written to a fallback configuration file that's used if `/etc/X11/xorg.conf` is missing.) '''[on reflection I'm not so keen on this idea, and haven't done it (yet)]'''
+
+=== Future Work ===
+
+==== Using XKB rules on the fly ====
+
+Write a library to parse XKB rules, such that it can replace the existing code in X to do this.
+
+Port `ckbcomp` to use this library, or `libxkbfile`.
+
+Teach `ckbcomp` to be able to tell the kernel to set the console keymap directly, rather than having to output data for `loadkeys`.
+
+If size comparisons between precompiled console keymaps and XKB data plus libraries are favourable, then change `console-setup-udeb` to work directly in terms of X keymaps (i.e. use `ckbcomp` or a similar from-scratch tool on the fly rather than concatenating precompiled keymap fragments), and simply ship XKB data in appropriate udebs instead of precompiled console keymaps.
+
+==== Data preservation and migration ====
+
+We need to ensure that `console-setup` uses the keymap configured in `console-tools` by default.
+
+Once `console-setup` is working, we need to make `console-tools` stop doing anything.
+
+=== BoF agenda and discussion ===
+
+* Should we change `xserver-xorg`'s debconf configuration scripts to offer keyboard choices in a similar way to `console-setup` (i.e. using select lists rather than requiring users to type in keyboard names)?
+** This is unfortunately difficult because the question is asked from `xserver-xorg.config`, dependencies are not available at that point, and XKB configuration is in a totally different source package. It would be nice at some point, though (perhaps by moving the debconf questions to a different package).
+* DanielStone says that `/etc/X11/xorg.conf.d` has been implemented upstream. Backporting this would make it possible to split out the X keymap question to `xkeyboard-config` (which would also allow resolving the keyboard choice presentation issue above) and write out a separate file containing just the X keyboard configuration; `console-setup` could then be pointed at this without the need for a fallback configuration file. If backporting this change is sane, then we will move towards that.
+* Can we do anything sensible with keyboard configuration done in GNOME and KDE? Ideally, we would arrange for configuration there to set the console keymap on a per-user basis; this can be done by writing `~/.console-setup` and running `setupcon` when the user logs in at the console.
+** According to `loadkeys(8)`, the keymap translation table is common to all virtual consoles, so at this time per-user console keymaps are not possible, and it makes more sense for the console keymap to follow the system-wide X keymap.
+* What's wrong with `libxkbfile`, apart from linking to `libX11`?
+** `libxkbfile` parses ''compiled'' X keymap files, not the raw XKB data; you need to run `xkbcomp` first to compile the keymaps, and the XKB parser lives there rather than in a library.
+
+=== Notes from console-setup author ===
+
+ColinWatson sent a mail to Anton pointing to this specification and asking for comments. Paraphrasing, he made the following points:
+
+* It's possible to generate smaller console keymaps, and he will do so.
+* It's not possible to have console keymaps for all possible layouts because there are too many of them, so `kbd-chooser` and `console-keymaps-tree` cannot be used with `console-setup`. However, it's possible to create keymaps corresponding to Xkb``Options and concatenate this to basic keymaps as demonstrated in `console-cyrillic`, and use this approach in the installer.
+* console-setup's config script can be used in the `kbd-chooser` replacement.
+* Translations for keyboard models, layouts, and variants are present in `xkeyboard-config` upstream.
+
+These comments are now incorporated above, but are retained for reference.
+
+=== Useful links ===
+
+* http://lists.alioth.debian.org/pipermail/pkg-kbd-devel/2005-October/000013.html
+* svn://svn.debian.org/svn/pkg-kbd/people/zinoviev/console-setup/
+** console-setup has been uploaded to Debian unstable and is thus now in Edgy.
+
+----
+CategorySpec

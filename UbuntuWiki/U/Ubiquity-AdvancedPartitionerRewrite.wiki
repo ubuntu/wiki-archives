@@ -1,0 +1,139 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+
+* '''Launchpad Entry''': UbuntuSpec:ubiquity-advanced-partitioner
+* '''Created''':  by ColinWatson
+* '''Contributors''': ColinWatson, JeffWaugh, BradBollenbach, MattWilson, EllenReitmayr, AdamConrad, JamesTroup
+* '''Packages affected''': ubiquity, partman-*
+
+=== Summary ===
+
+Rewrite Ubiquity's advanced partitioner, concentrating on usability and commonality of code.
+
+=== Rationale ===
+
+The use of gparted/qtparted in Dapper's live CD installer (Ubiquity) was expedient in terms of developer time, but it wasn't the long-term right answer. Using an external partition editor has many inherent problems, such as complex communication requirements with the rest of the installer, UI inconsistency between frontends, and behavioural inconsistency with the text-based installer and with autopartitioning. Furthermore, both gparted and qtparted are complex independently-designed C++ programs which require complicated patches to work in both standalone and installer mode; updating them has become a risky and time-consuming business, and fixing bugs can require investigating the design of both programs from the ground up.
+
+To replace this, we will write a simple Python frontend to partman using ubiquity's standard debconffilter framework, with relatively small PyGTK/PyQt shims. The UI will be designed from scratch with an eye to usability, and will be sufficiently similar between the GTK and KDE frontends to offer familiarity.
+
+Observation of bug mail and other user requests indicates that a very wide range of both existing and desired partitioning setups are required by users of Ubiquity's advanced partitioner, with multiple disks, many (well over 10) partitions per disk, the full range of supported partition types, etc.; it is necessary to support these to at least the approximate level of functionality provided by the current external partition editors. LVM and RAID are in use by some users, and it is necessary at least to have a visual design which will be able to accommodate this in the future, although it is probably not necessary to make it possible to create such setups for Edgy.
+
+A quick screenshot survey of some other major distributions' advanced partitioners (please don't get offended if I've left one out!):
+
+* <nowiki>[[http://shots.osdir.com/slideshows/588/9.gif|Gentoo 2006.0]]</nowiki>
+* Mandriva 2006: <nowiki>[[http://www.howtoforge.com/images/perfect_setup_mandriva_2006/6.jpg|1]]</nowiki> <nowiki>[[http://www.howtoforge.com/images/perfect_setup_mandriva_2006/7.jpg|2]]</nowiki> <nowiki>[[http://www.howtoforge.com/images/perfect_setup_mandriva_2006/8.jpg|3]]</nowiki> <nowiki>[[http://www.howtoforge.com/images/perfect_setup_mandriva_2006/9.jpg|4]]</nowiki> <nowiki>[[http://www.howtoforge.com/images/perfect_setup_mandriva_2006/10.jpg|5]]</nowiki> <nowiki>[[http://www.howtoforge.com/images/perfect_setup_mandriva_2006/11.jpg|6]]</nowiki>
+* <nowiki>[[http://shots.osdir.com/slideshows/302/9.gif|RHEL 4]]</nowiki>
+* Su``SE 10.1: <nowiki>[[http://www.howtoforge.com/images/perfect_setup_suse10.1/13.png|1]]</nowiki> <nowiki>[[http://www.howtoforge.com/images/perfect_setup_suse10.1/14.png|2]]</nowiki> <nowiki>[[http://www.howtoforge.com/images/perfect_setup_suse10.1/15.png|3]]</nowiki> <nowiki>[[http://www.howtoforge.com/images/perfect_setup_suse10.1/16.png|4]]</nowiki> <nowiki>[[http://www.howtoforge.com/images/perfect_setup_suse10.1/17.png|5]]</nowiki> <nowiki>[[http://www.howtoforge.com/images/perfect_setup_suse10.1/18.png|6]]</nowiki>
+* <nowiki>[[http://www.kenstone.net/fcp_homepage/partitioning_tiger.html|Mac OS X 10.4]]</nowiki>  
+* <nowiki>[[http://www.softpedia.com/progScreenshots/Partition-Magic-Screenshot-2118.html|Partition Magic]]</nowiki>
+
+The coloured graphical view of the disk presented by Gentoo and Mandriva (and by RHEL without colours) is a useful visual cue. I don't think it's wise to rely on it entirely as Gentoo appears to; that has obvious accessibility problems and doesn't present much in the way of detailed information up-front. The RHEL display is visually plainer and in particular makes no use of colour, but it strikes a reasonable balance between visual cues and presentation of information up-front. Su``SE's detailed view crams in lots of information without looking too cluttered, which I like. We should be able to borrow ideas from all of these.
+
+=== Use cases ===
+
+* Judith has been using Unix for some time, and wants to install Ubuntu using a custom partition layout with separate /, /usr, and /var filesystems. She wants reasonably fine control over the sizes of these partitions, and wants to choose which filesystems to use for each.
+
+* Eugene has a number of different operating systems installed for experimentation, and wants to add Kubuntu to the list. To make room, he will resize one of his existing partitions and delete another.
+
+* Chris has been trying out both Ubuntu and Kubuntu, and is confused by the way the advanced partitioners are so different in each. He would like to be able to transfer his experience from one to the other.
+
+* James has a system with two hard drives that mirror each other using RAID1, to reduce the risk of data loss from drive failures; the hard drives are both much larger than he needs right now, so he uses LVM on these so that he can extend filesystems easily without having to set up the partition table perfectly first time. He would like to use Ubiquity to install Ubuntu on this system. (edgy+1)
+
+=== Scope ===
+
+A successful implementation will provide a working and reliable advanced partitioner for both Ubiquity's GTK and KDE frontends that behaves similarly to that of the text-based installer but has a more attractive and better-designed UI, properly integrated into Ubiquity. LVM and RAID functionality is not required in a first iteration, but may be added later if time permits.
+
+We draw the distinction between an automatic partitioner and an advanced partitioner. An automatic partitioner consists of simple recipes for certain very common cases, and offers little or no configurability beyond perhaps single simple variables. An advanced partitioner offers direct control of all or most important items in the partition table, although it may use whatever presentation seems most effective.
+
+=== Design ===
+
+`partman`, the partitioner used in the text-based installer, is a debconf application whose main control flow features a basic UI revolving around a select widget with one line per partition (<nowiki>[[http://shots.osdir.com/slideshows/658/13.gif|screenshot]]</nowiki>). On selecting each partition, a submenu of information and operations that can be applied to that partition is presented, including method (use a filesystem, don't use, swap, other specialised uses), flags (e.g. boot), create (when selecting free space), resize, delete, and others. Some of these operations cause further prompts to be presented, while others present the submenu anew with updated information and perhaps different operations.
+
+partman's backend has been polished by use in one Debian and three Ubuntu releases, and while it certainly still has bugs they are generally relatively minor. partman's UI, on the other hand, while reasonably effective as far as it goes, is basic and can be confusing. Much of the confusion arises from the fact that it is not possible to cram all the available useful information into a single screen of text, and from limitations in `cdebconf` and its `newt` user interface that require partman to present select lists where in some cases buttons or other widgets would be more appropriate. Fortunately, these limitations do not apply to a graphical interface, and we already have the technology required to transform debconf protocol requests into a pretty good graphical user interface.
+
+==== Driving partman ====
+
+Any graphical user interface to partman is likely to require presenting information from the partition submenus up-front. As such, the Ubiquity partman component will on occasion (certainly on startup) need to navigate internally through all the available partition submenus and cache information about all of them; this can easily be done with the aid of a state machine. When the user performs an action in the user interface, the partman component will navigate to the proper partition submenu and select the requested action. When partman's `update.d` scripts are called for a particular partition, as happens following certain operations, the cache of information for that partition will be invalidated, and the partman component will need to reload it as soon as possible; some operations (such as deleting a partition) will update all partitions and so the cache will need to be reloaded from scratch.
+
+While cache updates will take a little time to complete, the author expects that this can be optimised at need, and that the benefits of caching will render update times not generally a problem.
+
+==== Resizing constraints ====
+
+(This section is primarily informational, included because of the effect of these real-world constraints on any user interface design.)
+
+`partman` keys its database of partition information off the start and end points of the partition segment. As a direct result of this, resizing operations must be applied immediately, because the backend cannot track changes that include a resize operation. This also means that choosing to resize a partition in the user interface cannot be undone. This limitation may be lifted in the future, although this would require considerable care.
+
+The start of a partition cannot easily be moved; doing so requires shuffling all the data and metadata around on the disk which is inherently more dangerous than resizing, and requires considerable care in order to ensure that a power failure in the middle of the operation does not destroy the filesystem. A few partition types are exempt from this (for instance, swap partitions without a hibernation signature, or partitions that have not yet been committed to disk), but it seems best to simply skip this for the time being.
+
+`libparted` cannot resize all filesystem types.
+
+Naturally, it is not possible to grow a partition if there is a partition immediately after it.
+
+==== User interface ====
+
+There is a tension between, on the one hand, attractive and clean visual design and easy manipulation, and on the other, accurate presentation of information and fine control. It seems likely that the partitioning screen will need to comprise two major elements in order to achieve this. We recommend a split between a visually attractive list of disks with graphically-oriented controls, and a primarily textual presentation of detailed information about partitions in the disk selected in that disk view with controls that pop up detailed dialog boxes.
+
+The disk view occupies the top part of the page, and looks as follows:
+
+* There is a vertically-arranged sequence of disks, which scrolls vertically if necessary.
+* Each disk is represented by a horizontal bar, which is divided into partitions.
+* Each partition is coloured according to its type (although of course it must not be necessary to be able to distinguish the colours used in order to use this) and includes a small amount of information about the partition table (type and mount point).
+* There is a minimum width for partition segments, to avoid very small partitions being invisible. A tooltip is displayed when hovering over the partition so that small partitions can be narrower than any text that would normally be displayed in it, since horizontal space may be at a premium.
+* Free space on a disk appears similarly to real partitions. It should have some suitably inactive-looking colour, such as grey.
+* The disk view is initially displayed with the first disk and the first partition segment (whether it represents a partition or free space) on that disk selected.
+* Selecting a disk causes an appropriately-coloured background to be drawn around it, and the nearest partition to the click to be selected.
+* Selecting a partition or free space has the following effects:
+** The horizontal bar segment representing the partition or free space is drawn pushed down like a button, and all other segments are drawn pushed up.
+** Contextual buttons appear below the disk within the surrounding coloured background. (The buttons are placed here rather than below the entire disk view to avoid them jumping around as different disks with different available options are selected, and to reduce the amount of mousing around required to operate on a disk. Be careful to disable the click handler until any shrinking of regions representing no-longer-selected disks is complete, to avoid incautious multiple clicks activating unwanted buttons.)
+** If the segment does not represent free space, then a resize grip appears at its right-hand side, provided that the <nowiki>[[#resizing-constraints|resizing constraints]]</nowiki> are satisfied. Dragging this asks for confirmation and if given resizes the partition immediately (see <nowiki>[[#resizing-constraints|above]]</nowiki>). As the start of a partition cannot easily be moved, it should be clear in which directions the resize grip can be dragged. There is no detailed resize control here; that will live in the Edit dialog.
+* For free space segments, a "Create a new partition" contextual button is displayed. Pressing this button pops up a dialog that asks for the new partition size (using a bar with a resize grip), mount point, partition type, and whether the partition is primary or logical. The resize bar operates similarly to the resize interface for partition segments on the disk view; it covers just the selected region of the disk, and is initially 100% full. The mount point selector will be a GTK Combo``Box``Entry (or equivalent) widget that allows either selection from a list of preset mount points or manual entry of a custom mount point.
+* For partition segments, "Edit partition" and "Delete partition" contextual buttons are displayed.
+** Pressing the Edit button pops up a dialog with detailed information on the partition and the facility to modify at least its size (using a bar with a resize grip, as above), mount point, partition type, whether the partition is primary or logical in the case of DOS partition tables, and whether to format the partition in the case of real partitions; this dialog is clearly quite similar to that presented on creation, although the initial values will differ. If the user requests that the partition be resized, the partitioner asks for confirmation and if given resizes the partition immediately (see <nowiki>[[#resizing-constraints|above]]</nowiki>).
+** Pressing the Delete button asks for confirmation and if given deletes the partition.
+* There will be a visual cue to indicate the difference between real partitions and virtual partitions. Real partitions are already on disk, and therefore require formatting if the partition type is changed and cannot have their primary/logical state changed; virtual partitions have not yet been committed to disk, and thus must be formatted and can be changed freely between primary and logical as long as the partition table layout allows it. A locked icon would be inappropriate here as real partitions are not immutable, but some kind of "saved" icon in the partition segment to indicate that it is on disk would be reasonable.
+* Real partition segments will have a "Check file system" contextual button, which runs libparted's check function on that file system.
+* Other contextual buttons may be present; for example LVM and RAID will require further contextual operations. Similarly, right-clicking on a partition segment will present a context menu of operations that can be performed there.
+* A global "Revert" button is displayed below the sequence of disks, which asks for confirmation and if given undoes all changes that have been made to partitions (possibly only since the last resize operation, depending on <nowiki>[[#resizing-constraints|partman limitations]]</nowiki>).
+
+The partition view occupies the bottom part of the page, and looks as follows:
+
+* To avoid having two independently-scrolling panes which represent the same data, the partition view only displays partitions in the disk selected in the disk view above.
+* There is a simple tabular list of partitions on the selected disk which exposes at least device name, mount point, type, whether to format the filesystem, size, start, and end (i.e. pretty much the information exposed by Anaconda); the partition label may be useful too. If horizontal space is short, the start and end positions may be omitted as they can be inferred from sizes.
+* Regions of free space are listed along with other partitions, so that it is straightforward to select them and create a partition in them.
+* Double-clicking the partition opens an edit dialog, which is essentially the same as that presented by editing in the disk view. A right-click context menu may also be offered.
+
+Apart from the possible exception of <nowiki>[[#resizing-constraints|resize operations]]</nowiki>, the interface will include text making it clear that changes will not be committed until the user proceeds past Ubiquity's summary page.
+
+In all cases, adequate keyboard accelerators for buttons will be made available; tab navigation between the disk and partition views and cursor-key navigation within the views is allowed; and other obvious keyboard shortcuts such as left/right cursor-key resizing may be included if time permits.
+
+The implementor should test the result on a 640x480 desktop to ensure that it can reasonably be used there. This will also help users who require large fonts.
+
+==== Data preservation and migration ====
+
+Partitioners involve an inherent risk to data, which must be mitigated as far as possible. Errors raised by partman will generally be presented to the user and may include an option to continue or go back. Steps will be taken to ensure that partman cannot proceed past its confirmation question to commit changes to disk unless the user has positively confirmed the changes.
+
+=== Future plans ===
+
+partman now supports encrypted partitions, which are useful on laptops. If it is straightforward to do so, we should integrate this; it should just require extra entries in the Create and Edit dialogs.
+
+LVM and RAID are not explicitly addressed in this specification, and require improved integration with partman (although LVM integration has recently been improved upstream so this may no longer be a blocker in that case). However, we have attempted to take them into account in this user interface design so that they can be implemented in future. We suggest that the interface provide two broad approaches to assembling composite devices such as LVM volume groups and RAIDs: either control-click on all component devices and select Assemble, or select Assemble with just one device selected and be offered a selection of all possible component devices.
+
+Some people find the container concept from Partition Magic is useful; using it for extended partitions may be overkill, but it may be useful once we start doing LVM and/or RAID.
+
+JamesTroup suggests a "wipe disk" button for each disk so that you don't have to go around deleting all the partitions if you want to blank the disk.
+
+=== Discussion ===
+
+What about users that don't know what a disk is, much less what "partitioning" is supposed to mean? Or is this taken care of at an earlier stage of the installation? Otherwise the screen should atleast contain a brief explanation and a recommended course of action. -- JohnNilsson 
+I think "redhat partitioner ( part of anaconda ) " is more advanced and it has resizing capabilities now. It is also a python program so why aren't we considering porting that to ubiquity.  -- VinodDahiya  * It is vital to use the same back-end partitioning implementation across both d-i and ubiquity, so we have no intention of dropping in a partitioner implementation that can't support both. In practice, that means that it needs to be written for d-i. -- ColinWatson
+
+----
+CategorySpec

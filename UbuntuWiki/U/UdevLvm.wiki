@@ -1,0 +1,84 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+
+''Please check the status of this specification in Launchpad before editing it.  If it is Approved, contact the Assignee or another knowledgeable person before making changes.''
+
+* '''Launchpad entry''': <nowiki>[[https://features.launchpad.net/distros/ubuntu/+spec/udev-lvm|udev-lvm]]</nowiki>
+* '''Packages affected''': udev, lvm2 
+
+=== Summary ===
+
+This specification details how to make udev and LVM play nicely together, in particular ensuring that udev events are issued for LVM volumes and that UUIDs are correctly exported and do not conflict.
+
+=== Rationale ===
+
+LVM is used by system administrators to collect block devices together into Volume Groups and then split them into Logical Volumes which can be readily resized and adjusted within the group without needing complicated work.  In order to support event-based mounting of these filesystems, we need reliable events from the block subsystem and no race conditions.
+
+=== Use cases ===
+
+* Fabio uses a combination of LVM and RAID for his root filesystem, he would like this to continue to be supported.
+
+=== Scope ===
+
+The scope of this specification is limited to the interaction between udev and LVM2; other specifications address similar concerns with device-mapper (on which LVM is based), RAID, etc.
+
+=== Design ===
+
+`vgchange -ay` is the command run to iterate all block devices on the system (filtered by CD-ROM, etc. devices) and combine them into volume groups, and activate logical volumes.  If the necessary components of a group cannot be found, it is not activated.
+
+This can be run directly from a udev rule whenever an LVM block device is added to the system.  `vol_id` can be used to determine whether a block device is an LVM Physical Volume or not.
+
+As LVM builds Logical Volumes using device-mapper, a further block event will be issued when the logical volume has been activated.
+
+There is a race between `vgchange` creating the `/dev/VGNAME/LVNAME` symlinks and udev receiving the device-mapper block event for the device that those should point to.  For this reason, `vgchange` will be instructed not to create these symlinks and instead `vgmknodes` will be called from a udev rule for device-mapper block devices.
+
+When mirroring is involved, it's possible for a logical volume to be mounted even though it's not yet complete.  We will offer the option of forcing a partial volume group mount after a timeout if it has not yet been activated.
+
+As with device-mapper, the Volume Group and Logical Volume name, and thus the device path, consitutes a unique identifier; there is no need for UUID or LABEL support for these block devices. We will continue to ignore them.
+
+=== Implementation ===
+
+* Patch `vgchange` to accept an option to inhibit device symlink creation.
+
+* Add a udev rule to call vgchange when block devices are added:
+  <pre>
+SUBSYSTEM=="block", RUN+="watershed /sbin/vgchange -ay --no-symlinks"
+</pre>
+
+* Add a udev rule to call vgmknodes when device-mapper block devices are added:
+  <pre>
+SUBSYSTEM=="block", KERNEL=="dm-[0-9]*", RUN+="watershed /sbin/vgmknodes"
+</pre>
+
+* Modify the mountroot script to give the option of attempting `vgchange -P` after a timeout.
+
+The `watershed` command used in the rules above is a tool to ensure that `vgchange` is run as many times as are necessary to process the incoming events.  It works by locking a known filename, clearing a state file, and then running the command.  If it cannot lock, it writes to the state file, and exits.  When the command finishes, it checks the state file, and if it exists it loops and runs the command again.
+
+This means that if two events come in hours apart, it is run twice.  If one hundred come in in rapid sequence, it will be run at least twice, but usually not 100 times.
+
+=== Notes from the actual implementation ===
+
+The "race between vgchange creating the /dev/VGNAME/LVNAME symlinks and udev receiving the device-mapper block event" is that the udev rules for processing the dm device for the lv might run before the symlinks are created.
+
+In fact, this is addressed as follows: the new rule for running vgchange as a result new block devices will apply both to the pv device and to the lv dm device (set up by vgchange run as a result of the pv vgchange).  In both cases, vgchange will take out the vg lock.  This means that the second vgchange (which does nothing very much) cannot exit until the first has finished (ie, the symlink is present).  Putting the vgchange udev rule earlier in the sequence than other rules is sufficient to avoid the race.
+
+'''Limitation''': The system, as designed above, will not cope at all with device removal events.
+
+ -- IanJackson 8.12.2006
+
+=== Implementation status ===
+
+The changes to lvm2 have been uploaded, but proper testing must wait until integration test: both (i) the udev "watershed" feature and (ii) proper handling of dm devices by higher layers are missing.  The specified change to "the mountroot script" has not yet been made either.
+
+ -- IanJackson 8.12.2006
+
+----
+CategorySpec

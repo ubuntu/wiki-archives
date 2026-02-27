@@ -1,0 +1,113 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+
+* '''Launchpad Entry''': https://launchpad.net/distros/ubuntu/+spec/bug-reporting-tool
+* '''Packages affected''': apport, launchpad-integration
+
+=== Summary ===
+
+We will develop client-side applications which assist the user in reporting a bug to Malone.
+
+=== Rationale ===
+
+A client-side application allows us to automatically collect information from the system which will be helpful in analyzing the bug report.  This will save oodles of time for developers and those involved in bug triage, resulting in more bugs being triaged, more bugs being closed, and a higher quality Ubuntu.
+
+=== Use cases ===
+
+* Bjorn notices that Evolution is misbehaving, so he selects the "Help -> Report a bug" menu entry in that application.
+
+* Brad notices a bug in his desktop, but it isn't obviously the fault of any particular application.  He selects the "System -> Help -> Report a bug" menu entry.
+
+=== Scope ===
+
+This specification describes a GUI client which requires a running X session. It is also desirable to develop a command line tool for reporting bugs on servers or reporting bugs when X is broken, but this should become a separate specification.
+
+=== Design ===
+
+==== Overview ====
+
+In order to not duplicate functionality, we use the existing Malone web UI instead of creating two more desktop UIs (for Gnome and KDE). The local agent will collect debugging information, direct the user to the Malone bug page, and makes sure that the debugging information is sent to Malone and gets attached to the new bug report.
+
+The workflow and data collection is very similar to the current apport crash detection system, so we will extend the apport libraries and frontend to support general bug reporting, and then treat crash reports as a special case of bug report.
+
+==== Frontend workflow ====
+
+# If the frontend is invoked from a running application, it already knows which package contains the bug. If it is called from "System -> Help -> Report a bug", it should ask for the source package name, or "I don't know" (in which case we are going to report a generic distribution bug).
+# Display an indefinite progress bar dialog asking the user to wait while debug data is collected.
+# Submit the debug information to Malone's temporary holding area ("cloakroom") and record the handle for it.
+# Open the `+filebug` page with `extra_info=<token>` URL argument and close the local frontend. The `+filebug` page is opened in a new Firefox (Ubuntu/Xubuntu) or Konqueror (Kubuntu) window. Launchpad will then guide the user through the bug filing process (including the suggestion to check whether the bug was already reported). (Note: HTTP POST is not possible with externally calling firefox with an URL.)
+
+==== Data submission ====
+
+The Launchpad cloakroom will accept a MIME multipart message.  Message parts with Content-Disposition: inline will be included as comments, while those with Content-Disposition: attachment will become attachments.  The first inline message part will be appended to the user's summary of the bug, while subsequent inline message parts will be included as additional comments.
+
+=== Implementation ===
+
+==== Collected debug data ====
+
+apport collects various useful debug data and assembles a MIME/multipart document (instead of the currently-used debcontrol format). Large file attachments like core dumps will use gzip content encoding for compression.
+
+The following information will be always collected:
+
+* `lsb_release -sir` output (inline)
+* `uname -a` output (inline)
+* `groups` output, with all groups >= 1000 removed for privacy reasons (inline)
+
+If the bug is filed against a particular package (when specifying a package when using System -> Help -> Report a bug), this additional information will be collected:
+
+* package name and version (inline)
+* source package name (inline)
+* Dependencies: package names and versions of all dependencies and pre-dependencies (attachment)
+
+If we have an associated process (if we get called from launchpad integration's menu), we additionally collect:
+
+* Executable``Path: /proc/pid/exe contents; if the crashed process is interpreted, this contains the script path instead (inline)
+* Interpreter``Path: /proc/pid/exe contents if the crashed process is interpreted; otherwise this key does not exist (inline)
+* Proc``Environ: A non-sensitive subset of the process' environment (SHELL, PATH, LD_PRELOAD (if nonempty), LD_LIBRARY_PATH (if nonempty), locale information) (attachment)
+* Proc``Cmdline: /proc/pid/cmdline contents (inline)
+
+If the bug report is a crash, additionally collect the following:
+
+* Proc``Status: /proc/pid/status contents (attachment)
+* Proc``Maps: /proc/pid/maps contents (attachment)
+* Core``Dump: gzip compressed core dump (attachment)
+* Stack``Trace: Output of gdb's 'bt full' command (attachment)
+* Thread``Stacktrace: Output of gdb's 'thread apply all bt full' command (attachment)
+* Top 5 lines of `bt` (inline)
+
+==== Code ====
+
+The proposed workflow is similar to the current crash reporting in apport. The following changes are necessary to apport:
+
+* Accept a `--file-bug` mode to `apport-gtk` with an optional package name. (Right now `apport-gtk` does not accept any parameters and just displays pending crash reports).
+* Add a dialog for entering the package name (or choosing "I don't know") to `apport-gtk`, which will be shown if no package was supplied as command line argument.
+* Implement cloakroom submission and missing data collection in `apport_utils`.
+
+==== Data preservation and migration ====
+
+No data migration needs to happen.
+
+If disk space in Launchpad becomes an issue, it is possible to remove large bug attachments like core dumps from closed and duplicate bug reports. Data in bug comments should be preserved forever.
+
+=== Testing ===
+
+Using the GUI:
+
+* Open `gedit`. It's help menu should have a ''Report a bug'' entry. Clicking that should bring up two progress dialogs ("collecting info" and "uploading report") and open your default browser with an URL like `https://launchpad.net/ubuntu/+source/gedit/+filebug/hWh3sQqXxg6NuqYNxrPZpQXFnDw`, i. e. the gedit "file bug" Malone page with a ticket number appended.
+* ''System'' -> ''Report a problem'' should file a generic distro bug, i. e. open an URL like `https://launchpad.net/ubuntu/+filebug/hAib3Rn1BiCXff2547liNDckYX2`.
+
+Using the `ubuntu-bug` script:
+
+* Running `ubuntu-bug -p bash' files a bug against bash. Similarly to the gedit case, it collects info and opens https://launchpad.net/ubuntu/+source/bash/+filebug/qWj8ycQP8ZrgbeSDt8Fc6QHmnx9.
+* Running `ubuntu-bug` files a distro bug, just like the ''System'' -> ''Report a problem'' case above.
+
+----
+CategorySpec

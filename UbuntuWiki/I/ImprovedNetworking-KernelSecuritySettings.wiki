@@ -1,0 +1,92 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+* '''Launchpad entry''': https://launchpad.net/distros/ubuntu/+spec/networking-security-sysctls
+* '''Created''':  by JohnMoser
+* '''Contributors''': JohnMoser
+* '''Packages affected''': 
+
+=== Summary ===
+This implements networking security improvements using the `sysctl` interface in Linux.
+
+=== Rationale ===
+It would be best to supply the most secure environment possible within reasonable constraints.
+
+=== Use cases ===
+No particular use examples.
+
+=== Scope ===
+The scope of this spec includes kernel `sysctl` settings for TCP, UDP, and IP based networking.
+
+=== Design ===
+The following `sysctl` settings will be set:
+
+* `net.ipv4.conf.all.rp_filter` = `1`.  Checks our routing table against the source address of incoming packets to make sure that they're coming from the interface our routing table says that address is on.  Note that this needs to be easily disabled; if some form of advanced routing or policy routing intends traffic from a host to come in one interface and traffic to that host to leave out a different interface, then legitimate packets will be dropped.
+* `net.ipv4.conf.all.accept_source_route` = `0`.  Generally bad, may give a way to route a packet through a firewall to an unreachable IP by specifying that IP in the route.
+* `net.ipv4.tcp_rfc1337` = `1`.  Implements RFC 1337 fix F1 to counteract hazards H1, H2, and H3.  This accounts for all hazards discussed in RFC 1337.
+* `net.ipv4.tcp_syncookies` = `1`.  Implements TCP Syncookies.  When the connection queue is filled, we drop back to this; we lose TCP extensions as a trade-off for any connections made as Syncookies, but we would otherwise not be making said connections at all so this is a net gain.
+* `net.ipv4.icmp_echo_ignore_broadcasts` = `1`.  Ignores broadcast pings, reducing the damage of SMURF attacks.
+* `icmp_ignore_bogus_error_responses` = `1`.  Some routers ignore RFC 1122 and send junk error responses that get logged.  It may be possible to trigger this logging by spoofing; this would lead to filling up the hard disk with junk logs, causing a denial of service.
+* `net.ipv4.icmp_ratelimit` = `20`.  Default value is `100`; we relax this to limit it to 5 per second.
+* `net.ipv4.icmp_ratemask` = `88089`.  Default value is `6168`; we set a few ICMP masks to be rate limited:
+** `0`:  ICMP Echo Reply
+** `3`:  ICMP Destination Unreachable (default)
+** `4`:  ICMP Source Quench (default)
+** `11`: ICMP Time Exceeded (default)
+** `12`: ICMP Parameter Problem (default)
+** `14`: ICMP Timestamp Reply
+** `16`: ICMP Information Reply
+
+The following `sysctl` settings are default at the time of this writing.  We intend that they stay this way.
+
+* `net.ipv4.conf.all.secure_redirects` = `1`.  Prevents hijacking of routing path by only allowing redirects from gateways known in our routing table.
+* `net.ipv4.conf.all.shared_media` = `1`.  Indicates that the media is shared with different subnets; importantly, if it's off it overrides `secure_redirects` and turns it off as well.
+
+The following are omitted:
+
+* `net.ipv4.tcp_window_scaling` = `0`.  TCP Window Scaling makes the TCP window longer; this makes TCP RST attacks a lot easier because you really only have to get a packet in with a sequence number that should appear before the next ACK for it to get accepted.  For our purposes we typically don't care; we would be limited to sending 64K of data and then ''stopping and waiting'' for an ACK if we didn't use this.  Our risk is a denial of service being made easier; and the DoS affects exactly one connection (source/dest host and source/dest port set) at a time.
+* `net.ipv4.conf.all.accept_redirects` = `0`.  Redirects let one machine tell another machine to route traffic through a node other than what's in its routing table; this is a bad idea and `secure_redirects` is likely spoofable.  Redirects are needed if you have networks where a router is plugged into a switch that goes to a network segment; and another router is plugged into that switch instead of directly into another port on the first router.  This type of bad design already adds excess load on the affected network segment's router port; disabling redirects adds even more.
+
+=== Implementation ===
+All of these settings can be implemented in `/etc/sysctl.conf`.
+
+A graphical interface to adjust some of these settings should be created, eventually.
+
+==== Code ====
+Any graphical control program would need to be coded.
+
+==== Data preservation and migration ====
+None.
+
+=== Unresolved issues ===
+We need documentation for this; it is imperative that certain features be easy to discover because they may ''break'' extraordinary and genuinely uncommon networking configurations.  It may be useful to have general security documentation, a la <nowiki>[[HardenedUbuntu/Doc]]</nowiki>; the purpose of such documentation would be to have a specific "Security Manual" that is light-weight but that "everybody should read," and could expose such.  (minimalism is the key to making people RTFM) --JohnMoser
+
+There may be other security improvements.  I'm the only one that's looked so far; this should be fixed.  I have not considered IPv6; although there seems to be nothing useful in the `sysctl` area. --JohnMoser
+
+Regarding the `shared_media` setting. The <nowiki>[[http://git.kernel.org/?p=linux/kernel/git/stable/linux-2.6.24.y.git;a=blob;f=Documentation/networking/ip-sysctl.txt;h=6f7872ba1def0e0e8af4bc61694e75466239e44a;hb=HEAD#l626|kernel docs]]</nowiki> read:
+
+    "''shared_media - BOOLEAN''
+    Send(router) or accept(host) RFC1620 shared media redirects.
+    Overrides ip_secure_redirects.
+    shared_media for the interface will be enabled if at least one of
+    conf/{all,interface}/shared_media is set to TRUE,
+    it will be disabled otherwise
+    default TRUE"
+
+Based on this and on the clarifications in different HOWTOs, it looks like the redirects are accepted when `shared_media` is set to 1, and are disregarded when it is set to 0. So to honor `secure_redirects` and to prevent abuse we should set `shared_media` to 0, not to 1. Am I missing something? --AlexanderKonovalenko
+
+=== BoF agenda and discussion ===
+
+=== References ===
+* <nowiki>[[http://ipsysctl-tutorial.frozentux.net/ipsysctl-tutorial.html]]</nowiki>
+* <nowiki>[[http://www.iss.net/security_center/advice/Underground/Hacking/Methods/Technical/Source_Routing/default.htm]]</nowiki>
+* <nowiki>[[http://kerneltrap.org/node/3072]]</nowiki>
+----
+CategorySpec

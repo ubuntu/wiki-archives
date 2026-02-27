@@ -1,0 +1,88 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+
+''Please check the status of this specification in Launchpad before editing it.  If it is Approved, contact the Assignee or another knowledgeable person before making changes.''
+
+* '''Launchpad Entry''': UbuntuSpec:ltsp-ssh-xdmcp-localdev
+* '''Packages affected''': ltsp-client, ltsp-server
+
+=== Summary ===
+
+Currently, Local device connections are plumbed via an ssh command channel.  This works fine, until we switch to using XDMCP, when it breaks.  We need to come up with a common command channel that will work in both instances.
+
+=== Rationale ===
+
+XDMCP, while insecure, is much faster than tunelling X over SSH.  For low powered thin clients, it may be desirable to switch to XDMCP as a communications method.  
+
+=== Use Cases ===
+
+* Ollie has just been asked to set up an Edubuntu lab in a developing nation by his boss.  On arriving, he finds that all the machines are Pentium 90's with 64 megs of RAM.  Running the standard LTSP encrypted setup isn't an option, as the clients just don't have enough power.  They work fine as XDMCP, though.
+* Scott wants to do video on his thin client.  He's got a gigabit network, but tunelling over SSH introduces too much latency.  He's not worried about security on his local network.
+
+=== Scope ===
+
+* <code>ltsp-server</code>
+* <code>ltspfs</code>
+
+=== Design ===
+
+* Use an X property on the root window as the communications mechanism, as this will be available to either SSH or XDMCP communications methods.
+
+=== Implementation ===
+
+==== Thin Client ====
+
+* Well defined place for Xorg's <code>.Xauthority</code> file to be written (in /tmp, but not named /tmp/fileKJHDJ)
+** Bind mount <code>/root/.Xauthority</code>
+* Logging in, and staticdev detection handled with:
+
+<pre>
+
+while /bin/true; do
+     FSTAB=$(cat /etc/fstab)
+     while [ ! $(xprop -root -f LTSP_FSTAB 8s -set LTSP_FSTAB "${FSTAB}" > /dev/null) ]; do
+        sleep 2
+     done
+     xblock  # discussed later
+done
+</pre>
+
+* This will wait until the X server is up, then set the X property LTSP_FSTAB on the root window.
+* This property will survive past an LDM or XDMCP login, but after a logout, an xreset is done.  All clients are disconnected, and all properties are cleared.
+* We'll need a small program, called xblock.
+** Does a connect to the X server, sits in empty event loop.
+** Simply exits quietly on X disconnect.
+* <code>add-fstab-entry</code> now simply:
+** updates the /etc/fstab file
+** updates the LTSP_FSTAB xprop (if X isn't up yet, not a problem, fail quietly, and the above bit of code will handle this automatically).
+* eliminate the <code>static-mounter</code> daemon.
+* fix <code>cdpinger</code> to set the xprop.
+
+==== Host Server ====
+
+* Need to create a daemon that is started from <code>/etc/X11/Xsession.d</code>
+* Looks at initial LTSP_FSTAB xprop, mounts anything not already there.
+* Listens for changes in the xproperty during the session.
+* Upon seeing a change, grabs the information needed, and calls an external program to handle the mount or unmount, as necessary.
+* on session exit, cleans up all mounts before exiting.
+
+==== External mounter ====
+
+* References UbuntuSpec:ltspfs-virtual-hal-devices
+* External program will iterate over hal set options, and insert a virtual HAL device.
+* HAL will then handle the plumbing.
+
+=== Implementation Notes ===
+
+* With the exception of the tiny xblock, everything should be able to be handled by shell and python scripting.
+
+----
+CategorySpec

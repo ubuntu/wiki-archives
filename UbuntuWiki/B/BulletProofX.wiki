@@ -1,0 +1,169 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+
+''Please check the status of this specification in Launchpad before editing it.  If it is Approved, contact the Assignee or another knowledgeable person before making changes.''
+
+* '''Launchpad Entry''': UbuntuSpec:bullet-proof-x
+* '''Packages affected''': displayconfig-gtk, gdm, Xorg
+
+See also:
+* <nowiki>[[Xorg7.3Integration]]</nowiki> - Upgrading to Xorg 7.3 and adopting xorg.conf autodetection feature
+* <nowiki>[[DisplayConfigGTK]]</nowiki> - Adopting GUI Xorg configuration tool
+* UnifiedLoginUnlock - Improving login screen consistency and reduce user confusion
+* XorgCtrlAltBackspace - Disabling ctrl-alt-backspace to reduce user confusion
+
+=== Summary ===
+
+This specification describes a new failsafe mode that will be used if X fails to start up.  It will be in a reduced (VESA 800x600/256 or VGA 640x480/16) graphics environment running a single application (displayconfig-gtk) for configuring the graphics devices.
+
+The goal of this specification is to eliminate the need for users to need to run apt-get reconfigure on the commandline.  That approach is confusing and too technical for many users, so moving away from that will solve a key pain point for users.
+
+=== Release Note ===
+
+This is a failsafe mode for X that will launch if the /etc/X11/xorg.conf file does not result in a working graphical environment due to Xorg failing to start.  It can also be invoked manually by specifying 'xforcevesa' via grub's kernel cmdline option, by setting the XORG_FAILSAFE_MODE environment variable to a non-empty string, or by selecting the Failsafe option from the Greeter.
+
+=== Rationale ===
+
+Xorg sometimes fails to launch for some users, typically due to failure to detect hardware properly during installation or when the user has changed monitors or graphics cards.
+
+Currently Ubuntu support has the user re-run dpkg-reconfigure, but this is confusing and too technical for many users, who complain about this.  So the sooner we can move away from requiring that, the better.
+
+=== Use Cases ===
+* Annette occasionally gives presentations at work on an old projector, but X fails to start when the projector is connected to her Ubuntu laptop, leaving her at the command prompt.  Because of this, she has to move her presentation to someone else's non-Ubuntu laptop, but she'd rather be able to use her own.
+* Bob changes his monitor for an older one because his monitor broke. Xorg fails to launch because the monitor fails to work with the frequency configured. Bob want to use the older monitor while his monitor is being repaired.
+* Cynthia installs for the first time and everything is properly detected except that the color depth is too high, thus consuming too much memory and preventing X from starting.
+* Dustin upgrades his graphics adapter and Xorg fails because of the existing configuration for the previous graphics adapter.
+
+=== Assumptions ===
+
+* That most failed-to-detect scenarios involve hardware that supports VESA or VGA modes
+
+=== Design ===
+
+==== GDM Failsafe Server ====
+
+The failsafe mode will be initiated by gdm if it fails to start X, or if an environment variable or command-line option is passed in.  This should also permit forcing vesa mode via the boot parameters.
+
+Failsafe mode runs with administrative permissions since it will likely need to alter the user's xorg.conf.  Because of this, the user will need to authenticate.  However, care must be taken to ensure the user notices that this is an abnormal situation; the authentication request must not be confused with the standard login screen.
+
+In this mode, the current xorg.conf will be ignored; instead a VESA 800x600/256 configuration will be used.  In some (rare) cases, hardware may not support VESA, in which case a VGA 640x480/16 mode will be the fallback, or framebuffer if that won't work either.  These cases will be tracked by means of a blacklist file.
+
+When launched into failsafe mode, a single application will be presented to the user:  gtk-displayconfig.  A window manager will be needed since gtk-displayconfig has some popup dialogs, but even a simple window manager should suffice.  This application will provide several functionalities:
+
+* Welcome screen
+** Explain why we're in failsafe mode
+** Synopsis of how to use gtk-displayconfig to get out of this mode
+** Where to get further information
+** i18n / translatable
+* Skip configuration (Just run X in reduced (VESA) mode)
+   [ ] Never prompt for reconfiguring
+* Specify graphics card, monitor, and driver(s)
+* Select resolution and refresh rate
+* Write out xorg.conf with new changes
+** Use temporarily (just this session)
+** Use as the permanent default
+
+==== KDM Failsafe Server ====
+
+KDM currently does not support a failsafe server as GDM does, so support for this capability on KDM-based distros will be deferred until this has been implemented.  Assuming a design similar to GDM is adopted, the above design can be used here as well.
+
+==== Live CD ====
+
+The above failsafe mode won't be used on the Live CD for Gutsy.  If there is an Xorg startup failure when running the live-cd, then it should directly go to vesa mode without requiring any configuration step.
+
+=== Implementation ===
+
+ 1. Create shell script for gdm to run if the X server crashes
+    /etc/gdm/failsafeXServer
+ 2. In /etc/gdm/gdm.conf indicate this failsafe server
+    FailsafeXServer=/etc/gdm/failsafeXServer
+    AlwaysRestartServer=true  # Maybe, only if GDM isn't forcing a complete X restart
+ 3. Also provide access to the failsafe session via the greeter
+    ShowXtermFailsafeSession=true
+ 4. Configure gdm to also invoke the FailsafeXServer script in any of the following cases:
+*** If the previous X session crashed (i.e., gdm never got the signal back from the X server that it started up).
+*** Environment variable XORG_FAILSAFE_MODE is defined
+*** /proc/cmdline contains option xforcevesa
+*** If the user selects the Failsafe option from the chooser
+ 5. When failsafe mode is activated, check the blacklist for systems we know do not support VESA 800x600/256
+*** Use EDID + PCI IDs as key to lookup (Can get PCI IDs from discover)
+*** If the display does not give EDID info, then use VGA 640x480/16 mode
+*** If a matching entry is found, then use VGA 640x480/16 mode
+ 6. Start up the failsafe X session using their regular user account
+ 7. Launch displayconfig-gtk (gnome) or displayconfig (kde) application, under gksu
+*** Initiate it using an option to let it know we're using it in failsafe mode
+*** Make sure to pass along environment variables for hardware preferences
+*** Provide welcome screen text explaining why the user is in this mode and what they have to do to solve the issue encountered.
+*** Provide a button that allows user to skip configuration and just launch Xorg with the VESA (or VGA) mode.
+*** Provide checkbox "Never prompt for reconfiguring"
+ 8. If user chooses to skip configuration, launch X using the temporary failsafe xorg.conf, one time
+ 9. If the user selects the "Never prompt for reconfiguring" option, then set the following in /etc/gdm/gdm.conf:
+    FailsafeXServer=
+
+=== Test/Demo Plan ===
+
+==== Acceptance Testing ====
+ 1.  Install Failsafe X package for testing
+ 2.  Reboot and use each available mechanism to force failsafe mode
+*** Set environment variable
+*** Option specified in /proc/cmdline
+*** Failsafe mode selected from chooser
+*** Deliberately misconfigured X (mismatched kernel/X drivers, bad resolutions, wrong refresh rates,  invalid options, etc.)
+ 3.  Check that the /etc/X11/xorg.conf file is not being used
+ 4.  Verify screen comes up as 800x600/256
+ 5.  Verify mouse and keyboard work properly and that keyboard layout matches that listed in /etc/X11/xorg.conf
+ 6.  Verify displayconfig-gtk is running
+ 7.  Check that help text and interface is internationalized appropriately
+ 8.  Check if displayconfig-gtk identifies the hardware correctly and selects the correct driver
+     - Especially check restricted drivers, including fglrx and nvidia
+     - Also test when specifying hardware selection preferences using environment variables
+ 9.  Verify the GUI provides the correct listing of resolutions and refresh rates for the selected configuration
+ 10. Verify that the system can drop to lower resolutions such as 640x480.
+ 11. Verify that the system can go to the maximum resolution supported by the hardware
+ 12. Verify that the xorg.conf is written with the options selected through the GUI
+ 13. When writing out the xorg.conf, it must preserve any data that existed beforehand.  Ideally, it must preserve formatting of this data as well, so diffs will show only meaningful lines changed.
+
+==== Fault Handling Testing ====
+Also test the following situations to make sure they're handled appropriately:
+
+* Different language settings
+* Systems with primary and secondary video cards, with display connected to secondary
+* System booted with monitor turned off initially
+* Systems with mis-detected color ranges, which can prevent xorg from loading
+* Test R500 / Radeon X1300 - X1950 hardware - this has had problems with vesa mode in the past, but a patch exists to fix it.  Since this is a common kind of hardware, especially for laptops, we need to ensure this patch is included in Gutsy.
+
+==== Usability Testing ====
+* Check if having to authenticate during failsafe adds too much complexity/confusion for users
+* Check if users with really thrashed up systems (glx drivers, wrong/mismatched restricted drivers in kernel, etc.) are able to get into failsafe mode gracefully and clean up their system satisfactorily. 
+* Check the time required by a novice user to hook up a non-EDID projector, boot into failsafe mode, reconfigure, and launch X with an acceptable resolution.  It should not require more than 5-10 min max.
+* Check that appropriate error messages given if user selects incorrect driver/hardware/resolution combinations
+
+=== Deferred Capabilities ===
+
+* ''What about Kubuntu? Since displayconfig-gtk is a port from KDE, I figure it shouldn't be too hard to support that too. --ColinWatson''
+** A pre-requisite to this is to have a gdm-style trigger for going into failsafe mode.  I checked with the KDM guys at UDS, and they confirmed it lacks this ability, and it didn't sound likely that it would be added in time for Gutsy, so we may need to defer supporting this for now.
+
+* If resolution of the failed X configuration requires specification of xorg.conf Options, the user will still need to manually add these, because gtk-displayconfig does not currently provide a list of available Options to select from.
+** ''Do we think this is widespread? Is it worth specifying that we need to add this to gtk-displayconfig? --ColinWatson''
+** It's probably not common enough to worry about, but when configuring dual-head with the nvidia binary driver on a 64-bit system, I did have to fiddle with some Options.  So I think it's safe to defer this for now, as it doesn't regress us from how things work currently, but it might be a nice-to-have for the future.
+
+=== Suggestions ===
+
+* What about monitors that lie about their capabilities? in such cases the user will just be presented with a 'signal out of range' error, and the X server and GDM are none the wiser. Is there a fallback scenario for that? Since the user cannot see what is going on, there is not a lot they can do, and is highly likely to just reset the machine by power-button or reset button. Perhaps we should detect such an event and present the user with the failsafe X server when a user has not logged on after a reboot and the filesystem has not been unmounted cleanly? I know this seems pretty arbitrary, and it probably is. This is just a brainwave. --HeinPietervanbraam
+** One option could be along the lines of what the Windows bootloader does when it's not able to bring up the GUI: 
+## There would be a certain file, let's call it /var/log/lastX.gdmstartup.
+## When GDM starts, before trying to bring up X, it would remove the file.
+## Later, at the first UI action in GDM, the file would be touched.
+## This would allow a boot-time script to check for the existence of such file. If it does not exist, either X was not correctly displayed (bad sync went undetected, etc) or the computer just rebooted without any login (i.e. power loss). The script would then bring up a curses-based menu offering to enter GUI failsafe mode, console mode, or ignore the error and enter the normal GUI. --Habbit
+
+* There is a tarball available but no details how to do stuff at http://people.ubuntu.com/~bryce/BulletProofX/
+----
+CategorySpec

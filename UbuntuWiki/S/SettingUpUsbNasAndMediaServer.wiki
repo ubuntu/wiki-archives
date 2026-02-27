@@ -1,0 +1,192 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+== Setting up a USB boot NAS and Media Server ==
+
+I lost a HDD a few weeks ago, and after spending several hours recovering backup DVDs I decided it was time for a better way... so I set out to build a NAS with RAID-1 for improved online protection of my important files.  I also figured, that, while I was at it, I would also set the machine up to be a mythtv backend for use as a local dvr and media server.
+
+I was kind of surprised that I couldn't find any complete documents for a similar setup on a recent Ubuntu version, so I decided to write up this description of the steps that worked for me.  
+
+Please note that I'm throwing around a number of commands that have the potential to trash your current Ubuntu install if not used correctly.  If you do not understand what these commands are for, you should read the man pages, and/or ask a knowledgeable person for help before proceeding.  
+
+Standard disclaimer applies, YMMV, you break it you bought it, etc.. 
+
+=== Hardware ===
+
+For the machine described, I'll be using the following hardware:
+
+    PNY Attache USB2.0 2GB Flash Drive
+
+    PNY Optima 1GB 240-Pin DDR2 SDRAM DDR2 533 (PC2 4200) Desktop Memory Model MD1024SD2-533
+
+    4 SAMSUNG HD250HJ 250GB 7200 RPM SATA 3.0Gb/s Hard Drives
+
+    Hauppauge WinTV-PVR 150 MCE 274 PCI Interface Tuner Card
+
+    ECS GF7100PVT-M LGA 775 NVIDIA GeForce 7100 HDMI Micro ATX Intel Motherboard
+ 
+   Intel Celeron 430 Conroe-L 1.8GHz LGA 775 35W Single-Core Processor Model BX80557430
+
+    Athena Power CA-2853B48 Black Steel ATX Mid Tower PC Computer Case ATX 480W PS2 V.2.2 PSU Power Supply 
+
+=== Software ===
+
+I'm using a Ubuntu Hardy Heron machine to build the software system for the new machine.  If you're staring with a windows machine or livecd, you may need to perform some steps slightly differently, but hopefully my basic steps will be of help.
+
+The steps I followed to configure this machine include:
+
+* USB flash disk filesystem setup
+* Base root filesystem install
+* GRUB install
+* tmpfs overlay configuration
+* md (raid) configuration
+* mythtv setup
+
+==== USB flash disk filesystem setup ====
+
+insert the USB drive, Ubuntu will auto-mount the drive.
+find the device ID of the thumb drive using your favorite method,
+
+if you haven't renamed the device, the following should work:
+<pre>
+cat /proc/mounts | grep USB20FD | awk '{print $1}'
+</pre>
+
+You need to unmount the device.
+Assuming your device ID is /dev/sdc1 you can do:
+<pre>
+umount /dev/sdc1
+</pre>
+
+then run:
+<pre>
+sudo fdisk /dev/sdc
+</pre>
+
+Run the following commands in fdisk:
+
+<pre>
+Command (m for help): d
+Selected partition 1
+
+Command (m for help): n
+Command action
+   e   extended
+   p   primary partition (1-4)
+p
+Partition number (1-4): 1
+First cylinder (1-7872, default 1): <cr>
+Using default value 1
+Last cylinder or +size or +sizeM or +sizeK (1-7872, default 7872): <cr>
+Using default value 7872
+
+Command (m for help): a
+Partition number (1-4): 1
+
+Command (m for help): w
+The partition table has been altered!
+
+Calling ioctl() to re-read partition table.
+
+WARNING: Re-reading the partition table failed with error 16: Device or resource busy.
+The kernel still uses the old table.
+The new table will be used at the next reboot.
+Syncing disks.
+</pre>
+
+Now at this point, ubuntu may re-mount the old filesystem; If it does, unmount again:
+<pre>
+sudo umount /dev/sdc1
+</pre>
+
+Now, make the new filesystem:
+<pre>
+sudo mkfs.ext2 /dev/sdc1
+</pre>
+
+...and give the filesystem a label: (this is important for setting up grub correctly later, so don't get too fancy here).
+<pre>
+sudo e2label /dev/sdc1 nas_rootfs
+</pre>
+
+At this point, you should effect a re-read of the device by removing it and re-inserting it.  Ubuntu will now most likely auto-mount the flash drive as /media/nas_rootfs  (the same name you used in the call to e2label).  Unmount it yet again.
+<pre>
+sudo umount /media/nas_rootfs
+</pre>
+
+==== Base root filesystem install ====
+
+Now we need to mount the USB filesystem, but with default mount flags, rather than the flags set by Ubuntu when it auto-mounts the drive.  
+<pre>
+mkdir /mnt/ubuntu
+sudo mount /dev/sdc1 /mnt/ubuntu
+</pre>
+
+You can use debootstrap to install a minimal Hardy system on the USB drive's new filesystem.  First make sure you've got debootstrap:
+<pre>
+sudo apt-get install debootstrap
+</pre>
+
+Now use debootstrap to install the minimal system:
+<pre>
+sudo debootstrap --arch i386 hardy /mnt/ubuntu http://us.archive.ubuntu.com/ubuntu/
+</pre>
+
+Please pick a mirror that's close to you.  If not using i386 based board, pick a different arch (many users may want amd64), I'm targeting a intel celeron so i386 works for me.
+
+the command runs for awhile, grabbing the base packages from your mirror and installing them.  If it finishes successfully you should see:
+<pre>
+I: Base system installed successfully.
+</pre>
+
+Now you're almost ready to chroot to the new system for some additional setup.  Before you do, give the new system a dummy /proc off the current machine:
+<pre>
+sudo mount -t proc /proc ~/nas_fs/root/proc
+sudo mount -t devpts devpts /mnt/ubuntu/dev/pts
+</pre>
+
+Now chroot ( this makes you root on the new flash disk system - more or less )
+<pre>
+sudo LANG="" chroot /mnt/ubuntu /bin/bash
+</pre>
+
+Before grabbing any additional software packages, you should ensure that apt doesn't try to start any daemons from you chroot'd session.  use the following commands to temorarily cripple start-stop-deaemon
+<pre>
+mv /sbin/start-stop-daemon /sbin/start-stop-daemon.REAL
+cp /bin/true /sbin/start-stop-daemon
+</pre>
+
+Next, you may want to kill off bootlogd.  It has a nasty habit of writing to the root filesystem, which we don't really want while we're booting of the read only flash drive filesystem.
+<pre>
+update-rc.d -f bootlogd remove
+</pre>
+
+Now use apt-get to confirm that you can see the repository and your base package is properly configured:
+<pre>
+apt-get update
+apt-get -f install
+apt-get dist-upgrade
+</pre>
+
+==== GRUB install ====
+
+Great! now you just need a kernel, and grub setup and you'll be ready to test-boot the usb drive.
+
+To get a list of available kernel images you can do:
+<pre>
+apt-cache search linux-image*
+</pre>
+
+I used:
+<pre>
+apt-get install linux-image-2.6.24-16-server
+</pre>
+
+Now you'll want to get grub and start setting it up:

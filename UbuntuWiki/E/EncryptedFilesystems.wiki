@@ -1,0 +1,121 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+
+''Please check the status of this specification in Launchpad before editing it.  If it is Approved, contact the Assignee or another knowledgeable person before making changes.''
+
+* '''Launchpad Entry''': UbuntuSpec:encrypted-filesystems
+* '''Packages affected''': partman, ubiquity, cryptsetup
+
+=== Summary ===
+
+The 7.10 Alternate installer introduced the possiblity to
+configure encrypted devices (with cryptsetup/LUKS and dm-crypt) and
+offers a standard partman recipe ("Use entire disk with encryption").
+For Hardy we review the current problems with it and add more use
+cases.
+
+=== Release Note ===
+
+The desktop CD installer can now set up encrypted file systems in all automatic partitioning modes. The alternate installer of Ubuntu 7.10 already supported encryption in "use full disk" and "manual" partitioning modes; 8.04 now also offers encryption when automatically resizing an existing partition or automatically partitioning free space.
+
+In addition to passphrases, encrypted partitions can now be unlocked with a key file placed on a removable device such as an USB stick.
+
+=== Rationale ===
+
+Encrypted hard disks are an important feature especially on laptops. We want to ensure that everyone who is installing Ubuntu can use this feature in an accessible way, and make it as robust as possible.
+
+=== Use Cases ===
+
+ 0. Mark installs Ubuntu 7.10 with only swap and `/home` encrypted. At boot, usplash is terminated, and cryptsetup asks for the passphrase in text mode. After the upgrade to Ubuntu Hardy, the entire booting is done with usplash, and usplash asks for the passphrase for `/home`.
+
+ 0. Marilize gets a new laptop with Windows preinstalled. She wants to keep the Windows installation. When installing Ubuntu with the Desktop CD, she selects the autoresize mode with encryption support and does not have to do any manual partitioning.
+
+ 0. Pitti normally uses a keyfile on an USB stick for booting his laptop and only uses the very long and complicated passphrase as a fallback. When booting, he is asked to insert the USB key or enter the passphrase.
+
+ 0. Reinhard uses separate encrypted swap, `/`, and `/usr` partitions. Installing Ubuntu 7.10 results in an unbootable system, because cryptsetup dynamically links against some libraries in `/usr/lib/`. He installs Hardy and it works out of the box.
+
+ 0. Nick temporarily places the encrypted Ubuntu partition of machine `gentoo` into `macaroni` to do some repairs on it (Both machines were installed with "use entire partition with encryption"). Both encrypted VGs are detected properly automatically, and `macaroni` boots from its own VG instead of the guest one from `gentoo`.
+
+ 0. Uli the user boots a machine with a series of encrypted filesystems that are have the same passphrase.  He enters the passphrase only twice (once when unlocking the root file system, and another time when unlocking the three additional partitions for /home, /usr/, and /var), instead of four times.
+
+ 0. Peter and his employees do not want to remember extremely long passwords. However, to achieve his goal of protecting company assets Peter needs strong encryption. Therefore he uses reasonably long passwords for his encrypted disks in combination with long key-files stored on USB disks (i.e. key file on USB + password = login/boot). In that way Peter reduces the risk of having his data decrypted and also makes the process of securing his data easier.
+
+=== Assumptions ===
+
+These improvements and changes apply to LUKS encrypted partitions, as used by default in Ubuntu 7.10. Raw dm-crypt devices are not supported.
+
+=== Design ===
+
+(items here match the use cases above)
+
+ 0. ("usplash")
+** Similarly to the initramfs hook, the init script should check whether usplash is still running. If so, it reads the passphrase from usplash and passes it to cryptsetup.
+
+ 0. ("ubiquity and autoresize encryption")
+** Combine the current partman-auto recipes for "full disk, encrypted LVM" and "autoresize"/"autopartition free space" to provide alternatives to the latter two with encryption support. This will make these recipes available in both d-i and ubiquity.
+** In ubiquity, the presentation of the recipes should be split into just "full disk"/"autoresize"/"autopartition free space" and a check box "Use encryption".
+** The main reason why ubiquity does not offer LVM and mdadm at the moment is the lack of an user interface for these. It takes too much time to get these written for Hardy, but as a compromise `partman-lvm` and `partman-md` should be added to ubiquity so that the automatic partition modes are available, but no manual partitioning for these modes. This will suffice for the most common use cases for Hardy.
+
+ 0. ("keyfile")
+** Add support for key files on removable devices to `/etc/crypttab`, specified by UUID.
+** At boot, wait until device with key file appears or allow the user to enter a passphrase.
+
+ 0. ("separate /usr")
+** Move the shared libraries of `libgpg-error` and `libgcrypt11` to `/lib/`, so that they are on the root partition. [This is done in Hardy already, and will be fixed in 7.10 in an SRU.]
+
+ 0. ("move disk to other host temporarily")
+** This currently breaks because the LVM VG is always named "ubuntu" by default in Ubuntu 7.10, and thus neither LVM will start due to the sanity checks in `mdadm`. A much better default is to construct the VG name as "ubuntu-''hostname''".
+
+ 0. ("sharing passphrase amongst several partitions")
+** Try the passphrase input from usplash first, and only ask for a new one if that fails.
+** The non-usplash behaviour is not changed for now, since it would require writing a reasonably safe password input method in shell and is not the default.
+** The initramfs hook is not changed. Transfering the password entered there to the init script would require storing the password in a temporary file, which we avoid for security reasons. For the same reason we do not share the password between the two cryptsetup init scripts ("early" (before mdadm/lvm) and "late").
+
+=== Implementation ===
+
+ 0. ("usplash")
+** The code for passphrase input and passing to cryptsetup can be taken from the initramfs hook (`/usr/share/initramfs-tools/scripts/local-top/cryptroot`).
+** Drop the sending of the usplash QUIT command and replace it with a test whether usplash is running.
+** Call cryptsetup with pipelining the password (`--key-file=-`).
+
+ 0. ("ubiquity and autoresize encryption")
+** The design is self-explanatory.
+
+ 0. ("keyfile")
+** Introduce new option `keydev` to crypttab which specifies a device node which will contain the key file (as specified in the third positional argument in crypttab). This should usually be `/dev/disk/by-uuid/...`, but defining tis as a device node instead of a pure UUID allows other use cases, too (such as labels, or even a plain `/dev/sda1`).
+** If a key file device is given, the code which wraps cryptsetup (`/lib/cryptsetup/cryptdisks.functions` and the initramfs script `cryptroot`) does the following:
+** Print "Insert device with the key file or press Enter to give a passphrase..." (with usplash if it is running, otherwise on console)
+** Run a loop which checks for a present device with the specified UUID, or checks whether Enter has been pressed.
+** If the UUID exists, mount it as read-only to a temporary directory, pass the key file to cryptsetup, and unmount it again.
+** If Enter was pressed, call cryptsetup as before without --key-file.
+
+ 0. ("separate /usr")
+** The design is self-explanatory.
+
+ 0. ("move disk to other host temporarily")
+** The design is self-explanatory.
+
+ 0. ("sharing passphrase amongst several partitions")
+** The design is self-explanatory.
+
+Additional code cleanup: The current initramfs `cryptroot` script is very complicated and error-prone, since it tries to set up LVMs, MD devices, etc all by its own. This is a heritage from Debian which does not depend on udev, but Ubuntu does. Thus all the code for device setup should be removed to make the script more robust, maintanable, and avoid the current confusing "Failure to set up LVM" error message on boot.
+
+=== Test/Demo Plan ===
+
+To be done when a beta is available.
+
+=== Outstanding Issues ===
+
+* We need a GUI for key/passphrase management of encrypted partitions. This could possibly be integrated into the nautilus volume/drive properties dialog, or an application for formatting drives/volumes (see outstanding issues in UbuntuSpec:partition-management).
+* For using encrypted removable devices on trusted computers we should offer the possibility of placing key files into `/etc/cryptsetup/keys/`''UUID'' or `~/.config/cryptsetup/keys/`''UUID'' and make hal/gnome-mount use them automatically. These key files should be configured with above GUI.
+
+----
+CategorySpec

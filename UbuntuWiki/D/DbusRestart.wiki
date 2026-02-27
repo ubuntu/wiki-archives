@@ -1,0 +1,83 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+
+* '''Launchpad Entry''': https://launchpad.net/distros/ubuntu/+spec/dbus-restarts
+* '''Created''':  by DanielStone2
+* '''Contributors''': DanielStone2
+* '''Packages affected''': dbus
+
+'''\sh''': {{{ 
+Back to draft status, because I think it needs another BoF, so that you can provide some more implementation details. Actually you should review your use cases, too. It's funny for us, but it should have a serious background for reader from outside the universe.
+}}}
+
+=== Summary ===
+
+Most daemons (including OpenSSH) are restarted in their package's maintainer scripts when new versions are installed.  This has many benefits: when a new version is installed, you know it is running, so you can more easily track security and other bug problems.
+
+However, D-BUS does not allow for this.  When the bus is restarted, all the applications using it fall off and do not reconnect gracefully.  This is partially because app maintainers refuse to because restarting D-BUS is not The Way And The Light, and partially because the library is fundamentally broken in this regard.
+
+Currently the D-BUS library forces an exit() when the bus dies; overriding this does not allow you to gracefully reconnect to the bus, however.  Currently we just avoid restarting D-BUS for this reason, although the network-manager package still restarts the bus.
+
+=== Rationale ===
+
+Being able to restart the D-BUS bus means that we can deploy security and critical bugfix updates without having to pop up a notice balloon asking the user to restart their computer (ugh!).  Making the library and apps resilient to bus failure also makes it far more stable, particularly if a TCP/IP binding comes about, at which point apps have to cope with the bus host simply falling off the network.  Even in the local bus case, the bus crashing should not be a fatal situation.
+
+=== Use cases ===
+
+Marilize uses Breezy, and keeps up-to-date with security patches.  She installs a D-BUS security update one day, and is astonished (and somewhat annoyed) to find the update manager recommend that she reboot her machine.
+
+Daniel tracks the Dapper development branch, and being the D-BUS maintainer, updates D-BUS all the time.  Whenever he restarts it to test something, HAL, g-v-m, update-manager, Beagle, Tomboy, network-manager, Banshee, Totem, and Evince all die.  Eventually Daniel gets so fed up with this that he writes a spec out of spite.
+
+Sébastien uses X-Chat, although no-one can quite work out why.  It has D-BUS support, although no-one can quite work out why.  One day the session bus crashes, and Séb's IRC client vanishes into thin air.  While irrelevant to this spec, he also uses AZERTY, although no-one can quite work out why.
+
+AdamNikolaidis: Zooey wants an "aggressive" auto-update feature for one or more of her networked computers that will allow the computer to automatically apply important security patches while minimizing the possibility of down-time.  This is possible because the system can dependably restart services after an update without a full reboot.
+
+=== Scope ===
+
+* dbus: fix the libraries to be less horrendously designed
+* dbus-using apps: implement reconnection solution
+
+=== Design ===
+
+==== Server side solution ====
+
+Provide restart support in D-BUS in a way that's transparent to clients, so they don't need to actively reconnect. Right before exiting, dbus should save the state of the connections to a file and set them to no-close-on-exec, which is then read at D-BUS start (think: hibernation for D-BUS). Keeping the file descriptions open on exec() could help here.
+
+For HAL it is even harder, since HAL additionally needs to remember client watches and state of the whole DB.
+
+==== Lib-based solution ====
+
+The library should install a handler that responds to the "bus has exited" notification and attempts to reconnect to D-BUS.
+
+If the lib provides a callback, the app can provide its own smart handler, or the lib can do its own handling if this callback hasn't been set -- i.e., default behaviour is for the library to silently reconnect, but the app can override this with its own behaviour if it wants to be smarter.  Provide a call to reconnect and optionally 'replay' all bus watches, et al?
+
+==== App-based solution ====
+
+Remember what it needs itself, reconnect to the bus and replay.  sleep until bus comes back and all dependent services connected (i.e. g-v-m waits until HAL has reconnected).  We have working patches to do this for g-v-m and update-notifier, battstat-applet, gnome-vfs-daemon, possibly cups in the future, network-manager.
+
+=== Implementation ===
+
+Pick any of the three approaches (not mutually exclusive), design and code same.
+
+==== Code ====
+
+Either extensive hacking to the server to make it restart-happy, deep hacking in the libs (including changing semantics) to make them capable of dealing with restarts.  Patch D-BUS using apps to deal with bus loss in their bus-handling code.
+
+=== Outstanding issues ===
+
+rml thinks restarting D-BUS is really stupid; this is typical of the significant upstream resistance.  Attitude from most RH upstream developers is 'well, don't do that [restarting D-BUS], then'.
+
+AdamNikolaidis: I'm not sure the opinion will change unless: a) we come up with a number of compelling use-cases, b) we implement it in a semi app-independent way with some sort of incentive for apps to begin implementing this themselves.  Could we support a fixed set of apps at the outset and then count on other, less critical apps to implement self-restart to ensure reliable operation?  If enough people get on board, it will ''become'' The Way And The Light.
+
+JamesLivingston: Having the apps do it doesn't really solve the problem, as apps might not know they're using DBus. What if an application uses a library (e.g. GnomeVFS) which happens to use DBus as an implementation detail? On the other hand, having libraries do that kind of thing behind an application's back is also very icky.
+
+----
+CategorySpec

@@ -1,0 +1,257 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+* '''Launchpad Entry''': https://launchpad.net/distros/ubuntu/+spec/network-authentication
+* '''Created''':  by JerryHaltom
+
+----
+
+* <nowiki>[[NetworkAuthentication]]</nowiki>
+
+== Introduction ==
+
+The most prominent step in successfully providing directory services integration on Ubuntu is that of the client. A server implementation without a client does not accomplish much. A client without our own server implementation can get us traction in markets already covered by a directory server, notably the majority of the world on Microsoft Active Directory. This is a market we should desire.
+
+This document outlines the proposed design of Ubuntu's directory services integration from the point of view of a client to the directory service: either a desktop machine or a server. It steps slightly into the realm of the servers when discussing various properties of the client which are directly driven by the choice of server configuration.
+
+After outlining the design, an implementation plan must be created. This plan must take into consideration the scope of the work and available resources.
+
+== Rationale ==
+
+As Ubuntu moves into the enterprise - either as a server or as a workstation - integration with that enterprise's existing systems will not only become desired, but in some circumstances required. Various US security requirements for certain work types such as banking, credit unions or other financial institutions mandate security requirements which force networks to use some form of secure integrated authentication.
+
+A typical form of this is that all systems including workstations and servers need to authenticate to a centralized source in order to retrieve authentication information from a centralized source. This source is then free to apply logging and access restrictions to prevent devices or people from accessing network resources. Not only must LAN and WAN authentication be guaranteed to be encrypted, it must flow from a centralized authority.
+
+Along with legal and organizational requirements, proper directory integration offers many compelling benefits. Security of authentication information in transit can reduce the number of attacks leveled against services. Single sign-on can reduce the management burden of users' passwords. Key-based authentication can reduce the number of times the user needs to be prompted and the number of places on the user's system their various passwords are stored. All of these reduce the necessary effort to access their services and result in a reduced attack footprint and fewer help desk calls.
+
+Improper directory service integration can, however, result in a negative benefit. Authentication failures can reduce large number of users' ability to get their work done or even access their systems. Simple network down-time which previously simply reduced a user's ability to access network resources can now impact a user's ability to even access his local machine. These types of possibilities are unacceptable and a large amount of thought must go into securing each potential fault point in the various systems involved.
+
+== Scope ==
+
+Before we can start planning our implementation we must first define what the scope of our implementation will be. Our initial goal will be to focus on integration with the widest deployed directory service currently in use today: Microsoft Active Directory. Since this directory service is "based" on standard LDAP and Kerberos components, careful selection of components leading to proper integration with it will be a major stepping stone on the path to proper integration with our own directory services.
+
+The scope of implementation for the client support is to allow Ubuntu systems to be configured against a specific named Active Directory domain. User interaction should be kept to a minimum. Preferably only two questions would be asked: 'What is the domain name?' and 'What credentials do I need to join it?' The answer to these questions should be preseedable as part of an automated Ubuntu deployment. After configuring the system the user should be able to log into the system using credentials which are hosted by the domain.
+
+Client support takes precedence over an Ubuntu directory server. Client support can instantly give us a user base in existing directory installations. Implementation of client support will give us exposure to these environments and a better understanding of how existing vendors have implemented their directory services. This understanding is critical for successful implementation. An install base also grants us a path of least resistance in establishing an income stream from institutions interested in deploying Ubuntu boxes alongside their existing services.
+
+Dealing with the problem of roaming user data or home directories is left to other specifications.
+
+Cross-realm authentication should be supported. The user should be able to log into any domain which the Active Directory forest allows him to. Most large (multi-location) enterprises actually use multiple domains joined together into a "forest". Not providing access to these resources (such as: an email server in one domain connecting and sending email to a server in another domain; a user from one domain accessing an internal web site at another location; or users connecting to centralized corporate file shares) would be detrimental to the use of Ubuntu in large distributed enterprises. The log-in interface needs to take this into account. The user needs to be able to select which realm he should authenticate against from a drop-down list of available realms.
+
+Operations common in enterprises need to be considered. User names are sometimes named based on family names, and sometimes these change. Participating client machines need to handle this situation transparently. If a user is renamed he should be able to log in as his new user name and his settings should be preserved. This presents some unique challenges for most Unix/Linux environments. An example is the crontab files which are named based on the user name. Another example is local group memberships which are stored in the local /etc/group file based on user name.
+
+As mentioned in the introduction disconnected authentication needs to be perfected. An Ubuntu laptop needs to operate disconnected. It needs to allow the user to log-in even though he has no contact with the LDAP or Kerberos servers. Again, shared files are not addressed by this specification. Obviously though the user is able to log-in he will not be able to access network resources until he connects. Upon reconnection the user should have a method of taking whatever action is necessary to refresh his network credentials.
+
+== Implementation ==
+
+There are a number of different paths to satisfying our goals.
+
+=== NSS (Solution 1) ===
+
+NSS (Name Service Switch) is provided by the base libc libraries and used to provide POSIX defined elements to applications (passwd, group, shadow, host.) To introduce the concept of remote users to our systems, extensions are added to NSS which retrieve the required user information from remote sources. Currently there exists libnss-ldap which is contains a basic implementation of support to transform an LDAP query into POSIX 'passwd' and 'group' lists.
+
+Typical use of NSS is very fine grained. Applications query large lists of all available passwd records and manipulate them to fill in drop down lists and other UI. Applications query NSS many times in fairly inefficient ways, often times retrieving the same record multiple times. Normally each application loads its own copy of the entire NSS service module stack. This results in no centralized place to cache entries and separate TCP connections to the central server being required for each application. NSCD (the Name Service Caching Daemon) seeks to eliminate a portion of this. NSCD runs as root and answers NSS queries on behalf of applications. It has rudimentary caching functionality with simple positive and negative expiry times. It does not handle disconnected operation properly. It is also fairly buggy when operating alongside libnss-ldap. It does however provide a process where caching can happen and a way to combine operations from multiple applications into a single set of TCP connections.
+
+Applications are typically very sensitive to NSS response times. They often block the UI while retrieving a user list. This works properly as long as obtaining a user list is simply reading from a local file, but it becomes a problem when the user information must be retrieved from the network. Not only is the network an order of magnitude slower under optimal conditions, conditions are not always optimal. Because of this the interaction between the application and NSCD needs to be tuned to provide near real time listing of users. Typically this means a cache must be actively maintained in NSCD at all times and that responses should be returned directly from this cache. This is not currently the case in either of these pieces of software. Work is needed to improve the situation.
+
+Though the shortcomings in existing and future software which uses NSS will force us to make optimizations in NSS to satisfy it, it should not preclude us from fixing those applications so that their actions are more efficient.
+
+Disconnected operation needs to be provided. To this end the NSS must cache all entries who expect to be able to log onto the laptop while disconnected. An up to date list of ALL users and groups could be maintained and persist between reboots. Or a partial cache of only previously queried UIDs could be maintained. When a laptop is shut down and disconnected from the corporate network NSS queries should continue working as expected, with some sort of service-unavailable error being returned for non-cached entries.
+
+The NSCD daemon will run as root. When issuing LDAP queries it will use the host/$(hostname)@REALM principal to authenticate with the remote LDAP server. This requires that the host principal key is created during a realm join and that it is maintained up to date.
+
+==== PAM ====
+
+PAM is the method by which the user is prompted for initial authentication information (user name and password) and the path that that information takes to either successfully authenticate the user or deny them access. An existing implementation of libpam-krb5 exists in various forms. This allows a remote Kerberos KDC to be contacted to validate a user's password. It also facilitates the retrieval of an initial Kerberos TGT upon log-in.
+
+The same conditions that affect NSS can affect a user's ability to authenticate through PAM. PAM however is much more lenient. Systems should wait until the server is confirmed inaccessible before resorting to reading from a cache. A package exists in Ubuntu named 'libpam-ccreds'. Properly used this module can solve this problem nearly completely. An example PAM stack follows:
+
+<pre>
+auth [default=die success=done authinfo_unavail=reset]      pam_unix.so debug
+auth [default=die success=1 service_err=reset auth_err=die] pam_krb5.so use_first_pass debug forwardable
+auth [default=die success=done]                             pam_ccreds.so action=validate use_first_pass
+auth [default=done]                                         pam_ccreds.so action=store use_first_pass
+</pre>
+
+When authenticating a user the first step is to use pam_unix. This attempts to read the user from the local password file. If the user is found and authentication is successful processing of the stack exits. If the user is unavailable (authinfo_unavail) (does not exist in /etc/passwd) then processing moves to the next module. In all other cases (invalid password) processing ends and the authentication attempt has failed. If pam_unix was unable to locate the user and proceeds to the next module, pam_krb5 attempts to validate the user against the remote KDC. If this succeeds processing jumps to the last module, pam_ccreds, which stores an SHA1 hash of the password in a local database. If pam_krb5 has a service_error (is unable to reach the KDC), pam_ccreds validates the password against the cache. If pam_krb5 returns auth_err (KDC was reachable, but password as incorrect), processing ends: the user entered the wrong password.
+
+This PAM configuration needs to be extensively tested and validated.
+
+==== Cross-Realm Authentication ====
+
+Cross-realm authentication allows a client in one domain to access a resource in another. Two pieces are required for this. First, the NSS libraries must be able to distinguish between users in different realms. They may be named the same. This is unavoidable. POSIX does not allow this. Second, unique UIDs must be used for all users across all known realms. The second issue is currently left out of this specification as partitioning and allocation of unique UID numbers across an entire enterprise is very much dependent on the resources of the directory server in question. The first issue means that we must mangle POSIX user names and combine in a realm identifier. POSIX user names then take the form of username@REALM. This keeps parity with the Kerberos principal name.
+
+Cross-realm authentication poses some unique problems for our NSS situation. The nature of cross-realm authentication means that a single passwd listing might require communication with a dozen different directory servers across an enterprise. This is not efficient. Active Directory provides something known as the Global Catalog on the server side to remedy this situation. The Global catalog is simply a complete listing of all objects needed from all trusted realms. Thus is might be possible for our LDAP libraries to have the option of talking to a specific set of secondary LDAP servers (Global Catalog servers) in the case of certain user look up operations.
+
+Other options might be that the workstations do contact the remote servers directly but do so with heavy caching restrictions. Attention needs to be paid to detail. Typing 'ls -l' from a shared network drive will result in a separate NSS query being issued for every unique UID that appears in the listing. This operation cannot be slow. The operation does not have to translate into dozens of separate LDAP queries.
+
+Many current Linux applications query and enumerate the entire NSS passwd table for some operations. Nautilus does so to display its permission owner selection drop-down boxes on files. As we move into large enterprises with many hundreds of thousands of distributed users, this situation cannot continue. Not only is such a query very large and will take a very long time to retrieve, the sheer number of users will make the interface unbearable. Different interfaces need to be introduced which make querying and sorting large user bases more reliable. Though you should be able to set a permission on a file relating to a user in another realm, it is not the primary use case. Typically you want only a list of users in the current realm or you want to filter based on the user's name or portion of their name. This requires some extended knowledge which is not present in the standard passwd table. POSIX has neither a concept of which realm a given user exists in, nor a concept of how to return an enumeration of users for a specific realm. For this interface to work either Nautilus will have to circumvent NSS and issue LDAP queries directly or NSS will have to grow such functions.
+
+One idea is the introduction of a new NSS table simply named 'realm'. Records would look like:
+
+<pre>
+0:
+1:COMPANY.DOM
+2:US.COMPANY.DOM
+3:EU.COMPANY.DOM
+</pre>
+
+A realm has a unique ID and a unique name. NSS service modules such as libnss-ldap would be able to provide support for this table by querying the domain for trust relationships. Functions would be added to enumerate users or groups from a given realm. The libnss-ldap module could implement support for these queries by directly contacting the appropriate LDAP server and issuing a single query. Whether the addition of a new NSS table in libc is something which can be done or should be done is up for debate.
+
+Each system would have file based equivalent (/etc/realm) and a default realm assigned (/etc/realmname).
+
+Additionally this new NSS table would drive out interfaces where a realm listing is required, such as with GDM (Gnome Display Manager). We would be able to provide the user a drop-down list to select where their user account is located.
+
+=== Daemon-based Authentication Service (Solution 2) ===
+
+The first solution involing NSS suffers from a number of fairly substantial setbacks.  NSS is pluggable, allowing the administrator to plug in various modules and introduce external sources of users and groups into the system. A set of standard POSIX APIs exist for user space applications to retrieve information from NSS. These APIs are fairly brittle. Operations exist for looking up a record by UID or name. An operation exists for enumerating all available entries. There are no operations available for asynchronous look-ups. There is no provision for querying the user/group base for arbitrary information or partial information. No concept of a "realm" exists, to separate users out by administrative groups. Applications which require these typically retrieve the entire NSS user base and iterate it. For a large distributed user-base, this can be performance prohibitive.
+
+For Active Directory compatibility the Samba team has succeeded in creating Winbind. Winbind is a simple idea. A daemon runs, other applications can connect to it to look up user and group information. It implements these request by intelligently querying Active Directory. An NSS module exists to provide a NSS compatible view of the data. No known user space applications except Samba itself connect to Winbind directly to manipulate the user-base, mostly due to the fact that these applications have no connection to Windows or Active Directory.
+
+Using Winbind would get us proper Active Directory integration today.
+
+Consideration towards the the long term must be maintained. Active Directory is not the only directory service we desire to be a part of. Eventually Ubuntu's own directory service may come into being. We may desire compatibility with Sun's or Netscape's directory services. As soon as possible we want to provide connectivity to existing LDAP/Kerberos setups. As it stands now, choosing Winbind will not get us any closer to any service other than Active Directory. NSS alone however is not a pretty picture when considering integration with any of these services. Substantial work would have to be done retrofitting it for asynchronous operation, adding realm support and queries. These changes would likely be disruptive, most likely not even acceptable upstream. Many of the APIs which query NSS are defined by POSIX, and would not be alterable. Adding any new API sets into NSS would likely not gain widespread adoption.
+
+Neither Winbind nor NSS satisfy our long term goals. The only long term option then is the creation of a new set of APIs for querying user and group information. Winbind however can provide a basis for this. Our new NSS replacement could have a dedicated daemon, well thought-out APIs, proper async operation and streaming of results. It could mirror Winbind in a lot of ways. Code from Winbind may even be appropriated. Working with the Samba team to turn Winbind into this new NSS replacement may even garner support from the Samba team itself. NSS compatibility could be maintained in the same way Winbind maintains it currently.
+
+Thus, choosing Winbind now, to provide compatibility with Active Directory, could be an appropriate short-term choice with long-term vision.
+
+==== Backwards Compatibility ====
+
+Choosing a daemon based option still requires us to retrofit the existing NSS library for compatibility with every existing application we have. Winbind has an existing solution for this, in the forms of nss_winbind and pam_winbind. These two modules contact Winbind directly and return NSS/PAM compatible answers. They query Active Directory for a user list, retrieve UIDs (either made up, or stored in AD), and create a Unix user name. The Unix username can be tailored to be in any form:
+
+<pre>
+username@DOMAIN
+username+domain
+domain\username
+</pre>
+
+We should choose one of these forms and stick with it. Using "@" seems the most appropiate as it matches the Kerberos principal name exactly. "@" is also well established as a namespace identifier between a user and a domain name (email addresses, XMPP). The author is unsure of the compatibility of choosing "@" as the separator.
+
+There's also no reason we can't use two at the same time. They could all resolve to the same UID. Windows uses this trick. This would make logging into existing services, such as SSH, a bit more manageable:
+
+<pre>
+ssh user@REALM@machine
+</pre>
+
+<pre>
+ssh user+REALM@machine
+</pre>
+
+As Winbind makes way for a more general purpose daemon-based solution any existing strategy can be maintained.
+
+=== Tasks ===
+
+In a large enterprise LDAP and KDC servers come and go as networks expand and contract. Some go offline and then come back. A proper implementation will use SRV records to query for available servers for a given domain. It will cache these records and consult the servers in some sort of priority (preferably based on metrics to determine least cost). When a server is unable to fulfill a request the software will attempt to find another. Periodically the list of SRV records will be retrieved and servers which were previously unreachable will be tried again. This process must be very well tuned. All workstations in an enterprise suddenly having a coding error and DDoSing a single server is unacceptable.
+
+Kerberos and LDAP systems do not use a simple short text string to uniquely identifier their users. Kerberos uses a principal name containing a realm portion:
+
+<pre>
+user@REALM
+</pre>
+
+LDAP usually identifies its objects based on their path within a given directory: 
+
+<pre>
+cn=User Name,ou=Users,dc=realm,dc=com
+</pre>
+
+Both of these are mutable and cannot be relied upon for long term storage of attributes linked to the user entity. Principals can be renamed and LDAP objects can be renamed or moved. Long term storage requires an immutable identifier be used which can be determined from the remote object and linked back up to the remote object once it has moved. In Unix we use the UID for this purpose.
+
+The UID in Linux is currently a 32-bit identifier which is simply desired to never change for a given user. File system permissions are stored based on this UID and as such have no problem tracking user moves or renames. LDAP provides us a place to store this UID attached to the user's other information such as principal name. Searching for the UID in LDAP is easy.
+
+Various systems in Linux however are not keyed based on the UID, but instead based on the user name. An example is group membership in /etc/group:
+
+<pre>
+/etc/group
+
+root:x:0:
+admin:x:1000:user@REALM
+</pre>
+
+Another example is crontab files in /var/lib/crontab. Both of these make relationships to the remote entities name instead of it's UID. Two solutions exist: a) mandate object names never change and b) store references based on an immutable key. The first solution is not likely to go over well in Active Directory. The second solution will require that group memberships in /etc/group be stored based on UID and crontab files be changed to be based on UID as well.
+
+<pre>
+/etc/group
+
+root:x:0:
+admin:x:1000:#262715750
+</pre>
+
+Though a directory service is free to assign whatever UIDs it feels are appropriate for a given user, our system needs to take some of this into account. We should allocate a range of usable UIDs which we consider "local users" and another range which we consider "remote users". This will help prevent conflicts. Determining a UID namespacing schema (as best we can with 32 bits) may be required as we begin to plan our own federated directory service.
+
+<pre>
+00000000 00010000 00000000 00000000
+^^^^^^^^ ^^^                        RID (Realm ID)
+             ^^^^ ^^^^^^^^ ^^^^^^^^ UID (User ID)
+
+01101010 0111                       REALM.DOMAIN.DOM
+             1101 00101110 01101111 username
+</pre>
+
+Such a schema would most likely use high UIDs.
+
+=== Kerberos Hosts ===
+
+Each machine participating in a Kerberos network should have a host principal. This is essentially a principal named:
+
+<pre>
+host/$(hostname --fqdn)@REALM
+</pre>
+
+The host uses it to access services on the network on its own. NSS for instance should connect to LDAP using the host principal in order to retrieve user listings. This prevents unauthorized devices from knowing available user names.
+
+This Kerberos principal should be created while joining the host to the domain. Our domain join procedure needs to take that into account. The principal should be created with a random password. The machine itself should periodically change its own password.
+
+Winbind currently takes care of all of this on its own.
+
+=== Kerberos Users ===
+
+After a user has logged into his session he will need to have acquired a Kerberos TGT. Unsure if Winbind does this, libpam-krb5 does. Applications the user opens will use this TGT to request service tickets for services they require access to. After a certain period of time the Kerberos TGT will need to be renewed. This is a process which should happen automatically. To accomplish this a per-user daemon should run within his session which keeps track of the user's TGT and periodically requests renewal. This process should require no user interaction.
+
+Eventually the ticket can actually expire. When this happens the authentication stage has to happen again: the user has to enter his password. The user should not be forced to log off and back on to resume access. When the user has an expired TGT a notification should pop up explaining to the user that he needs to re-authenticate to the network. A password dialog which acquires a new TGT needs to be displayed. One option is to ask the user to lock the screen. Unlocking it will result in the user reacquiring a TGT. Windows does this.
+
+When a user changes his password the PAM stack should allow it. In the case of a MIT or Heimdal Kerberos server, a kadmin protocol is provided. In the case of Active Directory, Winbind must be used. The configuration should take all of this into account.
+
+=== Interface ===
+
+Manual configuration of these varied Linux subsystems would take substantial time on the part of the administrator. To that end a simple interface should be created which integrates the various components outlined above in an easy-to-use form where the least number of required questions are asked. For an Active Directory domain this can be reduced to asking for the domain name and the authentication information required to connect to the domain.
+
+This process should be easily preseedable for automated Ubuntu deployments. When deploying Active Directory boxes it is desired that they join themselves to the domain when they first boot up. The seed would need to be able to contain the domain name and authentication information.
+
+<nowiki>[[NetworkAuthentication/Client/Interface]]</nowiki>
+
+== Action ==
+
+A number of tasks are required to make this implementation real.
+
+* Clean-up, audit and test combinations of libpam-krb5, libnss-ldap and libpam-ccreds. Fix any open issues preventing them from working together smoothly.
+* NSS components must keep blocking to an absolute minimum. NSS queries must be answered in near real time. If a LDAP server is slow to respond, we give up easily. KDC responses are more tolerant.
+* Address caching of NSS data when delivered over the network. NSCD will need to be audited and corrected to work optimally.
+* Address intelligent fall-back when communicating with LDAP and Kerberos servers.
+* Per-host Kerberos maintenance. Winbind will be required for some portions of AD integration. Some custom daemon will need to be created to maintain host keys for non-AD situations.
+* Work on interface for configuring authentication. Both command line and GUI.
+* Per-user Kerberos maintenance. The user session needs a daemon to renew Kerberos tickets periodically (both CLI and GUI, GUI popups should be default). In the case of an expiration, a procedure should be provided for the user to re-authenticate. Windows does this by asking the user to lock and unlock their sessions (effectively asking for their password.) This seems sane to the author.
+
+== Comments ==
+
+Please place comments under here:
+
+----
+
+I'd like to see the per-user Kerberos maintenance be done using integration into gnome-keyring and let the user be able to maintain Kerberos tickets alongside GPG and SSH keys. [JelmerVernooij]
+
+Jelmer, I would like to see this at some point too. Right now though, gnome-keyring is not in any shape for it. gnome-keyring really is nothing more than an encrypted password store. It has no facilities for inserting external things into it. Seahorse however does. Maybe you meant Seahorse? If so, yes. Seahorse may be a good basis for our ticket management interface. [JerryHaltom]
+
+Sorry, yes, it appears I actually meant seahorse. [JelmerVernooij]
+
+The focus here on the enterprise, kerberos and LDAP is good.  In the larger Internet space, for web logins, where phishing is an issue, I think the next big thing in client authentication will be identity metasystems such as OpenID and Microsoft Cardspace.  The cardspace specs are mostly published and the open software movement has been participating via OSIS, Higgins, etc.  As we implement improved network authentication we should track these developments and build infrastructure that will allow this next step to fit in well.  Protecting users from phishing via distinguished user interfaces is a major aspect of this.  See the IdentitySelector spec for more information. [NealMcBurnett]
+
+It's clear that from the enterprise perspective, client-side improvements are the place to start. However, from the Edubuntu/education perspective we need a server (& associated client) solution ASAP. Most schools and school districts with <5000 people total will be much more interested in Ubuntu & LTSP if we can at least provide integrated Samba/LDAP for single-sign-on. We should coordinate the enterprise and education Directory efforts to complement one another and aim at a common goal, perhaps with the education effort focusing on a simplistic server solution to start with. [MattOquist]

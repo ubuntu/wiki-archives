@@ -8,14 +8,17 @@ This is a public, readonly archive of the source text for two (soon to be) depre
 As these wikis were very large, we sorted each into alphanumeric subdirectories,
 to improve search and navigation on GitHub.
 
-> [!TIP]
+> [!NOTE]
 > There are a very large number of pages in this archive.
 > 
 > To find a page or topic, use the search function on GitHub.
 
-Tarballs are also available as release assets. These contain multiple page
-versions, images, attachments, and other data that could not be included in the
-repository directly.
+> [!TIP]
+> The plaintext archive is deliberatly lean.
+> Tarballs are also available as release assets. 
+> 
+> These contain multiple page versions, images, attachments, 
+> and other data that could not be included in the repository directly.
 
 ## Table of Contents
 
@@ -64,7 +67,7 @@ If 1 and 2 are a problem, use the tarballs provided as release assets.
 The original wikis were built using the Moinmoin wiki engine.
 To make archives that were readable and searchable on GitHub, the following modifications were made:
 
-1. Removed any files that were empty, stubs, or that contained spam.
+1. Removed any files that were empty or that contained spam.
 1. Removed any version of a page that wasn't the latest version.
 1. Removed named parent folders for pages and transferred the name to the relevant file.
 1. Removed URL encoding from filenames.

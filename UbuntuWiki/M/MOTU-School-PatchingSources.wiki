@@ -1,0 +1,181 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+'''This page is mostly a meeting log. Please refer to <nowiki>[[PackagingGuide/PatchSystems]]</nowiki> instead.'''
+----
+
+== Patching Ubuntu packages ==
+
+=== Why use separate patches? ===
+
+In earlier times, people just applied patches inline (i. e. directly in the source code tree). However, this makes it very hard to extract patches later to modify them, send them upstream, etc. Also this means that new upstream versions are a pain, since they generate a lot of rejections when applying the package diff.gz to them.
+With split-out patches it is much easier to send them upstream, keep track of them, develop them, etc., since you always see which changes belong together.
+The ideal state is an unmodified tarball from upstream, plus clean and separate patches, plus the packaging bits in <code>debian/</code>. That means that <code>lsdiff <sourcepackage>.diff.gz</code> only contains <code>debian/</code>.
+
+The first attempts to split-out patches were pretty trivial: storing patches in <code>debian/patches/</code>, and adding some <code>patch</code> and <code>patch -R</code> snippets to <code>debian/rules</code>. This worked for small patches, but it provided no tools for editing these patches, updating them for new upstream releases, etc.
+
+Thus, several standard patch systems were created which are easy to deploy and provide tools for patch juggling and editing.
+
+What I would like to do now is to introduce the most common patch systems and show some hands-on demos, describing how to add a new patch and how to edit one. For demoing, we will use some real-world packages as examples.  We will look at one package for each of the available patching systems.  It is recommended that you follow the same steps in a terminal, so that you get a better feeling for the process.
+
+'''Warning''': These examples were originally written up using packages from Ubuntu Dapper (6.06).  Things may have since changed; the packages may no longer use the same patching systems.
+
+If you want to try the stuff yourself, please execute the following commands as preparation:
+<pre>
+  sudo apt-get install dpatch dbs quilt patchutils cdbs
+  apt-get source cron udev pmount gnome-volume-manager ed xterm
+</pre>
+
+=== General Tips ===
+
+There will almost always be the need to apply patches before building a package. Here are a few patching tips taken from http://wiki.debian.org/Games/ToolsDiscuss .
+
+Some tips on how to use patches efficiently (Thanks Linas Žvirblis):
+** Provide descriptive file names for your patches: 'fix-loading-libfoo-on-architecture-bar.patch' is a good name, '001.patch' is not;
+** Make your patches stand-alone. Each patch should apply cleanly without depending on any other patch being applied;
+** Avoid modifying the same file in multiple patches;
+** If you absolutely need to create patches that depend on each other, specify that in the filenames: '00patchfoo-do-this.patch', '01patchfoo-do-that.patch' or similar;
+** Do not include multiple unrelated modifications into a single patch;
+** Patch your packages at build time. There is no need to ship a patch plus an already patched source. This only increases the size of the diff.
+** Make sure patch is applied before anything else happens with your package. Make configure rule depend on the patch rule;
+** Clean first, unpatch afterwards. Some files could have been modified during the build so unpatching may fail, unless you restore them. If simply makecleaning the sources does not restore their state, it may be a good idea to make backup copies, for example, in patch rule.
+
+=== inline patches (example package: cron) ===
+In this case, no formal patch system is used at all; there's nothing much to say about this.  You directly edit the files in the source tree. This is convenient for a simple and quick change, but will bite back for new upstream versions (see above).
+
+=== separate patches, but no patch system (example package: udev) ===
+This case is the most complicated one since you have to do all the hard work manually. In order to make you understand what a patch system does, and to give you a fallback method that will *always* work with any patch system, I handle this first.
+
+The general approach is:
+# copy the clean source tree to a temporary directory.  for example: <code>cp /path/to/clean-source /tmp/old</code>
+# apply all patches up to the one you wish to edit; if you want to create a new patch, apply all existing ones (this is necessary since in general patches depend on previous patches)
+ if you want, you can use <code>debian/rules</code> for this: remove the patches that come *after* the one you want to edit, and call <code>debian/rules patch</code>. The actual name for the patch target varies, I have seen the following ones so far: <code>patch</code>, <code>setup</code>, <code>apply-patches</code>, <code>unpack</code>, <code>patch-stamp</code>. You will have to look in <code>debian/rules</code> to see how it should be invoked.
+ 0.#3 copy the whole source tree again.  for example: <code>cp -a /tmp/old /tmp/new</code>
+# go into /tmp/new, and make your modifications
+# create the patch:
+  <pre>
+   cd ../
+   diff -Nurp old new > mypatchname.patch
+  }}}
+ 0. go back into your original source directory and move the patch to the proper place:
+  {{{
+   cd /path/to/clean-source
+   mv mypatchname.patch ./debian/patches/mypatchname.patch
+  }}}
+
+udev example 1: Let's create a new patch 90_penguins.patch:
+{{{
+  cd /wherever/you/unpacked/the/source/udev-079
+  cp -a . /tmp/old
+  pushd /tmp/old
+  debian/rules patch
+  cp -a . /tmp/new; cd ../new
+  sed -i 's/Linux/Penguin/g' README
+  cd ..
+  diff -Nurp old new > 90_penguins.patch
+  popd
+  mv /tmp/90_penguins.patch debian/patches
+  rm -rf /tmp/old /tmp/new
+</pre>
+Now take a look at your shiny new debian/patches/90_penguins.patch.
+
+udev example 2:
+<pre>
+  cd /whereever/you/unpacked/the/source/udev-079
+  cp -a . /tmp/old
+  pushd /tmp/old
+  cp -a . /tmp/new; cd ../new
+
+## apply the current version of the patch, so that you can edit it
+  patch -p1 < debian/patches/10-selinux-include-udev-h.patch
+
+## make some silly changes...
+  sed -i '1 s/$/***** HELLO WORLD ****/' udev_selinux.c
+
+  cd ..
+  diff -Nurp old new > 10-selinux-include-udev-h.patch
+  popd
+  mv /tmp/10-selinux-include-udev-h.patch debian/patches
+  rm -rf /tmp/old /tmp/new
+</pre>
+Now debian/patches/10-selinux-include-udev-h.patch contains both the original change and our modification of the first line of the source file.
+
+Since this is so hideously complicated, patch systems were invented to aid you with that. Let's look at the most popular ones now (they are sufficient to allow you to patch about 90% of the archive's source packages; for the rest you have to resort to the manual approach above).
+  
+=== cdbs with simple-patchsys (example package: pmount) ===
+
+cdbs' simple-patchsys.mk module matches its name; it has no bells and whistles whatsoever. However, it is pretty popular since it is sufficient for most tasks, and long ago I wrote a script '<code>cdbs-edit-patch</code>' which most people can live with pretty well. This script is contained in the normal cdbs package.
+
+You just supply the name of a patch to the script, and depending on whether it already exists or not, it will create a new patch or edit an existing one.
+
+Example with pmount:
+<pre>
+  cd /wherever/you/unpacked/the/source/pmount-0.9.11
+  cdbs-edit-patch 03-simple-readme.patch
+  echo 'This should document pmount' > README
+  <press Ctrl+D to end your editing session>
+</pre>
+Editing an already-existing patch works exactly the same way.
+
+Since the Ubuntu Edgy version of cdbs, <code>cdbs-edit-patch</code> also works for packages using tarball.mk, and it can edit patches which produce rejections.
+
+=== dpatch (example package: ed) ===
+
+<code>dpatch</code> is a pretty robust and proven patch system which also ships a script '<code>dpatch-edit-patch</code>'. The two most important things you should be aware of:
+* <code>dpatch</code> does not apply patches under <code>debian/patches/</code>, but instead applies all patches mentioned in <code>debian/patches/00list</code>, in the mentioned order. That means that you do not have to rely on ''asciibetical'' ordering of the patches and can easily disable patches, ''but'' you must make sure you do not forget to update <code>00list</code> if you add a new patch.
+* <code>dpatch</code> patches are actually scripts that are executed, not just patches fed to the <code>patch</code> command. That means you can also do fancy things like calling autoconf or using sed in a dpatch if you want.
+The manpage is very good and has examples, too, so I will only give an example here:
+<pre>
+  cd /whereever/you/unpacked/the/source/ed-0.2
+  dpatch-edit-patch 05_ed.1-warning-fix
+  <edit stuff, press Ctrl+D>
+</pre>
+This will edit an already existing patch and make sure that all previous patches are applied in order.
+<pre>
+  dpatch-edit-patch foo.dpatch 06_testsuite-Makefile.dpatch
+  <edit stuff, press Ctrl+D>
+  echo foo.dpatch >> debian/patches/00list
+</pre>
+This will create a new patch foo.dpatch relative to the already existing 06_testsuite-Makefile.dpatch. If your patch is very confined and does not depend on other patches, you can leave out the second argument.
+
+=== quilt (example package: xterm) ===
+<code>quilt</code> is the other non-dumb standard patch system. Like dpatch, it has a list of patches to apply in <code>patches/series</code> (to use <code>debian/patches</code>, a package needs to add a symlink). It is non-trivial to set up and has a lot of advanced commands which make it very flexible, but not very easy to use.
+
+So I will only show a small example here, too. First, use the existing machinery to set up symlinks and directories for quilt:
+<pre>
+  cd /wherever/you/unpacked/the/source/xterm-208
+  ln -s debian/patches patches
+  cd patches
+  touch series
+  cd /wherever/you/unpacked/the/source/xterm-208
+  export QUILT_PATCHES=debian/patches
+</pre>
+Now let's edit the already existing patch 901_xterm_manpage.diff:
+<pre>
+  quilt push 901_xterm_manpage.diff
+  sed -i 's/Copyright/Copyleft/' xterm.man
+  quilt refresh 901_xterm_manpage.diff
+  quilt pop -a
+</pre>
+So unlike the other patch systems, quilt works with patched inline sources, but keeps track of modifications.
+
+Finally, let's add a new patch to the top of the stack:
+<pre>
+  quilt push -a
+  quilt new muhaha.diff
+  quilt add README  # you have to do that for all files you modify
+  sed -i '1 s/^/MUHAHA/' README
+  quilt refresh
+  quilt pop -a
+</pre>
+
+----
+Go back to '''<nowiki>[[MOTU/School]]</nowiki>'''.<<BR>><<BR>>
+<nowiki>[[CategoryArchive]]</nowiki>

@@ -1,0 +1,104 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+
+* '''Launchpad Entry''': https://launchpad.net/distros/ubuntu/+spec/langpacks-desktopfiles
+* '''Created''': 2005-10-25 by MartinPitt
+* '''Contributors''': JordiMallach, MartinPitt, CarlosPerelloMarin, ZygmuntKrynicki
+* '''Packages affected''': intltool, libbonobo (?), glib, pyxdg, gnome-desktop (?)
+
+=== Summary ===
+
+Some translatable files do not use gettext at runtime, but rather contain all translations in a single file, like .desktop, .server and .directory files. We want to find a robust and generic way to update these translations through Rosetta and language packs.
+
+=== Rationale ===
+
+Currently the language packs contain only translations for desktop applications that use gettext. However, there are many more translatable items in Ubuntu. Our goal is to extract all translatable contents from application packages, import them into Rosetta, and ship them into language packs so that they can be updated after a release and benefit from Rosetta updates.
+
+=== Use cases ===
+
+* Sjoerd adds a Dutch translation to a menu entry of a Breezy application in Rosetta. Breezy users should get this new translation with the next language pack update.
+
+=== Scope ===
+
+This specification deals with the Gnome part. The KDE counterpart is specified in LangpacksDesktopfilesKDE.
+
+=== Design ===
+ 
+The Gnome libraries that evaluates desktop/server/directory files should just use gettext() to translate entries since application's *.mo files already ship the translations. 
+
+In the past we proposed the extension of the <nowiki>[[http://standards.freedesktop.org/desktop-entry-spec/latest/|FreeDesktop standard]]</nowiki> to support an additional field TranslationDomain, so that Gnome, KDE, and other implementations can find the matching .mo file at runtime to get additional translations from it. However, since this has been rejected upstream, we will use our own Ubuntu-specific field for this. 
+
+Note that most upstream packages already use gettext to translate .desktop files at build time. For these packages, we only need to change the build system to put the translation domain into the destination files. Most packages that are of interest to us use `cdbs` and `gnome.mk`, thus modifying `gnome.mk` will already cover a very large percentage of packages.
+
+=== Implementation ===
+
+==== description files ====
+
+`gnome.mk` or `debian/rules` put the translation domain into the destination file.
+
+* For .desktop/.directory files, we will use the key `X-Ubuntu-Gettext-Domain` for storing the translation domain.
+* For .server files, we will add a Ubuntu-specific attribute and add Ubuntu translations to the `<oaf_server>` tag (`ubuntu-gettext-domain`).
+
+This needs to be done without intermediate tools. `intltool-merge` is not appropriate for this task, because:
+
+* Many source packages ship their own intltool-merge, and it is not possible to override the path to it in a clean way.
+* intltool-merge does not figure out the translation domain itself, it had to rely on heuristics for this. Putting heuristics in `gnome.mk` is less evil than putting them into `intltool`.
+
+==== gnome library changes ====
+
+pyxdg and libgnome-desktop have patches to support gettext:
+* https://launchpad.net/distros/ubuntu/+source/pyxdg/+bug/3697
+* https://launchpad.net/distros/ubuntu/+source/gnome-desktop/+bug/3723/
+* https://launchpad.net/products/glib/+bug/3935
+ 
+gnome-panel is moving to use glib's GKeyFile and libgnome-desktop's parser is being set as deprecated. 
+Glib is now patched and works fine. Current patch will only affect desktop files (identified by [Desktop Entry] group.
+
+==== Benchmarks ====
+
+To evaluate the performance impact of the additional gettext lookups, the time between login (pressing Enter after entering the password in gdm) and getting an usable menu (Applications menu drops down after clicking on it) was measured, first with the original packages, then with the patches applied and all desktop files enriched with the translation domain. This was tested on an AMD64/3000 (1.8 GHz), 1GB RAM, UDMA100 discs.
+
+{| class="wikitable"
+|-
+| test case
+| original
+| patched
+|-
+| clean profile, cold boot
+| 27s
+| 27s
+|-
+| clean profile, relogin
+| 13s
+| 14s
+|-
+| big custom profile, cold boot
+| 33s
+| 35s
+|}
+
+These results demonstrate that the performance penalty is negligible.
+
+=== Outstanding issues ===
+
+* Coordination with Xubuntu.
+* If performance becomes an issue, we need to think about adding pre-caching of the translations. However, Zygmunt did some tests which look promising: gettext() lookups do not impede runtime performance at all, just slow down the panel startup a bit.
+* SuSE uses one large .po file for this as operations such as loading the k-menu might be too slow with lots of smaller .po files.
+
+==== Random ideas about performance improvements (for historical reasons) ====
+
+* Regenerating the desktop files at language postinst time does not work, since this does not take desktop files into account that are installed after the language pack installation.
+* apt hooks are not generic enough to support updating files when a new package is installed. There are no dpkg hooks, as they are considered evil. However, if dpkg hooks should be available at one day, they could be utilized for pregenerating translated files.
+* Modify postinst files with a debhelper hook which asks for updating translations in files.
+* Put make /usr/share/applications the secondary lookup location, primary location could be changed to /usr/share/applications-cache/ which could be a tarball extracted over ramdisk. Similar operation could be performed for default /usr/share/locale-langpack/$LANGUAGE to reduce the slowness of stat and open
+* Use a gettext daemon that maintains a lazy cache in /var/cache/gettext. The cache would be full after the first run. Each i18n update would invalidate the cache (either manually or automatically with some inotify magic)
+----
+CategorySpec

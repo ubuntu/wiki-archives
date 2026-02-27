@@ -1,0 +1,488 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+== Analysis reports for privileged programs ==
+
+In order to implement the SecurityPolicy for <nowiki>[[WartyWarthog:Security|Warty]]</nowiki>, the following network services and setuid binaries were analyzed. The goal is to reduce the privileges to a minimum at the earliest possible time.
+
+=== mtr ===
+
+main() starts with calling net_preopen() and then immediately setuid()s back to
+normal user privileges. It even has a double check that setuid() did what it
+was supposed to do.
+
+net_preopen() opens two raw sockets (which requires root privileges) and does
+not do any other stuff.
+
+'''Conclusion''': root privileges are dropped at the earliest possible stage, no
+further improvement is possible.
+
+=== gnupg ===
+Current implementation has provisions for using capabilities, but Debian package does not use it and implementation is incomplete. A patch was written to fix this and ensure minimal privileges. See Debian Bug <nowiki>[[http://bugs.debian.org/260803|#260803]]</nowiki>.
+
+MattZimmerman: uploaded as 1.2.4-4ubuntu1 and patch filed in Debian BTS
+
+MartinPitt: Update: above patch did not work on kernels with disabled capability support. <nowiki>[[http://www.piware.de/gpg-fix-minprivs.interdiff|This patch]]</nowiki> fixes this (<nowiki>[[http://bugs.debian.org/262467|#262467]]</nowiki>).
+
+=== apache2 ===
+The current package uses root privileges for the following tasks:
+
+* bind to privileged ports (usually 80 and 443)
+
+ minimalization:
+
+** set[ug]id to www-data immediately after start (server/main.c, main() ) and only keep CAP_NET_BIND_SERVICE
+
+** drop last privilege CAP_NET_BIND_SERVICE as soon as all listening ports are opened (server/listen.c, ap_listen_open())
+
+ '''Problem''': The user which apache2 should run under is configurable in
+ apache2.conf (it does not need to be www-data); thus the configuration has to
+ be parsed first before set[ug]id. Configuration parsing is done as root then
+ and might have security holes (since it is pretty complex). However, this is
+ no showstopper.
+
+* write pid file into /var/run/
+
+ Two possible solutions:
+
+  1. create pid file and chown it to www-data before dropping to root; modify server/log.c, ap_log_pid() not to yell on empty existing pid file
+
+    pro: no package upgrade glitches
+
+    con: modifies upstream behavior, potential security hole (theoretically the file could be hardlinked in the middle of this process)
+
+  2. create pid file in /var/run/apache2 and own this directory to www-data (dir is created by init.d script)
+
+    pro: does not modify upstream behavior
+
+    con: breaks package upgrades if apache2.conf (which contains the location of pid file) was changed by user.
+
+ The second solution seems to be the saner one since with apache2 it should not be necessary to modify apache2.conf.
+
+* write logs to /var/log/apache2/
+
+ Performing as normal user:
+** chown /var/log/apache2 to www-data:www-data
+** if user modifies log directories, he must make sure that www-data can write into them
+
+ '''Problem''': if child apache processes run under the same user as the master
+ instance, the children can empty the log files. This could be avoided by
+ having the master instance run under a different user (e. g. www-master), but
+ then it could not fork off children under www-data without CAP_SETUID. Thus
+ this would mean to replace one potential security hole by another one, which
+ is not really what we want. This seems to be the real showstopper.
+
+'''Conclusion:''' dropping root privileges cannot be done without drawbacks or major
+modifications of apache2.
+
+=== dhcp3-client ===
+
+The daemon itself runs fine as a normal user 'dhcp' with the following
+capabilities: CAP_NET_ADMIN, CAP_NET_RAW, CAP_NET_BROADCAST,
+CAP_NET_BIND_SERVICE.
+
+The actual configuration of network interfaces is done by
+/etc/dhcp3/dhclient-script, which is executed by the daemon; thus this script
+needs CAP_NET_ADMIN as well.
+
+The problem is that the current handling of capabilities in exec() is flawed in
+the current Linux kernel:
+
+1. When a non-root process exec()s an executable, its set of permitted and effective capabilities is cleared, i. e. the executed program has _no_ capabilities regardless of the ones of the mother process.
+
+2. When a root process exec()s something, the new process gets the _whole_ set of permitted and effective capabilities (who the hell conceived _this_?)
+
+This is documented in detail in capabilities(7).
+
+From that follows:
+
+1. It is not possible to run a process that delegates privileged tasks to subprocesses as a normal user. The intended solution is to attach capability lists to binaries, but AFAICS this is not yet implemented in the kernel.
+
+2. It does not enforce privilege minimization to let the process run as root and just drop its capabilities (and maybe setfsuid() ), since a process just needs to exec() to regain all capabilities.
+
+<nowiki>[[http://lkml.org/lkml/2003/9/27/70]]</nowiki> has a solution for this, but involves
+patching the kernel in an incompatible way.
+
+'''Conclusion:''' dropping root privileges is not possible without a patched kernel or another security system (grsecurity or SELinux).
+
+MattZimmerman: let's revisit this at some point (maybe during the conference); I think we can do something here.  For example:
+
+- dhclient acquires capabilities, drops root to user 'dhcp', which is a member of group 'dhcp'
+- group 'dhcp' can invoke a setuid-root helper which executes the scripts
+
+If the scripts use proper quoting, and the helper also sanitizes the parameters, I think this could provide a reasonable level of isolation between the network and root.
+
+=== procmail ===
+
+Current state: 
+
+* /usr/bin/procmail: setuid root, setgid mail
+* /usr/bin/lockfile: setgid mail
+
+Both exim4 and postfix execute procmail under the user (and his primary group)
+of the recipient, so procmail does not need to be setuid root to be used with
+these MTAs.
+
+The only application of setuid is the usage of procmail as a (local) MDA, since
+it has to change to the recipient's uid. But this is not strictly necessary,
+since a proper MTA is installed anyway; if an admin really wants to do that, he
+can still dpkg-statoverride if he accepts the risk.
+
+procmail needs setgid mail to create a new mailbox file in /var/mail/<username>
+if it does not yet exist.
+
+lockfile needs setgid mail to be able to put a lock file into /var/mail when
+procmail delivers a mail into its default location /var/mail/<username>. It is
+not needed if delivering to a mailbox in the user's home directory, but this
+cannot be assumed to be always the case.
+
+Privilege minimization:
+
+* procmail suid: as written above, this can be dropped without breaking usual stuff.
+
+* procmail sgid: can be dropped if we manage to abandon the current standard mail
+ behavior of having mbox files in /var/mail and convert all applications to use
+ one of the following behaviors:
+ 
+** default inbox in mbox format in the user's home directory 
+** use maildir and set up /var/mail/<user>/ (adduser would be the appropriate place to implement this)
+
+ This conversion is a post-Warty issue. In the meantime the usage of setgid
+ mail should be minimized by switching to the real group id (the user's
+ primary group) right at the program start and only use the privileged group
+ (mail) for creating a missing default mail spool (/var/mail/<user>).
+
+* lockfile sgid: cannot be tightened further; since lockfile creation may fail
+ (because another process has locked), it has to try to create the lock file
+ several times and thus cannot setgid back to normal user earlier. After
+ creating the lock file, the program exits.
+
+'''Conclusion''': privileges can be tightened, <nowiki>[[http://www.no-name-yet.com/patches/procmail.minprivs.diff|patch against current sid version]]</nowiki> was written.
+
+The package is now contained in Warty, with non-suid default installation.
+
+=== hal ===
+
+hald currently runs as root. It needs the following privileges:
+
+ 1. Read the MII registers of network cards to determine link status.
+ 2. Raw-read drive device nodes to find out file system type, cdrom status etc.
+ 3. Optional: call a script that modifies /etc/fstab and creates mount points if a new volume is hotplugged.
+ 4. Future: it will be necessary to read the symlinks /proc/<pid>/exe.
+
+'''Minimization:''' 
+
+It is desirable to have hald run as a normal user 'hal'.
+ 
+ 1. CAP_NET_ADMIN is sufficient for this.
+
+ 2. Read-only access to the device nodes is sufficient. However, device nodes
+ are currently root:disk (or root:cdrom, or root:floppy) with perms 0660, so
+ the only other option is to run hald in these groups. This is suboptimal since
+ it is also granted write permission by this, but other than changing the
+ permissions of all mountable devices there is no solution that works with the
+ current kernel without ACLs.
+
+ However, since the groups and permissions of volume device nodes are not
+ specified in FHS, the groups should not be hardcoded into the source code, but
+ dynamically specified by explicitly putting the hal user in the respective
+ groups in /etc/group.
+
+ 3. If the user desires this, there is no way to avoid running hald as root.
+ Thus there should be a debconf question whether the user wants this optional
+ feature.
+
+ 4. This is not yet implemented, but will be soon (according to upstream). This
+ will require CAP_DAC_OVERRIDE, which would be very bad since that is almost as
+ good as root privileges. The only benefit is that exec()ed shells don't
+ inherit those capabilities, should an attacker be able to exploit a buffer
+ overflow to spawn off a shell.
+
+These points have been discussed with upstream. 
+
+'''Patch''':
+
+A patch has been created against the current sid version hal-0.2.93+20040711-2,
+which handles this. Changelog entry:
+
+* debian/rules: added cdbs patch system rules, added debian/patches/
+* 01_log_to_syslog.patch: fixed hald/logger.c to log via syslog (as
+ intended), not to the void
+* 02_ioctl_errors.patch: added HAL_ERROR messages to all previously
+ unchecked ioctl() calls to help debugging
+* 03_min_privileges.patch:
+** added option --drop-privileges to hald which
+   causes hald to run under normal user 'hal' with some additional
+   capabilities (CAP_NET_ADMIN and groups disk, floppy, and cdrom);
+** hald/Makefile.am: now link with -lcap to support capabilities
+* 04_fix_hal_conf_in.patch: fixed hal.conf.in to speficy '@HAL_USER@'
+ instead of hardcoded 'root'
+* debian/hal.postinst: create user and group hal if necessary
+* updated debian/hald.8 manpage to describe --drop-privileges
+* added build-dependency libcap-dev (now required by hald/hald.c)
+* now build-depend on debhelper >= 4.1.16 for po-debconf support
+* added debconf question whether hald should run as root (default yes)
+* deleted debian/hald.init, replaced it by hald.init.in
+ which is put in /usr/share/hal/ and dynamically installed by ucf
+* /etc/dbus-1/system.d/hald.conf is now installed by ucf since the user must
+ be specified according to debconf answer
+* hald now depends on ucf and ${misc:Depends} (for debconf)
+* test whether invoke-rc.d is available and fall back to directly call init
+ script if not (compliance to Policy 9.3.3.2)
+
+The interdiff is available at
+<nowiki>[[http://www.piware.de/hal-logging-privileges.diff]]</nowiki>. After applying it to the
+package, two commands are needed to complete it:
+* rm debian/hal.init
+* autoreconf
+
+The updated package has been extensively tested; it showed no behavioural
+difference when running as normal user 'hal'. Debug logging was activated and
+compared against debug output when running as root; debug logs were identical.
+
+An updated package is available under <nowiki>[[http://www.piware.de/hal/]]</nowiki>.
+
+=== mount/umount ===
+
+'''Required privileges:'''
+
+ 1. mount file systems (what a surprise)
+
+ 2. create a lock file /etc/mtab~.<pid>, create global lock file /etc/mtab~, create and write /etc/mtab.tmp, move /etc/mtab.tmp to /etc/mtab
+
+'''Minimization for user invocations:'''
+
+The best strategy would be to avoid mount invocations from users at all. This
+goal can be reached by fully automatic volume handling. Then mount would not
+need the suid bit any more.
+
+However, for backward compatibility, users should continue to be able to mount
+volumes with the fstab option 'user', 'users', or 'owner'. The privileges above
+can be achieved with the following:
+
+* Immediately set user and group id to a nonprivileged user. This should _not_
+ be the user calling mount, otherwise the user could stop and trace mount and
+ exploit the extended privileges of mount. Thereby the process should run as a
+ new system user 'mount'.
+
+* keep CAP_SYS_ADMIN to be able to call mount(2).
+
+* lock and temporary files could be handled as user 'mount' if these are not
+ created in /etc/, but e. g. in /var/lock or /var/cache/mount (permissions
+ mount:root 0700). 
+ 
+ Problem: /var may not be mounted (or mounted remotely), /tmp is too unsafe
+ since all processes can write into it, the future /run probably will not be
+ writeable to non-root users either.
+
+* Possible alternatives of rewriting /etc/mtab:
+** keep CAP_DAC_OVERRIDE and use it when its needed; but this is equivalent
+   to being root
+** chown this file to mount:root 0640; but this alters upstream and
+   historical behavior; I'm not sure whether this would break anything or
+   impose any security risk.
+
+'''Conclusion:''' There is currently no straightforward and unintrusive way to drop root
+privileges for mount. I (MartinPitt) would appreciate an in-depth discussion
+about that.
+
+'''Preliminary patch:''' On <nowiki>[[http://www.piware.de/mount-droppriv.interdiff]]</nowiki> is a patch against the current util-linux package 2.12-7 which implements
+privilege dropping by writing the temp and lock files into /etc/mount/ and chowning /etc/mtab to mount:root. I don't really like this, but it works.
+'''Use at your own risk!''' This has not yet been tested extensively. '''Attention:''' This patch was updated on 2004-08-04 16:20 UTC to also work on kernels without capability support.
+
+'''Restriction to local users:'''
+
+According to the SecurityPolicy only 'local' users should be able to mount
+devices. To achieve this, /bin/[u]mount should get permissions 4750 and owner
+by root:local. All members of group 'local' are local users, all users who are
+not in this group are remote users (apart from the system users which have a
+group on their own). 
+
+Since the user created by base-config shall be a local user, base-config must
+be modified to create group 'local' and put the user into it. In addition there
+should be a nice GUI to manage these user classes.
+
+=== login ===
+
+/bin/login is currently installed suid root (4755). Since it is usually called from
+a getty (which runs as root), this is not really necessary. Applications like
+su, ssh, telnet, etc. continue to run without any difference (tested both on
+Sid and on Warty).
+
+The only "application" of login being suid root is that it is possible to
+terminate a login shell with "exec login". This will not work any more with the
+setuid bit removed:
+
+<pre>
+martin@donald:~$ ls -l /bin/login
+-rwxr-xr-x  1 root root 35512 2004-07-27 16:39 /bin/login
+martin@donald:~$ exec login
+donald login: martin
+Password:
+
+Authentication service cannot retrieve authentication info.
+
+Debian GNU/Linux 3.1 donald vc/1
+
+donald login:
+</pre>
+
+(The second login is the 'real' one spawned by getty since the current shell
+terminated.)
+
+On the other hand the same effect can be achieved with 'logout' or 'exit', as
+it is supposed to be done.
+
+Calling login from a shell script does not work anyway, this yields a 
+
+<pre>
+No utmp entry.  You must exec "login" from the lowest level "sh"
+</pre>
+
+Thus shell scripts should not break if the suid bit is removed.
+
+I asked the Debian maintainer of login (Karl Ramm) why it is still enabled by
+default:
+
+  ''Simply because enough (misguided) people use this that I don't want to deal
+  with them complaining that it doesn't work.''
+
+Otherwise he agrees that suid root has no substantial purpose.
+
+'''Proposal:''' login could be changed to print an error message and point to
+logout/exit instead of terminating in this ugly way. If that is accepted,
+MartinPitt will provide a patch.
+
+MattZimmerman: let it break; the tiny minority who have ever actually used this functionality will know what to do if it doesn't work
+
+MartinPitt: Okay: I wrote a <nowiki>[[http://www.piware.de/shadow-nosuidlogin.interdiff|patch against the current shadow package]]</nowiki> which disables suid and prints an error if invoked by an user.
+
+=== cupsd ===
+
+'''Required privileges:'''
+
+ 1. bind to privileged port (usually 631)
+ 2. access local printer device nodes
+ 3. read shadow password database to authenticate web admin access
+ 4. According to the documentation there may be problems with connecting to an
+ lpd backend.
+
+'''Minimization:'''
+
+cupsd should run as normal user 'cupsys'; the current package already supports
+this (configuration variables 'User', 'Group', and 'RunAsUser'), but the
+default configuration lets cupsd run as root.
+
+ 1. cupsd must start as root, bind to the privileged port and drop root
+ privileges. The current package already does this when RunAsUser is enabled.
+
+ 2. In Debian, parallel port and usb printer device nodes are accessible as
+ group 'lp'; therefore cupsd should run under this group to access them. A
+ problem appears with serial printers: the ttyS nodes are only accessible as
+ group 'dialout', so if a serial printer is used, the cupsys user must be added
+ to the dialout group.
+
+ 3. cups must run with auxiliary group shadow to be able to read /etc/shadow.
+ Other than that, shadow membership does not grant any relevant privileges (not
+ even writing to /etc/shadow), so this should be reasonably safe.
+
+ This group membership is '''not''' necessary under the following conditions:
+** the configuration application talks directly to libcupsys (like gnome-cups-manager)
+** the user is in group lpadmin; then authentication is done without asking for a password by passing the cups certificate in /var/lib/cups/certs/. 
+  If the user is not in lpadmin, cups asks for a password and needs shadow for verifying it.
+
+'''Patch for Debian Sid:'''
+
+An <nowiki>[[http://www.no-name-yet.com/patches/cupsys.min-privileges.diff|interdiff against the current sid version 1.1.20final+rc1-4]]</nowiki> was
+created which does the following:
+
+* added patch 33auxgroups to support running the cups server under auxiliary groups
+* postinst: create an user 'cupsys' and put it into groups lp, shadow, and dialout
+* postrm: remove user cupsys when purging
+* default cupsd.conf: enable RunAsUser, set User to cupsys, Group to lp
+* configure with --with-cups-user=cupsys
+* precreate /var/run/cups and chmod it to cupsys
+
+A test package is available at <nowiki>[[http://people.debian.org/~mpitt/packages/cupsys/]]</nowiki>. You
+can also get it with the following apt source:
+
+<pre>
+deb http://people.debian.org/~mpitt/packages/cupsys/   /
+deb-src http://people.debian.org/~mpitt/packages/cupsys/   /
+</pre>
+
+This package is now contained in Warty.
+
+=== jackstart ===
+
+jackstart is a suid wrapper to allow starting jackd with some additional capabilities (required for locking memory and improving scheduling priority).
+
+'''Current implementation:'''
+
+ 1. jackstart is suid root and executable for any user in the group 'audio',
+ thus at start it has full root privileges
+ 2. check whether jackstart has all capabilities necessary for jackd
+ (CAP_SYS_NICE, CAP_SYS_RESOURCE, CAP_IPC_LOCK) plus CAP_SETPCAP (!). If one
+ capability is missing, program exits with an error message.
+ 3. does some checks on the binary to verify correct permissions and owner
+ 4. fork
+ 5. child: drop uid/gid to calling user, execute jackd
+ 6. parent: give above capabilities to the child process (which is jackd now),
+ including CAP_SETPCAP (jackd needs this to give capabilities also to its
+ forked children)
+
+'''Analysis:'''
+
+This approach is totally broken. First, the kernel is usually compiled not to
+give CAP_SETPCAP to _any_ process (which is very sensible), so jackstart fails
+at step 2 and thus is useless.
+
+If the kernel actually gave CAP_SETPCAP to processes, above approach would be
+highly dangerous since CAP_SETPCAP is given to the jackd processes, which could
+be exploited for all sorts of bad things.
+
+''Conclusion:'' The current version of jackstart is useless or unsafe and thus
+should be dropped completely. 
+
+'''Solution:'''
+
+jackd itself should be suid root, do the necessary privileged operations
+(allocating locked memory (IPC_LOCK), set process priority (SYS_NICE), and
+whatever it needs SYS_RESOURCE for) and then drop back to the calling user
+without keeping _any_ capabilities.
+
+It is not immediately clear why jackd needs SYS_RESOURCE. None of the function
+calls mentioned in the relevant capabilities(7) manpage occur anywhere in the
+code. jackd runs fine (of course without realtime scheduling) as normal
+unprivileged user, but a person familiar with jack usage should comment this.
+
+'''Updated package:'''
+
+jack-audio-connection-kit_0.98.1-3ubuntu2 has been uploaded to fix these issues. jackd runs suid-root, keeps IPC_LOCK and SYS_NICE and drops back to user (it is very difficult to drop these capabilities at runtime). jackstart is a simple symlink to jackd now. The <nowiki>[[http://www.no-name-yet.com/patches/jack-audio-connection-kit.fix-capabilities.diff|interdiff]]</nowiki> is available and announced to Debian.
+
+=== camel-lock-helper ===
+
+This helper program of Evolution is installed sgid mail to be able to create lock files also in the standard mail directory <code>/var/mail/</code>. It is very similar to the lockfile
+program of procmail, the implementation looks quite conservative and sane.
+
+The sgid mail can be avoided if the lock files were not created in the
+directory of the to-be-locked file, but in a separate hierarchy:
+
+* If that hierarchy is created in <code>/var/lock/camel-lock-helper/</code> (which would be
+ root:camel 770), camel-lock-helper would be required to setgid camel (which
+ should not be a big problem)
+
+* If it is created in <code>~/.camel-lock-helper/</code>, it is difficult to ensure that
+ it gets cleaned automatically and that the user does not (accidentally)
+ delete it.
+
+Putting the locks into a flat file is probably not the best idea since access to this file had to be locked as well.
+
+CategoryArchive

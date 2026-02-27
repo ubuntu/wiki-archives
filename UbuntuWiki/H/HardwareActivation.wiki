@@ -1,0 +1,91 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+
+* '''Launchpad Entry''': https://launchpad.net/distros/ubuntu/+spec/hardware-activation
+* '''Created''':  by JaneWeideman
+* '''Contributors''': JaneWeideman, ScottJamesRemnant, JeffBailey
+* '''Packages affected''': udev, initramfs-tools, pcmcia-cs
+
+=== Summary ===
+
+Once hardware has been detected it needs to be configured and activated, for example networking needs to be enabled on manually configured network cards; bluetooth devices need to be associated with the bluez stack; sound cards may need initialisation and mixer settings uploading, etc.
+
+We should ensure that this activation during the boot sequence is reliable, and performed after the device has been detected.  We also need to ensure that devices are correctly activated when plugged in after the boot sequence has been completed, for example hot-pluggable network devices.
+
+=== Rationale ===
+
+Race conditions during the boot sequence, where detection and activation are happening side-by-side, lead to unreliable hardware and often requiring manual reconfiguration after startup.  This leads to user frustration and unhappiness.
+
+Hardware not being activated when plugged in leads the user to believe it just doesn't work, when it may simply require a manual activation step which should be done automatically.
+
+=== Use cases ===
+
+* Colin's laptop sound-card always starts with the volume muted unless otherwise configured.  ALSA can take care of restoring the previous mixer settings, but needs to be run after the sound card module has been loaded.
+
+* Jeff has a firewall script in his boot sequence, it needs to be run after networking has been enabled and configured.
+
+=== Scope ===
+
+Devices that are detected by initial coldplugging for which the activation takes place later in the boot sequence are within the scope of this specification.
+
+Configuration of networking is specified in the NetworkMagic specification.
+
+Other kinds of hotpluggable devices are out of scope of this specification for the `dapper` time-frame as we need to keep the changes as non-invasive as possible.  For `dapper+1` we can consider moving activation out of the main boot sequence and into a more event-driven model, within this release we will rely on the existing systems (`alsa`, `bluez`, etc.) handling it correctly.
+
+=== Design ===
+
+Cold-plugging of hardware during the initial boot sequence will be done in a synchronous manner, blocking the boot sequence until it has finished.  This ensures that any activation scripts further down will be able to rely on a system largely without parallel events.
+
+This is not completely true with, for example, the USB, SCSI and Bluetooth subsystems which may discover devices some time after the bus initialisation has been completed; however support for those devices is deferred to `dapper+1` where we can make the more invasive changes necessary.
+
+Synchrony doesn't come for free; cold-plugging is performed by userspace writing to `uevent` files in the `/sys` filesystem which cause the kernel to re-issue the event across the uevent netlink socket.  This event is then captured and queued by the udevd daemon and processed at the earliest opportunity.
+
+In order to ensure the udevd daemon has finished processing the event, we need to know what events it is currently processing.  To find this out we will add support for a "scoreboard" file that will list all of the events in the queue, one `DEVPATH` per line.  When the queue is empty, this file will be unlinked.
+
+User-space can then request uevents and simply wait for `udevd` to finish processing them by checking for the existence of this file.
+
+=== Implementation ===
+
+Implementation relies on various parts of the UdevRoadmap specification, those parts that affect this specification in particular are defined below.
+
+==== Code ====
+
+`udevd` will be modified such that when a new event is queued, the `/dev/.udev_scoreboard` file will be created when necessary and a line containing the `DEVPATH` of the event appended.  When an event is removed from the queue, after processing has completed, the line will be removed from the file and if the queue is empty, the file is unlinked.
+
+A new `udevplug` tool will be implemented to walk specified parts of the `/sys` filesystem and request events by writing to any `uevent` file it finds.  Before doing this it will wait for the scoreboard file to no longer exist, and after sending the requests, again wait for the file to no longer exist.  In order to ensure that events aren't confused, it will perform this waiting by watching `inotify` events rather than using inherently racey `stat()` calls.
+
+To reduce overhead for maintaining the scoreboard file, it will be placed under `/dev` and modified by using `mmap()` so that the overhead is simply that of directly modifying a page of memory.
+
+==== Use of udevplug ====
+
+The `initramfs` scripts will be modified to start `udevd` and then use this tool to create the base device nodes and walk the IDE, SCSI, i2o and USB buses to activate sufficient pieces of hardware to enter real user-space.
+
+Cold-plugging in user-space will also use this tool and will request all uevents, including those that may have been already requested in the `initramfs`.  This is necessary to assign permissions to the created devices, and to process any rules not present in the `initramfs`.
+
+The second will ensure basic modules and support are available, such as the `psmouse`
+
+==== Policy ====
+
+In order to ensure reliable activation, the following policy for `udev` rules will be established.
+
+* Names and permissions must be assigned in different rules files, so that the names can be applied in `initramfs` where it is not possible to assign permissions.
+
+* No `RUN` rule may depend on the `/usr` filesystem being mounted, whether directly by running a program in it, or indirectly by running a program that does.
+
+* Programs in `RUN` rules must function correctly if called multiple times.  They may choose to do nothing if the configuration does not require changing.
+
+* Rules may communicate with daemons located under `/usr` (for example, `hal`) by using socket rules.  Those daemons must perform their own discovery of existing devices when they start.
+
+==== Other considerations ====
+
+PCMCIA card services will be started earlier in the boot sequence, during single-user and after existing coldplugging.  This ensures that these devices are configured before the majority of services are started.
+----
+CategorySpec

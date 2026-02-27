@@ -1,0 +1,92 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+
+''Please check the status of this specification in Launchpad before editing it.  If it is Approved, contact the Assignee or another knowledgeable person before making changes.''
+
+* '''Launchpad entry''': UbuntuSpec:apport-improvements
+* '''Packages affected''': apport, linux-source-2.6.19, python2.4, python2.5
+
+=== Summary ===
+
+We want to extend the range of crashes that apport can process, as well as make the process more efficient.
+
+=== Rationale ===
+
+In Edgy we do not get any useful information from crashed processes which cannot write into their cwd (like `notification-daemon`) or are terminated with SIGABRT due to an exception (like interpreted Python/Mono programs). To accelerate processing, the core dump should not be temporarily written to the disk at all.
+
+=== Use cases ===
+
+* `notification-daemon`, a user-session daemon which does a `chmod('/')` at program start, crashes. apport is able to get a proper core dump and extract useful information from it.
+* serpentine crashes with an unhandled Python exception. apport picks this up and creates a report which contains the Python backtrace.
+
+=== Design ===
+
+* Have the kernel pipe the core dump to apport instead of writing it to the disk temporarily. This is both faster and also makes core dump creation independent from cwd writability.
+* Add hooks to most common interpreters (Python for now) to intercept unhandled exceptions and create an apport report.
+
+=== Implementation ===
+
+==== Kernel ====
+
+In 2.6.19, Andi Kleen committed a new feature for `/proc/sys/kernel/core_pattern`: it can start with a pipe ('`|`') now, in which case the remainder is interpreted as a path. That path is executed, and the core dump is piped to stdin. We will base our solution on this, however, two modifications are still required:
+
+* 2.6.19 upstream does not support arguments for the called program. In order to avoid having to write and process the core dump, we will pass the macro values as environment variables. Andi Kleen would welcome to see this fixed upstream, but doesn't want to work on that himself.
+
+* We do not want to generally enable core dumps, thus we need to leave the default `ulimit -c` to 0. If `core_pattern` is a pipe, the kernel should ignore the current `ulimit -c`; our kernel maintainers consider this safe, since the kernel does not actually write any file in that case. Instead, the called process can decide about an appropriate limit. This should be discussed with upstream and we should aim for their approval, so that eventually apport (and similar crash interception projects) work on a stock upstream kernel across all distributions.
+
+==== apport ====
+
+Apport needs to read the core dump from stdin if the core dump path is '-' (this is already implemented in Feisty). The init script needs to set the appropriate `core_pattern`: `|/usr/share/apport/apport %p %s -`.
+
+We will also add a new Python package `apport` (shipped in `python-apport` deb) which provides a default Python exception handler that creates an apport report (this is already implemented in Feisty).
+
+==== Python 2.4/2.5 ====
+
+`site.py` should try to `import apport.python_hook`, and if that succeeds, call the apport exception handler (`python_hook.install()`). See https://launchpad.net/bugs/70957 for details and patch.
+
+==== Data preservation and migration ====
+
+Not required.
+
+== Test cases ==
+
+* Crash of a process that cannot write into its cwd:
+ 
+ {{{
+ $ rm /var/crash/*
+ $ /usr/lib/notification-daemon/notification-daemon &
+ $ kill -SEGV %1
+ $ ls /var/crash
+ _usr_lib_notification-daemon_notification-daemon.1000.crash
+ }}}
+
+ and you'll get an apport window that reports the crash.
+
+* Catching Python crashes:
+  
+ {{{
+ $ rm /var/crash/*
+ $ sudo sed -i '2 s/import/imnport/' /usr/bin/serpentine
+ $ /usr/bin/serpentine
+ [...]
+ $ ls /var/crash/
+ _usr_bin_serpentine.1000.crash
+ $ sudo sed -i '2 s/imnport/import/' /usr/bin/serpentine
+ }}}
+ 
+ and again you will get an apport crash notification.
+
+Both of these cases (as well as many others) are already checked in apport's own test suite. The self tests can be run with
+ 
+ {{{
+ $ /usr/share/apport/testsuite/run-tests }}}
+----
+CategorySpec
