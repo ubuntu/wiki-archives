@@ -1,5 +1,9 @@
 # Archive of Ubuntu wikis (2004-2026)
 
+> [!WARNING]
+> The tarball version of the archive is currently unavailable due to a GDPR request.
+> It will be re-uploaded at the nearest opportunity.
+
 This is a public, readonly archive of the source text for two (soon to be) deprecated Ubuntu wikis:
 
 - **UbuntuWiki**: archived from `wiki.ubuntu.com`
