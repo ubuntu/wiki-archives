@@ -1,0 +1,291 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+
+== UbuntuDownUnder/BOFs/UbuntuDevelopment/USplash ==
+
+=== Status ===
+
+** Created:  by MattZimmerman<<BR>>
+** Priority: MediumPriority<<BR>>
+** People: DanielStoneLead, PaulSladenSecond<<BR>>
+** Contributors: MattZimmerman, MatthewGarrett<<BR>>
+** Interested: AndrewFitzsimon, JeffBailey<<BR>>
+** Status: DraftSpec, BreezyGoal, DistroSpecification, SimonSharwoodQueue<<BR>>
+** Branch: <<BR>>
+** Malone Bug: <<BR>>
+** Packages: usplash<<BR>>
+** Depends: BootLogd<<BR>>
+** UduSessions: 1<<BR>>
+
+=== Introduction ===
+
+Provide a graphical splash screen for the Ubuntu boot process.  Primarily aimed at:
+
+* People scared on the command line and ''black and white text''
+* Gentoo/bootsplash types who like bling
+* Make Ubuntu look more rounded than it is at the moment.
+
+=== Rationale ===
+
+People are simply scared of the command line.  White or grey text on a black background strikes the fear of the appropriate deity into people; Jeff's mother wants to have something nice, pretty and reassuring.  If we can hide the entire process from early userspace to starting ''gdm'' under a small curtain of VGA 'art', suddenly the Ubuntu boot process is much friendlier to typical users.
+
+Having no splash makes people think that they will be forced to deal with the command line when the rest of the experience should be CLI-free.
+
+=== Scope and Use Cases ===
+
+* A static image displayed as early as possible in the boot process (very early userspace)
+** Has to go in initrd/initramfs
+*** initramfs with grub and multi-cpio (See EarlyUserspace) will allow including/excluding an extra 'usplash.cpio' and 'usplash-artwork.cpio' on the end.
+* A progress indicator displayed when enough userland is present to support it (as soon as the root filesystem is mounted)
+** Progress bar, text describing which step it is at
+* Only enabled if 'splash' is present on the kernel command line (requires mounting '/proc')
+** jbailey's new initramfs greps+reflects this into the ENVIRONMENT for initramfs apps
+  
+* Safe fallback to textual boot process if any significant error condition arises
+** Either bailing out of the splash, or through providing an area which we do not touch during the splash.  If we mark a given area as not to be used and always set the cursor to the start of this area, applications can write directly on top of the splash to indicate horrific errors.
+
+==== Use Cases ====
+
+** Boot
+** Hibernate (swsuspend free/writing), needs foo
+** Resume (boot whilst unfreezing)---special case of 'boot'
+** Shutdown---special case of 'boot'
+
+=== Implementation Plan ===
+
+* PaulSladen to implement this week, hopefully.
+
+* vga16fb or offb enabled by the kernel at boot time.
+
+* In very early userspace, cat a static splash image (with custom colourmap) to the framebuffer, so we get an image up almost as soon as 'Starting Ubuntu' is presented to the user.  Build the image from a 16-colour PNG to a series of VGA escape sequences with a small utility beforehand, so this step is as simple as 'cat usplashartwork > /dev/fb0'.
+
+* When we get the root filesystem mounted, start a very small daemon which takes care of the splash.  Listen on a socket or a file, so we can take in status messages.  Every LSB init function resets a fifteen-second counter.  If this counter times out, the daemon bails out and heads back to the command line, assuming that this has gone wrong.
+
+* Wrap LSB init functions to send messages to the usplash daemon; this way we can have status text like 'Starting networking', 'Starting graphical environment', et al, in the progress text section.
+
+* Quit when gdm starts.
+
+==== Questions ====
+
+* Can we use 'pty' instead of a pipe for communication (avoids the problem of needing tmpfs to create a read-write named pipe).
+
+** A named pipe (a FIFO) '''does not need write access''' to be read-write and hence doesn't need tmpfs. -- MikkoVirkkilä (mvirkkil)
+
+** <nowiki>[[http://www.suspend2.net/downloads/all/suspend2-userui-0.5.1.tar.gz|suspend2-userui]]</nowiki> uses a netlink socket.  Does not need a device node to operate, so it works before there is a /dev set up.
+
+* Use 'tty1' as main graphics and 'tty2' as console for messages?
+** Blogd integration since it's going to be stealing the messages that would be going to '/dev/console'
+** Blogd might be able to be used for the redirection itself
+
+===== Grabbing Init Status/Progress =====
+
+* Using /dev/vcs{,a}[1-8] ...really designed for Braille output, ''vcs'' == Virtual Console Screen memory
+
+* Integration with 'bootlogd' [using ioctl(TIOCCONS) console redirection]
+
+* Patch 'lsb-scripts' to send 'current' information through a socket/pipe
+
+* Should attempt to use compatible messages to cdebconf, which currently uses the <nowiki>[[http://svn.debian.org/wsvn/d-i/trunk/packages/cdebconf/doc/progress.txt?op=file&rev=0&sc=0|protocol]]</nowiki>, viz:
+
+<pre>
+The cdebconf progress bars are currently driven by the following protocol:
+
+PROGRESS START <min> <max> <title-template>
+PROGRESS SET <val>
+PROGRESS STEP <inc>
+PROGRESS INFO <info-template>
+PROGRESS STOP}}}
+
+Framebuffers used:
+
+{{{
+amd64: vga16
+i386: vga16
+powerpc: built-in framebuffer (offb)
+</pre>
+
+Jeff Bailey to work out how to rebuild initrd/initramfs so that it can be rebuilt:
+
+* Using the grub magic for appending it, this will becomes trivial on i386 / amd64
+
+* Other architectures are best served by updating this at kernel upgrade time, rather than automatically rebuilding the initrd.  It would be hard to make sure that the right initrd would be built correctly, and there is a high risk of overwriting user changes in ways for which they might not have prepared.
+
+==== Data Preservation and Migration ====
+
+* Not to disrupt boot messages.
+* Interact with 'blogd'
+* Preserve existing 'grub'/bootloader command line.
+** If this can be pushed out in the Breezy install, updating existing grub installations can be avoided.
+
+==== Packages Affected ====
+
+* `usplash`
+* `sysvinit`
+* `lsb-init`
+* `initscripts`
+* `bootlogd` ?
+
+<pre>
+Package: vga16fb-mode-grub
+Arch: i386, amd64
+Pre-depends: grub
+
+Package: usplash
+Suggests: usplash-artwork, vga16fb-mode-grub
+
+Package: usplash-ubuntu-artwork
+Provides: usplash-artwork
+Build-dep: ubuntu-artwork, imagemagick
+</pre>
+==== User Interface Requirements ====
+
+Four defined areas:
+* Image (16-colour VGA)
+** Ubuntu Logo is 3 color
+** Ubuntu Name is 1 color
+** Background is 1 colour
+** Foreground text 1 colour (status)
+** Progress bar is 2-3 colors
+** Anti-aliasing/fun 7-8 colors
+** This effects (colors) can be used for text-mode as well in the case of no Framebuffer, or no matching graphics.
+* Progress text (line of text describing what's happening now)
+** Can be accompanied by mono/transparent icons
+** status text probably best kept simple and without indication of failure status
+* Progress bar (just bouncing from end to end)
+** Or twiddling.  Windows uses bouncing, OSX twiddles.  RiscOS hour-glassed.
+* Untouchable region that programs with urgent critical errors can write over
+** If on console TTY it may be possible to 'disguise' this with using foreground/backgrounds colors the same
+** Probably easiest for the moment to skip this initially and bring in as required when the use-case is clearer
+** Compatible with existing kernel 'fbcon' driver negating the need for extra font code
+ 
+Accept User Input for (password) for:
+* Encrypted swap-resume (un hibernate)
+* Encrypted root
+** Either do this as a separate process that just draws/writes directly to FB
+
+Fsck is the main process during boot that takes an inconsistent amount of time (mostly zero seconds, and sometimes 10 minutes after a maximum mount-count has been reached):
+* Main fsck high-level processes SIGALARM's parallelized child processes to ensure that only one of them is currently output to the console.  Relies on '\r' to clear the command line.  Child actually do the drawing of the entire graph line *themselves* and are merely marshaled by the master fsck to not overwrite each other.
+** Probably easier to screen-scrap this from either vcs or bootlogd/TIOCCONS
+** Although easy in theory, less keen on patching high-level fsck to allow passing of separate filehandle for status output.
+** Fsck needs to be forwarded to a progress bar.
+
+Watchdog:
+** in no 'update' or 'ping' for X seconds, switch to console messages by chvt'ing.
+** implement by patching lsb_* to send a `SIGBOING`  (SIGALARM/pipe?)
+
+-----------------------------------------------------
+
+==== Fonkle: Detailed Implementation ====
+
+<pre>
+splat:
+* main ()
+** if(strstr(kernel_cmdline, " splash="))
+** vt = get_current_console()
+** if(framebuffer)
+*** f = open(file_raw_image_of_depth("usplat_image", get_depth()))
+*** width, height = get_dimensions(open("/dev/fb0")
+*** image_width, image_height = image_decode_dimensions(f)
+*** palette = image_decode_dimensions(f)
+*** hide_cursor(vt)
+*** draw_image(CENTER | MIDDLE, image_decode_bits(f))
+** else(text-mode)
+*** hide_cursor(vt)
+*** set_text_palette(vt)
+*** draw_text(CENTER | MIDDLE, get_lsb_release_string())
+** exit()
+</pre>
+
+Note that by disabling the 'Starting Ubuntu...' message from init-tools any errors at this point will appear over the disable in an 'ubuntu-ish' colour but the fbcon/text-terminal will still be active.
+
+Integration with BootLogd will capture/redirect any message collected during initrd/initramfs, and hopefully tee it to tty2
+
+-----------------------------------------------------
+
+=== Outstanding Issues ===
+
+Code is not written.
+
+* Status Grepping
+* Redirection away of output messages
+* init-utils needs patching to *completely* remove 'Starting Ubuntu' message (used to be 'Welcome to init-tools-2.9.3')
+** Make this dependant on checking 'quiet' argument on the command line.
+ 
+Code mostly written:
+
+* usplash initial functionality (intelligent 'cat').  Fix for video-modes other than 16-bit.
+** easiest is to mandate a separate image in the initrd for each of 4-bit, 8-bit, 16-bit, 24-bit.  If one doesn't match it will be skipped
+* Text-mode throbber ideas exist in Python
+* Python-based fd.o icon-file decoder written in Python---this cursors are 24-bit with Alpha channel though...
+
+==== UDU BOF Agenda ====
+
+* Video mode selection
+** Just use the default VGA text mode, or whatever we get from OpenFirmware.
+** On x86/amd64 this will be 640x400x4 or 640x480x4 depending on what has been passed on the command line.
+** On x86/amd64 video mode setting IS DONE BY THE BOOTLOADER and needs to be setup in 'grub.conf'
+* Handling of kernel parameters
+** depend on kernel command line 'splash='
+** depend on '/usr'---have been variously relevant at different times.  Looks like for the complexity we're actually aiming for at now, it won't matter.  LTSP would like it to work without '/usr'.
+* Use of existing code
+** PaulSladen has existing code that can be used as a base.
+** Splashy people
+** fbsplash;  investigate for progress bar.
+** Instead of a daemon, it's possible to simply respawn a new application to re-open and re-draw the progress bar at every update, which wouldn't require pipes on read-only fs's...
+*** I see no reason why pipes are a problem. Also I wonder how much overhead reiniting the video handling will cause? --MikkoVirkkilä
+* Interactivity
+** What interactivity?:
+** Zero at the moment, sulogin forces switch to console (investigate how to do this in '/etc/inittab' which requires only one command per line and can't handle chaining with a semicolon.
+* Progress indication
+** End-to-end bouncing progress bar.
+** Or twiddler.
+** GDM Human cursors have a nice (but small) twiddle---have done tests with this.
+*** Python-based Xorg decoder for this... silly, complicated format.
+** A simple way to do a 'twiddler' animation is to change the value of a color (palette rotation etc), -- MikkoVirkkilä
+* Consequences for laptop support
+** MatthewGarrett says that vga16fb is the only framebuffer driver which is compatible with suspend
+** It seems to interfere with my laptop's suspend to disk.  I am trying to remove it and it removes
+     ubuntu-desktop.  An option to just turn it off to test would be nice.
+** May be possible to use X on the way down if it wasn't for 
+** DirectFB doesn't even support vga16fb, and its capabilities are very limited
+** So use vga16fb on i386/amd64 and offb on powerpc.  We cannot sensibly attempt to set up accelerated framebuffers.
+** 'bogl' is used by d-i as a simple 4-bit framebuffer library, try to use this to share code and simply.
+** bterm uses bogl for UTF-8 text-output to framebuffer.
+
+==== About BOGL ====
+===== Supports =====
+* vga16fb
+* loading font files
+* compiling font files in to C
+* displaying UTF8 text
+* compiling images in to C
+* displaying images
+* drawing horizontal- and vertical lines and boxes
+* changing/altering the palette (easy to create fast and simple 'twiddlers')
+* some rudimentary mouse and pointer support
+
+This was not a comprehensive list of everything that might be relevant that is supported
+
+===== Does not support =====
+* dynamic loading of image files
+* advanced drawing
+
+This was not a comprehensive list of everything that might be relevant that is not supported
+
+===== Needs investigation =====
+* other display modes
+* blitting
+
+==== UDU Pre-Work ====
+
+* Review existing <nowiki>[[http://www.ubuntulinux.org/wiki/USplash|USplash]]</nowiki> design documents
+* Review <nowiki>[[http://wiki.nanofreesoft.org/index.php/UsplashHowDoesItWork|Vincenzo Ampolo's solution]]</nowiki> and determine whether it is suitable as a base: http://lists.ubuntu.com/archives/ubuntu-devel/2005-March/005233.html
+* Review fbsplash and determine whether it is a suitable base: http://www.kerneltraffic.org/kernel-traffic/kt20050402_301.html#2

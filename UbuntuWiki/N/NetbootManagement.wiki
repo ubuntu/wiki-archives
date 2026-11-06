@@ -1,0 +1,123 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+* '''Launchpad Entry''': https://launchpad.net/distros/ubuntu/+spec/cluster-installation
+* '''Created''':  by JaneWeideman
+* '''Contributors''': JaneWeideman, IvanKrstic, ReinhardTartler
+* '''Packages affected''': ltsp-server-standalone
+* '''Suggests''': ConfigurationInfrastructure
+
+=== Summary ===
+
+We want to enable users to easily perform mass installations of Ubuntu on a pool of machines. We develop a console tool to intelligently manage dhcpd and syslinux configuration, and provide a GUI frontend for easy point and click configuration. 
+
+N.B. We use the term 'cluster' to mean 'a pool of machines'. While this could be a pool of cluster compute nodes, it doesn't have to be. The mass-install infrastructure also provides generic netboot management.
+
+=== Rationale ===
+
+We already support fully automated installation with d-i using preseeding (and/or kickstart). The Ubuntu LTSP integration already puts in place its own plumbing for netbooting thin clients. Let's put all the parts together so they are easy to use even for less experienced administrators, make them configurable, and provide a reasonable management interface.
+
+=== Use cases ===
+
+* Andreas is running an Internet cafe on several thick clients. He doesn't want to use the LTSP functionality in Breezy, but wants to install Ubuntu on each machine individually, and be able to trivially reinstall any machine. 
+ 
+* Kathrin runs a high-performance computing (HPC) cluster at her university. She needs to be able to install Ubuntu on 300 compute nodes, which are contributed by five departments. Each department's nodes form a named group. Kathrin wants to have each node register itself with the resource manager upon finishing installation. She also wants nodes to stage certain files from the central server locally. The whole pool, or any named group, should be trivial to reinstall by performing the appropriate action in our management tool (in the console or the GUI frontend), and then simply rebooting the nodes.
+ 
+* Reinhard is a teacher at Kathrin's university. He knows that his department's named group in Kathrin's cluster (composed of sixty machines) is currently idle, as there are no jobs submitted. So he wants to use the machines as LTSP thin clients with an LTSP server running on Ubuntu on the same network. Kathrin should be able to select Reinhard's named group, set it to boot into LTSP on the next boot, and then reboot all the machines in the group.
+
+* Rich teaches computer science in a high school. The computer lab where classes are held is running Ubuntu on thick client machines. Rich feels that it's important for students to not be confined in a locked-down computer environment, but that they should be free to explore as much as they want on the lab machines. He gives any student who asks the root password for the thick clients. To make sure machines can easily be restored to a working condition if the students break them, Rich wants to create a complete 'lab machine' disk image when he first installs Ubuntu. He wants to be able to re-image any machine with this image at any point, and he also wants all machines to re-image themselves automatically every night at 2AM. 
+ 
+=== Design ===
+
+The management tool we discuss is called 'nmt' (netboot management tool). It is able to set the next boot policy for each machine that's registered with it, or a named group of such machines.
+
+A boot policy is a simple specification of the file that gets sent to a machine that is requesting a PXE boot. Example policies include:
+
+* boot as a regular thick client from the local disk
+* boot into the (preseeded/kickstarted) Ubuntu unattended installer
+* restore a system image (re-image the machine) - postponed until Dapper+1
+* save a system image (snapshot the machine) - postponed until Dapper+1
+* boot as LTSP thin client
+* custom user-defined action (advanced users)
+
+nmt has the first four policies built-in. The LTSP policy would be shipped by the Ubuntu LTSP package. The tool should also support initiating the reboot remotely, but this functionality will likely be handled by the ConfigurationInfrastructure spec.
+
+Built-in groups are:
+* '''unknown''': A machine which has not been seen at all before, is automatically placed in the unknown group. As soon as an unknown machine requesting PXE boot is detected in the dhcpd log files, it becomes listed in nmt as a member of this group.
+* '''local boot''': This policy makes the machine boot from local disk. This policy is immutable, and only available with machines that have been previously installed by the unattended Ubuntu installer, also controlled by nmt.
+
+All computers supposed to be controlled by nmt are set to PXE boot. We operate under the assumption that once turned on, it would be impractical to turn PXE booting off on a per-machine basis (as is certainly the case with, for example, computing clusters). This is why we have to provide a method to boot a client from the local disk, even though it's attempting a PXE boot from the server.
+
+The only time a machine that's attempting PXE boots _should_ boot into its local disk, is if it's a thick client machine (possibly a HPC compute node) that's previously had Ubuntu installed on it through our automated preseed/kickstart installer. After consulting with ColinWatson, we decided that the automated installer, after finishing the stage1 install, should send a notification to the installation server that specifies its root device. The installation server keeps a mapping of MAC addresses to root devices for all automatically installed machines. Upon first receiving such notification for a machine that was previously in the '''unknown''' nmt group, the installation server automatically removes the machine from the unknown group, and places it into the built-in '''local boot''' group.
+
+The 'boot to local disk' policy hence depends on the root device mapping, and allows us to serve (via PXE) a syslinux image which simply chains to the bootloader on the root device specified in the mapping.
+
+The notification at the end of the first stage of the installer is received on the installation server by a tiny daemon called nmtd. nmtd runs as non-root, and its sole purposes are to receive stage1 installation notifications and receive notification about ip assignments from dhcpd. We'll have to evaluate if it is feasible to extend dhcpd with a trigger mechanism or if we have to parse the dhcpd logs in real-time. This is done to provide nmt with up-to-date information about yet unseen hosts.
+
+nmt is a CLI tool; a GUI frontend is available for less experienced system administrators, who want to avoid dropping into the shell to configure things. 
+
+The tool supports the following actions:
+* Assign a name to a machine
+* Assign a machine to a group
+* Set the netboot policy on next boot for a machine or a group
+* List all known machines, or all machines belonging to a group
+* List the root device : MAC address mapping database
+* Manually add, remove, or modify the root device mapping for a MAC address
+
+=== Addressing the use cases ===
+
+Here we explain how the tools we will build, nmt and nmtd, address each of our use cases.
+
+* Andreas, the internet cafe owner from our first use case, will install his main Ubuntu server, and load the nmt GUI tool. He will set the default policy for the 'unknown' group to 'boot the unattended Ubuntu installer'. When he applies the nmt configuration, he can boot the rest of the computers in his internet cafe. Because of the 'unknown' group policy, the machines will get Ubuntu automatically installed. After the stage1 of install, the installer will send the machine's root device to nmtd on the server, which will automatically place the machine into the 'local boot' named group. On subsequent reboots, the auto-installed machines will be provided a PXE boot image that instructs them to boot from the local disk (the mapped root device). 
+
+* Kathrin installs her main Ubuntu server, customizes the kickstart file for her cluster to perform file staging and registration with the resource manager, and turns on her 300 compute nodes. They are installed fully automatically. Then she creates named groups for the five departments, and reassigns the appropriate machines from the 'local boot' group (where they were automatically placed at the end of the stage1 installer) to the groups she just created. She sets the default policy for all department groups to 'boot from local disk'. She has a fully operational HPC cluster.
+
+* Kathrin places Reinhard in sudoers on her installation server, which allows him to fire up nmt and set the default boot policy for his department's group to 'boot LTSP', and back to 'boot from local disk' when he's done. Reinhard is able to easily use his department machines as thin clients when they're not being used as compute nodes.
+
+* Rich installs his main Ubuntu server. He boots his first lab machine, which gets Ubuntu automatically installed by the unattended installer (due to being in the 'unknown' group). He creates a cron script on this machine, which reboots it at 2:05 AM every morning. Rich now sets the next boot policy for this machine to 'take a snapshot of the machine'. At next boot, the machine is served a tiny kernel and initrd which use cpio and tar to create a snapshot of the root device, and then send it to the installation server. Rich then reverts the machine's boot policy to 'local boot'. 
+
+He changes the policy for the 'unknown' group to 're-image', and chooses the snapshot that was just sent to the server. He boots the rest of his lab machines, which are re-imaged from the snapshot. He adds all of his lab machines to a 'lab' group in nmt with policy 'local boot', and assigns a root device mapping to the whole group. He sets up a cron script on the installation server, which changes the 'lab' group policy to 're-image' (with the previously created snapshot) every night at 2AM, and reverts it to 'local boot' 30 minutes later. Rich is done. There is world peace and much rejoicing in the streets.
+
+* Roger maintains a set of machines that are reimaged and managed via an autoinstaller. On one machine, that happens to be far away, perhaps in a remote data center, the install hangs due to some anomaly. Roger has a set of monkeys who can examine the machine, but the issue is beyond their scope. He would like to take a look at the anomaly by perhaps SSHing into the machine. Roger would like network-console to be enabled and included in the automated installer as an option. Perhaps Roger would like an embedded syslog server in the installer that can dump log data to a log server configured by debconf.
+ 
+=== nmt interface design ===
+
+The nmt GUI interface will be designed working together with a usability person. It is not specified at this time.
+
+=== Implementation and code ===
+
+* Define interface to dhcpd config to define netboot actions
+** This will be handled by the 'include' functionality in dhcpd.conf
+** We can include one file that is managed by nmt without clobbering the remaining dhcpd configuration
+* Define interface to create/update/edit preseed configs
+
+Both nmt and nmtd will be written in Python. They will use a SQLite database to share state. The automatic stage1 installer is to be modified to send completion notification to the installation server.
+
+=== Outstanding issues ===
+
+Check with dhcpd maintainer if it is feasible to extend dhcpd by a trigger mechanism on handing out ips as described above.
+
+Needs integration with:
+* ConfigurationInfrastructure is highly depending on this spec, since it is basically an extension of nmt. When implementing nmt, we need to keep this extension in mind.
+* LTSP - is currently distributing a very simple dhcpd.conf. It will be changed to use nmt to change the boot policy for the unknown group to 'boot LTSP'.
+
+=== Notes ===
+
+- Since we're already building an interface to dhcpd, nmt could also provide an easy interface to configure static IPs and other standard dhcpd functionality (outside of netboot management)
+
+- Eventually, we will need to provide integration with NetworkWideUpdates and NetworkAuthentication, which will both be hooked into the post-installation stage of the automatic installer. 
+
+- An administrator can design a custom kickstart/preseed file. We could generate one at the end of the installation server install, which duplicates a standard Ubuntu install using defaults given at install time.
+
+- The default password for the default preseed file will be chosen randomly, and presented when nmt is first started
+
+ajmitch offers help with implementation. Nicolas Kassis offers a testbed for nmt.
+----
+CategorySpec

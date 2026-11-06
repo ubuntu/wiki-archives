@@ -1,0 +1,139 @@
+# Archive of Ubuntu wikis (2004-2026)
+
+This is a public, readonly archive of the source text for two (soon to be) deprecated Ubuntu wikis:
+
+- **UbuntuWiki**: archived from `wiki.ubuntu.com`
+- **UbuntuCommunityHelpWiki**: archived from `help.ubuntu.com/community/CommunityHelpWiki`
+
+As these wikis were very large, we sorted each into alphanumeric subdirectories,
+to improve search and navigation on GitHub.
+
+The latest version of each page, **as of September 23rd, 2026**, is included in this
+plaintext repo.
+
+The new wiki was launched on September, 22nd 2026.
+
+> [!NOTE]
+> There are a very large number of pages in this archive.
+> 
+> To find a page or topic, use the search function on GitHub.
+
+> [!TIP]
+> The plaintext archive is deliberatly lean.
+> Tarballs are also available as release assets. 
+> 
+> These contain multiple page versions, images, attachments, 
+> and other data that could not be included in the repository directly.
+> Note that the tarball archive is currently not as up-to-date as the plaintext
+> archive.
+
+## Table of Contents
+
+- [Archive of Ubuntu wikis (2004-2026)](#archive-of-ubuntu-wikis-2004-2026)
+  - [Purpose of these archives](#purpose-of-these-archives)
+  - [Limitations of the text-based archive](#limitations-of-the-text-based-archive)
+  - [Suitable for most use-cases: text-only wiki archives](#suitable-for-most-use-cases-text-only-wiki-archives)
+  - [For the completionists: wiki tarballs](#for-the-completionists-wiki-tarballs)
+  - [Gallery](#gallery)
+    - [The two wikis in 2026](#the-two-wikis-in-2026)
+    - [wiki.ubuntu.com through the ages](#wikiubuntucom-through-the-ages)
+
+## Purpose of these archives
+
+These archives are intended to serve two purposes:
+
+1. Preserve an important part of Ubuntu history in a way that's easy to access
+1. Make pages available to contributors and teams who may need to copy,
+   download, or migrate them
+
+> [!CAUTION]
+> 
+> The content in these wikis has been archived and is readonly.
+> 
+> The wikis have been archived for historical preservation and to aid content migrations.
+> 
+> The wiki pages are not maintained and may not be reliable. **Do not use them as documentation.**
+> 
+> There may be formatting issues associated with a syntax conversion necessary for rendering on GitHub.
+>
+> If you need pages closer to their original format, download tarballs from **Releases**.
+
+## Limitations of the text-based archive
+
+1. We have needed to remove content, including images, attachments and versions, to reduce space requirements.
+1. To make the pages more readable on GitHub, we have converted the markup to MediaWiki style. This
+conversion is not perfect, partially due to inconsistencies in the original sources. You may encounter formatting and rendering errors.
+1. This archive is not intended to be used for general reference or to be maintained with working links. Most links are wrapped in `<nowiki>` tags and will not work.
+1. The index for the larger wiki is too long for GitHub to render fully. To view the complete index, you must view the `raw` file. In a local copy, you can use the index for navigating to the files; for example, using `g f` in Vim.
+1. As GitHub may truncate large long lists, use its search function as much as possible.
+
+If 1 and 2 are a problem, use the tarballs provided as release assets.
+
+## Suitable for most use-cases: text-only wiki archives
+
+The original wikis were built using the Moinmoin wiki engine.
+To make archives that were readable and searchable on GitHub, the following modifications were made:
+
+1. Removed any files that were empty or that contained spam.
+1. Removed any version of a page that wasn't the latest version.
+1. Removed named parent folders for pages and transferred the name to the relevant file.
+1. Removed URL encoding from filenames.
+1. Converted Moinmoin wiki syntax to MediaWiki syntax, which renders on GitHub.
+1. Added a top-level warning to all pages about limitations of the wiki.
+1. Sorted pages in each wiki into alphanumeric folders (GitHub truncates long lists of files).
+
+## For the completionists: wiki tarballs
+
+Compressed tarballs of the wikis are available as GitHub release assets.
+
+These include images, attachments, and page versions.
+The source pages are unmodified, so they use Moinmoin syntax.
+
+The `Community Help Wiki` is provided as a single tarball.
+
+The `wiki.ubuntu.com` archive exceeds the GitHub asset limit by an order of
+magnitude. For this reason, the tarball is split into smaller parts, which can
+be re-assembled before extraction.
+
+## Gallery
+
+### The two wikis in 2026
+
+#### wiki.ubuntu.com
+
+![big-wiki-2026](Assets/big-wiki-2026.png)
+
+#### Community wiki
+
+![community-wiki-2026](Assets/community-wiki-2026.png)
+
+### wiki.ubuntu.com through the ages
+
+#### 2004
+
+![big-wiki-2004](Assets/big-wiki-2004.png)
+
+#### 2006
+
+![big-wiki-2006](Assets/big-wiki-2006.png)
+
+#### 2008
+
+![big-wiki-2008](Assets/big-wiki-2008.png)
+
+#### 2010
+
+![big-wiki-2010](Assets/big-wiki-2010.png)
+
+#### 2012
+
+![big-wiki-2012](Assets/big-wiki-2012.png)
+
+#### 2014
+
+![big-wiki-2014](Assets/big-wiki-2014.png)
+
+#### 2026
+
+![big-wiki-2026](Assets/big-wiki-2026.png)
+

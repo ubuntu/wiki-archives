@@ -1,0 +1,272 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+
+''Please check the status of this specification in Launchpad before editing it.  If it is Approved, contact the Assignee or another knowledgeable person before making changes.''
+
+* '''Launchpad Entry''': UbuntuSpec:restricted-manager-rewrite
+* '''Packages affected''': restricted-manager
+
+=== Summary ===
+
+We propose a new code and driver database design for
+restricted-manager which will make it maintainable again and also be
+suitable as a proper upstream project, so that other distributions can
+use it as well.
+
+We review the list of existing and proposed features and create a new
+code architecture which will be rewritten from scratch (with reusing
+most of the existing code modules, of course).
+
+=== Release Note ===
+
+The behaviour of restricted-manager should not change in a visible
+way, so this should not be mentioned in the release notes.
+
+=== Rationale ===
+
+The original code architecture of restricted-manager was very narrow,
+focusing on non-free kernel drivers in a Gnome application. A lot of
+new features have been bolted on this original structure, such as the
+KDE frontend, grouping of handlers, support for firmware installation,
+or non-free support packages of drivers which are free by themselves.
+This made the code very interdependent and hard to
+maintain/bugfix/understand.
+
+The current version also has a lot of Ubuntu specifics hardcoded,
+which renders it hard to use for other distributions without
+significant changes.
+
+=== Use Cases ===
+
+* Jon is a RedHat developer. He decides that the next Fedora release
+ should get an easy to use frontend for installing restricted
+ drivers. He creates a branch of restricted-manager, implements the
+ small distro specific "OSLib" class, and has it running. Since this
+ was so easy, he has some time to fix some bugs, which he
+ contributes back to upstream.
+
+* Richard does not want to provide an interface for restricted
+ drivers in his distribution, since they are evil and from the dark
+ side of the force. However, he needs a GUI for providing free
+ third-party drivers which are hosted outside of his distro's
+ repository and which are maintained separately. He calls
+ restricted-manager in "free third-party drivers" mode. For this
+ reason upstream renamed the project to something less focused on
+ restricted drivers.
+
+* Martin writes a handler for installing the Broadcom firmware on
+ demand. Three months after releasing Hardy the download URL
+ changes. He just sets a new URL in the central database and users
+ can continue to get the firmware with a snap of a finger without
+ the need to provide an SRU.
+
+=== Design ===
+
+* Move away from being Ubuntu specific to a proper upstream project.
+
+* Handlers are DE agnostic, but they sometimes need to ask questions
+ → need to call abstract UI message boxes etc.
+
+* Application logic and UI workflow is encapsulated in an abstract UI
+ class. This gets subclassed to implement KDE/GNOME/CLI/a
+ noninteractive test suite implementation.
+
+* Basic handler must not make assumptions about kernel modules, etc.,
+ since there are many device drivers which are not tied to a kernel
+ module (e. g. sl-modem-daemon, printer drivers, file system
+ drivers, etc.).
+
+* As a consequence of the previous point, each driver needs to be
+ able to decide on its own whether it is applicable on the current
+ system. The application framework should provide common
+ functionality like modalias reading/overriding, lsmod/lspci evaluation,
+ (i. e. provide a list of available and enabled hardware),
+ kernel module blacklisting, etc., which those handlers can call.
+
+* Supports different handler types: 
+** kernel module (vmware/OSS)
+** kernel module + additional magic (nvidia/ati, sl-modem-daemon)
+** kernel module + shipped firmware (ipw3945)
+** kernel module + non-shipped firmware (bcm43xx)
+** grouping  (all three vmware modules, or all two dozen OSS drivers)
+** printer driver
+** Fuse implementation to support a new file system type.
+
+* A handler knows whether it has a free or restricted driver.
+
+* The application can be started in any of three modes:
+** Show non-free drivers only (as in Ubuntu, since we do not want to
+  promote providing free drivers without getting them into the main
+  kernel)
+** Show free drivers only (Richard's use case from above, there is an
+  actual real-life request for this feature)
+** All available drivers (for vendors that want it).
+
+ The user interface and strings change accordingly.
+
+* Encapsulate all distro specific code in an abstract `OSLib` class
+ and provide distro specific implementations in concrete subclasses.
+ This should be the only class downstreams have to override and
+ implement (aside from providing concrete custom handlers).  As an
+ example, the Ubuntu implementation will be aware of handling
+ `/etc/default/linux-restricted-modules-common`.
+
+* Drop the `runme_as_root()` madness, since it is inappropriate for other distros, makes assumptions about the authentication backend, and is only used for a corner case (enabling nvidia driver in compiz control panel, but this could run r-m through gksu itself if it wants to).
+
+* The handler → driver mapping should not be hardcoded any more. The
+ mapping is maintained on a central location (initially on
+ http://www.drivertool.org) where all interested distros can
+ maintain their own mapping to a distro package, URL, etc., and where
+ distros can collaborate to maintain this database.
+
+* For this phase, distros will ship all the available handlers by
+ default, so that they can detect availability. In the future, it is
+ desirable to move the handlers themselves to a central place, so that
+ third-party vendors can provide their own. We currently do not
+ provide a solution how to get them from that central place to the
+ distribution. However, the new program design should not assume any
+ tight coupling between the core code and handlers. (Note: this is
+ already true for the current design, any package can ship a handler,
+ at which point it becomes available in r-m.)
+
+=== Implementation ===
+
+==== Handler-Driver mapping ====
+
+http://www.drivertool.org is a distribution neutral place which can be
+used for hosting the central mapping. This site is currently hosted
+privately by Jon Masters, but if traffic becomes an issue, it would
+need some contributions by Canonical, RedHat, and other Linux vendors
+which participate. However, the amount of data that gets exchanged is
+very small. 
+
+Any computer can do a query on this database. As an input, it provides
+a type/value pair, where type is 'modalias', 'PCI vendor/product ID',
+'Printer manufacturer and model', etc., and the value is the
+respective value for that type. This ensures that
+
+* the system is extensible to accomodate any kind of hardware
+ identification
+* the amount of data sent by the client is minimal (in particular, it
+ does *not* send the OS vendor, version, any serial numbers, etc. for
+ privacy reasons).
+
+The response is a list of available entries, where each entry has the
+following fields:
+
+* OS Vendor
+* OS version
+* set of type/value pairs
+
+The type/value pairs can be interpreted freely for each OS vendor
+(distribution), but there should be some standard types like 'handler,
+'module', 'url', 'packagename', 'md5sum', 'sha1sum', etc.. For Ubuntu,
+we additionally define the data type 'repository', which would be an
+URL to an apt repository.
+
+With this design, each client always gets the full list of entries for
+all OS vendors. This compromise is done to avoid exposing the OS
+vendor and version, and other information which could be used for
+tracking, collecting data for security attacks (like providing an IP
+list of known-vulnerable OS versions); the lists are not expected to
+become very big, too (in the order of 50 entries, which should amount
+to some 5 KB).
+
+Distribution specific handlers know by themselves which module and
+package they need, so for those the DB only needs to specify the
+handler name and information which is better maintained outside of the
+handler itself (like URLs which are volatile). But this design also
+permits writing more generic handlers which get their information
+(which kernel module they manage, or which additional packages to
+install) from the driver database.
+
+===== Example 1: bcm43xx firmware =====
+
+Client → DB: 
+<pre>
+module
+bcm43xx}}}
+
+DB → Client: 
+{{{
+Ubuntu/all
+    handler BroadcomFirmwareHandler
+    url http://ubuntufriends.org/firmware/bcm43xx.o
+    sha1sum DEADBEEF42
+SuSE/10.3
+    handler Bcm43xxHandler
+    package bcm43xx_firmware
+    component non-free
+</pre>
+
+===== Example 2: nVidia driver =====
+
+Client → DB: 
+<pre>
+modalias
+pci:v000010DEd00000098sv*sd*bc03sc*i*}}}
+DB → Client: 
+{{{
+Ubuntu/7.10
+    handler NvidiaGlxNewHandler
+    repository restricted
+Ubuntu/8.04
+    handler http://www.ubuntu.com/drivers/handlers/8.04/NvidiaGlxHandler.py
+    repository restricted
+Fedora/8
+    handler NvidiaGraphicsHandler
+    repository http://www.fedora-nonfree.org/fedora8/
+</pre>
+
+==== Class layout ====
+<nowiki>[[File:restricted-manager.png]]</nowiki>
+
+(Dia source: <nowiki>[[attachment:restricted-manager.dia]]</nowiki>)
+
+==== Collaboration with other distributions ====
+
+* Contact Debian, Novell, Mandriva for joining the project, contact with
+ RedHat is already established with Jon Masters.
+
+* Create upstream product on Launchpad for trunk, invite distros to
+ host their branches there, too (this is not a requirement, though, LP
+ just provides a great hosting platform for bzr). (OK with Jon)
+
+* Create two mailing lists on a vendor neutral platform (LP does not
+ have MLs yet), for now this will happen on
+ http://www.linux-foundation.org/en/Driver_Backport:
+** ML for design and code coordination between vendors. (Posting
+  limited to members, moderated subscription, should have open
+  archives)
+** ML as an official contact point for interested third parties which
+  want to provide their drivers in the central DB (Free posting for
+  all, no public archive).
+
+* As one of the first bikeshedding discussion adventure, the ML will
+ discuss a proper name for the project. "restricted-manager" does not
+ suit the "free third-party drivers" use case, and is not a proper
+ noun either.  The name should not actually appear prominently in the
+ UI, it's just the project name as appearing in Launchpad, the source
+ code, etc.  (Current candidate: "3PO" or "Threepio", suggestions
+ welcome).
+
+=== Test/Demo Plan ===
+
+(TODO)
+
+It's important that we are able to test new features, and demonstrate them to users.  Use this section to describe a short plan that anybody can follow that demonstrates the feature is working.  This can then be used during CD testing, and to show off after release.
+
+This need not be added or completed until the specification is nearing beta.
+
+=== Outstanding Issues ===
+
+----
+CategorySpec

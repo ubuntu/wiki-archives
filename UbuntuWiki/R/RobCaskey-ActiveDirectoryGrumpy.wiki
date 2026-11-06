@@ -1,0 +1,199 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+=== Nasty Hacky Active Directory Integration on Gutsy ===
+Everything listed here is done as root, so get your sudo on.
+
+Where you see ENV{'FOO'} substitute for appropriate values, sample values are as follows:
+
+<pre>
+export DOMAIN_ADMIN=rcadmin
+export DOMAIN_PASS=YOURPASS
+export MACHINE_FQDN=cai17.music.uga.edu
+export MACHINE_OU=Music
+export AD_DOMAIN=LABS.AD.UGA.EDU
+export AD_SHORTNAME=LABS
+</pre>
+
+==== /etc/hosts ====
+The real hostname needs to be present in /etc/hosts, mine looks like this
+
+<pre>
+127.0.0.1       localhost
+127.0.1.1       cai17 cai17.music.uga.edu
+</pre>
+
+=== Install Samba and Friends ===
+<pre>
+apt-get install samba winbind krb5-user  -y
+</pre>
+==== /etc/samba/smb.conf ====
+The following settings are important and changed from the defaults, the full smb.cnf at end of this document for your edification. Again, this is not the complete smb.conf.
+
+<pre>
+   security = ads
+   workgroup = $ENV{'AD_SHORTNAME'}
+   realm = $ENV{'AD_DOMAIN'}
+   idmap uid = 10000-20000
+   idmap gid = 10000-20000
+   winbind separator = +
+   winbind enum users = no
+   winbind enum groups = no
+   winbind use default domain = yes
+   template homedir = /home/%U
+   template shell = /bin/bash
+   client use spnego = yes
+   domain master = no
+   encrypt passwords = no
+</pre>
+==== /etc/nsswitch.conf ====
+* all instances of the word compat get replaced with compat winbind
+* all instances of the word dns get replaced with dns wins
+
+=== Configuring Pam ===
+==== /etc/pam.d/common-account ====
+a new line should be inserted at the beginning of this file
+<pre>
+account     sufficient     pam_winbind.so
+</pre>
+==== /etc/pam.d/common-auth ====
+a new line should be inserted at the beginning of this file
+<pre>
+auth     sufficient     pam_winbind.so
+</pre>
+==== /etc/pam.d/common-session ====
+a new line should be inserted in /etc/pam.d/common-session immediately after the line containing pam_unix.so
+<pre>
+session required        pam_mkhomedir.so        umask=022 skel=/etc/skel
+</pre>
+=== Configure Kerberos ===
+Kerberos server should be identical to your AD_DOMAIN
+<pre>
+dpkg-reconfigure krb5-config
+</pre>
+=== Set the Clock To Match The Domain ===
+<pre>
+ntpdate $AD_DOMAIN
+</pre>
+and add an entry to /etc/crontab so we stay on time
+<pre>
+* /5 *   * * *   root    ntpdate labs.ad.uga.edu
+</pre>
+=== Join the Domain ===
+Dont include the last bit if you dont have a sub ou to join
+<pre>
+net ads join createcomputer=$MACHINE_OU -U$DOMAIN_ADMIN%$DOMAIN_PASS
+</pre>
+=== Restart Samba and Winbind ===
+<pre>
+/etc/init.d/samba stop
+/etc/init.d/winbind stop
+/etc/init.d/samba start
+/etc/init.d/winbind start
+</pre>
+==== Install Netatalk ====
+<pre>
+apt-get install netatalk -y
+</pre>
+
+==== /etc/netatalk/afpd.conf ====
+edit /etc/netatalk/afpd.conf, it should read
+<pre>
+ - -transall -uamlist uams_clrtxt.so,uams_dhx.so -nosavepassword
+</pre>
+or alternatively this, but it is NOT needed for OS X SSO from login-window <pre>
+- -transall -uamlist uams_dhx.so,uams_gss.so  -k5service afpserver -k5keytab /etc/krb5.keytab  -k5realm LABS.AD.UGA.EDU -fqdn $MACHINE_FQDN:548
+</pre>
+==== /etc/netatalk/atalkd.conf ====
+/etc/netatalk/atalkd.conf should read
+<pre>
+eth0
+</pre>
+==== Enabling Encrypted Password Support ====
+All modern macs refuse to connect without encrypted password support, which must be compiled in by the user for licencing reasons.
+<pre>
+apt-get source netatalk
+sudo apt-get build-dep netatalk devscripts fakeroot cracklib2-dev -y
+cd netatalk-2.0.3
+DEB_BUILD_OPTIONS=ssl debuild
+dpkg -i ../netatalk-*.deb
+</pre>
+
+==== Appendix: Full /etc/samba/smb.cnf ====
+
+<pre>
+[global]
+workgroup =  LABS
+server string = %h server (Samba, Ubuntu)
+
+dns proxy = no
+
+log file = /var/log/samba/log.%m
+
+max log size = 1000
+
+log level = 2
+syslog = 0
+
+panic action = /usr/share/samba/panic-action %d
+
+security = ads
+realm = LABS.AD.UGA.EDU
+encrypt passwords = true
+passdb backend = tdbsam
+obey pam restrictions = yes
+
+invalid users = root
+
+passwd program = /usr/bin/passwd %u
+passwd chat = *Enter\snew\sUNIX\spassword:* %n\n *Retype\snew\sUNIX\spassword:* %n\n *passwd:*password\supdated\ssuccessfully* .
+
+socket options = TCP_NODELAY
+
+idmap uid = 10000-20000
+idmap gid = 10000-20000
+
+winbind separator = +
+winbind enum users = no
+winbind enum groups = no
+winbind use default domain = yes
+template homedir = /home/%U
+template shell = /bin/bash
+client use spnego = yes
+domain master = no
+
+[homes]
+   comment = Home Directories
+   browseable = no
+   writable = yes
+
+[printers]
+   comment = All Printers
+   browseable = no
+   path = /var/spool/samba
+   printable = yes
+   public = no
+   writable = no
+   create mode = 0700
+
+[print$]
+   comment = Printer Drivers
+   path = /var/lib/samba/printers
+   browseable = yes
+   read only = yes
+   guest ok = no
+
+[group]
+        comment = "Group Folders"
+        path = /group
+        browseable = yes
+        writable = yes
+
+</pre>

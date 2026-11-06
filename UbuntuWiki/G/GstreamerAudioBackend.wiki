@@ -1,0 +1,112 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+=== Status ===
+
+** Created: 2005-10-25 by MartinPitt
+** Launchpad Entry: https://launchpad.net/distros/ubuntu/+spec/gstreamer-audio-backend
+** Contributors: MartinPitt, ChristopherOlsen
+
+=== Introduction ===
+
+Eventually we want replace esound with a better solution, since esound has many bugs and is unsuitable for low-latency applications like video playback. We also propose a transition that will make sound work everywhere and allows a more flexible default configuration.
+
+=== Rationale ===
+
+Breezy sets up and uses esound for all Gnome-related sound output. esound provides a sound card independent mixing daemon. However, users report many bugs in esound that do not happen when using ALSA directly. In addition, esound has a high latency which makes it unsuitable for video playback.
+
+Breezy enabled ALSA's dmix feature by default which allows several applications to open the sound device simultaneously and mixes streams. It should make the concept of a desktop mixing daemon obsolete.
+
+=== Use Cases ===
+
+* John wants to play a movie with totem and wants good A/V synchronisation. At the same time he wants to hear sound events (from e. g. gnomemeeting) .
+* Mary wants to share the sound device with John, so her desktop session should be able to playback sound as well. John's running session should not prevent Mary from playing sound.
+* ALSA upstream developer Al Samix is interested in getting feedback about cards which work with dmix, in order to enable dmix by default on them in future releases.
+
+=== Scope ===
+
+The change is confined to the Gnome desktop and Gnome applications, which usually use gstreamer. Non-gstreamer applications usually have their own way of handling audio configuration, and often default to ALSA or automatic detection nowadays. This spec is only about finding a good backend for gstreamer.
+
+=== Design ===
+
+==== gstreamer ====
+
+gstreamer should use the ALSA backend if ALSA dmix is enabled, fall back to esound or arts if the daemon is running, then fall back to ALSA without dmix, and finally fall back to OSS.
+
+This issue has been discussed with upstream, and the following design has been agreed upon:
+
+* We need to create a new audio sink "alsadmixsink" which only works when dmix is available.
+* gstreamer 0.10 adds an audio autosink which checks which sinks are available and determines the best one. This currently prefers ALSA over esd. This needs to be changed to prefer alsadmix over esd over alsa.
+* gstreamer 0.10 is due in December, so that we can include it into Dapper without problems.
+
+==== ALSA ====
+
+* Upgrade to the latest ALSA (1.10), which has much better support for multiple users and dmix support.
+* Change access permissions to the ALSA IPC sockets to "writable for group audio", so that several users can access the device simultaneously.
+* Upstream is actively interested to improve dmix support; they need feedback about cards where dmix works on, so that these cards can be whitelisted.
+
+==== esound ====
+
+* We still need the esound package as a fallback when ALSA dmix does not work.
+* In order to not interfere with other sound systems like JACK, and to avoid useless resource consumption, esound will not be started with the session any more, but it will be started as soon when an application actually wants to use it.
+
+==== libgnome ====
+
+libgnome currently uses libesd directly, so sound events will not work as intended. It should use gstreamer or ALSA directly.
+
+=== Implementation ===
+
+==== Code ====
+
+gstreamer alsadmix:
+* dmix works IFF it is possible to do two successful calls to `snd_pcm_open()`. If the second one would block, then dmix is not enabled, and the sink module should fail to initialize.
+* gstreamer uses classes, so the alsadmix module can inherit everything but the open method from the original alsa module, and call the alsa module's open method after doing the check. Therefore the amount of code in alsadmix is minimal.
+* gstreamer needs to change the default backend to the autosink.
+* Time estimation: 2 days (code change, upstream cooperation, tests)
+
+esound:
+* /etc/esound/esd.conf: `set autospawn=1`
+* Time estimation: 15 minutes (including testing)
+
+libgnome:
+* There is a proposal to change libgnome to use gstreamer instead of libesd: http://gstreamer.freedesktop.org/tasks/gnome.html#libgnomeify
+* Patch is quite intrusive and we are not in a position to create and maintain it. According to Jeff, upstream will soon move to gstreamer, so we need to make sure that this happens soon.
+* If upstream does not change libgnome to gstreamer in time, then the sound events will just continue to use esound. This does not actually break sound.
+* Time estimation: We will not do this ourselves, but rely on upstream and might just push a little.
+
+libao:
+* This library is used commonly, and it currently defaults to the esd backend. It must be changed to output to ALSA by default.
+* Time estimation: 30 minutes (including testing)
+
+hwdb-client:
+* Provide a frontend for detecting whether or not dmix works: if dmix does not work by default, we should temporarily enable it and do the test again.
+* For this we really need an interactive and audible test, the user has to decide whether the sound was free of disturbances.
+* Once we have this information in the database, we should forward it to ALSA upstream, so that dmix can be enabled by default on these cards.
+* Time estimation: 2 days when Oliver Grawert can help with this.
+
+==== Data preservation and migration ====
+
+* The gstreamer sink will not automatically be changed to autosink for users who manually changed the backend. But this is actually reasonable.
+
+==== Jack usage ====
+
+* [jec] : I think there should be a way to configure the alsadmixsink to use something else that dmix, ESD, Alsa. This would be useful for people using Jack for example. A config file in ~/.gstreamer_default_backend could fo the trick, so the user could set: backend = jack,dmix,esd,alsa,oss for example
+
+[Note: gstreamer currently has no working jacksink that would work the way alsa or esd sink work, in addition to that the old jack output plugin is so far not ported to 0.10 ]
+
+==== Questions ====
+* What's the situation of SDL_audio/pygame?
+** SDL audio will try several of the compiled in sound backends when running. The environment variable `SDL_AUDIODRIVER` controls which to try by default. Setting this to `alsa` should be sufficient? I know Debian provides several SDL binaries built with different audio library dependencies. I am unsure whare Ubuntu does? For more information on the SDL audio environment vars, look here, http://www.libsdl.org/cgi/docwiki.cgi/SDL_5fenvvars
+
+==== Comments ====
+Upstream has started a wiki about this:
+http://live.gnome.org/GStreamer/esd
+----
+CategorySpec

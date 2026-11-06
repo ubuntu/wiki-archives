@@ -1,0 +1,232 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+There seems to be quite a bit of discussion about suspend-to-ram and suspend-to-disk support in Feisty. I think a large portion of the disagreements are rooted in the fact the overall suspend process and support are largely inconsistent and undocumented. Therefore, in an attempt to foster useful discussion, I will try to document the overall method of how software suspend works in Ubuntu.
+
+=== Relevant Packages ===
+
+{| class="wikitable"
+|-
+| '''Package name'''
+| '''Responsibilities'''
+|-
+| ''acpi-support''
+| Default suspend and hibernate policy.
+|-
+| ''powermanagement-interface''
+| Front-end to acpi-support policy.
+|-
+| ''gnome-power-manager''
+| Alternate policy provider.
+|-
+| ''hal''
+| gnome-power-manager policy backend.
+|-
+| ''kpowersave''
+| Alternate policy provider.
+|}
+
+=== Starting software suspend ===
+
+There are multiple methods of starting a software suspend procedure. Each is associated with a different user-interface state.
+
+==== Default (acpi events) ====
+
+In the absence of any other overriding policy, ''acpi-support'' has full control over the software suspend process.
+
+{| class="wikitable"
+|-
+| '''acpi suspend events'''
+|-
+| ''ibm-hibernatebtn''
+|-
+| ''ibm-sleepbtn''
+|-
+| ''panasonic-hibernatebtn''
+|-
+| ''panasonic-sleepbtn''
+|-
+| ''sony-hibernate''
+|-
+| ''sony-sleep''
+|-
+| ''tosh-hibernate''
+|-
+| ''tosh-sleep''
+|-
+| ''sleepbtn''
+|}
+
+There are two categories of acpi suspend events, and they respectively execute two scripts:
+
+{| class="wikitable"
+|-
+| '''Suspend category'''
+| '''Associated script'''
+|-
+| ''hibernate''
+| /etc/acpi/hibernate.sh
+|-
+| ''sleep''
+| /etc/acpi/sleep.sh
+|}
+
+These scripts are either executed directly, or in-directly by a mapping of the third-party sleep/hibernate button events to the normal ''sleepbtn'' event.
+
+==== GDM ====
+
+GDM has menu-items specifically for "hibernate" and "suspend" (sleep). These call the ''powermanagement-interface'' directly via the following commands:
+
+{| class="wikitable"
+|-
+| '''Menu item'''
+| '''Command executed'''
+|-
+| hibernate
+| /usr/sbin/pmi action hibernate
+|-
+| suspend
+| /usr/sbin/pmi action sleep
+|}
+
+The ''powermanagement-interface'' scripts execute the ''acpi-support'' scripts with an override for any other policy.
+
+==== Gnome ====
+
+''gnome-power-manager'' is the official policy and user-interface for power management in Gnome. When it is running, the several power management related ''acpi-support'' scripts specifically disable themselves. Their normal actions will not occur except when specifically requested via a "force" command-line option.
+
+The software suspend policy of ''gnome-power-manager'' is actually handled by ''hal''.
+
+==== KDE ====
+
+=== Software suspend policy ===
+
+Once a software suspend has been requested, some program must perform the "policy" for it. That is, actually ensure the system is in a suitable state for suspension. And later, return the system to (roughly) the same state it was before the software suspend occurred.
+
+==== acpi-support ====
+
+These much maligned scripts now have a long history behind them, and apparently fairly rich support for a variety of hardware. However, they are also almost completely Ubuntu specific.
+
+The two earlier mentioned scripts, /etc/acpi/hibernate.sh and /etc/acpi/sleep.sh handle the heavy lifting. Documenting their every contortion is beyond the scope of this article; however, the overall process is as follows:
+
+{| class="wikitable"
+|-
+| '''Step #'''
+| '''/etc/acpi/hibernate.sh'''
+| '''/etc/acpi/sleep.sh'''
+|-
+| 1
+| Ensure ACPI_HIBERNATE is enabled in /etc/default/acpi-support.
+| Ensure ACPI_SLEEP is enabled in /etc/default/acpi-support.
+|-
+| 2
+| (no acpi events call hibernate)
+| Defer to alternate policy, or check for override.
+|-
+| 3
+| 
+| Lock the screen.
+|-
+| 4
+| 
+| /etc/acpi/prepare.sh - prepare system for suspend
+|-
+| 5
+| Spin down hard drives.
+| Disable hard drives' DMA.
+|-
+| 6
+| hibernate via uswsusp or suspend1
+| sleep via suspend1
+|-
+| 7
+| Disable laptop_mode
+| Reset and enable the DMA of the hard drives.
+|-
+| 8
+| 
+| /etc/acpi/resume.sh - reverse the suspend preparation
+|}
+
+==== hal ====
+
+As ''hal'' is designed to be operating system agnostic, there is a (mostly dummy) front-end handler script initially called and then a specific worker script:
+
+{| class="wikitable"
+|-
+| '''Power event'''
+| '''Initial script'''
+| '''Linux-specific script'''
+|-
+| hibernate
+| /usr/lib/hal/scripts/hal-system-power-hibernate
+| /usr/lib/hal/scripts/linux/hal-system-power-hibernate-linux
+|-
+| suspend (sleep)
+| /usr/lib/hal/scripts/hal-system-power-suspend
+| /usr/lib/hal/scripts/linux/hal-system-power-suspend-linux
+|}
+
+* is this the setup in feisty?  On my edgy system scripts are in /usr/share/hal/scripts and there is no scripts/linux directory -- MattPrice
+
+These scripts have several bugs and inconsistencies between them. ('''Free easy bug-fixing opportunity here!''') However, in terms of Ubuntu, a selection process for what will perform the hiberate/suspend is performed:
+
+## ''powermanagement-interface''
+## ''powersaved''
+## ('''hibernate only''') freedesktop's ''pm-utils'' ('''do you mean "suspend-to-disk only"?''')
+## ''uswsusp''
+## ''hibernate'' (suspend2)
+## ''acpi-support''
+## Direct to ''/sys/power/state'' sysfs interface.
+
+In a default Ubuntu installation, ''powermanagement-interface'' is installed and therefore will always win. This results in ''hal'' handing off policy back to ''acpi-support''.
+* Am I right in thinking this is a ranked ordering, so that installing hibernate on top of a default ubuntu system will never allow hibernate to take over the suspend process?  --MattPrice
+* If a user wants to make changes to the default suspend procedures, what's the right level at which to intervene?  Is it possible to rationalize this system so that system-specific changes only need to be made to one set of scripts?  --MattPrice
+** I filed a patch for that at https://bugs.launchpad.net/ubuntu/+source/hal/+bug/90425
+==== kpowersave ====
+As of 0.7.2, kpowersave also uses HAL
+=== Kernel suspend technologies ===
+
+=== Inconsistencies ===
+
+** There does not appear to be a default handler for the ''hibernatebtn'' acpi event.
+** ''acpi-support'' will use ''uswsusp'' for hibernation but not sleep.
+
+=== Alternatives ===
+
+==== uswsusp ====
+currently in the Universe repository:
+http://packages.ubuntu.com/cgi-bin/search_packages.pl?keywords=uswsusp&searchon=names&subword=1&version=all&release=all
+Contains these binaries:
+* s2disk - suspend to disk (hibernate)
+* s2ram  - suspend to RAM (sleep). Not in Edgy.
+* s2both - kind of a mixture of the two above. First saves the RAM contents to the swap partition and then goes to sleep. Not in Edgy.
+
+'''Note:''' can do compression and encryption when hibernating. Integration with usplash.
+
+==== Suspend2 ====
+Suspend2 is a kernel patch which enables a second suspend method at the kernel level.  Because it uses compression, it is generally somewhat quicker than swsusp, and it has a number of other features such as a pretty user interface.  Some users also find that suspend2 is more reliable at suspending/resuming than swsusp, but this is almost always because those users use a different power-management interface -- the hibernate script package.
+
+This page used to say:
+
+''The complexity of the suspend management system and the multiple changes that are made to the system when suspend2 is added make it difficult to diagnose precisely why one method works when another does not.  If the whole stack were made as implementation-agnostic as possible  (e.g. if acpi-support would try suspend2 as well as uswsusp and swsusp, and if suspend2's more advanced configuration features were accessible somehow within the default stack) would go a long way towards making suspend2 easier to use on ubuntu.''
+
+Suspend2 has, however, included support for transparent replacement of swsusp for some time. It should therefore be trivial to see whether reliability is improved simply by using Suspend2, or because of using the hibernate script in place of the above mentioned stack. Support for replacing swsusp by default is enabled at kernel compile time, and can be temporarily disabled at run time by echoing 0 or 1 to /sys/power/suspend2/replace_swsusp. At boot time, any attempt to resume via swsusp also invokes a check to resume a Suspend2 image, since we can't know until we check for an image which method was used when we suspended.
+
+The default configuration in the Suspend2 patch has replacing swsusp enabled, and builds and configures LZF compression support. Any resume= parameter will override resume2=, and Suspend2 understands swsusp's simpler resume2=/dev/<partition> format, and will thus work out of the box in most cases. For swapfiles, a different method of telling where to find the image header is used (resume[2]=[swap:]/dev/<partition><nowiki>[[<sector>]]</nowiki>). The values to be used can be found by swapon'ing swap devices, then catting /sys/power/suspend2/swap/header_locations:
+
+# cat /sys/power/suspend2/swap/headerlocations
+
+ For swap partitions, simply use the format: resume2=swap:/dev/hda1.
+
+ For swapfile `/swapfile`, use resume2=swap:/dev/hda2:0xe4058.
+
+----
+CategoryLaptop

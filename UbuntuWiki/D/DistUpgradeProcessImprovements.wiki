@@ -1,0 +1,162 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+
+''Please check the status of this specification in Launchpad before editing it.  If it is Approved, contact the Assignee or another knowledgeable person before making changes.''
+
+* '''Launchpad entry''': https://features.launchpad.net/distros/ubuntu/+spec/dist-upgrader-fixes
+* '''Packages affected''': apt, update-manager
+
+=== Summary ===
+
+The upgrade experience from dapper->edgy was not good for a lot of people. This spec tries to identify what caused the problems and what we can do to fix them.
+
+=== Rationale ===
+
+Currently there are situations that can make the dist-upgrade fail. In the worst case, this means that the system becomes unbootable or that X won't start. We need to make sure that even when errors happen during the upgrade the system is still bootable and X will still work.
+
+=== Use cases ===
+
+1. Alice heard that Ubuntu is a great distro. She runs a script in the forums that automatically installs multimedia stuff. When she upgrades later, the upgrader detects this and works around the issue.
+
+2. Bob has installed some python modules manually. When he upgrades, a python package postinst fails because of this. The upgrade goes on and only the affected package is reported as problematic, the rest is installed fine.
+
+=== Scope ===
+
+There are various ways to attack the problem. One is AutomaticUpgradeTesting to find errors early and automatically. Next we need to make sure that packages/postinst scripts with errors can not trash the system (to the extent that this is possible). An option to test/roll-back an upgrade would be good as well, but this is technically very challenging. We should add a option to automatically (or semi-automatically) send in problem reports when the upgrade failed, using apport for this if feasible.
+
+=== Design ===
+
+The following things in the ReleaseUpgrader needs to be improved:
+# Upgrade calculation
+# Recover from third party packages
+# Error handling during the upgrade (maintainer scripts)
+# Deal with a changing environment (themes/libraries) during the upgrade
+# Better SRU support
+# Misc improvments
+
+==== Improve the upgrade calculation ====
+
+We should test a new algorithm for the ReleaseUpgrade calculation. It should work like this:
+# Upgrade all essential packages
+# Upgrade all packages in main and set them to protected
+# Force problem resolution on them. Because no packages in main depend on packages outside main, this set should be self-contained. 
+# Do the same for unsupported packages and make sure that we do not interfere with main
+
+==== Recover from problems caused by third party packages ====
+
+Currently we do not offer a fallback if we can't do a dist-upgrade and still keep the {ubuntu,kubuntu,edubuntu,xubuntu}-desktop installed. This can happen when third party packages are installed (e.g. for dapper->edgy when compiz was enabled). Instead of just showing a error message we should offer a mode that will create a high pin on the Ubuntu archive to force downgrades. This should ensure that we get only official packages. Because downgrades are not a good idea in general we will only do this as a last resort and print a big warning to the user. 
+
+Implementation note: A high pin seems rather risky because of the risk of downgrades breaking the system even worse.
+
+==== Fixing the error handling ====
+
+The error handling for failed maintainer scripts needs to be improved. Currently apt will stop after dpkg reports a error. It should instead report this error to the frontend and keep going with the upgrade until there are only broken packages left. This requires changes in libapt. A new APT::DPkgPM::StopOnErrors will be used to control the behaviour. 
+
+Implementation note: This is implemented in the current apt in feisty. Because the relase-upgrader does not support backports right now (See Implementation for more details.), I would like to get this code into edgy-updates. It does not change any behaviour by default and will only act if the option is explicitely set. So the risks is low.
+
+Implementation note: Because we do not have proper backports support this should be done as a patch to apt in edgy-proposed.
+
+==== Fixing the environment changes problem ====
+
+The problem of the changes in the environment needs to be attacked from two directions. Firstly we need to make sure that we run with known working environment as far as possible. This involves switching the theme before the upgrade (and switching back after). 
+
+We also need to make sure that even if the GUI crashes during the upgrade we can recover better from it. This means that we need to keep all state of the upgrade in a separate process that won't die if the frontend dies. All communication between frontend and backend is done via a socket and a very simple protocol (modeled after the debconf protocol) that can set progress information and the current state. During the upgrade we need to copy the input/output of dpkg so that we can still present all progress in a vte GTK widget (or the equivalent for Qt). We use vte_terminal_set_pty() to interact with the running dpkg. If the GUI goes away the backend can try to restart it and (if that does not work) fallback to a text based UI to ensure that the upgrade is actually fully performed. 
+
+Implementation note: Python does not support filedescriptor passing over a PIPE currently. See Implementation for more details. For the next release update-manager contains a "fdsend" module that supports file descriptor passing over sockets.
+
+==== Better SRU support ====
+
+Similar to the new requirements from StableReleaseUpdates we need a way to test the ReleaseUpgrader in $dist-proposed. To do this we will add a new switch to update-manager "--proposed" that will make it look for a meta-release-proposed file. Only users who explicitly run update-manager with this switch will get the ReleaseUpgrader from proposed. 
+
+Implementation note: Done, added --proposed switch
+
+==== CDRom upgrade ====
+
+If a upgrade is run from the CD and the user selects that the network should be used, the upgrader needs to check for a upgrade of itself and download it. This way we can fix potential problems later.
+
+Implementation note: Done, when the user selects that he wants to use the network it will check and download the updated version.
+
+==== Dealing with derivatives ====
+
+In order to better support kububuntu, xuubntu and edubuntu we need to support different localizable announcements for them. This will be done bassed on the installed metapackage. 
+
+=== Implementation ===
+
+The existing update-manager release-upgrader code need to be modified to implement the above requirements.
+
+There are some limitations that we are currently facing. The current release-upgrader is arch=all. 
+
+That makes a speperation between frontend and backend impossible because python does not support sending file descriptors over a pipe without a arch=any modules (e.g. fdsend). The https://blueprints.launchpad.net/ubuntu/+spec/dist-upgrader-arch-any spec discusses some ways to make this possible. There is a working prototype for a frontend-backend seperation code is at http://bazaar.launchpad.net/~mvo/update-manager/gui-seperation. For full operation it requires that the backend can send the pty with the attached terminal for dpkg to the frontend. This pty is then attached to the vte terminal widget or the konsole widget. I recently patched the konsole kpart to support setPtyFd(). 
+
+The new APT::DPkgPM::StopOnErrors option faces the same problem. To use it, libapt needs to be upgraded. This is currently not possible (only in a very hackish way). 
+
+==== Testing ====
+
+In addition to the auto-testing we need to cover the following test scenarios:
+ 1. ubuntu-desktop install with incompatible packages. We should try to model the situation with compiz where xserver-xorg couldn't be upgraded.
+
+=== Analysing the problems dapper->edgy ===
+
+The following problems were reported in launchpad for the dapper->edgy
+upgrade:
+# upgrade could not be calculated (e.g. with unofficial compiz: #58424)
+# {pre,post}inst failures (e.g. firestarter, python-$foo: #56779, #59932, #64615, #67913, #67996, #68378, #69019, #69104, #59347, #63450, #66347, #67368, #67559, #67696,#68177,#66702, #68765)
+# X didn't ome up (#67069)
+# kernel wouldn't boot (#68848) other hardware regressions (#62628)
+# upgrader crashes because of environment changes (e.g. theme changes: #68027, #69124)
+# upgrader crashes because of programming errors (#68553)
+# system behaves differently in a fundamental way after the upgrade (#69145,#69059,#69208,#67803,#64909)
+# misc problems that makes the upgrade difficult (#69051, #68467, #67090, #59946)
+
+Here is a list with all the identified upgrade bugs so far:<<BR>>
+https://launchpad.net/distros/ubuntu/+bugs?field.tag=edgy-upgrade
+
+Here is a list with all the identified upgrade regressions:<<BR>>
+https://launchpad.net/distros/ubuntu/+bugs?field.tag=edgy-regression
+
+The data we have so far indicates that most of the problems are caused by failures in maintainer scripts. This means that apt/update-manager needs to better prepared for those and should try to ignore these errors as much as possible. 
+
+Another source of problems were the changes in the environment during the upgrade itself. Those are the hardest to protect against. If e.g. the theme engine becomes suddenly broken for a certain amount of time, this can cause crashes in the upgrader during the process.
+
+The current dist-upgrader on the alternate CD is not able to update itself from the net. It should do this when it finds a network connection.
+
+All of the above problems are addressed by this spec. 
+
+=== User comments ===
+
+Maybe the update process could be simplified (or at least the chances of making a dist-upgrade work could be improved) by first trying to create a default system, upgrading and then trying to restore all the customizations. Of course, the user has to be informed, about what is going on and if he wants an action to be performed. There also should be a recommended action and a warning that the upgrade might fail, should anything else be selected. I imagine something like this:
+
+1) Check for modified config-files
+If some are found, copy them to a new folder in the user's /home-directory (e.g. /home/user/updatebackup) and restore the defaults. If possible list the differences.
+
+2) Check for 3rd-party/unsupported apps and repositories
+The repositories are already checked. The apps could be checked against the old ubuntu-version's repositories. If they are not supported (this also includes newer versions), make a list of these and then remove them. If they have generated config-files in other folders then the /home-folders, make a backup.
+
+3) Reboot, if necessary.
+
+4) Upgrade (change repositories, download files, install apps)
+
+5) Try to restore the removed apps
+Apps should first be checked against the official repositories. Maybe they are included by now. If not, tell and warn the user, restore the removed repositories. If they include the name of the older version, rename them (e.g. "edgy" to "feisty"). Then try to install the apps again. If nothing works, write a list of the apps concerned, place it in the user's /home-folder and tell the user.
+
+6) Try to restore the config-files
+If now installed apps had config-files, restore them (after backing up the defaults). The user was already warned when installing the apps. If other config-files were changed, make a backup of the new default (best named file.ubuntuname.default, e.g. xorg.conf.feisty.default), warn the user, show him the differences and ask him to confirm each restoration.
+
+7) Make list of all changes
+Write a list of all the changes to the default settings (apps and config-files) and place them in the user's /home-folder.
+
+8 ) If need be, reboot
+
+I consider the upgrade itself the prority, so keeping all the old apps comes second. Like this the upgrade should work while (hopefully) giving the user back his old system. If some apps or config-files could not be restored, the user at least has a list and can decide, whether he still needs those. E.g. I didn't need all the modifications to my xorg.conf in dapper to make beryl work in edgy. It's better to give a user a working system he needs to fine-tune, then a broken system he probably has to wipe.
+
+--Sokraates
+----
+CategorySpec

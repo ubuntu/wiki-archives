@@ -1,0 +1,74 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+Mock-up explaination of effects of proactive security.
+
+Note that "Guarantee" is not "Effectiveness."  Certain features are effective at doing what they say, but do not actually provide guaranteable security; for example, perfectly supplying an NX bit, even in hardware, does not mean programs won't mprotect(PROT_EXEC) their stacks.  On the other hand, these features do bring a level of security with them, for example FORTIFY_SOURCE exposes ''some'' trivial bugs that would otherwise be missed and left as security holes, even though it doesn't guarantee that there aren't other such bugs that it didn't detect.
+
+On the other hand, the effectiveness of a feature is logically equal to or higher than the guarantee it supplies.  Guarantees are only supplied when you can quantify the conditions under which the protection fails.  They also are only possible when you can identify ''exactly'' what a protection protects.  For example, ProPolice prevents stack buffer overflows from being carried out to fruition directly, based on a 32-bit random value; the only non-negligible failure case is when the attacker guesses that 32-bit value.  Other negligible failure cases include bugs in variable argument list functions; bugs pertaining to a structure with a buffer below another data element; or overflows in buffers in functions with multiple buffers, where one buffer can damage another buffer.
+
+{| class="wikitable"
+|-
+| <rowbgcolor="#d9bb7a"> Protection
+| Location
+| Bug Type
+| Guarantee
+| Implemented
+| Effect
+|-
+| ProPolice
+| gcc
+| Stack smash
+| Probabilistic, >99.999%
+| Edgy
+| Detects stack based buffer overflows before a ''return'' if the function has a local char[]; moves local variables around so arrays are at the top of the stack frame and overflows cannot destroy local variables; copies passed arguments to local variables at entry to prevent overflows from destroying them.
+|-
+| FORTIFY_SOURCE
+| gcc
+| Buffer overflow
+| Checking, 0%
+| No
+| Checks for '''obvious''' buffer overflows at compile time and issues warnings.  Also causes special versions of standard C library functions to be used, which can perform checking for obvious overflows when the fail condition is known but the actual condition isn't known until exceution (''i.e. when you know the buffer is 20 bytes long but don't know how much will be copied to it until the function is called'').  This provides a level of added security; however, '''its effectiveness can't be properly measured''', especially due to interference from middleware libraries like glib.  It is most usefully good for finding obvious bugs so they can be fixed.
+|-
+| Address space layout randomization
+| Kernel
+| Stack execution; heap execution; data memory execution; return to libc.  ''These may be a result of Stack smash; double free(); heap overflow; shellcode injection''
+| Probabilistic, Variable
+| H:0, M:10, S:19
+| Randomly selects stack, heap, and mmap() bases per program run.  Made more effective by having a non-executable stack, which forces a return-to-libc to be used, multiplying stack base entropy with mmap() based entropy. Basic entropy seems to be 10 bits mmap() (''M:10'') and 19 bits stack (''S:19'') on i386, with no heap randomization (''H:0'').  A proper attack can trigger a ret2libc storing the stack frame in the heap, with a success rate of 1/1024; for every 10,000 users we have, 10 are assumed vulnerable in this scenario. <<BR>><<BR>> It should be trivial to increase this to M:14 S:20, preferably by introducing a boot option to control the level of entropy and submitting a patch for such to mainline Linux. <<BR>><<BR>> Heap randomization does not seem to work with either PIE or normal executables in the stock kernel; Fedora Core seems to have H:13. <<BR>><<BR>>  With M:14 and a non-executable stack with S:20, this gives the attack most likely to work a 1 in 134,217,728 success rate; the most likely possible attack has a success rate of 1 in 17,179,869,184 (''although this can theoretically be reduced by 4096 times by a smart attacker'').  Address space randomization on 64-bit architectures should trivially be possible at levels around 40-48 bits. <<BR>><<BR>> Decisions on how to implement this kind of protection--How much entropy to use--should be based on the whole-world test:  From the attack most likely to succeed, assume all 6 billion people in the world attack the host, and determine how many will be successful.
+|-
+| CS limit PROT_EXEC enforcement
+| Kernel
+| Stack execution. ''This may be a result of shellcode injection; stack smash.''
+| Feature emulation, 0%
+| No
+| Code segment limit tracking is used by PaX and Exec Shield to implement a non-executable stack on i386 with no NX bit; other supported architectures supply a true hardware NX bit.  This creates a split in memory where higher addresses are not executable and lower addresses are.  This can only suggest a non-executable stack; however, this is lost if any executable mapping appears above the stack.  This can not suggest anything below the stack be non-executable, because immediately below the stack begin executable shared library .text segment mappings.
+|-
+| Supervisor-bit overloading PROT_EXEC enforcement
+| Kernel
+| Stack execution; heap execution; data memory execution.  ''These may be a result of Stack smash; double free(); heap overflow; shellcode injection''
+| Feature emulation, 0%
+| No
+| PaX originally supplied a method of NX bit emulation which was per-page accurate on any layout by using the supervisor bit on i386 to indicate non-executable pages.  This causes the kernel to handle a protection fault; at this point it can determine if the fault was an instruction or data fetch, and abort if it was an instruction fetch.  This unfortunately is quite slow under access patterns which cause TLB thrashing and lots of TLB cache misses; and does not work under the K6 architecture due to it having a combined ITLB and DTLB.  Current PaX uses CS limit tracking to increase performance by removing supervisor-bit overloading logic from memory that can be covered by CS limit tracking.
+|-
+| Passive data-code separation
+| SELinux
+| Stack execution; heap execution; data memory execution.  ''These may be a result of Stack smash; double free(); heap overflow; shellcode injection''
+| Memory policy, 0%
+| No
+| PaX supplies ''mprotect() restrictions'' which prevent memory from having PROT_EXEC and PROT_WRITE at the same time.  Part of this logic silently adjusts the parameters of memory objects at creation if they are requested with PROT_EXEC and PROT_WRITE, assuring all memory is created in a safe state; this logic can be implemented using SELinux policy.<<BR>><<BR>>  A "safe state" is a state where memory is not writable code; this can be called ''data-code separation'' based on the assumptions that ''executable memory is always code'' and ''only data may be writable''.  The second assumption implies that ''writable memory is data''; and thus memory that is both writable and executable is both data and code, and is experiencing ''data-code confusion''.
+|-
+| Active data-code separation
+| SELinux
+| Stack execution; heap execution; data memory execution.  ''These may be a result of Stack smash; double free(); heap overflow; shellcode injection''
+| Memory policy, 100%
+| No
+| PaX ''mprotect() restrictions'' enforce the ''data-code separation'' policy in two major ways.  First, they disallow memory to ever be transitioned into a state where PROT_EXEC and PROT_WRITE are both concurrently applied; second, they disallow data from becoming code by preventing memory without PROT_EXEC from becoming executable.  This level of enforcement can also be instrumented in SELinux.<<BR>><<BR>>  ''Caveat: Breaks Java; Mono; some programs that are textbook broken, such as nVidia's GLX extension; anything else generating code at runtime.''
+|}

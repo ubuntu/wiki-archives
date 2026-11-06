@@ -1,0 +1,728 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+This session was presented by Stefan Potyra and Steve Langasek on 18th January 2008.
+
+<pre>
+20:06	sistpoty	so a big welcome to everyone for joining the motu school session about library packaging
+20:06	sistpoty	the session will be split in two parts:
+20:07	sistpoty	in the first part, we'll dive deeply into the background of shared objects, and how to find out information about these
+20:07	sistpoty	and in the second part, we'll go through creating a library package by example
+20:07	sistpoty	so let's start with part 1
+20:07	sistpoty	First off, shared objects are useful for two different purposes
+20:08	sistpoty	1) as a plugin mechanism in conjunction with dlopen
+20:08	sistpoty	2) for dynamic libraries, to share code between different projects
+20:08	sistpoty	as this is about library packaging, we'll be only looking at 2) in this session
+20:09	sistpoty	First off, (ELF) shared objects are a collection of symbols in different sections together with some meta-information
+20:09	sistpoty	a symbol denotes a named entity in C (e.g. a function or a variable)
+20:09	sistpoty	the section will give us some detail about the symbol
+20:10	sistpoty	btw.: if you have questions, just ask ;)
+20:10	sistpoty	let's take a look at an example: http://www.potyra.de/library_packaging/example.c
+20:10	sistpoty	so please everyone download the file
+20:11	sistpoty	everyone got it?
+20:11	warp10	yep!
+20:11	mok0	+
+20:11	sistpoty	great, so let's compile the file:
+20:11	sistpoty	gcc -c example.c -o example.o
+20:12	sistpoty	so far, the .o is just a normal object, not a shared object yet... however we can do some stuff with it already
+20:12	sistpoty	now run
+20:12	sistpoty	nm example.o
+20:12	sistpoty	the output are the different symbols defined in example.c
+20:14	mok0	what are the letters U, T, t...
+20:14	sistpoty	for example in line 3, the variable "static_global" is results as symbol "0000000000000000 d static_global"
+20:14	sistpoty	mok0: will talk about that in a second ;)
+20:14	sistpoty	when you compare the output of nm, together with the variables of example.c, does anyone see anything odd?
+20:15	sistpoty	I'll give you a hint: look at the beginning of the function local_function
+20:16	sistpoty	now, anyone?
+20:16	warp10	why local_var isn't listed?
+20:16	sistpoty	warp10: excellent
+20:16	mok0	it's allocated on the call stack
+20:17	geser	why does static_local_var has a number in the nm output (here: static_local_var.2268)?
+20:17	sistpoty	excactly... some symbols in C (like local_var) don't need to be stored anywhere, because these are located in the stack
+20:18	sistpoty	ok, and some variables (like static_local_var) won't result in the same symbols as they are named. This is because the variable is not visible anywhere but in the function, and you can name a variable like this anywhere else
+20:18	slangasek	geser: that's a very good question whose answer I don't remember :)
+20:18	sistpoty	and you cannot have two symbols with the same name of course
+20:18	mok0	geser: could that number be the offset?
+20:19	sistpoty	any more questions or shall we go to the funny letters?
+20:19	mok0	^^
+20:19	slangasek	mok0: it's not the offset
+20:19	warp10	What's the order with which symbols are listed by nm?
+20:19	sistpoty	warp10: good question: slangasek?
+20:20	slangasek	plain alphabetical
+20:20	siretart	slangasek: in order to avoid name clashes between different static local variables with the same name in different functions?
+20:20	sistpoty	mok0: I guess it's just a counted number gcc will assign, but I may err on this side
+20:20	mok0	sistpoty: my number is != gesers
+20:20	geser	mok0: it could be the line number after including all headers. after changeing the line with the previous one the number is now 2267
+20:21	slangasek	siretart: probably, yes
+20:21	sistpoty	mok0: he, ah
+20:21	mok0	static_local_var.1781
+20:21	slangasek	siretart, geser: suffice to say, it goes away once you've linked the object into a shared library, so it ends up not being very relevant
+20:22	sistpoty	ok, then now let's take a look at the letters.
+20:22	sistpoty	First off, some are lower case and some are upper case.
+20:22	slangasek	geser: it isn't the line number; if I run the source through gcc -E, I get line 757
+20:22	geser	ok
+20:22	sistpoty	The lower case letters denominate local symbols. Noone except this very object file can see these kind of symbols
+20:23	mok0	lower case == local, Upper case == global
+20:23	sistpoty	whereas the upper case letters mean that the symbol is global, and other object files are global... exactly.
+20:23	sistpoty	the letter denote the type of the symbol:
+20:23	sistpoty	t -> text section (may be mapped readonly), executable
+20:23	sistpoty	d -> initialized data (statics, initialized globals)
+20:23	sistpoty	(as in variables)
+20:24	sistpoty	c -> uninitialized data (uninitialized global variables)
+20:24	sistpoty	r -> read only data (const variables), not necessarily read only though.
+20:24	slangasek	(btw, if you later don't remember what these letters map to, they're listed in man nm)
+20:24	sistpoty	and then there's an interesting one: u
+20:24	sistpoty	this means that the symbol is not defined in the object, but somewhere else
+20:25	sistpoty	(undefined)
+20:25	slangasek	to clarify, that means the object *refers* to the symbol but does not define it
+20:25	sistpoty	so "stderr" is listed there, as it comes somewhere from the c library, as well as fprintf
+20:26	sistpoty	ok, now let's make a shared object from this file:
+20:26	sistpoty	gcc -Wl,-z,defs -Wl,-soname,libexample.so.1 -fPIC -shared example.c -o libexample.so
+20:27	sistpoty	everyone got it?
+20:27	warp10	y
+20:27	mok0	+
+20:27	sistpoty	ok, now let's look again at it with nm
+20:28	warp10	wow...
+20:29	sistpoty	(you can ignore anything with an underscore, that's internal stuff)
+20:29	bddebian	nm is like objdump?
+20:29	slangasek	yes
+20:29	bddebian	ok
+20:29	slangasek	I might suggest at this point also running 'nm -D libexample.so', for comparison
+20:29	sistpoty	erm... sorry, we need to do another thing I forgot... let's first strip off the debugging symbols
+20:30	sistpoty	strip libexample.so
+20:30	slangasek	... or that :)
+20:30	geser	nm: libexample.so: no symbols
+20:30	mok0	hehe
+20:31	mok0	that's easy :-)
+20:31	sistpoty	ok, to look at the dynamic symbols, you'll now want nm -D as slangasek suggested
+20:32	slangasek	right - since we strip binaries by default, 'nm foo.so' in the wild is going to give you empty output
+20:32	geser	the local symbols aren't listed anymore?
+20:32	sistpoty	what you'll see is that there are now (apart from some internals) only global symbols left. i.e. everything not defined as "static"
+20:32	sistpoty	exactly
+20:33	sistpoty	(side note: the static modifier in c means that the resulting symbol will be a local symbol)
+20:34	sistpoty	any questions so far? then let's try some other tools on the shared object
+20:34	mok0	sistpoty: well, global to the functions in that file
+20:34	sistpoty	mok0: yes, a local global *g*
+20:34	bddebian	hrh
+20:34	slangasek	geser: since they're local, they're by definition not accessible to other things linking to this code; so aside from debugging symbols, which we've used 'strip' to wipe out, there's no reason to take up space by keeping around names for these variables
+20:35	sistpoty	ok, now let's take a look at the meta-information:
+20:35	sistpoty	objdump -x libexample.so
+20:36	sistpoty	this will give lots of info. The most interesting stuff can be found with objdump -p libexample.so as well
+20:37	bddebian	Who uses anything more than |grep SONAME? ;-)
+* slangasek raises his hand
+20:37	sistpoty	one thing that's in there is the SONAME, we'll take a look at it later
+20:37	sistpoty	the other thing in there is the NEEDED entry (or entries)
+20:38	sistpoty	the SONAME denotes the ABI-Verison of the shared object...
+20:38	sistpoty	everything with the same SONAME can be considered to be compatible
+20:39	geser	if upstream doesn't make a mistake
+20:39	bddebian	geser: Never happens ;)
+20:39	slangasek	everything with the same SONAME *will be* considered compatible by ld.so, so it darn well better *be* compatible :)
+20:39	sistpoty	geser: we'll just see what happens then ;)
+20:39	sistpoty	the NEEDED entries denote what libraries this shared object needs. These refer to the SONAME of other libraries
+20:40	sistpoty	I guess everyone knows ldd, let's try that one
+20:40	sistpoty	ldd libexample.so
+20:41	sistpoty	ldd will resolve any shared libraries a binary or a shared object needs
+20:42	geser	is linux-vdso.so.1 provided by the kernel?
+20:42	sistpoty	so, what's the difference between the NEEDED entries and the output of ldd apart from the pathname?
+20:42	slangasek	geser: yes, linux-vdso is a bit of Magic
+20:43	warp10	ldd output shows three entries, not just one
+20:43	geser	ldd resolves them recursively
+* bddebian thinks geser is too smart for this class :)
+20:43	sistpoty	exactly what geser said :)
+20:43	geser	bddebian: :P
+20:43	sistpoty	so you should keep these in mind when dealing with shared objects, as you might want to look at the *direct* dependencies as well
+20:44	slangasek	yes; for a real world-example, have a look at ldd /usr/lib/libgnome-2.so.0, vs. objdump -p /usr/lib/libgnome-2.so.0 | grep NEEDED
+20:45	slangasek	so we've looked at the output of nm -D on this object, but nm -D has one weakness as a tool which is not at all obvious if you don't already know what's missing
+20:46	slangasek	have a look at the output of nm -D libexample.so again
+20:46	slangasek	now, compare it to the output of readelf -s libexample.so
+20:46	slangasek	who can spot the difference in the names?
+20:47	bddebian	The stuff from @@glibc?
+20:47	geser	you mean the versioned symbols?
+20:47	slangasek	yep - nm -D doesn't show symbol versions
+20:47	mok0	cool
+20:48	slangasek	so if you want to get at those, you'll want to use objdump -T or readelf -s
+20:48	geser	what does the "(2)" in "6: 0000000000000000   144 FUNC    GLOBAL DEFAULT  UND fprintf@GLIBC_2.2.5 (2)" mean?
+20:48	slangasek	symbol versions are sometimes important, so you'll want to keep these tools in mind -- sometimes, an app/lib will not know the symbol version it's supposed to use, and that indicates a bug!
+20:49	slangasek	geser: I'm not sure, sorry
+20:50	slangasek	I'd probably have to look at the readelf source to figure that out, the fields aren't all well-explained in the documentation
+20:50	mok0	we can write a dependency resolver from these tools
+20:50	slangasek	mok0: indeed, dpkg-shlibdeps uses these tools
+20:51	sistpoty	ok, any more questions so far?
+20:51	sistpoty	When writing a program, that uses a library, we want to make sure that the API of that library is stable.
+20:52	sistpoty	If we want to distribute this program, we also want a stable ABI.
+20:52	sistpoty	stable API means that my program compiles against the library and a newer version of it.
+20:52	sistpoty	stable ABI means that the symbols stay the same
+20:53	mok0	what if there are new symbols?
+20:53	sistpoty	mok0: of course... I just wanted to correct myself
+20:53	sistpoty	stable ABI means that there won't get any symbols removed, and their meaning is still the same
+20:55	mok0	If you write code that corrects a bug, but the interface remains the same?
+20:55	sistpoty	mok0: then the ABI and API is stable
+20:56	sistpoty	(most likely)
+20:56	mok0	... but I would still want that programs exclusively use the fixed version
+20:56	sistpoty	but let's first have some fun... as some newby upstream started to produce a library...
+20:56	geser	mok0: if I'm correct you can change the implementation as long as function name, arguments and return type stay the same
+20:57	sistpoty	mok0: you can do this (as upstream) only, if the library have some version string or date encoded
+20:57	mok0	ok
+20:57	sistpoty	mok0: or by advetising it on your homepage *g*
+20:57	mok0	you can bump the minor version number
+20:58	sistpoty	for the library: yes (I'll come to this part yet)
+20:58	chiptoxic	how do you tell if a library has a stable API or ABI is it just by watching the version numbers of that library?
+20:58	sistpoty	chiptoxic: I'd like to postpone this question, as I first want to show you an example
+20:59	chiptoxic	ok
+20:59	sistpoty	so please everyone get <http://www.potyra.de/library_packaging/libmyhello-1.0.1.tar.gz>
+20:59	sistpoty	if you've got it, extract it and compile it with
+20:59	sistpoty	make
+21:00	sistpoty	then install the result (as root) with
+21:00	sistpoty	make install
+21:00	sistpoty	(no worries, it will only copy files to the /usr/local/ namespace, and make uninstall removes it again)
+21:01	sistpoty	everyone got so far? (then me types the commands as well)
+21:02	mok0	make PREFIX=. install
+21:02	mok0	does it locally
+21:03	sistpoty	then you might have trouble upgrading the library
+21:04	sistpoty	(or building an application against it, which we'll do as soon as everyone is finished)
+* warp10 is done
+21:04	sistpoty	ok, next step: of course we want s.th. that uses the library, so get <http://www.potyra.de/library_packaging/hello_prog-1.0.tar.gz>
+21:05	sistpoty	extract that somewhere else and also build the binary with "make"
+21:06	sistpoty	if you've done that, you should have a cool binary hello_prog, which will print hello. you can even tell it how often it should print hello with the first argument
+21:06	sistpoty	./hello_prog 10
+21:07	sistpoty	everyone got so far yet?
+21:07	mok0	error while loading shared libraries: libmyhello.so.1: cannot open shared object file: No such file or directory
+21:07	frigaut	same here
+21:07	geser	mok0: sudo ldconfig
+21:08	mok0	geser: just doing what the teachers tell me .-)
+21:07	warp10	and here too :)
+21:07	slangasek	heh, did any of the people having this problem install to /usr/local?
+21:08	slangasek	or did you all install to a different prefix?
+21:08	james_w	slangasek: /usr/local for me
+21:08	slangasek	ah, ok
+21:08	sistpoty	hehe
+21:08	frigaut	works now after ldconfig
+21:08	sistpoty	of course I forgot to mention ldconfig
+21:08	chiptoxic	mine works and i just did what you said and ran ldconfig
+21:08	sistpoty	(still got it installed from testing *g*)
+21:09	mok0	Yay, it says hello to me 10 times
+21:09	kdub	you have to have /usr/local in your /etc/ld.so.conf of course
+21:09	geser	sistpoty: "eventually run ldconfig now."
+21:09	slangasek	kdub: in /etc/ld.so.conf.d/libc.conf actually... :)
+21:09	sistpoty	geser: hehe, what a nice upstream *g*
+21:10	geser	yep
+21:10	sistpoty	now if it prints hello for everyone, let's remove the *library* again with
+21:10	sistpoty	make uninstall (run as root)
+21:11	sistpoty	now try again to run the hello_prog.
+21:12	sistpoty	any results yet?
+21:12	geser	./hello_prog: error while loading shared libraries: libmyhello.so.1: cannot open shared object file: No such file or directory
+21:12	mok0	boom
+21:13	sistpoty	great, so (I guess what you expected) it won't work w.o. the library
+21:13	sistpoty	now upstream has released a new version of the library... I guess you all want hot new stuff?
+21:13	sistpoty	then get it at http://www.potyra.de/library_packaging/libmyhello-1.0.2.tar.gz
+21:13	sistpoty	we'll be compiling it again:
+21:13	sistpoty	make
+21:14	sistpoty	and install it again (run as root)
+21:14	sistpoty	make install
+21:14	mok0	If you install the library again, it works once more :-)
+21:14	sistpoty	hehe
+21:14	warp10	I don't think so :)
+21:15	geser	./hello_prog: symbol lookup error: ./hello_prog: undefined symbol: print_hello
+21:15	sistpoty	(oh, if you haven't removed installed the new library, you could also try ldd ./hello_prog)
+21:16	sistpoty	so what happened?
+21:16	sistpoty	now let's try to make use of the knowledge we gathered so far
+21:16	mok0	the application attempts to use the new library
+21:17	sistpoty	mok0: exactly
+21:17	sistpoty	let's take a look at the symbols of both shared objects (old library vs. new library)
+21:17	mok0	=> ABI has changed
+21:17	sistpoty	excellent!
+21:18	sistpoty	in the old library, we had the function: T print_hello
+21:18	sistpoty	which upstream obviously renamed to just: T hello
+21:19	sistpoty	when you start the program, one of the first steps is that undefined symbols will get resolved
+* bddebian curses upstream
+21:19	sistpoty	hehe
+21:20	slangasek	yeah, I would think twice about packaging any libraries from this upstream ;)
+21:20	sistpoty	which is done recursively for each shared object that is used
+* sistpoty removes copyright notices *g*
+21:20	mok0	This is why it is wrong to use the program version number for library versions
+21:20	bddebian	heh
+21:20	mok0	which a lot of upstream programmers don't understand
+21:21	sistpoty	when the symbol lookup can't resolve one symbol.. well you just saw what happens.
+21:21	sistpoty	ok, what we've seen now is an incompatibility on symbol level.
+21:22	sistpoty	I hope with the tools you've learned so far, you can easily track those down
+21:22	sistpoty	-> any removed symbol in a shared library is a problem, *if* the SONAME stays the same
+21:23	mok0	so let's change it
+21:24	sistpoty	mok0: feel free to change it, I guess you can figure this in the Makefile
+21:24	mok0	I set major to 2
+21:25	albert23	Wouldn't this be an API change, since print_hello is not defined anymore in hello.h?
+21:25	albert23	I wouldn't expect this to compile anymore?
+21:25	sistpoty	albert23: exactly: this is an API change as well
+21:26	sistpoty	ok, but let's get back to the ABI...
+21:27	sistpoty	symbols however cannot represent the signature of functions (i.e. number of parameters, type of parameters)
+21:27	sistpoty	this is part of the ABI as well
+21:27	sistpoty	if we want to look if this changed, we'll need to dig a little bit deeper
+21:27	mok0	Now the program works again, because it finds the first version of the library
+21:27	mok0	(I changed MAJOR to 2)
+21:28	sistpoty	mok0: hehe, so you didn't unstall the old library?
+21:28	chiptoxic	im not a programmer but is there a way you could put an alias in the code say print_hello is really hello so you dont break the api? or would that just be messy
+21:28	mok0	sistpoty: I still have 1.0.1 but I removed 1.0.2
+21:28	mok0	The new one is 2.0.1
+21:29	sistpoty	chiptoxic: you could for example abuse the preprocessor: "define print_hello hello"
+21:29	mok0	My experiment shows you can have several versions of the library present
+21:29	sistpoty	er... #define print_hello hello
+21:29	chiptoxic	ah cool, thanks
+21:29	sistpoty	ok, back to the topic...
+21:30	sistpoty	you can look at the debug information with gdb, so let's run
+21:30	sistpoty	gdb libmyhello.so
+21:30	slangasek	mok0: exactly, and this is a key reason why we always use the full soname for the names of our library packages
+21:30	geser	mok0: and now try the same on windows :)
+21:30	sistpoty	inside gdb, you can look at the signatures of functions with
+21:30	sistpoty	info functions
+21:31	mok0	slangasek: you mean the major soname ?
+21:31	slangasek	mok0: the "soname" is the value returned by objdump -p $lib | grep SONAME
+21:31	mok0	slangasek: ok
+21:31	slangasek	and set (hopefully) using the -Wl,-soname option at build time
+21:32	sistpoty	mok0: the Makefile just puts $(MAJOR) and a name in the soname, but the real soname is in SONAME
+21:32	slangasek	lintian knows the standard way to map sonames to package names, and warns you if your package is named differently.  but of course, we have to take care that upstream is handling their ABI right in the first place!
+21:32	sistpoty	inside gdb, you can also display the types of variables with
+21:32	sistpoty	info variables
+=== \sh is now known as \sh_away
+21:33	sistpoty	(which is uninteresting for libmyhello.so though, since it doesn't define a global variable by itself)
+21:33	sistpoty	everyone looked at the output of "info functions"?
+21:34	mok0	just one: hello(void)
+21:34	sistpoty	you should see s.th. like "void hello(void);" or "void print_hello(void);" there (depending which version you chose)
+21:34	sistpoty	yes, so upstream is lazy as well *g*
+* bddebian files upstream bug
+21:35	sistpoty	now let's strip the shared object (which wasn't done during the build process):
+21:35	sistpoty	strip libmyhello.so
+21:35	sistpoty	(outside gdb again)
+21:36	sistpoty	and then call gdb libmyhello.so again and look at the functions again
+21:36	mok0	:-(
+21:36	sistpoty	as you can see, these are all gone.
+21:36	geser	mok0: install the -dbgsym package of it :)
+21:37	mok0	heh
+21:37	sistpoty	that's because these were part of the debug symbols, which have been stripped away
+21:37	sistpoty	ok, so if we want to find out about the ABI-part of the signatures, it's a little bit tougher, but still doable
+21:39	sistpoty	if a signature is changed (number of arguments and type of a function), it can lead to different results. Most probably it will segfault, since the library and the application no longer agree on what data they exchange)
+21:39	sistpoty	an exception to this rule is C++
+21:40	sistpoty	in C++ the signature is encoded in the name of a symbol
+21:40	sistpoty	so if you change an argument, add an argument or remove one, you get a different symbol name
+21:41	sistpoty	(side note: you can use nm -C to demangle these names back to a human readable signature)
+21:41	slangasek	or c++filt
+21:41	sistpoty	any questions so far?
+21:42	sistpoty	chiptoxic: did that answer your question from some time ago?
+21:42	slangasek	other side note, checking for ABI changes of this kind by hand is hard and tedious; there is a tool in universe that tries to automate this checking, called icheck
+21:42	chiptoxic	yea, thanks
+21:42	mok0	slangasek: icheck, what package?
+21:43	sistpoty	slangasek: ah, nice :)
+21:43	sistpoty	mok0: icheck
+21:43	slangasek	if you're maintaining a library and want to be careful because your upstream isn't, icheck will let you generate a "manifest" from the old and new -dev packages, and compare them to see if the signatures have changed
+* chiptoxic cant believe how much im learning :)
+21:43	james_w	slangasek: how does that compare to check-symbols from the ubuntu-dev-tools package?
+* mok0 install icheck
+21:43	slangasek	james_w: icheck examines headers, not symbols
+21:44	slangasek	james_w: so it's specifically for the case where you're trying to detect the kinds of ABI changes that /don't/ show up in the symbol table
+* bddebian can't keep up being at work :'-(
+21:45	slangasek	(doh, check-symbols uses nm -D?  Baaad, what did we learn was the weakness of nm -D? :-)
+21:45	sistpoty	slangasek: since you mentioned ABI changes not showing up in the symbol table, want to say a few words to these?
+21:46	slangasek	probably, let me see where I put those words
+21:47	slangasek	right - does everyone here understand why changing the arguments or return type of a function is an ABI change?
+21:47	mok0	yes
+21:47	slangasek	(if everyone knows, there's no sense in me spending time explaining it - but if you don't know, please speak up :)
+21:48	warp10	y
+21:48	mok0	Well renaming a global variable would show up
+21:49	slangasek	two people know who care, everyone else is asleep or doesn't want to talk to me ;)
+21:49	slangasek	sistpoty: back to you
+21:49	slangasek	:)
+21:49	mok0	I just tried icheck on the 2 library versions,
+21:50	mok0	but I couldn't get it to work
+21:50	sistpoty	ok
+21:50	mok0	... "Failed to parse libmyhello.so
+21:50	sistpoty	mok0: haven't used it myself yet
+21:51	mok0	sistpoty: :-)
+21:51	sistpoty	what we should have learned so far is that if the ABI breaks, you'll need to bump the SONAME
+21:51	slangasek	mok0: you point it at the headers, not at the library
+21:51	mok0	Ah!
+21:51	sistpoty	however there is yet another case, we didn't consider
+21:51	slangasek	that's the whole point - the library doesn't have the info you need about the function sigs :)
+21:52	sistpoty	upstream might put additional functionality in the library
+21:52	sistpoty	and keep the ABI downwards compatible
+21:53	sistpoty	in that case, the SONAME would (and should) stay the same, because no program ceases to work with the newer library
+21:53	sistpoty	however this has one caveat: people who use this library might make use of the new features
+21:53	mok0	... but new programs that use the new functionality?
+21:54	sistpoty	right, so these programs wouldn't work with the old library but only with the new one (even though the SONAME is the same)
+21:54	sistpoty	for this, there the SONAME is not sufficient alone.
+21:55	sistpoty	slangasek: told me that historically the minor version was incremented for this
+21:55	sistpoty	-:
+* mok0 also read that
+21:55	sistpoty	but that won't work if you copy binaries from one system to another (as you don't know about the libraries there)
+21:56	sistpoty	ok, this pretty much was part 1 -- shared objects
+21:56	sistpoty	any questions so far?
+21:57	mok0	Well, what is the answer to the last problem?
+21:57	sistpoty	mok0: we'll see that in part 2 :)
+21:57	mok0	Arrghh
+21:57	warp10	:)
+21:57	mok0	It stops at the most exiting part
+21:58	mok0	typical of these mini-series :-)
+</pre>
+
+<pre>
+20:06	sistpoty	so who's around for part 2 of the library packaging session?
+20:06	albert23	hello sistpoty
+20:06	sistpoty	hi albert23
+20:07	sistpoty	first off, there is an excellent guide about debian library packaging. We'll use this one as a reference for this session:
+20:07	sistpoty	http://www.netfort.gr.jp/~dancer/column/libpkg-guide/libpkg-guide.html
+20:09	nixternal	thanks sistpoty for the wakeup call :)
+20:09	sistpoty	hi nixternal :)
+20:09	nixternal	well howdy
+20:09	sistpoty	ok, in part 1, we hopefully learned all the basic stuff about shared objects.
+20:10	ScottK	You wouldn't have a link to the log for that would you?
+20:10	nixternal	I was just gonna ask, I have a lib I gotta package up :)
+20:10	albert23	http://irclogs.ubuntu.com/2008/01/17/%23ubuntu-classroom.html
+20:10	sistpoty	ScottK: sorry.. no idea if this is publically logged somewhere
+20:10	sistpoty	thanks albert23
+20:11	ScottK	albert23: Thanks
+20:11	sistpoty	now in part 2, we'll be packaging a library by example, and will discuss a few of the caveats
+20:12	sistpoty	since I'm lazy, let's take libmyhello again from part 1
+20:12	sistpoty	http://www.potyra.de/library_packaging/libmyhello-1.0.1.tar.gz
+20:13	sistpoty	everyone got it?
+20:13	warp10	y
+20:13	hellboy195	y
+20:13	albert23	yep
+20:13	sistpoty	ok, let's start with debianization... unpack it, rename the tarball so that we've got a valid .orig.tar.gz
+20:14	sistpoty	let's take a look, we'll always need a few files in there, let's start with debian/copyright
+20:16	sistpoty	put in the usual stuff there (this is not really important for the technical bits of library packaging)
+20:17	sistpoty	what else do we need... I guess we'll be using debhelper, so let's create a compat in debian/
+20:17	sistpoty	everyone got it so far?
+20:17	hellboy195	y
+20:17	warp10	y
+20:18	albert23	y
+20:18	sistpoty	ok, now let's start with the interesting bits
+20:18	sistpoty	the control-file
+20:19	sistpoty	First off comes the usual stuff (I'll pastebin this)
+20:19	sistpoty	hm... pastebin is kinda slow today :(
+20:20	sistpoty	ok, I'll paste it right here... pastebin doesn't like me *g*
+20:21	sistpoty	Source: libmyhello
+20:21	sistpoty	Section: libdevel
+20:21	sistpoty	Priority: optional
+20:21	sistpoty	Maintainer: Your Name <youraddress@bla.org>
+20:21	sistpoty	Build-Depends: debhelper (>> 5.0.0)
+20:21	sistpoty	Standards-Version: 3.7.2.0
+20:22	sistpoty	for a library, we'll always end up with two packages
+20:22	sistpoty	two binary packages even
+20:22	sistpoty	one package contains the shared object(s)
+20:23	sistpoty	and another one, the -dev package will contain everything you need to develop applications with the shared object
+20:24	sistpoty	i.e. header-files, eventually a statically linked library, eventually pkconfig files (which specify what to pass to the compiler/linker to link against this library)
+20:25	sistpoty	so let's create an entry for the -dev package
+20:25	sistpoty	Package: libmyhello-dev
+20:25	sistpoty	Architecture: any
+20:25	sistpoty	Description: myhello library headers
+20:25	sistpoty	This package contains the development headers
+20:25	sistpoty	for libmyhello.
+* ScottK notes sistpoty needs to update to the current standards version...
+20:26	sistpoty	ScottK: hehe, I'm not up to date
+20:27	sistpoty	the package containing the shared object will need to be named in a special way:
+20:28	sistpoty	it must be related to the soname.
+20:28	sistpoty	the library packaging guide I mentioned contains the rules how it should be named
+20:29	sistpoty	chapter 5, section 3
+20:29	sistpoty	remember the soname of libmyhello yet?
+20:30	sistpoty	anyone?
+20:30	warp10	mmm... libmyhello.so.1, maybe?
+20:30	sistpoty	warp10: exactly
+20:31	sistpoty	if you wouldn't have remembered, you could of course always use objdump -p <shared object> to find out
+20:33	sistpoty	so in this case, the name of the library would be libmyhello1
+20:33	sistpoty	if you've got a library, that contains more than one shared object
+20:33	sistpoty	you'll need to create a binary package for each of these
+20:33	sistpoty	let's add an entry for the binary package
+20:34	sistpoty	Package: libmyhello1
+20:34	sistpoty	Architecture: any
+20:34	sistpoty	Depends: ${shlibs:Depends}
+20:34	sistpoty	Description: myhello library
+20:34	sistpoty	This package contains the hello library.
+20:35	sistpoty	ok. anyone got a clue, why the name of this binary must be related to the SONAME?
+20:35	sistpoty	this binary package...
+20:36	sistpoty	anoyne`
+20:36	sistpoty	+?
+20:36	albert23	we want to be able to install multiple versions of the library, when ABI changes
+20:36	sistpoty	albert23: excellent
+20:37	sistpoty	so does anyone have an idea why this could be needed?
+20:38	warp10	sistpoty: maybe different packages may need different versions of the library?
+20:38	sistpoty	warp10: this would be one argument, but not the main one.
+20:38	sistpoty	let's just consider that a very essential library (maybe libc) will get updated
+20:39	sistpoty	currently, I've got libc6 installed, and I guess almost all packages I've got installed will depend on libc6
+20:39	sistpoty	suddenly, a new libc7 appears
+20:40	sistpoty	if it couldn't be installed side-by-side to libc6, that would mean that I had to remove *all* installed programs
+20:40	sistpoty	or that all programs would immediately break if libc6 were removed by force
+20:40	sistpoty	that's pretty bad, hm?
+20:41	sistpoty	(I tried this once when I didn't have a clue... wasn't so funny back then *g*)
+20:41	warp10	:)
+20:41	sistpoty	any questions so far?
+20:42	warp10	I have one
+20:42	warp10	Why the -dev package doesn't need any Depends: field?
+20:42	sistpoty	warp10: excellent question... it needs one :)
+20:43	sistpoty	so, as I wrote earlier, the -dev package is what you install if you want to build programs using this library
+20:44	sistpoty	so we need to make it depend at least on the library package
+20:44	sistpoty	let's add the depends line there
+20:45	sistpoty	the header files in question should always match what's in the shared object
+20:45	sistpoty	hence we'll need to restrict the version for this dependency
+20:46	sistpoty	Depends: libmyhello1 (= ${binary:Version})
+20:47	sistpoty	however often you'll need additional libraries to compile a program with a specific library
+20:47	sistpoty	so you'll need to add the corresponding -dev packages there as well.
+20:48	sistpoty	a good indication should give you the NEEDED entries of the shared object
+20:49	sistpoty	so you'll just need to find the corresponding -dev package that contains these shared objects
+20:50	sistpoty	so, what do we need here?
+20:51	albert23	NEEDED      libc.so.6
+20:51	sistpoty	great.
+20:52	sistpoty	so let's find out in which package this is (we'll see a better method later)
+20:52	sistpoty	just use dpkg -S libc.so.6
+20:53	sistpoty	hooray, it's libc6 :)... so we'll want libc6-dev
+20:54	sistpoty	(libc6-dev is often ommitted, since build-essential already depends on it. however it's not wrong to add it)
+20:55	sistpoty	as you might have noticed, in the case of libc6, the -dev package is not named like the source package
+20:55	sistpoty	but instead it is named like the binary package + -dev
+20:56	sistpoty	this is useful, if you want to have more than just one version of the library in the archive
+20:56	sistpoty	(e.g. because one application needs the old one, and won't build with the new version)
+20:56	sistpoty	then you'll need to be able to select which -dev package you want
+20:57	ScottK	There's a very recent thread on adding libc6 on debian-devel that came down pretty strongly in favor of adding it.
+20:57	sistpoty	if you do this, you should have the -dev package(s) of the different versoin Provide and Conflict to libmyhello-dev package
+20:58	sistpoty	ScottK: ah, haven't read that one yet
+20:58	sistpoty	(or maybe I have but forgot *g*)
+20:59	sistpoty	ok, does everyone have the control file so far?
+20:59	albert23	y
+20:59	warp10	y
+21:00	sistpoty	hehe, mine is still missing the depends line *g*
+21:01	sistpoty	ok
+21:01	sistpoty	what else do we need... a changelog file. just create one with dch
+21:03	sistpoty	dch --create
+21:03	sistpoty	(needed to look this up, thought it always was -c)
+21:04	sistpoty	everyone got it filled in?
+21:04	warp10	y
+21:05	albert23	y
+21:05	sistpoty	ok, then let's start with the rules file
+21:06	sistpoty	let's see what targets we need to adhere to the policy: clean, build, binary, binary-arch, binary-indep
+21:06	sistpoty	did I miss one?
+21:07	warp10	install?
+21:07	ScottK	configure?
+21:07	slangasek	not required by policy :)
+21:07	sistpoty	yep
+21:07	warp10	configure should be optional, right?
+21:07	sistpoty	hi slangasek btw.
+* slangasek waves
+21:08	warp10	install is optional too?
+21:08	sistpoty	warp10: libmyhello fortunately doesn't need to be configured, as it doesn't use autotools
+21:08	sistpoty	warp10: yes
+21:09	sistpoty	let's start with clean, should be easiest
+21:09	sistpoty	since we'll use debhelper, we'll first call dh_clean
+21:09	sistpoty	and then: make clean
+21:09	sistpoty	to cleanup libmyhello stuff
+21:09	sistpoty	or, if you prefer make distclean
+21:10	sistpoty	(which won't make a difference *here*)
+21:12	sistpoty	then let's get a shot at the build rule
+21:12	james_w	sistpoty: dh_testroot to start clean as well?
+21:13	sistpoty	james_w: right, makes sense
+21:14	sistpoty	ok, build should be easy as well.
+21:14	sistpoty	just a call to make
+21:14	sistpoty	any questions so far?
+21:15	warp10	n
+21:15	albert23	n
+21:15	sistpoty	ok, then let's go to the binary target
+21:16	sistpoty	since this is an arch:any package, we'll use the binary-arch target for the job, and have the binary target depend on it
+21:17	sistpoty	let's add some debhelper stuff
+21:18	sistpoty	dh_testdir
+21:18	sistpoty	dh_testroot
+21:18	sistpoty	dh_installchangelogs
+21:18	sistpoty	dh_installdocs
+21:19	sistpoty	dh_install
+21:19	sistpoty	dh_strip
+21:19	sistpoty	dh_compress
+21:19	sistpoty	dh_fixperms
+21:20	sistpoty	and now an interesting one: dh_makeshlibs
+21:20	sistpoty	(we'll have a look at it in a few minutes)
+21:20	sistpoty	dh_shlibdeps
+21:20	sistpoty	dh_installdeb
+21:20	sistpoty	dh_gencontrol
+21:20	sistpoty	dh_md5sums
+21:20	sistpoty	dh_builddeb
+21:21	sistpoty	since we'll need to build s.th. before we can install it, we'll add a dependency to build for binary-arch
+21:22	sistpoty	(a nicer way is to use stamps, but that's a different topic)
+21:22	sistpoty	now what does dh_makeshlibs do...
+21:23	sistpoty	as you may have noticed, whenever you put ${shlibs:Depends} in the control file, it will get resolved to the library packages during build
+21:23	sistpoty	this is done via the shlibs-mechanism
+21:23	sistpoty	if you've been here in part 1, I guess you could build one yourself
+21:24	sistpoty	if you look at /var/lib/dpkg/info, you'll find a number of shlibs-files
+21:25	sistpoty	let's take a look at one
+21:26	sistpoty	the format is: library-name soname-version dependencies
+21:27	sistpoty	let's look at /usr/lib/dpkg/info/libgnome2-0.shlibs
+21:28	sistpoty	compare this to the SONAME of /usr/lib/libgnome-2.so.0
+21:28	sistpoty	this explains the first two fields
+21:29	sistpoty	the third one is the package where this shared object can be found in
+21:29	sistpoty	the job of dh_makeshlibs is to generate such a file for us
+21:29	warp10	cool...
+21:31	sistpoty	and at this point, we can try to answer mok0's question of part 1, what to do if upstream released a new abi compatible version, but programs use this one
+21:31	sistpoty	since the shlibs file can specify a version string (just look at the gnome shlibs file again)
+21:31	sistpoty	we can request to have a minimum version of the library
+21:32	sistpoty	this will get replaced for all packages that use ${shlibs:Depends} and build against our library
+21:33	sistpoty	so we only need to tell dh_makeshlibs, that a new feature landed in the library, so that it will set version field in the shlibs file right
+21:33	sistpoty	you can do this with dh_makeshlibs -V<version>
+21:33	sistpoty	now if anyone has installed an older version of the library, and wants to use the program that needs the new cool features
+21:34	sistpoty	he will have to upgrade the library via apt
+21:34	sistpoty	any questions so far?
+21:34	albert23	How can we know which library version was the first providing a specific ABI version?
+21:35	albert23	Isn't there a risk we set version to high in dh_makeshlibs -V<version>?
+21:35	sistpoty	albert23: pretty much through the same means that we can find out if the ABI is broken
+21:35	albert23	ok
+21:36	sistpoty	albert23: there is no real risk in Ubuntu to set the version to high
+21:36	sistpoty	however setting the version not high enough can lead to problems
+21:36	albert23	It would make backports more difficult?
+21:37	sistpoty	not too sure... I don't think so
+21:37	sistpoty	a backport gets compiled to whatever is in gutsy or feisty
+21:37	sistpoty	so it will get built against the feisty/gutsy version of the library, which has a different version requirement
+21:37	ScottK	So if you set it correctly and there isn't a sufficient ABI available, the backport build will, correctly, fail.
+21:38	sistpoty	well... it doesn't really relate to building, but rather to installin
+21:38	sistpoty	+g
+21:39	sistpoty	in order to build against a library, the version (and ABI) is irrelevant.
+21:39	sistpoty	what matters to build against it is the API
+21:39	sistpoty	the version rather enforces that users *need* to upgrade the library to a minimum ABI version
+21:39	ScottK	I guess I meant API then.
+21:40	sistpoty	so if the API changed, the field won't really be much of a problem, since this means a new ABI in almost all cases
+21:40	sistpoty	and hence a new SONAME, and a different library package
+21:41	sistpoty	this version is only relevant if the ABI/API stay the same, but new features got added
+21:41	ScottK	Ah.  RIght.
+21:41	sistpoty	any further questions?
+21:42	warp10	n
+21:42	albert23	n
+21:42	sistpoty	ok, then let's try to fix the rules file and finish the package, shall we?
+21:43	sistpoty	since we use dh_install, we still need to install the files into debian/tmp/
+21:43	sistpoty	let's use PREFIX=$(pwd)/debian/tmp make install for this
+21:44	sistpoty	if you want, you can put this right at the beginning of binary-arch
+21:44	sistpoty	or you could add an install rule and have binary-arch depend on it... whatever you prefer
+21:46	sistpoty	now we'll need to sort which files go into which package
+21:47	sistpoty	so we want libmyhello1.install and libmyhello-dev.install
+21:47	sistpoty	the header files will go into the -dev package
+21:49	sistpoty	bah... back a few lines... (recalled the Makefile wrongly)... PREFIX should of course be $(pwd)/debian/tmp/usr
+21:49	sistpoty	I guess I should have added DESTDIR or s.th. to libmyhello's makefile
+21:50	sistpoty	in case we'd have a statically linked library (libmyhello.a), that would go into the -dev package as well.
+21:51	sistpoty	(only useful if you want to link s.th. statically against it)
+21:52	sistpoty	what else do we need in the -dev pacakge
+21:52	sistpoty	the .so symlink should go in there as well
+21:53	sistpoty	btw: the .so symlink is what the linker will look for if you give the -l parameter
+21:53	sistpoty	more specifically, if you'd call -lmyhello, it would prepand a lib and add an .so and look for this file (libmyhello.so)
+21:54	sistpoty	in case there are any other files for development purposes (pkconfig files for example), these should also go in the -dev package
+21:54	sistpoty	luckily we don't have these
+21:56	sistpoty	in the library package should be the shared object (of course) and the symlink that's named like the soname
+21:56	sistpoty	while the symlink itself would also be recreated by ldconfig
+21:57	sistpoty	including it in the library package has the advantage that it will get deleted if the library is removed
+21:57	sistpoty	because it's a file of the package
+21:58	sistpoty	everyone got the .install files?
+21:58	albert23	y
+21:58	warp10	y
+21:59	sistpoty	ok, let's give it a shot, and see if it works
+21:59	sistpoty	just use
+21:59	sistpoty	fakeroot make -f debian/rules binary
+22:00	sistpoty	to fix the errors
+22:00	sistpoty	(like my install files, that where wrong *g*)
+22:00	albert23	mine too
+22:00	warp10	argh... :-S
+22:01	sistpoty	did you fix the PREFIX=... make install?
+22:01	albert23	y
+22:01	warp10	sistpoty: just a wrong install for me too :)
+22:01	sistpoty	warp10: hehe
+22:04	albert23	I think $(pwd) did not work
+22:04	albert23	make tried to install in /debian
+22:05	sistpoty	it should install into debian/tmp/usr/
+22:05	albert23	I got this: PREFIX=/debian/tmp/usr make install
+22:06	sistpoty	heh, I've got the same which doesn't work as well. but the answer is one line above
+22:06	sistpoty	PREFIX=debian/tmp/usr make install
+22:06	sistpoty	those nasty slashes *g*
+22:06	warp10	grrrr
+22:06	albert23	Yep, just removed the pwd part, that works
+22:09	sistpoty	hm... I guess I'll need to read the make manual again, I was so sure that $(PWD) exists (or $(pwd))
+22:09	albert23	$(CURDIR) ?
+22:09	slangasek	$(PWD) exists only if it's set in the environment by the invoking shell
+22:10	slangasek	$(shell pwd) execs out to call the pwd command, so is rather inefficient
+22:10	slangasek	$(CURDIR) is the make builtin variable you should use
+22:11	sistpoty	thanks... I guess I confused this with $(pwd), which I often type in the shell *g*
+22:11	slangasek	:)
+22:11	sistpoty	so does everyone's build succeed now?
+22:12	albert23	yep, package looks good
+22:12	warp10	looks fine!
+22:12	sistpoty	damn, only mine doesn't build yet *g*
+22:13	sistpoty	ok, so you've got a source package and a binary
+22:13	sistpoty	let's run lintian at the binary packages. it will take a second look that we've got the files sorted out correctly
+22:14	albert23	clean
+22:15	sistpoty	excellent!
+22:15	sistpoty	any questions so far?
+22:16	albert23	no, that's pretty clear
+22:17	warp10	it's fine. Just wondering if it would be so easy in the real-world packaging :)
+22:18	albert23	I guess that strongly depends on upstream
+22:18	sistpoty	ok, so now what would you do if the ABI of a library changed, but the SONAME didn't?
+* slangasek smiles
+22:19	albert23	complain at upstream
+22:19	sistpoty	albert23: great, that should always be the first choice
+22:19	sistpoty	can you imagine, while it's a bad idea, if you bump the SONAME on your own?
+22:20	sistpoty	(as a packager)?
+22:20	albert23	could be risky, as it might conflict with new upstream versions?
+22:21	sistpoty	that's one argument
+22:22	sistpoty	but you could append a debian or ubuntu somewhere and change the build scripts, so you could circumvent this
+22:22	sistpoty	any other arguments against this?
+22:22	slangasek	it leads to binary incompatibility with other distros
+22:22	slangasek	but that shouldn't outweigh the problems caused by binary incompatibility with previous releases
+22:23	sistpoty	also, it leads to binary incompatibility for binary only software
+22:23	sistpoty	(just imaging to change the SONAME of libc, and look at what breaks in multiverse)
+22:24	slangasek	well, a workaround for such binary-only software would be to instruct users to create their own local symlinks for the wrong soname
+22:25	sistpoty	heh
+22:25	sistpoty	ok, what other interesting points do we have...
+22:25	slangasek	like I said, the alternative is that you have to break all the /free/ software using the old version on upgrade :)
+22:25	sistpoty	yeah, it's either bad or worse *g*
+22:26	sistpoty	ok, what should you do when you upgrade a library?
+22:26	slangasek	by "upgrade", you mean "package a new version"?
+22:26	sistpoty	yes
+22:27	sistpoty	we already learned that we should look out for ABI compatibility, so let's look at the case where we *do* have a new SONAME
+22:27	sistpoty	and hence a new library package
+22:28	sistpoty	anyone any ideas?
+22:28	slangasek	grep -r $oldsover debian/ :)
+22:28	albert23	I think we are going to have a problem with the -dev package
+22:29	sistpoty	albert23: what do you think could get problematic?
+22:29	albert23	packages requiring the old ABI will get the new ABI when we would want to rebuild?
+22:30	sistpoty	exactly (but it's API in this case... compiling *P*rograms->aPi, binaries->aBi)
+22:31	sistpoty	so you should check which packages actually build-depend on the -dev package.
+22:31	sistpoty	if there is a large number, you could do local test-builds and see which fail
+22:32	sistpoty	in case you cannot live yet with the new version alone, you could for example make a different source package and hence have two version of the library in the archive
+22:33	sistpoty	one thing you might stumble over when dealing with libraries is a lintian warning about rpath
+22:34	sistpoty	when you link against a library, that has an rpath set, it will tell the loader to look for the shared object only in that very directory
+22:34	sistpoty	so you can specify -Wl,-rpath=/somewhere and link hello_prog against it
+22:35	sistpoty	then the loader will look for libmyhello only in /somewhere when hello_prog is started
+22:35	sistpoty	can anyone imagine, why using rpath for a library is a bad idea?
+22:38	albert23	well, software would break if for some reason the library is moved to another directory....
+22:38	sistpoty	exactly
+22:38	sistpoty	and one use-case for moving a library is for example the ia32-libs package on amd64
+22:39	sistpoty	ok, any questions?
+22:39	slangasek	(and multiarch! whoo!)
+22:40	slangasek	albert23, sistpoty: I would note that the general case is that we don't want to continue supporting an old API for a library, even if it means some work has to be done to get the applications ported
+22:40	slangasek	so it's /usually/ better to have the new library version take over the source package name and the -dev package name, and only reintroduce an oldlibs package as a last resort
+22:41	sistpoty	thanks for clarifying
+22:41	albert23	Well, one question: what would be the best place to look for bugs / qa issues to practice what we learned?
+22:42	sistpoty	hm... that's a good question indeed
+22:42	sistpoty	well, one thing is that you could review library packages on REVU
+22:43	sistpoty	or get your hands dirty and package a library
+22:44	sistpoty	ok, I guess we're through with the session... slangasek: anything important I forgot or you'd like to add?
+22:45	slangasek	sistpoty: I only had half an eye on the channel today; I guess you didn't talk about techniques maintainers can use to automatically detect ABI breakage when moving to a new upstream version?
+22:45	sistpoty	slangasek: nope
+22:46	slangasek	the dpkg in hardy includes the new dpkg-gensymbols code developed by Raphaël Hertzog in Debian; it basically creates a manifest, declaring which symbols were added in which version of the package
+22:46	slangasek	the /side/ benefit of this is that if you already know which symbols are supposed to be present, you know if any have gone missing
+22:47	slangasek	so http://qa.debian.org/cgi-bin/mole/seedsymbols is a site that includes automatically generated symbol manifests for all libs in the archive
+22:47	slangasek	(the Debian archive, that is; most will be applicable to Ubuntu too, obviously)
+22:48	slangasek	http://wiki.debian.org/UsingSymbolsFiles is a general description of this
+22:48	slangasek	I still need to use this on my own packages, so I can only give you theoretical insight into this stuff, not much practical :)
+22:49	slangasek	and everyone's eyes glaze over again ;)
+22:50	albert23	Yeah, I guess I will first do some attempts to do the work manually.
+22:50	albert23	I have bookmarked those links for later use...
+22:51	slangasek	one example of this in practice is the zlib1g package
+22:51	slangasek	which the maintainer, Mark Brown, blogged about as well (syndicated on planet.d.o)
+22:52	sistpoty	heh, I skipped this post, and wanted to read it later (which I then forgot *g*)
+22:52	sistpoty	ok, anything else?
+22:53	sistpoty	then thanks everyone for coming :)
+</pre>
+
+This log has been lightly edited for clarity.

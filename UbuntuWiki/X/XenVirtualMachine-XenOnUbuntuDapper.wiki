@@ -1,0 +1,310 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+Has anyone attempted this? Other distros, notably Fedora, seem to have included Xen and use th 2.6.15 kernel. Can we reuse their kernel patches to make a default-compatible ubuntu kernel which is also xen0? This could then be in universe as a drop-in replacement for the standard kernel.
+
+==== Update ====
+You can use the Xen precompiled kernels in Dapper Drake Beta 2 (and, presumably, Drake's final release). See XenOnUbuntuBinaryInstall.
+
+==== Unofficial Xen 3.0.2 packages for Dapper ====
+
+Add the following to your /etc/apt/sources.list
+<pre>
+deb http://thoughtcrime.co.nz/ubuntu dapper xen main
+</pre>
+Then open a console:
+<pre>
+ $ sudo apt-get install xen
+</pre>
+Simple, eh?
+
+Now the hard part: building your kernel
+You still need to edit your grub.conf as described below.
+
+'''Compiling the Kernel'''
+
+'''NOTE''': The procedure described below is NOT the Right Way to build a kernel for Xen 3.0.2. The Right Way is to use the --subarch xen argument for make-kpkg, which currently isnt supported in Ubuntu kernel-package, although a patch has been submitted to Malone.
+(https://launchpad.net/distros/ubuntu/+source/kernel-package/+bug/40088)
+
+This procedure will yield a usable Xen kernel, however it is packaged as a standard i386 kernel, and YMMV.
+
+First you need to install the Xen kernel patch, and packages required to build the kernel.
+
+<pre>
+ $ sudo apt-get install linux-patch-xen kernel-package build-essential ncurses-dev devscripts
+</pre>
+
+Acquire a copy of the 2.6.16 kernel source. Unpack and patch it.
+
+<pre>
+ $ wget http://ftp.kernel.org/pub/linux/kernel/v2.6/linux-2.6.16.tar.bz2
+ $ tar -jxvf ./linux-2.6.16.tar.bz2
+ $ cd linux-2.6.16
+ $ /usr/src/kernel-patches/i386/apply/xen
+</pre>
+
+Configure the kernel. By default, make reads the .config file from your current kernel.
+
+<pre>
+ $ sudo make menuconfig
+</pre>
+
+These are the options you need to enable:
+
+Under "Processor Type and Features", set "Subarchitecture Type" to "Xen-compatible".
+Under "Xen", enable:
+
+<pre>
+Priviliged Guest
+PCI Device Backend driver
+Block-device Backend driver
+Network-device Backend driver
+Network-device Loopback driver
+Block-device frontend driver
+Network-device frontend driver
+Scrub memory before freeing it to Xen
+Disable serial port drivers
+Export Xen attributes in sysfs
+</pre>
+
+'''NOTE''': You probably want to enable loopback device support as well (Device Drivers > Block Devices > Loopback device support) - otherwise you may have problems mounting disk images. You could also enable Device Mapper if you want to use LVM for your DomUs : Device Drivers> Multi-device Support(RAID and LVM)
+
+'''NOTE''': I had a build error with the RIO drivers module.  To overcome this I disabled (Device Drivers > Character devices >  Specialix RIO system support ).
+
+Compile the kernel.
+<pre>
+ $ sudo make
+</pre>
+Copy the kernel vmlinuz to a place where make-kpkg can find it.
+<pre>
+ $ sudo cp vmlinuz arch/i386/boot/bzImage
+</pre>
+Run debchange to fool make-kpkg into building with our revision
+
+<pre>
+ $ sudo debchange -b -v xen0-20040410-Custom-1
+</pre>
+Build the .deb using make-kpkg
+I had to put a random debian.Changelog file in the debian folder before this would run. I then replaced the version "(b)" with "(xen0-20040410-Custom-1)"
+You can also just create a new debian changelog by doing the following while in your kernel source directory:
+
+<pre>
+ $ sudo mkdir debian && sudo debchange --create -v xen0-20040410-Custom-1
+</pre>
+
+Now make-pgk should run.
+
+<pre>
+ $ sudo make-kpkg kernel-image modules-image --initrd --revision xen0-20040410-Custom-1
+</pre>
+
+Install the resulting package
+<pre>
+ $ sudo dpkg -i ../kernel-image-2.6.16_xen0-20040410-1_i386.deb
+</pre>
+Now you MUST edit your grub.conf as described below.
+
+'''Edit the grub.conf'''
+
+You need to let grub know it has to boot the Xen hypervisor.
+<pre>
+ $ gksudo gedit /boot/grub/menu.lst
+</pre>
+Change the lines
+<pre>
+title           Ubuntu, kernel 2.6.16
+root            (hd0,0)
+kernel          /vmlinuz-2.6.16 root=/dev/mapper/vg-shockwave ro
+initrd          /initrd.img-2.6.16
+boot
+</pre>
+so they look like
+<pre>
+title           Ubuntu, Xen 3.0.2testing, kernel 2.6.16
+root            (hd0,0)
+kernel          /xen.gz dom0_mem=512000
+module          /vmlinuz-2.6.16 root=/dev/mapper/vg-shockwave ro quiet splash
+module          /initrd.img-2.6.16
+savedefault
+boot
+</pre>
+The dom0_mem option on the kernel line specifies the amount of ram thtat will be allocated to domain 0 (your ubuntu session).
+
+Save and reboot!
+
+'''Did it work?'''
+
+At the grub menu, select "Ubuntu, Xen 3.0.2testing, kernel 2.6.16" from the list.
+
+Once you've booted, try:
+<pre>
+$ sudo xm list
+Name                              ID Mem(MiB) VCPUs State  Time(s)
+Domain-0                           0      500     2 r-----  7
+</pre>
+
+If the kernel doesnt boot, or crashes, simply select the next kernel in the list to return to your 'last known good'
+configuration.
+
+'''Using Xen'''
+
+A good place to start on learning how to use Xen is the user manual at: 
+
+http://www.cl.cam.ac.uk/Research/SRG/netos/xen/readmes/user/user.html
+
+'''Using the Binary NVIDIA Driver'''
+Follow the instructions at http://www.nvnews.net/vbulletin/showthread.php?t=68648 to compile your kernel.
+
+'''Running guests'''
+(This is probably not the right way to do things, but it seems to work: please edit!)
+
+The xen kernel you made is able to run as both a dom0 and a domU, so it is possible to just use the same one again. Once you have booted your dom0, you can now start to make domUs for it. Heres a simple method using LVM, assuming you have a new disk to put your domUs on (you could do much fancier things with LVM, but heres the nice simple one...:
+Initialise the disk(s) with pvcreate:
+<code>pvcreate /dev/hdd1</code>
+Create a volume group called xen(you can add other disks to this as well)
+<code>vgcreate xen /dev/hdd1</code>
+Now make logical volumes as needed for your virtual machines (Ive named them according to numbers and names, with 5G for the root and 1G for swap on the vm named vm01-webserver)
+<pre>
+lvcreate --nvm01-webserver-root -L5G
+lvcreate --nvm01-webserver-swap -L1G
+</pre>
+Check they are all there with lvdisplay, you should see something like:
+<pre>
+lvdisplay
+  --- Logical volume ---
+  LV Name                /dev/xen/01-webserver-root
+  VG Name                xen
+  LV UUID                TQBFQe-yeeG-K4ev-W9pE-G9Qe-xnLT-IFoVRt
+  LV Write Access        read/write
+  LV Status              available
+## open                 0
+  LV Size                5.00 GB
+  Current LE             2560
+  Segments               1
+  Allocation             inherit
+  Read ahead sectors     0
+  Block device           253:5
+
+  --- Logical volume ---
+  LV Name                /dev/xen/01-webserver-swap
+  VG Name                xen
+  LV UUID                HeccOk-ZOvH-beGy-UMyV-4QNS-52OW-l30gHi
+  LV Write Access        read/write
+  LV Status              available
+## open                 0
+  LV Size                1.00 GB
+  Current LE             256
+  Segments               1
+  Allocation             inherit
+  Read ahead sectors     0
+  Block device           253:6
+</pre>
+Next, we'll need to format the new disks:
+<pre>
+mkfs.ext3 /dev/xen/vm01-webserver-root
+mkswap /dev/xen/vm01-webserver-swap
+</pre>
+
+Now to install a basic dapper onto the new disk, we'll use debootstrap for this. '''Note: there is a much more detailed debootstrap/chroot howto at DebootstrapChroot'''
+
+First make sure you have debootstrap and chroot installed (also bridge-utils, if you want networking):
+<pre>
+sudo apt-get install debootstrap dchroot bridge-utils
+</pre>
+Now mount the disk and debootstrap it (I have used a UK mirror, if you are elsewhere in the world, use a local one for speedy). You could also install debian with this method, just replace the "dapper" and the mirror.
+<pre>
+mkdir /mnt/xen
+sudo mount /dev/xen/vm01-webserver-root /mnt/xen
+debootstrap dapper /mnt/xen/ http://gb.archive.ubuntu.com/ubuntu/
+</pre>
+Give that a while to simmer, then once its done we need to change some stuff.
+If you have installed from dapper, then you can just copy your sources across, also I have copied the sudoers file so that things work the way I am used to for dapper (using sudo). Also move the tls libs, same as for the host.
+<pre>
+sudo cp /etc/apt/sources.list /mnt/xen/etc/apt/
+sudo cp /etc/sudoers /mnt/xen/etc/
+sudo mv /mnt/xen/lib/tls /mnt/xen/lib/tls.disabled
+</pre>
+I just copied the modules from my dom0 kernel into the vm, since its the same kernel. I have no idea if this is bad / dangerous / fattening, it may well beat you up and steal your lunch.
+<pre>
+cp -R /lib/modules/2.6.16 /mnt/xen/lib/modules/
+</pre>
+Then chroot to the new install and add a user for yourself, and the admin group so sudo works
+<pre>
+sudo chroot /mnt/xen/
+groupadd admin
+useradd -m myusername -Gusers,admin
+passwd myusername
+</pre>
+Set up networking in the guest
+<pre>
+vi /etc/networking/interfaces
+</pre>
+I also had to make a new /etc/hosts, since there wasnt one in the debootstrapped install. I added the vm's hostname to a default one (without the hostname, it would give errors when trying to sudo)
+<pre>
+127.0.0.1 localhost.localdomain localhost my.hostname
+::1 ip6-localhost ip6-loopback
+fe00::0 ip6-localnet
+ff00::0 ip6-mcastprefix
+ff02::1 ip6-allnodes
+ff02::2 ip6-allrouters
+ff02::3 ip6-allhosts
+</pre>
+Here is an example of a static ip setup, change to your taste/network
+<pre>
+auto lo
+iface lo inet loopback
+
+auto eth0
+iface eth0 inet static
+        address 192.168.5.100
+        netmask 255.255.255.0
+        gateway 192.168.5.1
+</pre>
+
+Next we need to set up a xen config file for the beast. Exit from the chroot, unmount the disk and make a config file in /etc/xen
+<pre>
+exit
+umount /mnt/xen
+vi /etc/xen/vm01-webserver
+kernel = "/boot/vmlinuz-2.6.16" #this is the same kernel you made for dom0
+memory = 128 #Choose how much RAM it gets
+name = "webserver" # Name of the vm
+disk = [ 'phy:/dev/xen/01-webserver-root,sda1,w', \
+'phy:/dev/xen/01-webserver-swap,sda2,w' ] # Virtual disks
+root = "/dev/sda1" # The vm's root
+
+vif = [ '' ] # This is for networking (virtual interface)
+dhcp ="off"
+ip="192.168.31.191"
+netmask="255.255.255.0"
+gateway="192.168.31.150"
+hostname="my.hostname"
+</pre>
+
+You can now start the vm by running
+<pre>
+xm create /etc/xen/vm01-webserver
+</pre>
+If you get an error like "Error: Device 0 (vif) could not be connected. Backend device not found." this probably means you have no network bridge set up. If you reboot with the xen dom0 kernel once you have installed bridge-utils, xen will magic it for you. You can check with ifconfig, if the bridge is set up, you should see something like xenbr0 and vif0.0 in there.
+
+You now have your guest running, you can check with "sudo xm list" and you should see something like:
+<pre>
+Name                              ID Mem(MiB) VCPUs State  Time(s)
+Domain-0                           0      500     1 r-----    13.3
+webserver                          1      128     1 -b----     6.9
+</pre>
+You can also attach to the console of a vm with "xm console {name}", and get back to dom0 with CTRL+]
+
+''Some issues I had with a dapper domU''
+There were problems with gettys respawning too fast, so I edited /etc/inittab in the guest and commented all but one out. This stopped the error. Everything else seems to be running fine.
+
+You can just repeat this process for as many domUs as you want, I am running 5 and they are all behaving and playing nice.
+----
+CategoryLookMergeDelete

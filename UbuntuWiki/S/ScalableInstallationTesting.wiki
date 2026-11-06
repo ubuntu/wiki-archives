@@ -1,0 +1,184 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+''Please check the status of this specification in Launchpad before editing it.  If it is Approved, contact the Assignee or another knowledgeable person before making changes.''
+
+* '''Launchpad entry''': https://features.launchpad.net/distros/ubuntu/+spec/scalable-installation-testing
+* '''Packages affected''': installer, installation-feedback
+
+=== Summary ===
+
+In order for our installation and upgrade testing procedure to grow with the needs of Ubuntu, we have to tackle the problem of scalability.  We'll do this by attracting more users to testing, helping users do testing, and provide a simple interface to collect this data.
+
+=== Rationale ===
+
+For Edgy Eft, the installation testing was done by freezing development and concentrating as many people as possible on doing tests.  The results were correlated by hand, which makes this untenable as we get more installed systems, more testers, and more variants.
+
+There are several problems we wish to solve:
+
+* Installation testing status is maintained by hand on a Wiki page, which is a bottleneck and error-prone.
+* We do not preserve older results.
+* It is difficult for the community members to get involved.
+
+=== User stories ===
+
+Adam is a developer who is doing installation testing.  He downloads the images, burns some CDs, and finishes some installations.  After he notices some problems, he wants to report them.
+
+Beatrice is a power user who wants to help with testing.  She wants instructions on what to do and how to contribute.
+
+Carl is a novice user who has upgraded to a milestone release, but his screen looks funny.  He wants to tell someone that he has this problem.
+
+=== Scope ===
+
+This specification covers the installation and upgrade to a new release of a distribution.
+
+=== Design ===
+
+We will take three parallel paths to solving this problem: user advocacy, testing welcome screen, and a better data collection interface.
+
+==== User advocacy ====
+
+Using the Fridge, Planet Ubuntu, and the mailing lists, we will announce that testing is open for new milestones.  This requires advanced notice that a new milestone is being created, but we decided that they would be done at regular intervals for the FeistyReleaseSchedule.
+
+Various groups, such as Trafmetrics and Guadalinfo, have volunteered to test subsets of the installation testing platform.  To support these groups, QA will provide organizational and instructional help for their test cases.
+
+Documentation on the Wiki will be written with instructions on how to begin with testing.  This includes help on how to join the team of testers, people to discuss things with, and how to report results.
+
+In addition, we will write test scripts for each of the individual test plans that need to be done.  That way, people who are unfamiliar with the particular installer options can know what they need to do and what to expect.
+
+Few users are willing to wipe their machines, so we will provide instructions on how to save and restore their systems on the bare metal.  As well, we will provide virtual machines to perform testing for certain platforms.
+
+==== Testing welcome screen ====
+
+We will add a new package `installation-feedback` which collects some system information and opens a browser window with the test feedback page. This only happens once for a given release, and only for an user who was likely the one who installed the system.
+
+''ColinWatson: There's already an installation-report package which does some similar things. I think it should be part of this package rather than adding another one.''
+
+==== Data collection ====
+
+We will offer an interface to submit test results, which will consist of a simple web form to collect the required fields of data.  This can be as bare-bones as free-entry text fields, and a selection box for the appropriate test name.
+
+''[pitti: (mdz's idea): this should be redesigned; instead of the user specifying the test case, all parameters (gfxboot choice, installer questions, partitioning, language, etc.) should be read from installer logs; for d-i that's the cdebconf database, ubiquity needs to grow something similar -> interface discussion; these data points should then be sorted into equivalence classes that are our predefined test cases, with all the additional parameters like language added as extra information bits in the database].''
+
+'''MattZimmerman: the installer should submit this directly'''
+
+=== Implementation ===
+
+==== Testing welcome screen ====
+
+The installer needs to record the installer's <code>/.disk/info</code> information on to the installed hard disk (<code>/var/log/installer/diskinfo</code>). We also need to make sure to record the derivative (Ubuntu/Kubuntu/Xubuntu/Edubuntu).
+
+''ColinWatson: Note slight wart for netboot or USB installations. Probably doesn't have to be specified here but the implementor needs to remember that non-CD installations don't have a .disk/info.''
+
+`installation-feedback` package contains:
+
+* a hook in <code>/etc/X11/Xsession.d</code>: If the user is in group `admin` and `/var/lib/installation-feedback/lastseen` content is smaller than `lsb_release -sr`: 
+** Write `lsb_release -sr` to `var/lib/installation-feedback/lastseen`.
+** Call `/usr/share/installation-feedback/installation-feedback`.
+
+* `/usr/share/installation-feedback/installation-feedback`:
+** Collect some system information (architecture, disk-id, derivative).
+** Open `x-www-browser` with the URL for the feedback page with above data as arguments.
+** It should test to see if it can connect on port 80/443 to the feedback page.  If it can't, it should launch `x-www-browser` with `/usr/share/installation-feedback/thanks.html` which contains a nice document telling the user to report the installation at that URL, after setting up Internet access. ''[pitti: this needs to explain to call the welcome script again, not just click an URL, since we need the data collection]''
+   ''ColinWatson: Is i18n of thanks.html necessary?''
+ 
+* A file `var/lib/installation-feedback/lastseen` with mode `root:admin 0664`, initially empty.
+
+* `/etc/default/installation-feedback`, which initially enables the Xsession.d script. Some days before the final release we would update this package to disable it by default, so that the user is not bothered with this for final release installations (for testing the final images, people need to run the `installation-feedback` script manually). With this we are flexible to request feedback whenever we like. This step needs to be added to the release checklist.
+
+''ColinWatson: As above, this should be part of installation-report. Instead of updating a configuration file, why not key it off .disk/info?''
+
+==== Database layout ====
+
+We need a database to store this information, and then just collate them to show the most relevant information.
+
+<pre>
+CREATE TABLE inst_media (
+  id INTEGER PRIMARY KEY,
+  architecture VARCHAR[255] NOT NULL,
+  distribution VARCHAR[255] NOT NULL,
+  medium VARCHAR[255] NOT NULL,
+  current_build TIMESTAMP,
+  download_url TEXT
+);
+</pre>
+
+The <code>inst_media</code> table describes which installation media we provide on our servers (this includes netboot and upgrades). If <code>download_url</code> is NULL, the URL is created dynamically from the UI.
+
+<pre>
+CREATE TABLE test_cases (
+  id INTEGER PRIMARY KEY,
+  inst_medium INTEGER REFERENCES inst_media(id),
+  install_mode VARCHAR[255] NOT NULL,
+  assignee VARCHAR[255],
+  instruction_url TEXT
+);
+</pre>
+
+The <code>test_cases</code> table tracks what kind of tests we want to run on a particular installation medium (like the amd64 DVD or a sparc netboot). A test case is defined by a particular set of instructions for a particular installation medium and architecture.  A URL is also included, which can point to a set of instructions online.
+
+<pre>
+CREATE TABLE results (
+  id INTEGER PRIMARY KEY,
+  date TIMESTAMP,
+  test_case INTEGER REFERENCES test_cases (id),
+  launchpaduser VARCHAR[255] NOT NULL,
+  build TIMESTAMP NOT NULL,
+  success SMALLINT NOT NULL,
+);
+
+CREATE TABLE results_bugs (
+  result INTEGER REFERENCES results (id),
+  bugid INTEGER NOT NULL
+);
+</pre>
+
+The <code>results</code> table tracks each test installation.  We need to keep track of when someone did a test, which test they ran, who did it, which build of the software (CD timestamp), whether it succeeded, and optionally a list of Malone bugs.
+
+''[pitti: results now also needs complete installer db, etc., see comment above]''
+
+'''ColinWatson: Full installation logs would be useful (be careful not to submit these automatically in installer debug mode as they may contain passwords). While the user's choices as represented in the debconf database are often sufficient, that's not going to be enough for things like debugging weird partitioning problems.'''
+
+==== User interface ====
+
+The web application that drives the data collection has simple needs for its user interface.  It needs to collect the data from the user, display the gathered data, and manage the kind of tests to run.
+
+In general, the website should have the same look and feel as http://ubuntu.com.  We can do this by inheriting Ubuntu's default CSS.
+
+The part of the web interface that manages/modifies reports, sets assignments, etc., should be confined to a small team, checked by asking for Launchpad credentials. Submitting a test should still require a Launchpad login for precise tracking, but should not be confined otherwise.
+
+===== Collecting data =====
+
+This should be a simple web form that asks for the following information:
+
+* '''Username''': The user's Launchpad user name.  This should ensure that this user exists on Launchpad.
+* '''Architecture''': A selection box for the user to choose the appropriate architecture.
+* '''Medium''': A selection box for the type of installation medium that was used to install it.  For instance, from a CD, a DVD, an upgrade, etc.
+* '''Distribution''': A selection box for the distribution of Ubuntu being tested.  This should be a specific distribution release like "Kubuntu 7.04".
+* '''Success''': This radio button lets you choose between PASS, FAIL, and Not Applicable.
+* '''Build''': This texts field offers people the ability to report the version of the current build.  This should be filled in with the current default, if this information can be supplied by default.
+* '''Bugs''': A comma-separated field of <nowiki>[[Malone]]</nowiki> bug numbers that apply to this test report.
+
+===== Displaying data =====
+
+The testing summary should resemble <nowiki>[[Testing/Current]]</nowiki>.
+
+===== Manage tests =====
+
+The initial interface for managing tests can be directly manipulating the SQL database.
+
+=== Unresolved issues ===
+
+* MattZimmerman suggests that arbitrary installation reports should be accepted, not just ones tied to test cases.
+** SimonLaw says that this would be difficult to manage from an informational point of view.  Should all freeform reports be separated out?  Lumped together?  Or should only freeform installation bugs be kept in a list and not displayed in the scoreboard?
+** MartinPitt wonders how arbitrary such installations can get---after all, our test cases are exhaustive in terms of bootsplash-selectable modes, media, partitioning and upgrades, and we never differentiated between choices in expert mode, LVM, etc.
+
+----
+CategorySpec

@@ -1,0 +1,254 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+
+''Please check the status of this specification in Launchpad before editing it.  If it is Approved, contact the Assignee or another knowledgeable person before making changes.''
+
+* '''Launchpad Entry''': UbuntuSpec:usplash-polish
+* '''Packages affected''': usplash, usplash-theme-*
+
+=== Summary ===
+
+The Usplash design will get some good scrubbing, a better split between libraries, binaries and daemon, better theming support and proper connections to the rest of the system (eg: cryptsetup, fsck)
+
+=== Release Note ===
+
+No release note will be needed, the user just sees that Ubuntu got a bit shinier. When explaining what changed, I think we occasionally get overly technical.
+
+=== Rationale ===
+
+Usplash has grown, many features were added without having a proper design. It is time to clean it up and integrate it with the rest of the system.
+
+=== Use Cases ===
+
+* Jani maintains an Ubuntu derivative, he wants usplash themeing to be easy
+* Dennis is Ubuntu user, he wants to easily switch themes
+* Reinhardt uses cryptsetup and doesn't like that usplash shuts down when cryptsetup asks for his key.
+
+=== Design ===
+
+You can have subsections that better describe specific parts of the issue.
+
+=== Implementation ===
+
+This is the design I have worked out so far:
+
+<pre>
+Improvements to usplash
+-----------------------
+
+* More drawing code in libusplashtheme instead of themes
+
+* Modifying the theme struct to all the changes and to make it easier to use
+
+* Usplash switcher - easy switching btween usplash themes
+ - Add to gdmsetup
+ - Somewhere in KDE as well
+
+* Better messaging protocol
+ - Messages have the format (pid_of_sender, context_id, type, message)
+ - Messages can have progressbars associated with them
+ - Simple messages go throgh the FIFO, messages which require an answer go via
+   a unix domain socket
+ - usplash_write can take away complexity so both upstart and scripts can use
+   it
+ - Messages/progressbars can be removed by subsequent messages
+
+* Display
+ - Still one main progressbar
+ - Small progressbars associated with messages, up to the theme how to display
+  o Default theme: on the same spot as ok/fail, as simple progressbars
+  o Not displaying a few temporarily when the screen is full is ok, just pop
+    them back
+
+* Cancelling
+ - Naive cancelling as first step
+  o Cancellable messages will have 'press ESC to cancel next to them
+  o Pressing ESC causes the lastone of those to be canceled
+ - Maybe in the future have the F1-F12 keys be canceling keys
+
+* FSCK
+ - Main user of progressbars and cancellable messages
+ - FSCK can somehow pipe output on a different FD, somehow this needs to be
+   sent to usplash
+ - Patch initscripts so canceling is allowed (ctrl C) iff the chck is done
+   because of max_mount_count or max_mount_time
+
+* Starting/Exiting usplash
+  - Should usplash quit on VT switch?
+  - Should init call usplash or the should the DM do that?
+  - Magic escape key?
+
+Splitting up usplash
+--------------------
+Usplash will be split into several components:
+- usplash: the daemon and helper programs such as usplash_write
+- libusplashthemeN: the theming lib
+- libusplashtheme-dev: headers for --^
+- libusplashclient: abstraction lib for talking to usplash, used by
+  usplash_write but other apps can use it as well
+- libusplashclient-dev: headers for --^
+
+The wire protocol
+-----------------
+Messages are sent as raw struct usplash_message 
+
+struct usplash_message {
+    pid_t     pid;
+    char      ctx_id;
+    char      msg_type;
+    char      msg[80];
+    char      progress;
+} usplash_message_t;
+
+The pid should be the pid of the sending program, or more accurately, the
+program that needs to be signaled on canceling. Together with the ctx_id, every
+message has a unique id. The msg_type is on of the following:
+
+* MSG_NORMAL: normal message
+* MSG_PROGRESS: message with separate progress bar
+* MSG_INPUT: to ask for user input
+* MSG_PASSWORD: ask for a password
+* MSG_CONFIRM: ask for a confirmation ('hit enter to')
+* MSG_QUIT: make usplash quit
+
+possibly or'ed with MSG_CANCELLABLE for messages that should be cancellable.
+To advance the global progress bar, pid_t and ctx_id should be 0.
+
+The progress field can be set to STATUS_OK for an "ok" text instead of a
+progressbar, or STATUS_FAIL for a fail text.
+
+Connecting to usplash
+---------------------
+For messages that don't need an answer, a simple fifo can be used for
+communicating with the usplash daemon. For messages that need an answer, a unix
+domain socket will be used. This all will be abstracted by libusplashclient and
+usplash_write.
+
+Theming
+-------
+libusplashtheme will contain all code themes need for drawing their elements. A
+theme will consist of areas with solid colors, areas with static images, areas
+with dynamic images, progressbars and text. The theme struct will be:
+
+struct usplash_theme {
+    int version;
+    char *name;
+    struct usplash_theme_variant* var;
+
+	void (*init) (struct usplash_theme *theme);
+	void (*draw_root) (struct usplash_theme *theme);
+	void (*draw_messages) (struct usplash_theme *theme, int nmsg, struct usplash_message **msges);
+	void (*animation_step) (struct usplash_theme *theme);
+} usplash_theme_t;
+
+struct usplash_theme_variant {
+    struct usplash_theme_variant next;
+    short background_color;
+    struct usplash_image background_image;
+    struct usplash_font font;
+    struct usplash_progressbar bar;
+
+    short text_x;
+    short text_y;
+    short text_width;
+    short text_height;
+	short text_background;
+	short text_foreground;
+	short text_success;
+	short text_failure;
+
+    short progressbar_x;
+    short progressbar_y;
+} usplash_theme_variant_t;
+
+struct usplash_image {
+
+} usplash_image_t;
+
+struct usplash_font {
+    char *name;
+    int height;
+    int index_mask;
+    int *offset;
+    int *index;
+    uint32_t *content;
+    wchar_t default_char;
+} usplash_font_t;
+
+API
+---
+The public API consists of 3 parts:
+
+libusplashtheme.so.N  - theming API
+libusplashclient.so.N - connection/msg API
+/sbin/usplash_write   - wrapper binary to call from scripts
+
+The theming api will include default drawing functions for themes, as well as
+additional functions for making custom drawing functions easier:
+
+void def_init(struct usplash_theme *theme);
+void def_draw_root(struct usplash_theme *theme);
+void def_draw_messages(struct usplash_theme *theme, int nmsg, struct usplash_message **msges);
+void def_animation_step(struct usplash_theme *theme);
+
+void draw_image(struct usplash_image *img, int x, int y);
+void draw_partial_image(struct usplash_image *img, int x, int y, int w, int h, int orig_x, int orig_y);
+void draw_progressbar(struct usplash_progressbar, int x, int y, int percentage);
+
+The client API consists of the message struct and values, as described above,
+as well as the following functions:
+
+bool is_usplash_active(void);
+
+Returns true if usplash is running, false otherwise. This function should be
+called by client programs before calling other functions. Other usplash
+functions should not be called if usplash is not running.
+
+usplash_message_t* usplash_message_new(const usplash_msg_type t, const char* msg, const char progress, const char ctx_id);
+
+Returns a pointer to a newly allocated message struct, or NULL if allocation
+failed or usplash is not active. The allocated struct can be freed with free().
+
+char* usplash_message_send(usplash_message_t *msg);
+
+Sends the message, returns a pointer to the returned text for INPUT/PASSWORD
+messages, or NULL for others or if usplash is not runnning
+
+/sbin/usplash write can be called as follows:
+
+/sbin/usplash-write --input|--msg|--password|--confirm|--text|--ok|--fail|--quit [--pid pid] [--ctx cid] [--progress progress] [message]
+
+pid will default to the result of getppid(), cid defaults to 0 (so
+/sbin/usplash_write --pid 0 --progress X will advance the global progress bar)
+
+It will return 0 on success and print any output on stdout. Return code will be
+1 if usplash is not running, 2 if an error occured.
+</pre>
+
+=== Test/Demo Plan ===
+
+Get it in quickly so people can test it. Initial code is already there.
+
+=== BoF agenda and discussion ===
+
+Use this section to take notes during the BoF; if you keep it in the approved spec, use it for summarising what was discussed and note any options that were rejected.
+
+=== Comments ===
+
+It will be good to have an ability to show boot messages during boot (as it was in old versions of ubuntu) --Sorib
+* Boot without the 'quiet' option if you want that. --ColinWatson
+** SuSE and others have the option to watch the output after pressing ESC, F2 or whatever. The splash-image is then displayed in the background with the text in the foreground. This gives a very sophisticated impression. Anyway, a splash/messages toggle-button would be a nice addition (though probably with a very low priority). --Sokraates
+** I totally agree with Sokraates, sometimes you want to see boot messages when you already booted and thus it is too late to use the 'quiet' option --MatteoZandi
+
+Alternative to usplash: "splashy" (http://ubuntuforums.org/showthread.php?t=477426) --Gunblade2
+
+----
+CategorySpec

@@ -1,0 +1,141 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+
+* '''Launchpad Entry''': https://launchpad.net/distros/ubuntu/+spec/simplified-livecd
+* '''Created''': 2005-10-31 by ColinWatson
+* '''Contributors''': ColinWatson, MattZimmerman, FabianFranz, JuanjeOjeda
+* '''Packages affected''': casper, initramfs-tools
+
+=== Summary ===
+
+Simplify and improve the live CD's bootstrap mechanism.
+
+=== Rationale ===
+
+As of Ubuntu 5.10, the Ubuntu live CD bootstraps itself using the installer machinery. While this was convenient for purposes of maintainability, it has disadvantages in performance, interactivity, complexity and aesthetics. It should be replaced with a simple initramfs which handles the following tasks non-interactively:
+
+* Progress display using usplash
+* Hardware detection (using standard, shared Ubuntu mechanisms)
+* Location and mounting of the live media
+* Initialization of the live filesystem
+* Transfer of control to the live filesystem
+
+On /dev/cdroms/ (used in current installer code to locate the live media), ScottJamesRemnant asks: '''Could this be done using the udev "by-label" and/or "by-uuid" /dev names?''' Unfortunately I think not. Using by-label (a) requires a suitable label to be set on the CD image when running mkisofs, which is a new requirement and one I think customisers will frequently get wrong, and (b) requires unique volume labels, which breaks in cases where people have multiple CD drives and an Ubuntu CD in each (in practice all our CD images for a given release on a given architecture will have the same volume label). `vol_id` does not support by-uuid for ISO9660 filesystems. However, we can still do better than the existing code; see below.
+
+=== Use cases ===
+
+* Most users of the live CD want it to boot quickly and painlessly, without a sharp visual distinction between various stages of the bootstrap process.
+* Pierre is French, and still wants to be able to select French as his language, have a reasonable keymap selected for him, etc.
+
+=== Scope ===
+
+This specification covers a redesign of the live CD bootstrap process. It does not attempt to address additional features that might be implemented in the live CD, although the redesign should take care to retain customisability and not to restrict reasonable extensions.
+
+=== Design ===
+
+We will replace the d-i frontend with a simple initramfs with a usplash progress bar. This may be built using the d-i build system (which knows how to build initramfs now, and can build it out of udebs) or using mkinitramfs (which can build the initramfs out of arbitrary hooks, and already knows how to chain to a new root filesystem). This should carry out the following operations:
+
+==== Boot loader ====
+
+Su``SE applies the "gfxboot" patch to isolinux to allow graphical language selection.
+
+No similar simple menu facility exists for yaboot; and the boot loader may not support all required languages (CJK, Indic, etc.). As such, selection of the language in the boot loader can only provide a default, and we will enhance language-selector to deal with keymap selection so that users can easily change (this will also be useful for UbuntuExpress).
+
+It would install the BootLoader in a USB if the user selected a USB installation.
+
+==== Hardware detection ====
+
+Mostly udev coldplugging, as with the rest of the system. We need to ensure that suitable modules are present in the initramfs.
+
+lp, mousedev, and psmouse are still loaded manually using /etc/modules in breezy. Which of these are still necessary? On powerpc, many devices on the mac-io bus are also handled using /etc/modules; we should ensure that the mac-io hotplug patches are merged to allow this to be removed.
+
+==== Locating CD-ROM ====
+
+In order to locate the live filesystem, we must find the CD-ROM on which it is located (in future, this might be e.g. an NBD device). To do this, the cdrom-detect installer component walks through /dev/cdroms/ (a devfs-style path, relying on udev's compat-full.rules). We can either use cdrom-detect directly (requiring a debconf database, to some extent) or reimplement it without debconf. It appears that a reimplementation would be much smaller than the original, since cdrom-detect performs various other pieces of installer integration as well as just mounting /cdrom.
+
+Instead of /dev/cdroms/, which is buggy in the event that a SCSI CD-ROM is probed before an IDE CD-ROM (and possibly other situations), we will use the /dev/cdrom* symlinks. While these have their problems in the event that CD-ROM devices are plugged and unplugged frequently due to using udev's `%e` enumeration support, they should be fine for our purposes.
+
+We should ensure that there is a suitable hook at around this point for future hard drive detection; some other live CD systems allow the live filesystem to be cached on the hard disk.
+
+Again, the build system needs to include suitable modules.
+
+==== System configuration ====
+
+We perform a number of system configuration tasks in the existing live CD, some of which ask questions, some of which do not. (Ideally, we would ask no questions after boot.)
+
+* Language selection
+
+ On architectures where it is possible, we should allow the user to select the language (and possibly country?) from the boot loader; see above.
+
+* Keyboard layout
+
+ We should select a reasonable default and allow the user to change it later once the desktop is available. Knoppix and d-i (via console-data) both have algorithms to guess a default layout from the language and country.
+
+ If there are multiple options, a future version of the Ubuntu live CD could make all of them available in GNOME's keyboard switcher applet.
+
+* Add default user
+
+ Just invoke adduser or similar. Alternatively, copy the passwd entries in from a template file.
+
+* X, gdm, swap, fstab, etc.
+
+ casper does this; we can reuse the code.
+
+* Unwinding changes
+
+ casper should make it easy for UbuntuExpress to unwind its changes, for example by moving init scripts out of the way rather than deleting them, and by installing unwind scripts which just need to be invoked.
+
+* Saving logs
+
+ d-i saves its logs to /var/log/installer/; initramfs-tools should have a similar generic facility.
+
+==== Live filesystem initialization ====
+
+We should switch over to the unionfs code in casper's main branch, and investigate moving from cloop to squashfs (both discussed in LiveCDFeatures). Aside from that, we can continue using the current live filesystem initialization code.
+
+==== Transfer of control to live filesystem from initramfs ====
+
+To transfer control to the live filesystem, we should overmount the live filesystem on /, then exec run-init. If we use initramfs-tools to build the bootstrap initramfs, then we get this for free from /usr/share/initramfs-tools/init.
+
+Since we will be using usplash to provide a progress bar while bootstrapping, we need to arrange that usplash continues to display a progress bar after transferring control to the live filesystem without jumping back to 0%. UsplashInitramfs discusses this issue.
+
+=== Implementation ===
+
+==== Example implementation ====
+
+There is a example implementation of this. In the <nowiki>[[http://www.guadalinex.es|Guadalinex]]</nowiki>/<nowiki>[[http://metadistros.software-libre.org/|Metadistros]]</nowiki> new live system a modified version of the `initramfs-tools` package is used, adding a new `live` boot mode (see the BOOT variable in `/etc/mkinitramfs/initramfs.conf`). This makes the initramfs use some hooks that add the scripts and modules necessary to create the live system.
+
+The system uses squashfs and unionfs and is pretty well integrated with the current Ubuntu `initramfs-tools` package. JuanjeOjeda also tried to reuse some code from `casper`, but it didn't work very well for him in some cases.
+
+The system is new but quite stable, and it's very easy to change things like whether to use cloop or squashfs, the path to the live filesystem, and so on.
+
+The code is available from the <nowiki>[[http://ws314.juntadeandalucia.es/guadalinex2005/generation_system/live/initramfs-tools/|Guadalinex project's Subversion repository]]</nowiki>.
+
+System configuration:
+* We didn't include a language selector, because we think it's better to use the <nowiki>[[https://launchpad.net/distros/ubuntu/+spec/gdm-keyboard-layout|GDM keymap selector]]</nowiki> for this.
+* The user is specified in the initramfs config file (`/etc/mkinitramfs/initramfs.conf`) and added in the boot process.
+* We use the current initramfs' log file (`/tmp/initramfs.debug`), but we save into the live filesystem for debugging purposes.
+
+Locating the live filesystem:
+We search through each block device, just in case the file is not on an IDE or SCSI CD-ROM, but on a USB device, hard disk, or whatever. With the initramfs system this is easy and fast.
+
+-- JuanjeOjeda
+
+=== Outstanding issues ===
+
+* How much code would be realistically shared with the udebs?
+** localechooser, kbd-chooser hooks
+** don't need progress bars anymore due to usplash
+** don't need any user input, as we won't ask any questions anymore
+** don't need netcfg due to network-manager
+* would like to avoid complexity wherever possible, but also share code in order to benefit from well-tested components
+----
+CategorySpec

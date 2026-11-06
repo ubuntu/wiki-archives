@@ -1,0 +1,100 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+
+''Please check the status of this specification in Launchpad before editing it.  If it is Approved, contact the Assignee or another knowledgeable person before making changes.''
+
+* '''Launchpad entry''': <nowiki>[[https://launchpad.net/distros/ubuntu/+spec/ubiquity-driver-updates|ubiquity-driver-updates]]</nowiki>
+* '''Packages affected''': `gfxboot-theme-ubuntu`, `casper`, `ubiquity`, `linux-source-2.6.19`, `update-manager`
+
+=== Summary ===
+
+Acquire and install third-party drivers during installation from the desktop CD.
+
+=== Rationale ===
+
+We want to encourage third-party hardware vendors to supply driver updates that can be installed by Ubiquity, allowing Ubuntu to be installed on systems that were not supported at the time of release. This specification discusses how these driver updates should be acquired and installed by Ubiquity, strategies for upgrading those drivers along with Ubuntu kernel updates, and related issues.
+
+=== Use cases ===
+
+* A vendor's disk hardware is supported in Feisty+1's kernel, but not in Feisty. They wish to make it possible to install Feisty anyway, and for upgrades to be handled smoothly.
+* A vendor has a Linux driver for their own hardware device; this driver has never been submitted upstream. Having tested it with an Ubuntu stable release, they want to make it possible for users of that release to be able to use their device out of the box.
+
+=== Scope ===
+
+Some possible driver updates consist simply of updated PCI IDs. We hope to be able to special-case these and handle them in a simpler way; see the <nowiki>[[https://blueprints.launchpad.net/ubuntu/+spec/driver-device-manager|driver-device-manager]]</nowiki> specification (which, at the time of writing, is not implementable as stated, but something similar should eventually be possible) for further details on this.
+
+CD-ROM drivers cannot be handled by this process, since there is no way to load the updated drivers from CD. If this becomes an issue for a particular vendor, we may be able to help them produce remastered versions of Ubuntu including their driver.
+
+Installations using d-i are not handled by this process, so no `.udeb` packages need to be provided by vendors.
+
+=== Design ===
+
+==== Live CD integration ====
+/!\ Note: Due to <nowiki>[[https://bugs.launchpad.net/bugs/120217|an issue]]</nowiki> in casper, using a driver CD when installing using the Live CD does not work in 7.04 Feisty Fawn.
+
+An entry will be added to the `gfxboot` menu allowing the user to say that they will provide a driver CD. The implementation requires that it simply adds `debian-installer/driver-update=true` to the kernel command line. This causes a script provided by `casper` in the initramfs to ask for a driver CD using `usplash` before mounting the root filesystem, so that the live CD can be ejected. After the contents of the `/ubuntu-drivers` directory on the driver CD have been read, it will prompt the user to re-insert the live CD to continue booting.
+
+Module packages will be stored on the CD in a directory based on the base kernel version: `ubuntu-drivers/<kver>/` where `<kver>` is the base kernel version (e.g. 2.6.15, 2.6.17 or 2.6.20).
+
+Packages matching this glob will be copied to the live session:
+
+<pre>
+ubuntu-drivers/<kver>/*_<debarch>.deb
+</pre>
+
+These files are stored in the initramfs in `/tmp/driver-updates`, and eventually copied to `/var/cache/driver-updates/` on the liveCD by casper.
+
+Casper then installs them (if possible) on the live sessions filesystem.
+
+Ubiquity is responsible for installing these packages on the target system.
+
+While we will not install source code in the live session or on the target system, we will recommend that vendors provide source packages under `/ubuntu` on the driver CD in order to satisfy their obligations under the GPL.
+
+==== Vendor process ====
+
+We will offer vendors a choice of multiple service levels for providing driver updates, probably including:
+
+* ABI change notification
+
+ Vendors taking part in this service will be notified when the kernel ABI is about to change, and will receive pointers to updated packages when available. They will be expected to provide updated module packages in a repository hosted by them.
+
+ We will provide a development kit with suitable documentation to allow vendors to build packages in the correct format easily, provided that they have an Ubuntu development system available.
+
+* Full hosting
+
+ Vendors taking part in this service will send us their module source, which will be rolled into a package maintained by the Ubuntu kernel team and published in a suitable repository. (We believe that the vast majority of drivers appropriate for this process are open source. Those that are not can use the ABI change notification service above.)
+
+ In future, it may be possible for these packages to be committed to a bzr branch on Launchpad owned by a team including the vendor and the Ubuntu kernel team, and published in a <nowiki>[[https://launchpad.net/products/soyuz/+spec/personal-package-archives|personal package archive]]</nowiki> owned by the same team. However, we cannot rely on personal package archives being in production in the Feisty timeframe, and in any case requiring knowledge of bzr and Launchpad may be too high a hurdle for many vendors. This will remain an optional service, and the infrastructure in Ubuntu will not depend on PPAs.
+
+In either case, the binary package will be named ''name''`-modules-`''version-abi-flavour'', e.g. `foo-modules-2.6.19-4-generic`, and provide the ''name''`-modules` virtual package, e.g. `foo-modules`. It should provide an informational URL in a `Driver-URL` control field. A metapackage (`foo-meta`) depending on the current version of the modules package will also exist; this is to encourage the package management system to upgrade when the ABI changes. This metapackage will provide a sources.list fragment (`/etc/apt/sources.list.d/foo-meta`) pointing at the vendor repository, whether it be external or Launchpad-hosted. Repositories must make sure to maintain the same URL.
+
+Modules should be installed under `/lib/modules/`''version-abi-flavour''`/updates/`''vendor'' in order to consistently supersede any in the Ubuntu kernel (the `/updates` directory is treated specially by `depmod`; all other directories are handled in `readdir` order, so in other words there is no other defined ordering of modules).
+
+Some vendor driver updates may simply be backports of drivers already in the mainline kernel. In cases where they are not, we will endeavour to integrate the drivers into our kernel for the next Ubuntu release, and offer the help of our kernel team in getting the drivers submitted upstream in the proper way.
+
+==== Upgrade handling ====
+
+It is important to ensure that upgrades to kernels with changed ABI (and therefore a new package name) install an updated driver wherever possible. There is no way to express this in terms of standard package relationship fields in such a way that it will be enforced by `dpkg` or `apt` (for instance, the kernel cannot depend on the updated driver because the driver package is not part of Ubuntu and should not be installed on all Ubuntu systems). The metapackage specified above may help in some situations, but is not sufficient. However, it is possible to handle the situation by means of special cases in `update-manager`.
+
+`update-manager` will detect when a new kernel package is being installed (kernel packages provide the virtual package `linux-image`), and check for all driver packages depending on the currently-running kernel package (driver packages provide a virtual package of the form `foo-modules`). If driver packages providing the same virtual packages are installable, it will mark them for installation. If not, it will warn the user that one of their hardware drivers has not been updated for the new kernel, and allow them to confirm or cancel the upgrade; if a contact address URL was provided in the driver package (see above), it will direct them to that.
+
+It may sometimes happen that a vendor-provided driver is later incorporated into the mainline Ubuntu kernel. In such situations, for the time being, we recommend that the contact URL explain the situation and tell users what to do.
+
+=== Notes ===
+
+Compare with Novell's process: http://developer.novell.com/wiki/index.php/Partner_Linux_Driver_Process
+
+There has been discussion of a single driver-updates package maintained by the kernel team for new drivers added post-release. The process above should allow for this, but does not require it.
+
+Running `depmod` on boot is slow. It would be nice for vendor packages to be able to include `modules.dep` and `modules.alias` snippets; however, care would be needed to ensure that these properly superseded entries for modules shipped as part of Ubuntu.
+
+----
+CategorySpec

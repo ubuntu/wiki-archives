@@ -1,0 +1,479 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+'''This page is kept for archiving reasons. Find the Merging guide at <nowiki>[[UbuntuDevelopment/Merging]]</nowiki>.'''
+
+=== Merging and Syncing Packages ===
+==== A MOTU tutorial session conducted By Daniel T. Chen on July 28th 2006 ====
+
+=== Background & History ===
+Merging and Syncing are operations required to keep the packages in the Universe and Multiverse repositories in line with the latest software in the Debian repositories. Debian packages that need to be changed (patched etc) before inclusion in the Ubuntu repositories are said to require "merging" while packages that can be included in Ubuntu without changes to the corresponding Debian package are said to require "syncing". 
+The need for changes in a package prior to inclusion in Ubuntu's Universe repository arise from differences in policy, bug-fixes, and branding that are local to Ubuntu.
+Historically, when the first group of MOTU started back in the Hoary dev cycle, they were pushing a lot of cool (saner) packaging changes (spec'd by the core-dev team) into universe and multiverse. Many of the merges today still bear that legacy, given the sheer number of packages (over 18,000) in Debian. So from Hoary through Dapper, the major "transitions" we've propagated to universe and multiverse include:
+# Modular X.Org (including /usr/X11R6/ -> /usr/ and GL{,u})
+# Python 2.4 by default
+# GCC 4.0 by default, C++ ABI bump (c2)
+# C++ standard allocator change (c2a)
+# Numerous library renames (libaa1, libmysqlclient15off, etc.)
+# iconcache for faster startup
+For Edgy, the major ones we're dealing with are:
+ 1.#7 GCC 4.1 by default
+# X.Org 7.1 (after resyncing modular X.Org with Debian - this ties into the modular X.Org transition)
+# Updated Python policy (python-central, python-support)
+The above nine transitions cover nearly every type of Ubuntu merge you'll encounter. The lesser ones (including .desktop files) are probably the most straightforward merges to do.
+
+=== Preliminary Work ===
+Just by way of setting up, it will be useful to glance at http://merges.ubuntu.com/ . You'll also find it useful to go ahead and create a scratch directory (like /tmp/merges/) and install the 'build-essential', 'devscripts', 'cdbs', 'dpatch', and 'fakeroot' packages using apt-get/aptitude/dselect/synaptic/adept. Also consider grabbing the grab-merge.sh script that's mentioned on the merges Web site.
+
+=== The Process of Merging/Syncing ===
+Currently Scott's excellent Merge-O-Matic tool (rather the output from that tool) at http://merges.ubuntu.com/ is used to lay the groundwork for the process. On http://merges.ubuntu.com/universe.html, you'll see a pretty lengthy list of pending merges. Near the leading vertical ("top") of the page, you'll see three links, one for outstanding merges, another for new, and another for updated. As on the day this was written, we have no outstanding merges, which is a relief. Outstanding merges are those that have not been tackled in Ubuntu at all across any release. On the other hand, we have 269 'new' merges, meaning that no one has tackled these merges yet in the Edgy dev cycle. There are, though, 47 'updated' merges, meaning newer Debian versions are available for merges that have already been done in the Edgy dev cycle. The above lists include all the packages that contain Ubuntu changes from their Debian counterparts at the time of the snapshot. For completeness, Lucas (another MOTU) maintains a merge list, too, at http://tiber.tauware.de/~lucas/mergescountdown/. Several packages that have previously been imported from Debian to Ubuntu are automatically synced at specific times in each release cycle. Those automatically "synced" packages are not include in the list of pending merges.
+
+==== Outline of Algorithm for Tackling Merges ====
+ Step One:: Grab the Merge-O-Matic output. You can do this using grab-merge.sh. 
+ Step two:: Read the Merge-O-Matic output (either in the extracted source or via REPORT on the website).
+ Step three:: Inspect the conflicts in each file listed in the M-O-M output, and follow this subroutine:
+ 1. Prefer the newer Debian changes when possible. This means we discard Ubuntu changes until we have to use one. 
+ /!\ When packages split and introduce conflicts/replaces statements, we often cannot safely discard the Ubuntu version number, because the new conflicts statement may refer to the Debian version number, but in Ubuntu it needs to be the Ubuntu number.
+ 2. If newer Debian changes were made that don't affect the old Ubuntu source package, then extract the newer pristine Debian source package and check if those Debian changes allow the Ubuntu merges to be dropped from the merged source.
+ 3. If those Debian changes allow the Ubuntu merges to be dropped, then make the modifications in the merged source package.
+ 4. Continue this step for all files listed in the M-O-M output.
+ Step four:: Sanity-check the package. For instance, you don't want hardcoded paths for older software (that you just dropped) sitting in the source.
+ Step five:: Change the debian/changelog to note your work. Note which Ubuntu deltas are still valid and why invalid ones were dropped. Change the M-O-M e-mail address and name to yours.
+ Step six:: Generate a new merged source package using the merge-buildpackage script. Remember to pass any necessary options like " -rfakeroot -k<your_gpg_key_id> ".
+ Step seven:: Sanity-build the source package in pbuilder, check the contents of the created debs (using dpkg-deb -c foo.deb), and alert a MOTU to your merged source package.
+
+(This is a work in progress --CarthikSharma)
+
+=== Raw Log ===
+
+What follows is the raw log for the session, edited to remove some extraneous material. The following material is also available as a text file - <nowiki>[[attachment:crimsun-motu-school-trimmed.txt]]</nowiki>
+
+<pre>
+23:05:48  <crimsun> ok, let's go ahead and get started
+23:06:14  <crimsun> Background stuff first:
+23:06:51  <crimsun> Tonight's section will address a couple ways to handle merging Ubuntu changes into newer Debian packages.
+23:07:24  <crimsun> Just by way of setting up, it will be useful to glance at http://merges.ubuntu.com/ . You'll also find it useful to go ahead and create a scratch directory (like /tmp/merges/) and install the 'build-essential', 'devscripts', 'cdbs', 'dpatch', and 'fakeroot' packages using apt-get/aptitude/dselect/synaptic/adept. Also consider grabbing the grab-merge.sh script that's mentioned on the merges Web site.
+23:09:03  <crimsun> (I'll give everyone a couple minutes while I cover some background.)
+23:11:55  <crimsun> It's useful to look at â€œmergingâ€ historically. When the first group of MOTU started back in the Hoary dev cycle, we were pushing a lot of cool (saner) packaging changes (spec'd by the core-dev team) into universe and multiverse. Many of the merges today still bear that legacy, given the sheer number of packages (over 18,000) in Debian. So from Hoary through Dapper, the major â€œtransitionsâ€ we've propagated to universe an
+23:13:05  <crimsun> ...the major â€œtransitionsâ€ we've propagated to universe and multiverse include:
+23:13:23  <crimsun> * 1)Modular X.Org (including /usr/X11R6/ -> /usr/ and GL{,u})
+23:13:32  <crimsun> * 2)Python 2.4 by default
+23:13:41  <crimsun> * 3)GCC 4.0 by default, C++ ABI bump (c2)
+23:13:50  <crimsun> * 4)C++ standard allocator change (c2a)
+23:13:58  <crimsun> * 5)Numerous library renames (libaa1, libmysqlclient15off, etc.)
+23:14:11  <crimsun> * 6)iconcache for faster startup
+23:14:26  <crimsun> For Edgy, the major ones we're dealing with are:
+23:14:35  <crimsun> * 1)GCC 4.1 by default
+23:14:51  <crimsun> * 2)X.Org 7.1 (after resyncing modular X.Org with Debian â€“ this ties into the modular X.Org transition)
+23:15:02  <crimsun> * 3)Updated Python policy (python-central, python-support)
+23:15:20  <crimsun> The above nine transitions cover nearly every type of Ubuntu merge you'll encounter. The lesser ones (including .desktop files) are probably the most straightforward merges to do.
+23:15:58  <crimsun> Personally, the best way to physically â€œhandleâ€ a merge is to do one. We're currently using Scott's excellent Merge-O-Matic tool (rather we're using the output from that tool) at http://merges.ubuntu.com/ .
+23:17:08  <crimsun> So, presuming everyone has a scratch directory created and the grab-merge.sh script downloaded, let's dive in.
+23:18:48  <crimsun> On http://merges.ubuntu.com/universe.html, you'll see a pretty lengthy list. We'll pick a few of these packages and walk through merges.
+23:19:48  <crimsun> Near the leading vertical ("top") of the page, you'll see three links, one for outstanding merges, another for new, and another for updated.
+23:21:24  <crimsun> We have no outstanding merges, which is a relief. On the other hand, we have 269 'new' merges, meaning that no one has tackled these merges yet in the Edgy dev cycle. There are, though, 47 'updated' merges, meaning newer Debian versions are available for merges that have already been done in the Edgy dev cycle.
+23:21:54  <Fujitsu> What's the difference between New and Outstanding?
+23:22:42  <Fujitsu> (and the updated merges thing can't always be trusted, like in the case of carpaltunnel)
+23:23:02  <crimsun> Outstanding ones have not been tackled in Ubuntu at all across any release.
+23:23:26  <carthik_home> Also, do the lists include all the packages in Debian?
+23:24:00  <crimsun> The lists include all the packages that contain Ubuntu changes from their Debian counterparts at the time of the snapshot.
+23:24:02  <Amaranth> carthik_home: All the ones that need attention. If the Ubuntu package didn't change it is synced automatically.
+23:24:18  <carthik_home> I mean aren't there any packages in Debian that are not in Ubuntu yet? ( I've heard it said that the deb repo is more vast than Ubuntu's)
+23:24:46  <Amaranth> carthik_home: They are autosynced.
+23:24:49  <carthik_home> (sorry if I am digressing - let me know and I'll can it)
+23:25:12  <crimsun> Because the snapshots are discrete, there may well be a few new Debian packages that aren't on the list, but they will be synced from Debian at a future time.
+23:26:06  <carthik_home> okay
+23:26:24  <crimsun> For completeness, Lucas (another MOTU) maintains a merge list, too, at http://tiber.tauware.de/~lucas/mergescountdown/
+23:27:04  <crimsun> (He uses different tools and a different update procedure.)
+23:27:43  <crimsun> So let's go ahead and dig in.
+23:29:20  <crimsun> Let's take a look at a few that are listed for me, starting with 'xmakemol' at http://merges.ubuntu.com/x/xmakemol/REPORT .
+23:30:01  <crimsun> For reference, I have a /tmp/merges/ directory and /tmp/grab-merge.sh
+23:30:37  <crimsun> From within /tmp/merges/, I'll execute: ../grab-merge.sh xmakemol
+23:31:29  <crimsun> The tool downloads the Debian and Ubuntu source packages and places them in your current directory, overwriting previous content.
+23:31:54  <crimsun> If there are special changes that you need to look at, they'll be listed.
+23:32:11  <crimsun> This output matches what is described in the REPORT.
+23:34:03  <crimsun> Note that there appears to be a conflict in the Ubuntu and Debian changes in (on my system) /tmp/merges/xmakemol-5.15-1ubuntu1/debian/control
+23:34:28  <crimsun> Now let's look at the actual conflict by opening that file in your favourite editor.
+23:37:09  <crimsun> To understand this conflict, I need to give a bit of background on the very first set of changes described by historical (1).
+23:38:19  <crimsun> When Ubuntu went the modular X.Org route, many of the source packages that had formerly been built using 'xlibs-dev' had to be adjusted to work with the new Ubuntu package names.
+23:39:21  <crimsun> Some of these changes were straightforward, like replacing 'xlibs-dev' with 'libx11-dev' and any additional ones (libxext-dev, libxinerama-dev, and so on).
+23:40:40  <crimsun> The GL packages were a particularly interesting transition. Instead of using 'xlibmesa-gl-dev' (which no longer existed in Ubuntu), we had to use 'libgl1-mesa-dev | libgl1-dev'.
+23:41:52  <crimsun> The use of the pipe ('|') as an alternate was to allow the packages to also be buildable in Debian. A similar thing occurred for GLU: We had to use 'libglu1-mesa-dev | libglu1-dev' instead of 'xlibmesa-glu-dev'.
+23:43:43  <crimsun> Now here's where the story gets interesting. Because we're addressing merges in Edgy, we need to know what Edgy currently provides. It turns out that in resyncing our modular X.Org packages with Debian's, we've taken up many of Debian's package names, which means that 'xlibmesa-gl-dev' exists once again. On the other hand, 'xlibmesa-glu-dev' still does not exist.
+23:44:51  <crimsun> It's never too late to point out that the ultimate goal of "merging" is to realign Ubuntu's universe packages with their Debian counterparts.
+23:45:47  <crimsun> Thus, we should always strive to drop Ubuntu changes and go with the newer Debian version (which is called "syncing").
+23:46:32  <crimsun> Syncing is important because it removes the maintenance burden from Ubuntu.
+23:47:44  <crimsun> Returning to our debian/control example for xmakemol, please notice that the only conflict lies in the Build-Depends field, or what the source package needs installed to generate the binary packages (debs).
+23:48:33  <crimsun> Specifically, the Ubuntu change is the use of 'libgl1-mesa-dev | xlibmesa-gl-dev' in place of Debian's 'libgl1-mesa-swx11-dev'.
+23:50:30  <crimsun> To understand this specific change, I have to explain that in earlier Ubuntu releases, having libgl1-mesa-swx11 installed forced the removal of accelerated libgl1-mesa, so I opted to go the common route of not forcing that removal.
+23:51:24  <crimsun> However, we're now dealing with Edgy having resynced/merged X.Org from Debian, so we should strive to drop Ubuntu-specific changes for fewer maintenance headaches.
+23:52:20  <crimsun> There are two possible outcomes when working with a Ubuntu merge listed on the Merge-O-Matic pages: 1) You merge, or 2) You request a sync.
+23:53:23  <crimsun> Keeping in mind that we only want to keep Ubuntu-specific changes that are absolutely necessary to the source package's ability to be built, we will decide to drop the Ubuntu merge and request a sync for 'xmakemol' from Debian Sid.
+23:54:36  <crimsun> To do that, let's look at the procedure for requesting a sync from Debian Sid.
+23:55:03  <crimsun> First, point your Web browser at https://launchpad.net/distros/ubuntu/+search . In the text entry field, type the name of the source package, which is xmakemol .
+23:56:31  <crimsun> Second, click the link for the 'Source package "xmakemol"...'
+23:56:56  <crimsun> Third, in the upper left corner, there's a "Report a Bug" link that should be clicked
+23:58:01  <crimsun> Fourth, we just need to fill in the necessary information. In the Summary text entry field, we could use "Please sync xmakemol from Debian Sid"
+23:59:32  <crimsun> In the 'Further information...' field, you will want to state that it's "Ok to override Ubuntu changes"
+00:01:40  <crimsun> If you don't have privileges to upload source packages to the Ubuntu processing infrastructure, you'll then need to find a MOTU to approve your sync request, and the MOTU will double-check it and perform any additional steps to subscribe the archive administrators to the bug report. The archive administrators actually run the scripts that sync the source packages from Debian Sid.
+00:02:54  <crimsun> A pending sync request looks like: https://launchpad.net/distros/ubuntu/+source/xmakemol/+bug/54405
+00:04:21  <crimsun> A completed sync request looks like:
+00:04:22  <crimsun> https://launchpad.net/distros/ubuntu/+source/diacanvas2/+bug/53994
+00:05:56  <crimsun> That's the process for requesting a sync, which is completed by the archive admins. Now let's look at something that actually requires a merge.
+00:07:45  <crimsun> My ready example is unfortunately a bit large, so it make take a while to download. Let's look at wesnoth.
+00:07:52  <crimsun> may take, rather
+00:09:09  <crimsun> While that's going, we can go ahead and get a good idea of what to consider by reading the current Ubuntu package's changelog and dsc files and comparing them to Debian's dsc.
+00:09:28  <carthik_home> so cd /tmp/merges and ../grab-merge.sh wesnoth then?
+00:09:39  <crimsun> yep
+00:10:00  <carthik_home> you mean http://merges.ubuntu.com/w/wesnoth/REPORT
+00:11:02  <crimsun> At the bottom of http://packages.ubuntu.com/src:wesnoth , there's a link to the Edgy source package, which we'll click.
+00:11:53  <carthik_home> to get to http://packages.ubuntu.com/edgy/source/wesnoth ?
+00:11:54  <crimsun> That brings us to http://packages.ubuntu.com/edgy/source/wesnoth , and at the bottom of this page we can view the current Ubuntu changelog in addition to the dsc files.
+00:13:08  <carthik_home> http://changelogs.ubuntu.com/changelogs/pool/universe/w/wesnoth/wesnoth_1.1.7-1ubuntu1/changelog
+00:13:14  <crimsun> eoghan: In the 'More Information..' section, click the "View the Debian changelog" link.
+00:13:46  <crimsun> The dsc is listed first in the File table in the 'Download wesnoth' section
+00:15:01  <crimsun> My normal practice -- and this is of course simply my own approach -- is to have one Web browser tab open for http://packages.ubuntu.com/edgy/source/wesnoth and another open for http://packages.qa.debian.org/wesnoth
+00:16:59  <crimsun> The reason for looking at the dscs is to look at the build dependencies; the reason for looking at the changelogs is to see whether Ubuntu changes have been "absorbed" upstream [in Debian] and noted there.
+00:19:18  <carthik_home> but the ubuntu changelog doesn't show the latest debian changes -- or does it?
+00:19:41  <crimsun> carthik_home: no, it doesn't, but it /should/ document why Ubuntu's diverged from Debian's.
+00:19:57  <carthik_home> okay
+00:19:59  <crimsun> (the reason for there needing to be a merge in the first place)
+00:21:04  <crimsun> The changelog notes that there's one difference, which is installing one file so that a particular use case (the -t switch) succeeds.
+00:21:56  <crimsun> We need to check if that file (scenario-test.cfg) is installed according to the Debian source package, and if so, we can request a sync, otherwise we have to merge the Debian changes.
+00:22:59  <crimsun> If you've completed downloading the wesnoth merge set, you'll note there are a TON of conflicts
+00:24:01  <carthik_home> yes pngs
+00:24:17  <crimsun> The good news is that according to the newest Debian changelog (in wesnoth_1.1.8-1.diff.gz and http://packages.qa.debian.org/w/wesnoth/news/20060726T080342Z.html), those are simply location changes.
+00:25:04  <crimsun> Thus, we only have to check if scenario-test.cfg is installed according to Debian's packaging structure.
+00:25:23  <crimsun> to do that, we'll extract the Debian source package for 1.1.8-1.
+00:25:42  <crimsun> From /tmp/merges/ , ``dpkg-source -x wesnoth_1.1.8-1.dsc''
+00:26:06  <carthik_home> (err, crimsun - http://bugs.debian.org/cgi-bin/bugreport.cgi?bug=337834 says that the test .cfg file was included in ver 1.1-2)
+00:27:38  <crimsun> carthik_home: here's where we have to be careful
+00:28:35  <crimsun> even though the bug report is closed, if we check the source package, scenario-test actually isn't installed
+00:28:46  <crimsun> meaning:
+00:28:57  <carthik> and the debian version numbers are confusing too...
+00:29:14  <crimsun> Let's first check if the file exists in the source package:
+00:29:18  <crimsun> $ find . -name '*scenario-test*'
+00:29:19  <carthik> yes
+00:29:26  <crimsun> ./data/scenario-test.cfg
+00:30:19  <crimsun> now let's check the debian/ packaging infrastructure to see if it's referenced
+00:30:46  <crimsun> $ grep -nHr 'scenario-test' debian/*
+00:31:48  <crimsun> if the change mentioned in the Debian #337834 is present, it should be in one of debian/*.install
+00:31:49  <carthik> no such file or dir
+00:32:08  <carthik> sorry found it
+00:32:29  <crimsun> [ $(pwd) == /tmp/merges/wesnoth-1.1.8 ]
+00:32:37  <carthik> yep, sorry
+00:33:03  <carthik> okay.
+00:33:28  <crimsun> It turns out that despite the Debian bug being "closed", it's actually still "open" -- the issue isn't resolved, so we need to keep the Ubuntu changes.
+00:35:01  <crimsun> sorry, I need to read a bit more closely. :)
+00:35:15  <carthik> debian/wesnoth-data.install:11:debian/tmp/usr/share/games/wesnoth/data/scenario-test.cfg
+00:35:44  <crimsun> actually it's 'debian/tmp/usr/share/games/wesnoth/data/*.cfg'
+00:35:59  <crimsun> which is referenced on line 9 of debian/wesnoth-data.install
+00:36:29  <carthik> I'm lost...
+00:36:45  <crimsun> make sure you're looking at 1.1.8-1's debian/wesnoth-data.install.
+00:36:57  <carthik> the grep gave me that one line I pasted above
+00:38:01  <crimsun> I think you're looking in the extracted merged directory.
+00:38:15  <crimsun> wesnoth-1.1.8-1ubuntu1/debian/wesnoth-data.install:11:debian/tmp/usr/share/games/wesnoth/data/scenario-test.cfg
+00:38:18  <carthik> crimsun, ah yes.
+00:38:58  <crimsun> Ok, so it turns out we can avoid merging wesnoth and request a sync for it, hooray.
+00:39:01  <carthik> so I had to download the debian sources too?
+00:39:21  <crimsun> you already have the Debian source package by using grab-merge.sh .
+00:39:41  <carthik> So I had to untar it then?
+00:39:58  <carthik> sorry - I missed that step.
+00:40:17  <crimsun> right, that was described above.
+00:40:50  <carthik> sorry, my bad :)
+00:41:02  <crimsun> Just for the record, wesnoth can be synced because *.cfg files are installed by using debian/wesnoth-data.install .
+00:41:19  <crimsun> (I was a bit hasty in declaring the bug still open.)
+00:41:55  <crimsun> Two syncs so far, which is great for Ubuntu maintenance.
+00:43:25  <carthik> crimsun, I am curious - how did you find out that the *.cfg line installs the screnario-test.cfg (since the grep produced zip)
+00:44:36  <crimsun> carthik: Ok, I'll need to delve into dh_install(1) a bit, which is a debhelper script to install files into certain packages.
+00:44:59  <crimsun> each debian/*.install lists files that are to be installed into that binary package.
+00:45:19  <carthik> okay
+00:45:47  <crimsun> The original Ubuntu delta comes from scenario-test.cfg not being installed into /usr/share/games/wesnoth/data/
+00:46:22  <carthik> ok
+00:46:33  <crimsun> So that line [debian/tmp/usr/share/games/wesnoth/data/scenario-test.cfg] was added to debian/wesnoth-data.install
+00:47:08  <carthik> okay
+00:47:28  <crimsun> In closing Debian bug #377834, the Debian maintainer decided to install *.cfg , hence the [debian/tmp/usr/share/games/wesnoth/data/*.cfg] line in debian/wesnoth-data.install
+00:47:58  <crimsun> (since *.cfg covers scenario-test.cfg)
+00:48:09  <carthik> yes
+00:48:27  <crimsun> Now for a merge :)
+00:48:30  <carthik> so this could have been synced earlier, then?
+00:48:35  <crimsun> yes
+00:48:37  <carthik> okay
+00:49:08  <crimsun> Now let's look at m2crypto
+00:49:33  <crimsun> This one is a merge because of the Python 2.4 transition noted at the beginning of the session.
+00:50:36  <crimsun> (Presuming we've executed grab-merge m2crypto, let's look at the extracted files that have conflicts.
+00:50:39  <crimsun> )
+00:51:28  <carthik> yes
+00:51:33  <carthik> control and rules
+00:51:53  <crimsun> First up is debian/control, and the first fields are Build-Depends and Standards-Version
+00:52:21  <carthik> so should I extract the debian files from the dsc ?
+00:52:36  <crimsun> nope, just use the extracted directory that grab-merge.sh creates.
+00:53:15  <carthik> crimsun, okay, so how do I look at the files?
+00:53:34  <carthik> I am in /tmp/merges
+00:54:08  <crimsun> The grab-merge.sh script will extract a merge candidate for you, which is m2crypto-0.16-1ubuntu1 in this example.
+00:54:13  <carthik> /tmp/merges/m2crypto-0.16-1ubuntu1/debian -- okay I am here - which is right, I suppose
+00:54:25  <crimsun> Yes.
+00:55:14  <crimsun> Then you can use your favourite editor (gedit, kate, vim, emacs, joe, ...) to view/edit the files listed in the output (or REPORT) with a 'C' or 'C*'
+00:55:19  <carthik> I can see build-depends and standards-version fields now
+00:55:52  <carthik> yes
+00:56:03  <crimsun> Our objective, as always, is to use Debian changes and only merge in Ubuntu's if necessary.
+00:56:25  <crimsun> To that end, we will drop Ubuntu's Standards-Version and use Debian's.
+00:56:43  <crimsun> Thus, we'll delete 'Standards-Version: 3.6.1' and replace it with 'Standards-Version: 3.7.2'.
+00:57:29  <crimsun> I'll explain the debhelper versioned dependency now.
+00:57:40  <carthik> edit /tmp/merges/m2crypto-0.16-1ubuntu1/debian/control?
+00:57:47  <crimsun> carthik: yes.
+00:58:42  <carthik> okay I edited line 7 to change 3.6.1 to 3.7.2 - carry on crimsun
+00:59:03  <crimsun> (Also make sure that there's only one Standards-Version line.)
+00:59:33  <carthik> so do I delete the line altogether, line 7, that is?
+00:59:55  <crimsun> sure, that's precisely what I did, for example.
+01:00:20  <carthik> okay
+01:00:26  <crimsun> Now let's look at the difference in debhelper versioned dependency.
+01:00:57  <carthik> carry on
+01:01:00  <carthik> ls
+01:02:02  <carthik> crimsun, how do I do that?
+01:02:25  <crimsun> When the 'Python 2.4 by default' transition was occurring, the ability to have debhelper calculate necessary Python packages for us was added via dh_python(1). To use dh_python in debian/rules, debian/control needed to be updated to depend on a newer version of debhelper, 4.2.28
+01:03:12  <carthik> okay - I am with you now - forget the earlier question :)
+01:03:42  <crimsun> Thus what we'll do to maintain that dh_python usage in debian/rules will be to keep Ubuntu's specific debhelper versioned dependency in the Build-Depends field.
+01:03:53  <carthik> okay
+01:04:31  <crimsun> So, currently we have:
+01:04:33  <crimsun> <<<<<<< m2crypto-0.13-1.1ubuntu1 (ubuntu)
+01:04:33  <crimsun> Build-Depends: debhelper (>= 4.2.28), libssl-dev (>= 0.9.7), python-dev (>= 2.4), python-dev (<< 2.5), python (>= 2.4), python (<< 2.5), swig (>= 1.3.21)
+01:04:36  <crimsun> =======
+01:04:39  <crimsun> Build-Depends: debhelper (>= 4.1.65), libssl-dev (>= 0.9.7), python, python2.3-dev, python2.4-dev, swig (>= 1.3.24)
+01:04:42  <crimsun> Standards-Version: 3.7.2
+01:04:45  <crimsun> >>>>>>> m2crypto-0.16-1 (debian)
+01:04:50  <carthik> yes
+01:05:14  <crimsun> Now let's iterate through the remaining Build-Depends on the Ubuntu side, checking that any newer Debian adjustments are added.
+01:05:40  <crimsun> libssl-dev matches, so we can leave it.
+01:06:01  <carthik> ok
+01:06:33  <crimsun> Ubuntu does not have an m2crypto package built for python2.3, so we'll omit those build dependencies.
+01:07:09  <crimsun> (i.e., we'll leave the python* references alone)
+01:07:19  <carthik> okay
+01:07:39  <crimsun> Finally, we'll update Ubuntu's swig for the stricter/newer version listed in Debian's
+01:08:08  <carthik> by editing the ubuntu build-depends entry?
+01:08:13  <crimsun> yes.
+01:08:34  <crimsun> so we'll change (>= 1.3.21) to (>= 1.3.24)
+01:08:41  <carthik> okay
+01:08:54  <crimsun> Then, we can remove the diff3 markers for this section (hunk).
+01:09:03  <crimsun> That leaves us with:
+01:09:04  <crimsun> Build-Depends: debhelper (>= 4.2.28), libssl-dev (>= 0.9.7), python-dev (>= 2.4), python-dev (<< 2.5), python (>= 2.4), python (<< 2.5), swig (>= 1.3.24)
+01:09:07  <crimsun> Standards-Version: 3.7.2
+01:09:32  <crimsun> The next diff3 hunk is:
+01:09:33  <carthik> so delete the debian line and the <<<<<<<<, ========= and >>>>>>>> lines?
+01:09:35  <crimsun> <<<<<<< m2crypto-0.13-1.1ubuntu1 (ubuntu)
+01:09:36  <crimsun> Depends: ${shlibs:Depends}, python (>= 2.4), python (<< 2.5)
+01:09:36  <crimsun> =======
+01:09:36  <crimsun> Depends: ${shlibs:Depends}, python2.3
+01:09:38  <crimsun> >>>>>>> m2crypto-0.16-1 (debian)
+01:09:43  <crimsun> carthik: yes
+01:10:16  <carthik> carry on
+01:11:17  <carthik> I suppose we are to keep the ubuntu version for this and remove the debian version?
+01:11:23  <crimsun> We resolve the conflict above by remember that Ubuntu only specified (and in this example, builds) packages for Python 2.4, so we can delete the Debian version.
+01:11:30  <crimsun> remembering, rather
+01:11:37  <crimsun> carthik: precisely
+01:11:53  <carthik> done
+01:12:16  <carthik> so now save the file and exit and proceed to the next one with a conflict?
+01:12:25  <crimsun> Then we save the modifications we've made and move on, yes.
+01:14:07  <carthik> ok, ready with vim rules
+01:16:10  <crimsun> In previous Ubuntu releases, m2crypto was patched. To see which (Ubuntu or Debian) hunks to keep, we'll look at the rest of the package.
+01:16:49  <crimsun> So: Check if Debian's changes can be taken over Ubuntu's.
+01:17:06  <crimsun> Thus we want to know if versions=$(subst -dev,,\
+01:17:06  <crimsun>            $(subst python,,\
+01:17:06  <crimsun>              $(filter python%-dev,\
+01:17:06  <crimsun>                $(shell sed -n '/^Build-Depends/s/,//gp' debian/control))))
+01:17:20  <crimsun> will work instead of:
+01:17:27  <crimsun> DEBIAN_DIR = $(shell pwd)/debian
+01:17:28  <crimsun> patchdir = $(DEBIAN_DIR)/patches
+01:17:28  <crimsun> patches = $(shell ls $(patchdir) | sort)
+01:17:28  <crimsun> rev_patches = $(shell ls $(patchdir) | sort -r)
+01:17:43  <carthik> ok
+01:18:08  <crimsun> Our first clue that we can use Debian's hunk is that there are no references to patches.
+01:19:39  <carthik> there are no refs to patches where?
+01:19:53  <crimsun> In fact, when we inspect the rest of debian/rules, the only references to the string "patch" lie in Ubuntu hunks.
+01:20:27  <carthik> yes
+01:21:06  <carthik> but what does the presence or absence of patches in ubuntu/debian chunks signify?
+01:21:29  <crimsun> To do that, we need to look at the patches in debian/patches/ .
+01:21:51  <crimsun> First up is debian/patches/01_setup.py-distutils-2.4.patch
+01:22:00  <crimsun> It's a one-liner:
+01:22:01  <crimsun> -def swig_sources (self, sources):
+01:22:01  <crimsun> +def swig_sources (self, sources, extension):
+01:23:01  <carthik> yes
+01:23:58  <crimsun> Now we need to look at the affected file and see if the change has been applied.
+01:24:28  <crimsun> Upon checking setup.py, we find that the change has not been applied, so we need to keep this patch.
+01:25:11  <carthik> yes
+01:25:22  <crimsun> I'll need to discuss ramifications of using patch systems in a second, but let's continue to the next patch.
+01:25:35  <crimsun> debian/patches/02_httpslib.py-2.3-and-above.patch
+01:27:34  <crimsun> Now we check M2Crypto/httpslib.py and find that the changes are unnecessary.
+01:28:48  <carthik> those lines are no longer there in the file...
+01:29:08  <crimsun> correct, so upstream has changed it to make the patch unnecessary.
+01:29:34  <carthik> okay
+01:30:06  <carthik> but what if, in the new source files, there are other lines that mention version numbers, and we have to change those to suit us?
+01:30:25  <crimsun> Then we have to change them.
+01:31:10  <carthik> so we have to search and find the lines first? - I'm sorry to have interrupted - please go on... :)
+01:31:53  <crimsun> In the worst possible case of upstream not documenting such a change, yes, we'd have to search the code (which requires some Python familiarity).
+01:32:36  <carthik> alright
+01:33:03  <crimsun> What saves us from having to do just that in this example is checking CHANGES.
+01:33:12  <crimsun> [m2crypto-0.16-1ubuntu1/CHANGES]
+01:34:00  <crimsun> In checking CHANGES, we note in the notes for 0.15 that support for "OpenSSL 0.9.8, Python 2.4.1, SWIG 1.3.24" was added
+01:35:01  <carthik> yes
+01:35:02  <crimsun> That actually obviates the debian/patches/01_setup.py-distutils-2.4.patch , too.
+01:35:29  <carthik> okay
+01:36:27  <crimsun> You should double-check, of course, that both patches can be dropped, and to do that, you'll back out to /tmp/merges/ , extract the newer Debian source package, and check if debian/patches/ exists.
+01:36:28  <carthik> okay
+01:37:48  <crimsun> Upon doing that, you'll find that Debian's 0.16-1 has no debian/patches/ , which confirms our hypothesis that the Ubuntu hunks in debian/rules can be dropped (since no patches need be applied).
+01:38:30  <crimsun> Thus, you'll return to the merged source package and remove the Ubuntu-specific changes.
+01:38:56  <carthik> okay
+01:40:10  <crimsun> After those modifications are saved, we'll need to return to debian/control and clean up the Build-Depends list so that it will work with debian/rules.
+01:40:19  <carthik> what if Debian's source had some in debian/patches ?
+01:40:39  <carthik> had some patches, I mean.
+01:41:02  <crimsun> if Debian's extracted source package had contained debian/patches/*, then we'd need to check if they were valid against the Debian source package.
+01:41:41  <crimsun> We would have had to check whether /those/ patches were valid against Debian's 0.16-1.
+01:42:00  <crimsun> (speaking strictly of debian/patches/* in Debian's 0.16-1)
+01:42:13  <carthik> okay
+01:42:34  <carthik> so we now go back to debian/rules and edit that?
+01:42:35  <crimsun> I'll outline a brief algorithm after this example to clarify things.
+01:42:45  <carthik> that would be great
+01:43:09  <crimsun> Correct, if you haven't dropped the Ubuntu changes from debian/rules, that's the next step.
+01:44:01  <crimsun> Then you'd fix up debian/control's Build-Depends so that the parsing in debian/rules works correctly.
+01:45:45  <crimsun> You do that by changing 'python-dev (>= 2.4), python-dev (<< 2.5)' to 'python2.4-dev' and by changing 'python (>= 2.4), python (<< 2.5)' to 'python'.
+01:46:43  <crimsun> The first change is straightforward, since it's just collapsing what is already stated.
+01:47:00  <crimsun> The second change is straightforward but not as obvious:
+01:47:14  <crimsun> To ensure it's correct, we check:
+01:47:26  <crimsun> $ apt-cache depends python && apt-cache policy python
+01:48:34  <crimsun> That demonstrates that we'll get "a python2.4", which is semantically identical to what we had before.
+01:49:47  <carthik> why not python 2.4 in control then, instead of just 'python' ?
+01:50:05  <carthik> 'pthon2.4' I mean
+01:50:16  <carthik> d'oh, you get the point.... sorry
+01:51:07  <crimsun> 'python2.4' is valid, yes
+01:51:39  <carthik> so in control, we have:
+01:51:46  <carthik> Build-Depends: debhelper (>= 4.2.28), libssl-dev (>= 0.9.7), python2.4-dev, python, swig (>= 1.3.24)
+01:51:46  <carthik> Standards-Version: 3.7.2
+01:52:03  <crimsun> On the other hand, the real reason why we want 'python' is answered by looking at the snippet from debian/rules which actually does the substitution:
+01:53:12  <crimsun> It takes the "python2.X-dev" strings, strips the "python" and "-dev" bits, and leaves "2.4", which is the Python version(s) for which packages are generated.
+01:53:41  <crimsun> Thus while both 'python' and 'python2.4' will work, for consistency we should probably use what Debian uses.
+01:54:15  <carthik> okay - for consistency with Debian  -- I understand.
+01:55:08  <carthik> okay crimsun
+01:55:36  <crimsun> there's one more optional change, which is adjusting debian/control:Depends
+01:55:57  <carthik> hmm
+01:56:18  <carthik> just make that 'python' too?
+01:56:29  <crimsun> yes.
+01:56:54  <carthik> okay
+01:57:32  <crimsun> Now to be correct, we'd want to make that 'python2.4'.
+01:57:39  <carthik> okay
+01:58:06  <crimsun> either will work in Ubuntu, since we no longer support Warty and have python2.4 as default in the supported releases.
+01:58:35  <carthik> since we are changing from Debian's version, we might as well make it as good as it can be?
+01:58:48  <crimsun> Right, that's my approach.
+01:59:24  <carthik> okay
+01:59:25  <crimsun> After we've modified debian/{control,rules}, we need to check if there are any hardcoded python2.3 paths in debian/*
+01:59:59  <crimsun> That can be as straightforward as: grep -nH 'python2.3' debian/*
+02:00:43  <carthik> i see one line from a changelog which is immaterial?
+02:00:50  <crimsun> correct
+02:00:55  <carthik> ok
+02:01:21  <crimsun> So, two remaining steps: 1) Generate the new merged source package, and 2) test-build it.
+02:02:14  <crimsun> (1) is done by invoking the merge-buildpackage script in /tmp/merges/
+02:02:24  <carthik> let's go for it then?
+02:02:33  <crimsun> I normally do: ../merge-buildpackage -rfakeroot -kC88ABDA3
+02:02:51  <crimsun> where -kC88ABDA3 is my gpg key id
+02:02:56  <carthik> the last bit being your key
+02:02:59  <crimsun> right
+02:03:00  <carthik> ok :)
+02:04:12  <crimsun> if you have pbuilder configured, you'll then want to test-build the merged dsc.
+02:04:41  <carthik> make: dh_testdir: Command not found
+02:04:50  <carthik> is that some package I missed out on installing?
+02:05:01  <crimsun> yeah, you'll need debhelper installed.
+02:05:08  <crimsun> dh_* are debhelper scripts.
+02:05:41  <carthik> okay this time it went through
+02:05:51  <carthik> I don't have pbuilder configured
+02:06:14  <crimsun> That will be covered in another session.
+02:06:19  <carthik> :) okay
+02:06:34  <crimsun> It's more important to know that you have to at least test-build your newly merged source package. :)
+02:06:37  <carthik> so you test-build it and then you're done?
+02:07:58  <crimsun> yes, then you can ping an MOTU to upload it.
+02:08:07  <crimsun> here's the log from pbuilder: http://pastebin.ca/104636
+02:08:32  <carthik> so what do I have have to upload and where?
+02:08:38  <carthik> and will that get reviewed then?
+02:09:51  <crimsun> you have a couple options: You can either upload to REVU (http://revu.tauware.de/), or you can file a bug using http://launchpad.net/ against the source package
+02:10:28  <carthik> okay, and upload what?
+02:10:33  <carthik> the .dsc ?
+02:10:41  <carthik> the new one that is
+02:10:44  <crimsun> It's immensely helpful to have your own Web space so that you can upload the .dsc and .diff.gz.
+02:11:11  <carthik> ah, okay, the .diff.gz too
+02:11:16  <crimsun> otherwise you'll upload the generated _source.changes, .dsc, .diff.gz, and .orig.tar.gz to REVU.
+02:11:22  <crimsun> (REVU is a topic for another session.)
+02:11:52  <crimsun> Now to tie this into current Edgy transitions, then to outline an algorithm.
+02:12:00  <carthik> one sec
+02:12:21  <carthik> what was the _source.changes about? is that an output of the build process?
+02:13:04  <carthik> I mean, where will these files all be, using /tmp/merges/ as the 'basedir'
+02:13:09  <crimsun> no, that's a listing of the changes and the source package that would be uploaded to the Ubuntu processing infrastructure.
+02:13:14  <carthik> in that same directory?
+02:13:19  <crimsun> they'll be in /tmp/merges/
+02:13:45  <carthik> but isn't it what we downloaded first - I mean - some of those files very never changed right?
+02:14:00  <carthik> s/very/were/
+02:14:01  <crimsun> specifically /tmp/merges/m2crypto_0.16-1ubuntu1.diff.gz, /tmp/merges/m2crypto_0.16-1ubuntu1.dsc, /tmp/merges/m2crypto_0.16-1ubuntu1_source.changes, and /tmp/merges/m2crypto_0.16.orig.tar.gz
+02:14:29  <crimsun> carthik: right, some of those files are only downloaded for references
+02:14:34  <carthik> okay cool
+02:15:18  <carthik> I suppose it will be okay to upload all these files to one's personal web-space -- just in case.
+02:15:22  <crimsun> carthik: ultimately the only ones that matter are the ones you regenerate, which constitutes the merged source package (.diff.gz + .dsc + _source.changes [+ possibly .orig.tar.gz])
+02:15:31  <crimsun> carthik: yes, that would be fine.
+02:16:17  <carthik> cool
+02:16:33  <carthik> I suppose MoM does save a lot of time for MOTUs
+02:16:34  <carthik> :)
+02:16:37  <crimsun> yes.
+02:16:55  <crimsun> Now you've just witnessed the reasoning behind the new Python Policy.
+02:17:16  <crimsun> i.e., changing stuff for Python versions 2.2, 2.3, 2.4, ... is tedious.
+02:17:52  <carthik> yes - this should be better :)
+02:18:33  <crimsun> That's why python-support and python-central are useful, and that's documented in the newer Python Policy at http://www.debian.org/doc/packaging-manuals/python-policy/
+02:19:16  <crimsun> Specifically, http://www.debian.org/doc/packaging-manuals/python-policy/ap-packaging_tools.html is relevant here.
+02:20:31  <crimsun> Which one you should choose is outside the scope of this session, which is already running a bit long. :)
+02:20:39  <carthik> yeah
+02:20:47  <crimsun> So, briefly, I'll outline an algorithm for tackling merges.
+02:22:01  <crimsun> Step one: Grab the Merge-O-Matic output. You can do this using grab-merge.sh. I'm omitting the details for configuring necessary packages like fakeroot, debhelper, devscripts, build-essential, cdbs, etc.
+02:22:55  <crimsun> Step two: Read the Merge-O-Matic output (either in the extracted source or via REPORT).
+02:23:56  <crimsun> Step three: Inspect the conflicts in each file listed in the M-O-M output, and follow this subroutine:
+02:24:46  <crimsun> Prefer the newer Debian changes when possible. This means we discard Ubuntu changes until we have to use one.
+02:26:16  <crimsun> If newer Debian changes were made that don't affect the old Ubuntu source package, then extract the newer pristine Debian source package and check if those Debian changes allow the Ubuntu merges to be dropped from the merged source.
+02:28:03  <crimsun> If those Debian changes allow the Ubuntu merges to be dropped, then make the modifications in the merged source package.
+02:28:23  <carthik> oh so check the /debian/patches in the new pristing Debian source to see if any of them duplicate the patches in the MOM Ubuntu source
+02:28:40  <carthik> duplicate or supercede... cool... got it now.
+02:28:55  <crimsun> (Correct for the previous example, but it won't always be debian/patches/ ; it could be plain source, which could be tedious.)
+02:29:04  <carthik> okay
+02:29:40  <carthik> (please carry on, and I'll hold my exclamations for when you say you're done)
+02:29:41  <crimsun> Continue this step for all files listed in the M-O-M output.
+02:31:11  <crimsun> Step four: Sanity-check the package. For instance, you don't want hardcoded paths for older software (that you just dropped) sitting in the source.
+02:32:21  <crimsun> Step five.: Change the debian/changelog to note your work. Note which Ubuntu deltas are still valid and why invalid ones were dropped. Change the M-O-M e-mail address and name to yours.
+02:32:48  <carthik> okay
+02:33:35  <crimsun> Step six: Generate a new merged source package using the merge-buildpackage script. Remember to pass any necessary options like " -rfakeroot -k<your_gpg_key_id> ".
+02:34:29  <crimsun> Step seven: Sanity-build the source package in pbuilder, check the contents of the created debs (using dpkg-deb -c foo.deb), and alert a MOTU to your merged source package.
+02:35:28  <crimsun> (End of sequence)
+02:36:14  <carthik> that was great, crimsun.
+02:37:12  <carthik> Things I've wanted to know about for some time now.
+02:37:26  <carthik> Sorry if I bugged you with too many stupid questions
+02:37:43  <crimsun> Merging is generally pretty straightforward. You don't have to have in-depth knowledge of packaging to help; it's mostly reading whether Ubuntu changes have been absorbed by Debian.
+02:37:57  <crimsun> No problem at all, questions are always welcome.
+02:38:03  <carthik> There was the one question about what to do to check if any of the new depends or build-depends packages force removal of some other package...
+02:38:16  <crimsun> Right.
+02:38:54  <carthik> exactly - so I thought if there was something relatively more mechanical than something that needs one to be a DD - that is something I can help out with
+02:40:01  <crimsun> xmakemol is a corner case: There aren't many packages that will require in-depth knowledge about whether libgl1-mesa-swx11 will force removal of libgl1-mesa-{dri,glx} .
+02:40:49  <carthik> okay
+02:41:10  <carthik> hopefully the reviewers will catch the slippery fish
+02:41:31  <crimsun> In this case, I felt it was a stronger justification to try and realign with Debian packaging, so libgl1-mesa-swx11-dev was preferred over xlibmesa-gl-dev.
+02:42:18  <crimsun> Arguably it's easier to add a Ubuntu delta than to comb through the M-O-M output to see if it can be dropped.
+02:43:13  <crimsun> Most of the time there's someone in #ubuntu-motu who will answer the more difficult dependency questions.
+02:43:39  <carthik> okay
+02:44:23  <carthik> Thanks crimsun, I am starving and it is 10:40 and there are 12 Jordanians waiting for me with beer and a hookah :)
+02:44:32  <crimsun> Does anyone (if anyone else's still awake) else have any questions?
+02:44:47  <crimsun> carthik: np, enjoy.
+02:45:05  <carthik> crimsun, I hope I can make all this worth your while - thanks again :)
+02:45:18  <crimsun> :)
+02:45:40  <crimsun> If no other questions, this concludes the merge section. An outline and log will be posted shortly.
+</pre>
+
+----
+<nowiki>[[CategoryArchive]]</nowiki>

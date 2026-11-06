@@ -1,0 +1,97 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+=== Ivman and Configuring Automounting of Devices ===
+
+Ivman is installed by default in Kubuntu and is configured to popup windows on insertion of new devices. I don't know about regular Ubuntu, but with the Kubuntu desktop I find this really annoying. One quick way to see if ivman is installed and configured on your system is to see if the directory /etc/ivman/ exists. With ivman in Kubuntu, everytime I insert a USB key or a CD, a new Konqueror window pops-up. Also audio CDs start playing right away and this is not what I wanted to KDE to do. This is especially annoying if you are like me and are using KDE 3.5 (Beta 1) which has its own dialog window which comes up and asks you what to do with the newly inserted media.
+
+To change the ivman settings, you should edit the file /etc/ivman/IvmConfigActions.xml as root. To do this enter the following command into a terminal window:
+<pre>
+sudo kwrite /etc/ivman/IvmConfigActions.xml
+</pre>
+
+Kwrite uses syntax highlighting which means everything that ivman cannot see is coloured grey (this is called commenting). The coloured text is the settings which effects the mounting of devices. You can comment out text you do not want like so:
+<pre>
+    <!--
+       <text you want to be commented out>
+    -->
+</pre>
+The <!-- and --> act as brackets which tell ivman to ignore the text inside.
+
+If you want specific actions to be commented out, there is a comment explaining what each section does above it. I want to stop a new Konqueror windows from opening as soon as something is mounted so I commented out this section:
+<pre>
+   <!-- open konqueror -->
+   <ivm:Match name="hal.info.category" value="volume">
+           <ivm:Option name="exec" value="MOUNT=$hal.block.device$; kfmclient openURL media:/${MOUNT#/*/}" />
+   </ivm:Match>
+</pre>
+
+Be careful not to comment out everything in the file. Even if you don't want anything to happen when something is mounted, make sure not to comment out the first two lines of the file, the last line, or this section:
+<pre>
+   <!-- try to mount any mountable volume at all -->
+   <ivm:Match name="ivm.mountable" value="true">
+       <ivm:Option name="mount" value="true" />
+   </ivm:Match>
+</pre>
+The section above tells ivman to mount any device when it is pluged in - but it does not tell ivman to launch any programs. Only comment out this section if you don't want users to have access to USB drives, or you plan to mount them yourself as root.
+
+=== Access Photos from Digital Cameras ===
+
+If you commented out the 'open konqueror' section above, Konqueror should still pop up a new window when plugging in a digital camera, as there is a separate rule in /etc/ivman/IvmConfigActions.xml for those:
+<pre>
+   <!-- cameras -->
+   <ivm:Match name="hal.info.product" value="USB PTP Interface">
+           <ivm:Option name="exec" value="kfmclient openURL media:/camera" />
+   </ivm:Match>
+</pre>
+
+Not all digital cameras support the Picture Transfer Protocol (PTP) though, and thus hal.info.product does not get set to the value above. This was specifically tested with the Casio Exilim EX-Z750 so far, but most older Casio cameras may be affected as well. For the EX-Z750, hal.info.product is set to "SANVOL". So some simple additional lines like the following solve this problem:
+<pre>
+   <!-- Casio non-PTP cameras -->
+   <ivm:Match name="hal.info.product" value="SANVOL">
+           <ivm:Option name="exec" value="MOUNT=$hal.block.device$; kfmclient openURL media:/${MOUNT#/*/}" />
+   </ivm:Match>
+</pre>
+Note, that we actually can't access "media:/camera" but rather use the same method we just commented out in the generic 'open konqueror' action above.
+
+==== Automatically Copy Photos from Digital Cameras ====
+
+Instead of just opening a Konqueror window and let the user copy the photos himself, a solution to copy photos automatically to a specified directory is described below. Please note that this has only been tested within KDE.
+
+First, we need to create a rule which matches the camera as specific as is possible, in order to not trigger this Ivman action by accident. For the Casio EX-Z750 we actually would need to check the "parent" HAL entry of the mountable partition on the MMC/SD card, as the HAL entry for the partition itself does not contain any indicator about the manufacturer (Casio) but the parent entry does. (You can check the HAL entries with a connected camera by running 'lshal'.) Unfortunately, there doesn't seem to be a way to resolve the hal.info.parent reference, but just checking the value of this key may be sufficient as well.
+
+If you put the following text in your /etc/ivman/IvmConfigActions.xml, all photos (and videos) are copied from the digital camera to a directory photo.YYMMDD-HHMMSS.
+<pre>
+   <!-- Casio Exilim Z750 digital camera -->
+   <!-- For now, assume that only partitions on the MMC in the digital camera
+	use this setting. What we really want to do is to access the parent HAL entry
+	of this partition to specificially check whether this is really a Casio camera,
+	e.g. like:
+	<ivm:Match name="hal.info.parent.info.vendor" value="CASIO">
+		<ivm:Match name="hal.info.parent.info.product" value="DIGITAL_CAMERA">
+   -->
+   <ivm:Match name="hal.info.product" value="SANVOL">
+	<ivm:Match name="hal.info.parent" value="/org/freedesktop/Hal/devices/storage_model_DIGITAL_CAMERA">
+		<ivm:Option name="exec" value="test -d $hal.volume.mount_point$/DCIM/100CASIO &amp;&amp; ( TARGETDIR=&quot;/data/pics/photos.`date +&quot;%Y%m%d-%H%M%S&quot;`&quot; &amp;&amp; kfmclient --caption &apos;Photo Import&apos; copy $hal.volume.mount_point$/DCIM/100CASIO ${TARGETDIR} &amp;&amp; kdialog --caption &apos;Photo Import&apos; --msgbox &quot;All Photos and Videos were successfully copied to:\n${TARGETDIR}&quot; ) || kdialog --caption &apos;Photo Import&apos; --msgbox &quot;No Photos or Videos found on the camera.&quot;" />
+	</ivm:Match>
+   </ivm:Match>
+</pre>
+Please note:
+* The text starting with "<ivm:Option ..." has to be put on one line
+* The commands above look more complex than they actually are, due to quoting of special XML/HTML chars:
+** &amp; = &
+** &quot; = "
+** &apos; = '
+
+This set of commands first checks whether the directories 'DCIM/100CASIO' are present on the partition which is to be mounted and pop up an information dialog if this is not the case.
+
+If these directories are present, we assume that pictures are on the digital camera and copy these to /data/pics/photos.YYMMDD-HHMMSS with YYMMDD = year, month, day, and HHMMSS = hour, minute, seconds. A copy progress dialog is shown and is replaced by an information dialog once the copying is finished.
+----
+CategoryLookMergeDelete

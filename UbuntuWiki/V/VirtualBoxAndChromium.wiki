@@ -1,0 +1,112 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+VirtualBox is a PC emulator which can be used to run other operating systems while having Ubuntu running. <nowiki>[[http://chromium.sourceforge.net/|Chromium]]</nowiki> is a software that can intercept OpenGL calls and (amongst other functionality) forward them to other machines. As Virtualbox does not offer accelerated 3d graphics so far, the idea is to use Chromium to forward OpenGL calls from the guest system to the host where they are executed with hardware acceleration. This page describes the basic steps to set up Chromium so it does this transfer from an Ubuntu Hardy guest system to a Debian (or Ubuntu) host.
+
+Note: the described setup is only meant for experimenting. It will not really make it possible to "use" accelerated graphics in from guest system.
+
+=== Prerequisites ===
+
+I assume you have a working Virtualbox installation, with an Ubuntu Hardy system installed as guest.
+
+Official Chromium documentation can be found <nowiki>[[http://chromium.sourceforge.net/doc/index.html|here]]</nowiki>.
+
+=== Installing Chromium ===
+
+You have to build and install Chromium on both host and guest (if you have exactly the same system installed as host and guest, it should also be possible to build only on one system and copy the binaries and libs over to the other system).
+
+Install the packages required for building:
+<pre>
+sudo apt-get install mesa-common-dev libglu1-mesa-dev libxmu-headers libxmu-dev libjpeg62-dev freeglut3-dev libxi-dev
+</pre>
+
+Download the <nowiki>[[http://sourceforge.net/project/showfiles.php?group_id=16529|Chromium sources]]</nowiki> (version 1.9 at the moment). Unpack, then run "make" in the new directory (there is no autoconf stuff; you can change build options in options.mk file, but the default build options work fine).
+
+When building is finished, there should be a bin/Linux/ and a lib/Linux directory with the newly-built stuff. For the rest of this doc, I assume that Chromium is located in ~/cr-1.9/ and so the bins will be located at ~/cr-1.9/bin/Linux/ and the libs at ~/cr-1.9/lib/Linux/ .
+
+=== Host configuration ===
+
+The host will be running the "mothership" process which coordinates the whole system; also, the render process ("crserver") will be running there. Unfortunately, at the moment the mothership process must be started manually every time before running an OpenGL app in the guest.
+
+The mothership process needs this configuration file (right - configuration files for Chromium are actually just Python scripts):
+
+<pre>
+import sys
+sys.path.append('../server')
+from mothership import *
+
+guestName = 'hostname_of_guest_system'
+hostName = 'hostname_of_host_system'
+
+appnode = CRApplicationNode(guestName)
+
+client_spu = SPU('pack')
+appnode.AddSPU(client_spu)
+
+cr = CR()
+cr.AddNode(appnode)
+
+renderspu = SPU('render')
+renderspu.Conf('resizable', True)
+node = CRNetworkNode(hostName)
+node.AddSPU(renderspu)
+node.AutoStart( ["/bin/sh", "-c", "crserver"] ) # auto-start a crserver
+client_spu.AddServer(node, protocol='tcpip')
+
+cr.AddNode(node)
+cr.Go()
+</pre>
+
+Save this config file in the ~/cr-1.9/mothership/configs/ directory, under the name vbox.conf . Replace hostname_of_host_system and hostname_of_guest_system with the respective hostnames. Chromium needs these as the basic communication is done over TCP/IP.
+
+You also must modify the PATH environment variable so the crserver command can be found, and the LD_LIBRARY_PATH variable so the libs can be found:
+
+<pre>
+export PATH=~/cr-1.9/bin/Linux/:$PATH
+export LD_LIBRARY_PATH=~/cr-1.9/lib/Linux/
+</pre>
+
+To start the mothership process, cd to ~/cr-1.9/mothership/configs and just run this command:
+
+<pre>
+python vbox.conf
+</pre>
+
+It should print some diagnostic and warning messages and then wait for a client to connect.
+
+=== Guest configuration ===
+
+In the guest, we want all OpenGL calls to be transparently forwarded to the mothership on the host. For this, we make all OpenGL apps load Chromiums libcrfaker.so. First, go into the Chromium directory on the guest (I'll assume Chromium is again located under ~/cr-1.9/) and there go into lib/Linux/. Run
+
+<pre>
+ln -s libcrfaker.so libGL.so.1
+</pre>
+
+Then, add this into your ~/.bashrc file so the "fake" libGL lib is found:
+
+<pre>
+export LD_LIBRARY_PATH=~/cr-1.9/lib/Linux/
+</pre>
+
+The libcrfaker.so lib finds the mothership process by connecting to the host specified in the CRMOTHERSHIP env var; so add this to your ~/.bashrc as well:
+
+<pre>
+export CRMOTHERSHIP=hostname_of_host_system:10000
+</pre>
+(again, replace hostname_of_host_system with the correct hostname).
+
+Now log out in the guest, and log in again. "echo $CRMOTHERSHIP" and "echo $LD_LIBRARY_PATH" should print the values you configured in your .bashrc file. If everything is set up correctly (and the mothership process is running), running an OpenGL app in the guest should now open a new window on the host, with the OpenGL output. glxgears and ppracer are nice test applications for this.
+
+=== Problems ===
+
+* host OpenGL window doesn't forward keyboard or mouse events back to guest; best workaround is to have a big screen to display Virtualbox window next to OpenGL window, and then focus Virtualbox window
+* OpenGL window doesn't have correct size; you have to manually resize it
+* mothership process must be restarted for every guest OpenGL app (maybe this could be automated with some scripting)
+* performance is still much much worse than on host; for comparison, ppracer performance: ~110 fps on host system, ~15 fps with Chromium in guest, ~1 fps without Chromium in guest

@@ -1,0 +1,127 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+
+* '''Launchpad Entry''': https://launchpad.net/distros/ubuntu/+spec/student-control-panel-completion
+* '''Created''':  by OliverGrawert
+* '''Contributors''': OliverGrawert, PeteSavage
+* '''Packages affected''': student-control-panel, x11vnc
+
+=== Summary ===
+
+Roadmap for finishing the basic implementation of student-control-panel
+
+=== Rationale ===
+
+To control LTSP connections in a school environment, an application that interacts with the ltsp server and the clients is needed. An initial implementation of this application tailored for the Ubuntu LTSP implementation called student-control-panel was uploaded to dapper. It currently implements basic connection control: it shows  a list of the users and the ip each client they are using, allows the administrator to cut the connection for one, more or all users, and can show the currently running processes of a single user.
+The current scope is to control a standalone LTSP server, in case we start to implement clustering and the like, a network aware backend has to be implemented in a future version of student control panel. 
+
+More features are needed to provide a full student control application for school environments.
+
+=== Use cases ===
+
+Dr. Miller teaches biology in an ltsp equipped class.  He has several students he suspects to secretly browse the web while he is not looking.  Using student-control-panel he can monitor the students desktops via vnc to see if his suspicion is true.
+
+Miriam teaches about free software in a class that uses a ltsp setup.  She wants to demonstrate several free software apps she wants to start up on all students desktops.  She hits ctrl-a to select all students in  student-control-panel and clicks on the execute button which brings up a dialog to execute a command on all selected desktop simultaneously.
+
+Anselmo has one student he doesn't want to be able to access the commandline from his desktop, since this specific student is known to write harmful scripts. Anselmo right clicks on the student's name in student-control-panel and selects the lock down option there. Pessulus, the gnome lockdown editor pops up and Anselmo checks the "Disable Commandline" checkbox.
+
+=== Scope ===
+
+Easy handling of student LTSP connections on a single LTSP server.
+
+=== Design and Implementation ===
+
+==== Killing processes ====
+
+* Add kill option for commands in processlist.  Basic implementation is done (button currently hidden in the UI); needs some trivial code to interconnect the kill button with processlist selection).
+
+==== Remote desktop access ====
+
+* Student Control Panel will use vnc for remote desktop access. A function using the vncclient package is already completely implemented in the current student control panel code but disabled in the GUI since the handling on the LTSP client side wasn't clear yet; we will now fix that by adding a vnc server application (x11vnc) to the LTSP client chroot. 
+
+* For the client implementation the x11vnc package will have to be installed in the client chroot.
+** The package will get a preseedable debconf option (suggestion: ltsp-client-mode), if this option is set to true, the postinst script installs an initscript which starts x11vnc connected to localhost:0 at boottime of the client and makes it read a custom password from a file thats located in the client chroot. 
+** Student Control Panel will generate this password dynamically on every startup of the Student control Panel GUI (using PASSWORD=$(pwgen -c -n -s 20 1) should suffice here) and rewrite the password in the file. Since x11vnc reads the password on every new connection from that file it *could* affect existing Student Control Panel sessions. Because of this Student Control Panel will not start if there is already a running instance but spill a warning to first close the old one.
+
+* Since we dont want to run apt-get install from Student Control Panels postinst script in the LTSP client chroot, we can't just install x11vnc at install time of the student-control-panel package.
+** A "first start popup window" will be added to the GUI, with a checkbox "Dont show this window again" and a button "Install remote desktop access". 
+** Choosing the latter option will execute a script <code>/usr/share/student-control-panel/install-client-vnc.sh</code> which will run <code> apt-get install x11vnc </code> in the LTSP client chroot with the above described option preseeded.
+
+==== Execution of programs in the users session(s) ====
+
+The GUI of Student Control Panel is started through gksudo and has a check if it runs under UID 0 to be able to manage the ssh sessions, have write access for password creation of vnc passwords in the client chroot etc. This enables usto talk to the system dbus which is only accessible through ACLs in the services file.
+A Student Control Panel listener service file with the namespace 'com.ubuntu.Student''''''Control''''''Panel' will be installed in /usr/share/dbus-1/service.d/ which will listen for messages from Student Control Panel. A second listener in the users session will pick up messages from this system service and execute the requested applications in the users sessions if the user is appearing in the com.ubuntu.Student''''''Control''''''Panel.Comm.List message. DBUS has ACL based security built in to not accept any messages except from SCP via the service namespace and the default AUTH mechanism. http://dbus.freedesktop.org/doc/dbus-specification.html explains details about the internally used authentication mechanism and message handling of dbus. 
+See also the system dbus configuration /etc/dbus-1/system.conf (for the system specific settings) and the dbus-daemon(1) manpage for further information on dbus access control.
+
+A services file example with access control:
+
+<pre>
+<!DOCTYPE busconfig PUBLIC
+ "-//freedesktop//DTD D-BUS Bus Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
+<busconfig>
+
+  <!-- Only root can own the SCP service -->
+  <policy user="root">
+    <allow own="com.ubuntu.StudentControlPanel"/>
+  </policy>
+
+  <!-- Allow anyone to recieve the messages we send -->
+  <policy context="default">
+    <allow receive_interface="com.ubuntu.StudentControlPanel.Comm"
+           receive_sender="com.ubuntu.StudentControlPanel"/>
+  </policy>
+
+  <!-- define who is allowed to send command messages -->
+  <policy user="0">
+    <allow send_interface="com.ubuntu.StudentControlPanel.Comm.List"/>
+    <allow send_interface="com.ubuntu.StudentControlPanel.Comm.Exec"/>
+    <allow send_interface="com.ubuntu.StudentControlPanel.Comm.Kill"/>
+    <allow send_interface="com.ubuntu.StudentControlPanel.Comm.Notify"/>
+  </policy>
+</busconfig>
+</pre>
+
+The com.ubuntu.Student''''''Control''''''Panel namespace will know the following messages:
+<pre>
+list <list> - the list of users for which the message applies (picked up automatically from the UI selection)
+exec <path> - ececutes the given path
+kill <PID> - kills the given PID
+notify <string> - sends a notification message to the notification daemon in the user session with the attached string
+</pre>
+
+The notification service is ignored for now, but will be helpful in further implementations of the student control panel.
+
+Execution of an application will be done the following way:
+<pre>
+* SCP sends list message to the system dbus (the ACL controls only SCP can do that)
+* The session script picks it up from there and verifies the message comes from the SCP namespace and verifies $USER is in the list
+* SCP sends exec message to the system bus
+* The session script, notified through the matching list message, picks up the exec message with the DATA (program to execute)
+* The session script executes what it found in the DATA that was trasferred (i.e. /usr/bin/firefox)
+</pre>
+
+This is a simple and elegant solution and security wise way better than the the xhost/DISPLAY variant all other similar tools use nowadays.
+
+==== Lockdown on the fly ====
+
+* A context menu will be added to the student list to start pessulus for a user to modify settings on the fly. (Screenshots: http://www.gnome.org/~vuntz/pessulus/screenshots/), that will allow things like disabling commandline access or locking down browser functionallity if epiphany is used by the student.
+
+==== Plugins ====
+
+* The UI will get a plugins menu. The directory /usr/share/student-control-panel/plugins will be read on every program start. Python scripts added to that dir will show up in that menu (for now only python scripts since we want to encourage the edubuntu community who contributes most to that program to use python, but that can be enhanced to other binaries in the future). student-control-panel will export the userlist of the selected users from the GUI in the variable $LTSP_USERS for these scripts, this will make it very easy for people to enhance the program and to contribute the plugins back into a student-control-panel-plugins package.
+
+=== Outstanding issues ===
+
+* Determine the best default options (compression, scaling of the windowsize etc) for x11vnc to be added to the initscript by user feedback during developent.
+
+----
+CategorySpec

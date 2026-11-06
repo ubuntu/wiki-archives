@@ -1,0 +1,169 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+== Packaging 101 - Daniel Holbach ==
+
+=== Introduction ===
+Hello everybody! We'll move on to  Packaging 101  now. If you have any questions, can you PLEASE move them to #ubuntu-classroom-chat and add "QUESTION:  " to them, to make them easier readable. I'll have a look every now and then and answer them, if they refer to what I'm currently talking about, if not we can deal with them later. If you want to become part of the MOTU team, or help out with packaging in general, apart from knowing how to write or debug code, it's good to know the tools the distribution uses.
+
+This session won't make you a packaging expert, but afterwards you will have heard of some things, which will make it easier to find your way around. There'll be a MOTU session on Wednesday, 15.00 UTC and Saturday on 16.00 UTC, which will cover what the MOTU team does in more detail.
+
+=== Example ===
+Please run the following command, it will take some time to work in the background.
+<pre>
+sudo apt-get install pbuilder; sudo pbuilder create
+</pre>
+
+Packaging - what does that involve?
+* adding enough information to the Upstream source, to make it buildable on a minimal system.
+* split the installed files up into separate packages depending on the target audience
+** example everybody uses libgtk2.0-0, but not everybody has an interest in libgtk2.0-dev
+* make the packages work out of the box
+* add copyright information, nice description, documentation, etc.
+
+Package maintenance involves far more than that, Jordan Mantha (Laser_away) will give a talk about that later today at 21.00 UTC and Thursday at 20.00 UTC.
+
+First we'll install some tools we'll need for the session:
+<pre>
+sudo apt-get install devscripts dpkg-dev build-essential
+</pre>
+
+I also prepared an example package we'll use also:
+<pre>
+mkdir 101; cd 101; wget http://daniel.holba.ch/temp/packaging101.tar.gz
+</pre>
+
+I learned most from looking at existing packages and trying to fix them, so let's take a look at the libsexy package. It's the one in feisty, I broke a bit to illustrate a few common problems you'll face in the daily work as a package maintainer or Ubuntu developer.
+
+If you untar the packaging101 tarball, you'll find the following files:
+<pre>
+libsexy_0.1.10-1ubuntu1.diff.gz  libsexy_0.1.10-1ubuntu1.dsc  libsexy_0.1.10.orig.tar.gz
+</pre>
+Together they make the source package. The .orig.tar.gz is called the 'original upstream tarball', the '.diff.gz' file is the changes we need to do to make the package buildable and working correctly in Ubuntu. The .dsc provides meta information like checksums, etc.
+
+To unpack the source package run
+<pre>
+dpkg-source -x libsexy_0.1.10-1ubuntu1.dsc
+</pre>
+
+If you change into the directory and have a look into it, you'll find a debian/ directory, which contains the packaging information.
+
+Let's try to build the package now. You can use dpkg-buildpackage, but running debuild is easier mostly. So to run a build, simply type <code> debuild </code> in the directory.
+
+The friendly build script might now ask you to install some build dependencies, after you did that, it should be spitting out some interesting messages.
+
+In my case the build is complaining (among other things) about the following:
+<pre>
+sexy-tooltip.c: In function 'sexy_tooltip_new_with_label':
+sexy-tooltip.c:143: warning: implicit declaration of function 'gtk_label_new'
+sexy-tooltip.c:143: warning: assignment makes pointer from integer without a cast
+sexy-tooltip.c:144: warning: implicit declaration of function 'gtk_label_set_markup'
+sexy-tooltip.c:144: warning: implicit declaration of function 'GTK_LABEL'
+</pre>
+
+We will need to patch the source to make it build again.
+If you have a look at debian/rules you will see that it mentions /usr/share/cdbs/1/rules/simple-patchsys.mk - after working with packages for a while that it means you can use cdbs-edit-patch to add a patch. Martin Pitt (pitti) will give a separate session on how to patch packages on Tuesday 18:00 and Thursday 17:00 UTC.
+
+First we run <code> fakeroot debian/rules clean </code> to clean up our existing build again.
+next we run <code> cdbs-edit-patch 01-fix-gtk-breakage </code> ''(Note:  cdbs-edit-patch  needs  cdbs  installed.)''
+
+Once we're presented with a subshell, in a directory like /tmp/cdbs-new-patch.R29983/libsexy-0.1.10.new , we edit  libsexy/sexy-tooltip.c  with our editor of choice and add a missing <code> #include <gtk/gtk.h> </code> just below the existing <code> #include </code>. Now save the file, and hit Ctrl-D.
+
+<code> ls debian/patches/ </code> should show our shiny new patch. Now we run <code> debuild </code> again and see if we fixed the package. It looks like our attempt succeeded. <code> ls ../*.deb </code> will show us the packages we made.
+
+As I explained above, part of the packaging work is trying to make sure that a package builds in a minimal environment also. Why? Because on our build daemons, a minimal system will be created for each package build to make sure it works in every, even a fresh, scenario. 
+
+We will now generate a new source package with the changes we made earlier.
+<pre>
+fakeroot debian/rules clean
+debuild -S -sa
+cd ..; sudo pbuilder build libsexy_0.1.10-1ubuntu1.dsc
+</pre>
+
+Ok, my pbuilder is 'finished' now - funnily enough the build fails with:
+<pre>
+checking for PACKAGE... configure: error: Package requirements (pango >= 1.4.0, glib-2.0 >= 2.4.0, gtk+-2.0 >= 2.4.0, libxml-2.0) were not met:
+No package 'gtk+-2.0' found
+</pre>
+
+This is because libgtk2.0-dev is not installed in the minimal environment I was talking about, but how does pbuilder know what to install? if you edit <code> debian/control </code> you will find the line <code> Build-Depends </code>. This line indicates the packages that need to be installed to build the package correctly. We'll just add  <code> libgtk2.0-dev </code>. after that we'll run <code> debuild -S </code> again. Please note that this time we don't need to run <code> fakeroot debian/rules clean </code>. Why? - Because the build happened in that clean environment, not in the source dir - another good point about using pbuilder.
+Let's run <code> sudo pbuilder build libsexy_0.1.10-1ubuntu1.dsc </code> again and see if we get it working now.
+
+The pbuilder build worked for me right now, but there are still some things that are weird: If you run    dpkg -c /var/cache/pbuilder/result/libsexy-doc_*.deb  (which displays the contents of the package), you will find it's nearly empty. It merely contains a couple of changelogs and copyright notices - what went wrong? If we look into the debian/ directory, you will see that it contains a couple of *.install files. These files mention which directories and files are supposed to be installed into which package, debian/libsexy-doc.install is empty. If you run <code> debuild </code> (to build the package again) and <code> dh_install --list-missing </code> afterwards, it will present you with a list of files that were not installed into any package. Once we add <code> debian/tmp/usr/share/gtk-doc/html </code> to <code> debian/libsexy-doc.install </code> it will contain something. Now we can run <code> debuild binary </code> to not have to go through the whole procedure again, but only rebuild the packages. You will find that if you run <code> dpkg -c libsexy-doc*.deb  </code> again, it will contain the documentation.
+
+I introduced some more bugs into the package, but given that we only have 19 minutes left, we should probably move on to some more questions.
+
+=== Q & A ===
+'''Q:''' should explain what MOTU is <<BR>>
+'''A:''' MOTUs are the "Master of the Universe", the team of maintainers that takes care of the package in Universe and Multiverse - that's where you start as a package maintainer. <nowiki>[[MOTU]]</nowiki>
+
+'''Q:''' what about complying programs in Ubuntu to be able to work on all the platforms (ppc, x86, and x86_64) <<BR>>
+'''A:''' we have autotools for this kind of stuff (if i understand correctly your question)
+
+'''Q:''' what's cdbs? <<BR>>
+'''A:''' cdbs is a collection of scripts that make packaging, especially writing debian/rules (a Makefile to automate the package build) a lot easier, by simplifiying common tasks. And you can read the package Description: (apt-cache show cdbs)
+
+'''Q:''' Will the script disregard temporary editor files when it does the patch? <<BR>>
+'''A:''' It's better to get rid of them. They will show up in the .diff.gz and in case of binary files make the build fail.
+
+'''Q:''' QUESTION UPDATE, if I edit the source with emacs, emacs creates a temp file, will the script disregard that when it makes the diff for the patch? <<BR>>
+'''A:''' Emacs will create a sexy-tooltip.c~ backup file, and that will be included in the diff if you don't remove it.
+
+'''Q:''' is there a short manual on how to make simple packages? like to create package for krusader from source? <<BR>>
+'''A:''' I will later post some links to help with packaging, but I fear that packaging will always be a bit tough in the beginning.
+
+'''Q:''' Will debuild automagically add all patches in the debian/patches directory? <<BR>>
+'''A:''' the rules in debian/rules (namely simple-patchsys.mk) takes care of that.
+
+'''Q:''' <code> debuild </code> only succeeds if my name is Daniel Holbach. What should I do? <<BR>>
+'''A:''' I'm sorry, yes you're right. Either disregard the message or run <code> debuild </code> with <code> -k<your keyid> </code>, that's just a warning. 
+
+'''Q:''' You refer to 'our build daemon' is that kind of pbuilderd ? <<BR>>
+'''A:''' the build daemons ( https://launchpad.net/+builds ) use sbuild, which is very similar.
+
+'''Q:''' What all does fakeroot debian/rules clean do? <<BR>>
+'''A:''' it runs the   clean   target of the upstream source (so whatever the upstream maintainer thought should be cleaned), plus   dh_clean  and rules you set up yourself.
+
+'''Q:''' How would we know from the error message mentioning 'gtk+-2.0' that the package we need is 'libgtk2.0-dev'? Is there a convention for figuring this out? <<BR>>
+'''A:''' One answer to that is: experience with packaging. But there are also some indicators of where to look: In the configure script it failed, because it tried to look up in /usr/lib/pkgconfig. So if the build fails for you in pbuilder, but works if you run on your system, you can easily check that directory and find out, where and why it went wrong. <code> apt-cache search <...> </code> or <code> apt-file search <...> </code> can help also.
+
+'''Q:''' debian/libsexy-doc.install doesn't exist <<BR>>
+'''A:''' it existed for me - anyway, it was supposed to be an empty file.
+
+'''Q:''' install pbuilder is still on, slow connection, will it install a new env. will get all packages from net? is doing validation on retrieved packages  <<BR>>
+'''A:''' it's not installing all packages, but only a very minimal set, needed to build packages, <code> build-essential </code>  will be contained in any case.
+
+'''Q:''' Are *.install files cdbs specific? <<BR>>
+'''A:''' no, they're not. They're scanned by dh_install.
+
+'''Q:''' which is the preferred format for documentation? Should you provide docs in a certain format if they aren't provided upstream? <<BR>>
+'''A:''' manpages are a good example of documentation that sometimes does not exist. It's always good to push it back to the upstream developers afterwards again. I don't have a link on manpages handy, but I could find you one. I have a template I always use to get started on them.
+
+'''Q:''' is the *.install file method the correct way for one source package to have multiple binary targets? like a lib, lib-dev, -doc and so on? <<BR>>
+'''A:''' some people use *.dirs files or run dh_install to debian/<binary package name> on their own, I personally prefer the .install file method
+
+'''Q:''' how about policy on packages. I read executables on /usr/bin must have manpages. <<BR>>
+'''A:''' manpages are not a strict must have, but they come in very handy and users are gratefule for manpages
+
+'''Q:''' Is it possible to have pbuilder setup to work in multiple releases concurrently? <<BR>>
+'''A:''' there's a page on the MOTU wiki about that - if nobody finds it out in the next minutes, I can try after the talk. https://wiki.ubuntu.com/PbuilderHowto?highlight=%28pbuilder%29
+
+'''Q:''' can i build for any version deboostrap supports? <<BR>>
+'''A:''' you can either set up a chroot for yourself (I think that's what most developers do), because that way you can test the resulting binary packages yourself, or you can have multiple differently configured pbuilders
+
+'''Q:''' Should all packages install to /usr? What's the use of /usr/local? <<BR>>
+'''A:''' /usr/local is for software you install yourself (like if you use ./configure && make && sudo make install)
+
+'''Q:''' pbuilder extracts the minimal system and then downloads additional dependencies. does it cache them? for how long? where? <<BR>>
+'''A:''' yes, it does in /var/cache/pbuilder/aptcache/ . I think it stores the packages until they're superseded by a newer version 
+
+=== Conclusion ===
+If you run into any other packaging related trouble and don't know where to look in the documentation, your first check could be similar packages, then ask the people on #ubuntu-motu or on ubuntu-motu@lists.ubuntu.com.
+<nowiki>[[MOTU/Documentation]]</nowiki>

@@ -1,0 +1,581 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+I found that the Ubuntu Laptop Testing Team pages had lots of data that I wanted, but not presented in a way that was convenient for someone looking to find a laptop with features X,Y & Z, as I was. The following is a python script to grab data from the laptop testing pages and allow you to query the information as a sqlite database. This script does three things:
+# Scrape the laptop testing information from the wiki
+# Dump that information into csv files suitable for import into a database.
+# Load that information into a SQLite database which can easily be queried to find, for example, laptops with support for a given feature.
+
+Running the script dumps you to an interactive python
+shell where you can inspect the sqlite DB with some convenience
+methods. For example,
+
+<pre>
+tom@lacky ubuntu_laptop_info :) $ ./scrape_laptop_info.py
+[... will parse pages and print instructions for usage ...]
+>>> laptops_for_criteria(Sleep='Yes',Hibernates='Yes',_3DAcceleration='Yes')
+Make    Model   Distro
+Dell    Latitude 110L   Breezy (current stable)
+Dell    Latitude 110L   Dapper (current development)
+Dell    Latitude D410   Breezy (current development)
+HP      NC4200  Breezy (current stable)
+IBM/Lenovo      ThinkPad X41    Breezy Final (current stable)
+IBM/Lenovo      ThinkPad X41    Dapper Flight 2 (current development)
+Toshiba Tecra A2        Breezy (current development)
+Acer    TravelMate 4402WLMi     Hoary (current stable)
+Acer    TravelMate 4402WLMi     Breezy (current development)
+Compaq  Presario 2701EA Breezy (current stable)
+Dell    Latitude D400   Breezy
+HP      Pavilion DV1245EA       Breezy
+HP      NC6120  Breezy (current stable)
+IBM/Lenovo      Thinkpad X31    Breezy (current stable)
+IBM/Lenovo      Thinkpad X41    Breezy
+Panasonic       CF-W2   Hoary (current stable)
+Panasonic       CF-W2   Breezy (current development)
+Panasonic       CF-Y2   Hoary (current stable)
+Panasonic       CF-Y2   Breezy (current development)
+Panasonic       CF-W4   Breezy (current development)
+Panasonic       CF-Y4   Breezy (current development)
+Sony    Vaio VGN-FS315E Breezy (current stable)
+Zitech  Z223    Breezy (current development)
+>>> display_info('HP','Pavilion DV1245EA')
+distro: Breezy
+make: HP
+model: Pavilion DV1245EA
+Screen: Yes
+_3DAcceleration: Yes
+ExternalMonitorWorks: Yes
+ExternalMonitorMirrors: Yes
+ExternalMonitorExtendDesktop: yes(1)
+BatteryDetected: Yes
+Hibernates: Yes
+Sleep: Yes
+SoundWorks: Yes
+TouchpadDoubletapDoubleClick: Yes
+TouchpadScrollDownSide: Yes
+
+distro: Dapper (current development)
+make: HP
+model: Pavilion DV1245EA
+Screen: Yes
+_3DAcceleration: Yes
+ExternalMonitorWorks: Yes
+ExternalMonitorMirrors: Yes
+ExternalMonitorExtendDesktop: Untested
+BatteryDetected: Yes
+Hibernates: Untested
+Sleep: Yes
+SoundWorks: Yes
+TouchpadDoubletapDoubleClick: Yes
+TouchpadScrollDownSide: Yes
+</pre>
+
+Hope this is helpful! -- ThomasMHinkle
+
+Please ThomasMHinkle fix the indention errors before copying and paste the script.
+Example: while not hasattr(next,'name'): next = next.next
+
+Here is the script in its entirety. Some brief documentation will automatically be displayed when you run it.
+
+<pre>
+
+import urllib, exceptions, csv, re
+import BeautifulSoup
+
+wikipage = 'https://wiki.ubuntu.com/LaptopTestingTeam'
+
+first_not_let = re.compile('^[^A-Za-z_]')
+non_word = re.compile('\W')
+
+def name_to_db_column (n):
+    n = non_word.sub('',n)
+    if first_not_let.match(n): return '_'+n
+    else: return n
+
+class FormatChange (exceptions.Exception):
+    pass
+
+def get_string_from_element (el):
+    if el.string: return el.string
+    else:
+        s = ''
+        for c in el.contents:
+            s += get_string_from_element(c)
+        return s
+
+def get_soup (url):
+    sock = urllib.urlopen(url)
+    return BeautifulSoup.BeautifulSoup(sock.read())
+
+def process_link_table (tbl):
+    rows = tbl.fetchChildren('tr')
+    rows = rows[1:]
+    lst = []
+    for r in rows:
+        ret = {}
+        cells = r.fetchChildren('td')
+        ret['make'] = get_string_from_element(cells[0].findChild('p')).strip()
+        ret['model'] = get_string_from_element(cells[1].findChild('p')).strip()
+        ret['submitter'] = get_string_from_element(cells[2].findChild('a')).strip()
+        ret['link'] = cells[3].findChild('a').attrs[0][1]
+        lst.append(ret)
+    return lst
+
+def grab_list (url=wikipage):
+    """Return 2 lists of webpages with laptop information.
+
+    The first list will be the canonical supplied list, presumably
+    more reliable.
+
+    The second list will be community supplied.
+    """
+    
+    scraper = get_soup(url)
+    try: header = scraper.fetch(name='h3',text='Canonical Supplied')[0]
+    except IndexError:
+        raise FormatChange("Can't find <h3>Canonical Supplied</h3>")
+    next = header.next
+    while not hasattr(next,'name'): next = next.next
+    if next.name != 'div': raise FormatChange("""We expect a div after <h3>Canonical Supplied</h3>""")
+    header = scraper.fetch(name='h3',text='Community Supplied')[0]
+    tbl = next.findChild('table')
+    canon_supplied = process_link_table(tbl)
+    for d in canon_supplied: d['Canonical supplied'] = True
+### Community supplied
+    try:
+        header = scraper.fetch(name='h3',text='Community Supplied')[0]
+    except IndexError:
+        raise FormatChange("Can't find <h3>Community Supplied</h3>")
+    next = header.next
+    while not hasattr(next,'name'): next = next.next
+    if next.name != 'div': raise FormatChange("""We expect a div after <h3>Community Supplied</h3>""")
+    tbl = next.findChild('table')
+    community_supplied = process_link_table(tbl)
+    for d in community_supplied: d['Canonical supplied'] = False
+    canon_supplied.extend(community_supplied)
+    return canon_supplied
+    
+class InfoGetter:
+
+    def __init__ (self, url=wikipage):
+        self.base = url
+
+    def get_laptop_list (self):
+        self.data = grab_list(self.base)
+        self.laptop_columns = ['make','model','submitter']
+        self.record_columns = ['distro']
+
+    def get_info (self):
+        for d in self.data:
+            d['info']=self.process_laptop_page(d)
+
+    def process_laptop_page (self,d):
+        print 'Fetching info for ',d['make'],d['model'],d['submitter']
+        try:
+            soup = get_soup(urllib.basejoin(self.base,d['link']))
+        except:
+            print 'Problem fetching',d['link']
+            import traceback; traceback.print_exc()
+            self.data.remove(d)
+            return
+        for hwtable in soup.fetch('table'):
+            works = hwtable.first('strong',text='Works?')
+            works_row = works.findParent('tr')
+            if not works_row: continue
+####### Find cell that represents the X position of our
+####### yes|no values in the table
+            for n,c in enumerate(works_row.fetch('td')):
+                if c.findChild('strong',text='Works?'):
+                    start_at = n
+                    break
+            distr_row = works_row.findNext('tr')
+            distr_cells = distr_row.fetch('td')
+            distros = [
+                get_string_from_element(c.first('p')).strip().strip('in ').strip('?')
+                for c in distr_cells
+                ]
+            d['distros'] = distros
+            rows = distr_row.fetchNextSiblings('tr')
+            for r in rows:
+                try:
+                    values = [get_string_from_element(c.first('p')).strip()
+                              for c in r.fetch('td')]
+                except AttributeError: # if strip fails because we get None instead of string
+                    values = []
+                if len(values) < 3: 
+                    continue
+######### Name of our field is always the first value
+                name = values[0]; values = values[1:] #reverse pop!
+                name = name.strip().title()
+######### Check if we already have this column name
+                if name not in self.record_columns:
+########### If not, we better make sure this isn't just a
+########### slight variation...  otherwise, we get duplicate
+########### columns in our SQL table.
+                    db_name = name_to_db_column(name).lower()
+                    for n in self.record_columns:
+                        if name_to_db_column(n).lower()==db_name:
+                            print 'Using ',n,'for',name
+                            name = n
+                            break
+                    else: self.record_columns.append(name)
+######### Bug# is always our last column
+                bugno = values.pop()
+                ret = {}
+                for n,v in enumerate(values[start_at-1:]):
+########### We're slicing at start_at - 1 because we already
+########### stripped the title off the start.
+                    if n >= len(distros):
+                        print 'Unusual value',name,v
+                        print 'This is value ',n
+                        print 'We only have ',len(distros),'distros:',distros
+                        break
+                    distro = distros[n]
+                    if v.lower().strip('!, ;.') in ['yes','y','true','works','work','function']:
+                        ret[distro] = 'Yes'
+############# ret['any'] = 'Yes'
+                    elif v.lower() in ['no','n','false']:
+                        ret[distro] = 'No'
+                    else:
+############# print 'Strange value for ',name,distro,':',v
+                        ret[distro] = v
+############# if not ret['any']: ret['any'] = v
+                d[name] = ret
+
+    def output_csv (self, base_filename='ubuntu_laptop_compatability_db'):
+        laptops = file(base_filename + '_laptops.csv','w')
+        laptop_writer = csv.writer(laptops)
+        laptop_writer.writerow(['LaptopID']+self.laptop_columns)
+        records = file(base_filename + '_records.csv','w')
+        record_writer = csv.writer(records)
+        record_writer.writerow(['Laptop']+self.record_columns)
+        laptop_no = 0
+        for d in self.data:
+####### We give each laptop a unique ID, which is then used
+####### to join the laptop table with the records table
+            laptop_fields = [d.get(c,'') for c in self.laptop_columns]
+####### laptop_fields = [str(laptop_no)] + ['"%s"'%f for f in laptop_fields]
+            laptop_writer.writerow([laptop_no] + laptop_fields)
+            distros = d.get('distros',[])
+            if not distros: print 'No records for ',d
+####### Write one record per distro
+            for dist in distros:
+                record_fields = [laptop_no,dist]
+                for r in self.record_columns[1:]: #ignore dist
+                    val = d.get(r,None)
+                    if not val:
+                        record_fields.append('')
+                    else:
+                        record_fields.append('%s'%val.get(dist,''))
+                record_writer.writerow(record_fields)
+            laptop_no += 1
+        laptops.close()
+        records.close()
+        print "Wrote data to two CSV files:"
+        print "Laptop info: ",base_filename + '_laptops.csv'
+        print "Record info: ",base_filename + '_records.csv'
+
+class LaptopDatabase:
+
+    """A simple interface to a SQLite database of Ubuntu Laptop information.
+
+    Our SQL column names are going to be the ubuntu fields stripped of
+    spaces, numbers and punctuation.
+
+    For example,
+
+    Sleep? becomes Sleep
+    External
+    3D Acceleration? becomes _3DAcceleration
+    """
+
+    DISPLAY_IN_ROWS_LENGTH = 6
+    
+    def __init__ (self,
+                  db_file='ubuntu_laptop_db.db'
+                  ):
+        import sqlite
+        self.connection = sqlite.connect(db_file)
+        self.cursor = self.connection.cursor()
+
+    def list_laptop_fields (self):
+        self.cursor.execute('SELECT * FROM sqlite_master WHERE name="laptops"')
+        return ld.cursor.fetchone()[4]
+
+    def list_record_fields (self):
+        self.cursor.execute('SELECT * FROM sqlite_master WHERE name="records"')
+        return ld.cursor.fetchone()[4]
+
+    def load_tables (self, base_filename='ubuntu_laptop_compatability_db'):
+        laptop_file = base_filename + '_laptops.csv'
+        records_file = base_filename + '_records.csv'
+        self.load_from_csv_file(laptop_file,'laptops')
+        self.load_from_csv_file(records_file,'records')
+        self.connection.commit()
+
+    def load_from_csv_file (self,filename,table_name):
+        infile = file(filename,'r')
+        reader = csv.reader(infile)
+        headers = reader.next()
+##### Column names must be plain old letters
+        headers = [name_to_db_column(h) for h in headers]
+        sql = "CREATE TABLE %s ("%table_name
+        idrow = headers[0]
+        rows = ['"%(idrow)s" int'%locals()]
+        rows += ['"%s" str'%h for h in headers[1:]]
+        sql += ", ".join(rows)
+        sql += ")"
+        try:
+            self.cursor.execute(sql)
+        except:
+            print 'Error executing following SQL'
+            print sql
+            print 'Sorry...'
+            raise
+        for row in reader:
+            sql = "INSERT INTO %(table_name)s"%locals()
+            sql += " (" + ", ".join(['"%s"'%h for h in headers]) + ') '
+            sql += "VALUES "
+            sql += "("
+            vals = [int(row[0])] + row[1:]
+            sql += ", ".join(len(vals)*["%s"])
+            sql += ")"
+            self.cursor.execute(sql,vals)
+        
+    def execute (self, sql):
+        self.cursor.execute(sql)
+        return self.cursor.fetchall()
+
+    def display_results (self, rows, headers=None):
+        """Display result rows, possibly with headers.
+
+        If we have headers, there must be a header for each column.
+        
+        If we have DISPLAY_IN_ROW_LENGTH columns or less, we will display
+        column TAB column TAB column
+
+        Otherwise, we'll display
+
+        Header: Column
+        Header: Column
+        ...
+        """
+        if len(rows)>0 and len(rows[0])< self.DISPLAY_IN_ROWS_LENGTH:
+            if headers:
+                print "\t".join(headers)
+            for r in rows:
+                print "\t".join(r)
+        else:
+            for r in rows:
+                for n,c in enumerate(r):
+                    if headers: print "%s:"%headers[n],
+                    print c
+                print
+            
+    def laptops_for_criteria (self, **criteria):
+        """Display list of laptops that match ALL criteria.
+
+        Criteria are keyword arguments of the form
+        column="value"
+
+        If criteria contains a %, we use LIKE instead of =
+
+        For example,
+
+        get_laptops_for_criteria(Sleep="Yes%") will execute the SQL
+        SELECT... WHERE Sleep LIKE "Yes%"
+
+        get_laptops_for_criteria(Sleep="Yes") will execute the SQL
+        SELECT... WHERE Sleep="Yes%"
+        """
+
+        self.display_results(self.get_laptops_for_criteria(**criteria),
+                             headers=['Make','Model','Distro'])
+
+    def __make_where_statement__ (self, **criteria):
+        where_statements = []
+        for k,v in criteria.items():
+            k = name_to_db_column(k)
+            if v.find('%')>0:
+                where_statements.append('"%s" LIKE "%s"'%(k,v))
+            else:
+                where_statements.append('"%s"="%s"'%(k,v))
+        return " AND ".join(where_statements)
+
+    def get_laptops_for_criteria (self, **criteria):
+        """Get laptops that match ALL criteria.
+
+        Criteria are keyword arguments of the form
+        column="value"
+
+        If criteria contains a %, we use LIKE instead of =
+
+        For example,
+
+        get_laptops_for_criteria(Sleep="Yes%") will execute the SQL
+        SELECT... WHERE Sleep LIKE "Yes%"
+
+        get_laptops_for_criteria(Sleep="Yes") will execute the SQL
+        SELECT... WHERE Sleep="Yes%"
+        """
+        base = """SELECT laptops.make,laptops.model,records.distro
+            FROM laptops JOIN records on laptops.LaptopID=records.Laptop
+            """
+        where_statement = self.__make_where_statement__(**criteria)
+        if where_statement:
+            base += "WHERE " + where_statement
+        return self.execute(base)
+
+    def get_hibernate_and_sleep (self):
+        return self.get_laptops_for_criteria(**{'Hibernates':'Yes',
+                                              'Sleep':'Yes'})
+
+    def get_almost_hibernate_and_sleep (self):
+        return self.get_laptops_for_criteria(**{'Sleep':'Yes%',
+                                              'Hibernates':'Yes%'}
+                                             )
+
+    def get_ideal_laptops (self):
+        return self.get_laptops_for_criteria(
+******* *{
+            'Sleep':"Yes%",
+            'Hibernates':"Yes%",
+            '_3DAcceleration':"Yes%",
+            'ExternalMonitorExtendDesktop':"Yes%",
+            }
+            )
+
+    def list_models (self, make=None):
+        self.display_results(
+            (make
+             and 
+             self.execute('SELECT make,model from laptops where make="%s"'%make)
+             or
+             self.execute('SELECT make,model from laptops')
+             ),
+            ['Make','Model']
+            )
+
+    def display_info (self, make=None, model=None, **criteria):
+        fields = ["distro",
+                  "make",
+                  "model",
+                  "Screen",
+                  "_3DAcceleration",
+                  "ExternalMonitorWorks",
+                  "ExternalMonitorMirrors",
+                  "ExternalMonitorExtendDesktop",
+########## "ExternalMonitorDvi",
+                  "BatteryDetected",
+                  "Hibernates",
+                  "Sleep",
+########## "SuspendToRamSleep",
+########## "SuspendToDisk",
+########## "DimBlankMonitor",
+                  "SoundWorks",
+                  "TouchpadDoubletapDoubleClick",
+                  "TouchpadScrollDownSide",
+                  ]
+        sql = "SELECT " + ", ".join(['"%s"'%f for f in fields])
+        sql += " FROM records JOIN laptops ON laptops.LaptopID=records.Laptop"
+        if make: criteria['Make']=make
+        if model: criteria['Model']=model
+        if criteria:
+            sql += ' WHERE ' + self.__make_where_statement__(**criteria)
+##### print 'Execute and display',sql
+        self.display_results(self.execute(sql),
+                             headers=fields)
+
+def show_help():
+    print """Laptop database ready for you inspection"""
+    print """For example... """
+    print """list_models() will list all models. list_models("Dell") will list all dell models."""
+    print 'display_info("Toshiba") will show a subset of key info for all Toshiba laptops'
+    print 'display_info("Toshiba","Satellite L10-101") will show info for that particular laptop.'
+    print "display_info('Toshiba',Sleep='Yes') will show info for all Toshiba models that support"
+    print "                                    sleep."
+    print "display_info('Dell','Lat%') will show info for all Dell Latitude models."
+    print "laptops_for_criteria(Sleep='Yes') returns a list of laptops that Sleep"
+    print "laptops_for_criteria(Make='Dell',Sleep='Yes') returns a list of dell laptops"
+    print "                                              that sleep."
+    print 'list_record_fields() will give you a sense of what the DB columns are.'
+    print
+    print 'type show_advanced_help() for more advanced help.'
+    print
+    print 'Type show_help() to repeat this message at any point'
+    print 'Type Control-D to exit (or Control-Z on Windows)'
+
+def show_advanced_help():
+       print '''ld contains your LaptopDatabase instance. 
+dir(ld) shows you all ld methods you might want to play with. 
+
+help(laptops_for_criteria) will explain the
+syntax for laptops_for_criteria in more detail.
+
+SQL Details:
+ld.execute(SQL) will execute a SQL statement and print the result rows.
+ld.cursor is the cursor directly if you want to manually handle 
+          ld.cursor.execute() and ld.cursor.fetchone/ld.cursor.fetchall
+
+list_record_fields() and list_laptop_fields() will give a list of the database 
+columns in each of the two tables. Usually, you'll want to use:
+
+SELECT columns FROM laptops JOIN records ON laptops.LaptopID=records.Laptop
+
+Type show_advanced_help() to repeat this message.
+Type show_help() for general help.
+Type Control-D to exit.
+'''
+
+if __name__ == '__main__':
+    import os, os.path
+    if not os.path.exists('ubuntu_laptop_db.db'):
+        if (not os.path.exists('ubuntu_laptop_compatability_db_laptops.csv')
+            or
+            not os.path.exists('ubuntu_laptop_compatability_db_records.csv')
+            ):
+            print "Grabbing information from Ubuntu wiki"
+            ig = InfoGetter()
+            print "Get list of laptop pages"
+            ig.get_laptop_list()
+            print "Scrape info from laptop pages"
+            ig.get_info()
+            print "Write csv files"
+            ig.output_csv()
+        else:
+            print "Using previously existing csv files"
+        try:
+            ld = LaptopDatabase()
+        except:
+            print 'You have laptop info in dictionaries in ig'
+            print 'You have two csv files with all your data in the current directory'
+            print 'Unforunately, we had trouble loading a SQL database'
+            raise
+        print 'Loading laptop database from csv files'
+        print '(Delete those files if you want to regenerate them)'
+        ld.load_tables()
+    else:
+        print 'Loading previously existing database from ubuntu_laptop_db.db'
+        print '(Move or delete this DB if you want to regenerate it)'
+        ld = LaptopDatabase()
+    ld = LaptopDatabase()
+    execute = ld.execute
+    laptops_for_criteria = ld.laptops_for_criteria
+    cursor = ld.cursor
+    connection = ld.connection
+    list_record_fields = ld.list_record_fields
+    list_laptop_fields = ld.list_laptop_fields
+    display_info = ld.display_info
+    list_models = ld.list_models
+    print
+    show_help()
+</pre>
+----
+CategoryLaptop

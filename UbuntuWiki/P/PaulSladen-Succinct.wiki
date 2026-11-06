@@ -1,0 +1,207 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+
+=== Overview ===
+
+=== Naming ===
+
+* + Wikis are good because everything you write stays in one place.
+* - Firefox and X crashing take out all your hard work.
+
+PSync was suggested by mvo, but we'll rename it 'Succinct' because there are less name space collisions.  If anyone asks, it's '''Superior''', '''Sync''' and '''to the point''' because it only downloads what's actually required.  Ideas are based on `rsync` and `zsync` and some of the of the base code is from those.
+
+=== Rational ===
+
+I should concentrate on Succinct and stop playing with making more laptop/tablet buttons work out of the box because:
+
+* PSync makes a real world difference, now
+** Saves users bandwidth
+** Saves money
+** Saves time
+** Saves frustration
+** Saves mirror bandwidth
+** Saves money
+** Saves CPU as comparison is done client side
+** Only depends on HTTP and ''not'' rsync.
+* Can do the buttons for Dapper + 1, it's crack that the 6month ricers will be happy to upgrade for.
+
+Because Ubuntu runs cron.daily 48 times per day that means that each update requires a fresh 5MB download of Packages.gz for a single package change.
+
+=== Receipes ===
+
+Receipes take a block b1 of length l1 and checksum c1 and transform it into block b2 with length l2 and checksum c2 using parmeters p0..n
+
+* linear, c1 == c2, l1 == l2
+* zlib, l2 normally shorter than l1, c1 != c2 using compression parameters p1,2,3 (bits, size, search, dictionary look-back length required)
+** special rules as fetches can end on partial flushes, but not start on one (if they do, the setting must be known a the dictionary must be pre-loaded), can simplify the common case by having multiple overlapping ranges of gradually extending lengths.
+* bzip2, l2 normally shorter than l1, c1 != c2, using compression parameters p1
+* patch, reversibly transform b2 into b1.  Destination checksum, but unknown source checksum---can give hint though.
+* ed, reversibly transform b2 into b1
+* i386jmp, transform block b2 into b1 of l1 == l2 using parameter p0, base-offset
+* literal, l1, c1, string[l1]="..."
+
+When contructing the z-map, if it is not possible to reverse-engineer the compression parameters needed to reconstruct the block, it is not possible to call it a zlib block!  Call it linear instead, same applies to bzip2;  however, when searching the hard-disk for matching files it is acceptable to mark a decoded zlib block without having to know the re-encoding parameters as that file is not a ''target''.
+
+Not that a zlib mapping is also a linear mapping.  This saves the round-tripping problem if only the latter blocks of a zlib stream are required.
+
+=== Packages.gz case ===
+
+More important in the case of Ubuntu than Debian as the Packages.gz gets pushed more often.
+
+See the patch case.  Effectively this turns the difference into an 'insert' operation where the blocks either side of the change are altered to add direct accesibility.
+
+=== Relation to 'patch' approach ===
+
+Focus on using patch to get from block b1 to b2, ...but there are multiple checksums of of b2 that can produce b1 when applied.  If we have a pre-known corpus of previous packages hints can be providers for those checksums that the patch is known to apply to.
+
+Additionally a hint can be provided for which unpacked file this particular section applies to with the hint to try applying the patch to that.
+
+When the range that the patch affects is known, the zlib source stream can be repacked to insert additional reset markers before and after the range that is changed.  This allows just that altered range to be fetched rather than the whole thing.
+
+=== Linear ranges ===
+
+Contigious linear ranges can be merged.
+
+=== deb file as receipes ===
+
+<pre>
+ linear   arch header
+
+ linear   arch debian-binary header
+ linear   debian-binary
+
+ linear   arch control.tar.gz header
+ linear   control.tar.gz gz header
+ zlib     control.tar
+ linear   control.tar.gz gz footer
+
+ linear   arch data.tar.bz2 header
+ linear   data.tar.bz2 bzip2 header
+ bzip2    data.tar
+ linear   data.tar.bz2 bzip2 footer
+</pre>
+
+ 1. Above linear sections can all be concatrenated as they are unlikely to appear in part elsewhere and are very short in length.
+ 2. The zlib and bzip2 are actually in multiple depending on the size.
+
+=== Depths ===
+
+Multiple depths of non-linear transforms (stacking) should be supported but it seems excessive and doesn't bring an immediate benefit.
+
+=== Tarball case ===
+
+The 512 byte tar headers are going to cause massive zlib section fetches even if 100% of the files either side of them can be found and constructed locally on the disk.  To remain backwards (not modifying the original tarball in any way) it might be best to provide these as literal ranges to make them directly addressible (since they are mostly zeros they will compress)
+
+=== Optimising ===
+
+PSync gets a 75% reduction straight away.  Further improvements are available but these follow the laws of deminishing returns.  The analysis to see what is really getting used can be done by recording what ranges are getting fetched, what similar ranges were available locally and why a transform was not being used or not being provided, to be used.
+
+This can be done by having the partial fetcher called additional meta data about why the request was generated in the page parameters:  `foo_1.23.deb?offset=...`
+
+=== Links ===
+
+* http://www.getright.com/seedtorrent.html This is really interesting piece about combining Bittorrent and HTTP/FTP fetching for filling the gaps.
+
+<pre>
+strings dapper-live-i386.iso.torrent  | head -1
+d8:announce39:http://torrent.ubuntu.com:6969/announce7:comment28:Ubuntu CD cdimage.ubuntu.com13:creation  datei1137413069e4:infod6:lengthi632541184e4:name20:dapper-live-i386.iso12:piece lengthi524288e6:pieces24140:
+</pre>
+
+Ubuntu torrents currently use a blocksize of 0.5MB and a 160bit SHA checksums per block.  (1/13000th meta-data size).
+
+=== Real world numbers ===
+
+From `ftp.uk.debian.org` (thanks to Phil Hands) for 7days, ending 2006-02-26;
+
+* `awk 'BEGIN{count=0;sum=0}$8~/Packages/{count+=1;sum+=$11}END{print count, sum}' < /var/log/apache2/access.log`
+
+{| class="wikitable"
+|-
+| 
+| '''Fetches'''
+| '''%'''
+| '''Megabytes
+| '''%'''
+|-
+| '''Packages'''
+| 159,490
+| 0.8%
+| 26,440
+| 0.06%
+|-
+| '''Sources'''
+| 85,096
+| 0.04%
+| 5,983
+| 0.001%
+|-
+| '''Total'''
+| 2,114,308
+| 
+| 4,407,587
+| 
+|}
+
+So, it's the overhead of `Packages.gz` itself is less than expected;  however when doing an upgrade it's generally left in the background, but a `apt-get update` is done interactively so appears to take ages.
+
+The effective of the `Packages` files should be amplified in the case of Ubuntu as `cron.daily` (which regenerates `Packages` from files in the archive is fairly small).
+
+[*] above figures are fairly rough-and-ready.
+
+=== Rsync rolling checksum ===
+
+==== Alder 32 ====
+
+This is used by gzip and called adler32, sources in `zlib/adler32.c`.
+
+<pre>
+BASE = 65521UL  # largest prime smaller than 65536
+def update(s1, s2, data):
+    s1 += data
+    s1 %= BASE
+    s2 += s1
+    s2 %= BASE
+    return s1, s2
+### s2 = (s2 + (s1 = (s1 + data) % BASE)) % BASE
+### adler32 = (s2 << 16) | s1
+</pre>
+
+==== rsync ====
+
+Like Adler32, but with the modulus being 2**16 rather than a prime, which makes the operation faster by avoiding a division and increases the hash bucket slightly.  Described at:  http://www.samba.org/rsync/tech_report/node3.html
+
+<pre>
+MASK = 0xffff  # 2**16
+OFFSET = 0  # Not used presently.
+def update(s1, s2, data):
+    s1 += data + OFFSET
+    s1 &= MASK
+    s2 += data
+    s2 &= MASK
+    return s1, s2
+def downdate(s1, s2, data, distance):
+    s1 -= data + OFFSET
+    s1 &= MASK
+    s2 -= distance * (data + OFFSET)
+    s2 &= MASK
+    return s1, s2
+</pre>
+
+==== --rsyncable ====
+
+Plain sum and then test equality to zero.
+
+<pre>
+def update(sum, data):
+    return sum + data
+def downdate(sum, data):
+    return sum - data
+</pre>

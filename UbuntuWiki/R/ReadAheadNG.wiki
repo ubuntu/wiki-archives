@@ -1,0 +1,75 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+
+''Please check the status of this specification in Launchpad before editing it.  If it is Approved, contact the Assignee or another knowledgeable person before making changes.''
+
+* '''Launchpad entry''': none yet
+* '''Packages affected''': 
+
+=== Summary ===
+This spec defines a next-generation readahead infrastructure for Ubuntu, from a multiple angle approach.
+
+=== Rationale ===
+There are many problems with current readahead, mostly that it is not adaptive and does not hold up to system changes without administrative intervention to re-engineer the `/etc/readahead/` files; further, other uses of `readahead()` can be explored to improve the performance of the system.
+
+=== Use cases ===
+General performance enhancement.
+
+=== Scope ===
+Our scope is multi-part and quite large.  Included are the below.
+
+`init`:
+* Integrate an adaptive readahead-ng package with Upstart to facilitate optimized-for-last-boot readahead.
+
+`gdm`:
+* Use readahead-ng library to read in the files launched by the individual sessions.
+* Track the first 10 seconds after log-in and use the data to preemptively read-ahead whatever session is set to start when the user logs in.
+
+`gnome-session`:
+* Use readahead-ng library to track the complete loading of the desktop and panel.
+** This occurs partially along side with `gdm`; that is okay, because parallel `readahead()` calls will skip over data already in page cache and are largely harmless.  (I think)
+* Future log-ins replay the previous log-in through readahead-ng.
+
+`gnome-panel`:
+* Use readahead-ng library to read in the `.desktop` files for submenus every time a menu is displayed.
+* When a menu is displayed, `.desktop` files related to the displayed entries should have the program they call read ahead.
+* The most commonly selected programs from a menu should be tracked, and their entire set of dependencies should be read in when their icons are displayed.
+** The most common libraries from the most popular applications should be first, followed by the more specific libraries used by only one of the most popular.
+
+`glibc`:
+* `ld.so` should use a trimmed readahead-ng to spawn a thread that reads relevant all libraries about to be dynamic linked before relocation starts.  This will allow some of the IO to be performed while COW and symbol resolution is occurring.
+** Libraries are each `mmap()`ed into memory space as they are known needed; as soon as any library's dependencies are read in, a readahead thread should be spawned to read the library.
+** The readahead-ng library will be smart enough to read only certain sections of ELF files used for dynamic linking; the code using `elflib` will have to be trimmed out of readahead-ng, replaced with calls to `glibc` internal code that does same.
+** `ld.so` should spawn a readahead thread after each library, dependent on the last thread spawned.  The readahead-ng code is capable of this kind of behavior through mutexes, pthread conditionals, and reference counted handles.
+
+=== Design ===
+The design is heavily based around a readahead-ng library being developed by JohnMoser.  This library uses `inotify` to monitor given directories and build a log file that future runs can replay; the goal is to update the log file on every boot while using the data from the last boot to improve readahead efficiency.
+
+The readahead-ng library is to be ELF aware.  A few sections in ELF files have to do with dynamic linking; the rest can be ignored.  `.init`, `.text`, and `.fini` in particular can be ignored; `.bss` and `.data` can be ignored as well, but may be useful to pick up in a second pass.  Sections related to symbols, relocations, the GOT, and the PLT are interesting.
+
+In some ELF files the interesting bits are most of the file; in others these are only a small portion.  In `libz.so` for example there are approximately 16 pages (64k) between `.plt` and `.data.rel.ro`; the last page contains `.data.rel.ro` and `.got` as well as the rest of the interesting structures.  Total 3 pages (12k) have to be read to get all the interesting data; the file is 76k (18 pages).
+
+The point of ELF awareness is to allow ELF files to be read in quickly.  We concern ourselves with the portion of the ELF file the dynamic linker will use, rather than any code that gets executed.  The entire code body will not likely get executed early in the program's run; thus, staying ahead of the dynamic linker should give us the best gain, in theory.
+
+Our design places use of the readahead-ng into init; the display manager; and the desktop environment.  The dynamic linker itself could benefit from just-in-time readahead, but would have to use a tightly integrated and stripped down version not relying on external libraries.
+
+=== Implementation ===
+
+==== Code ====
+
+==== Data preservation and migration ====
+
+=== Unresolved issues ===
+
+=== BoF agenda and discussion ===
+* I really, really, really need to come up with some clean way to tell `readahead-ng` that the specific path is a kernel module path and some component should be `uname -r` filled in, so that upgrading a kernel doesn't lose the benefit of reading ahead modules. --JohnMoser
+----
+CategorySpec

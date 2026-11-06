@@ -1,0 +1,81 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+
+''Please check the status of this specification in Launchpad before editing it.  If it is Approved, contact the Assignee or another knowledgeable person before making changes.''
+
+* '''Launchpad Entry''': UbuntuSpec:apport-crash-duplicates
+* '''Packages affected''': `apport`
+
+=== Summary ===
+
+We describe an algorithm for identifying and closing duplicate crash report bugs in the crash bug reprocessing bot.
+
+=== Rationale ===
+
+A lot of bug triaging work is currently spent on identifying and handling crash bug duplicates. Most cases can be handled mechanically, though, so we want bug triagers to only deal with the cases which need intelligent examination.
+
+=== Use Cases ===
+
+* Sebastien uploads a new version of gnome-panel which crashes on amd64 machines. Many people report the bug because they do not notice the duplication list on the Malone page. The retracing bot rejects all but the first bug as duplicates and marks them as such.
+
+* In a later Gnome Panel version, a function reintroduces a crash bug that was fixed three months ago. The retracing bot sees that the stack trace is identical to the previously reported one, but does not duplicate it because the affected package version is higher than the version that closed the bug.
+
+=== Scope ===
+
+This spec describes the handling of crash bugs which were created with apport. Bugs which were reported manually do not follow the structure assumptions and thus need to be handled manually.
+
+=== Design ===
+
+After retracing a new crash report, the bug processing bot (`launchpad-crash-digger`) checks if the crash has a valid ''crash signature''. If so, it checks for an already existing bug in the ''database'':
+
+* If there is an open one, the new bug is rejected and marked as a duplicate of the existing one.
+* If there is a closed one, it compares the package version in the new bug (which might also be in the Dependencies field) against the fixed version of the one found in the database. If it is smaller, the bug is rejected/duplicated as above, otherwise it just adds a comment with a reference to the previously existing bug and creates a new database entry with state 'open'.
+* If there is no entry, it creates one with state 'open'.
+
+In order to save space, all attachments should get removed from bugs which get rejected/duplicated.
+
+=== Implementation ===
+
+==== Crash signature ====
+
+The signature of a Python crash is the concatenation of the function names on the stack (`Traceback` field) and the exception class name, all separated by a space. Python crashes always have a valid signature.
+
+Signal crashes have a valid signature if the `StacktraceTop` field has no unknown functions and either has 5 functions, or the bottom function is `main`. Checking this property ensures that we do not inadvertedly unify unrelated crashes if retracing produces a clipped stack trace. The signature is the concatenation of the executable path, the function names in `StacktraceTop`, and the signal number, all separated by a space.
+
+==== Database ====
+
+The state will be kept in an SQLite database with a single table:
+
+{| class="wikitable"
+|-
+| '''Field'''
+| '''Description'''
+|-
+| `signature`
+| crash signature
+|-
+| `bug_id`
+| bug number
+|-
+| `fixed_version`
+| package version number that fixed the crash; `NULL` for open bugs
+|}
+
+The (`signature`, `fixed_version`) tuple is the primary key. `signature` alone is ''not'' a primary key since bugs might be reintroduced in later versions, occur and get fixed in multiple distro releases, or crashes with different causes might accidentally be duplicated. This structure ensures that all previously fixed issues are tracked.
+
+A bug is considered 'open' if `fixed_version` is `NULL`, otherwise 'closed'.
+
+==== Version tracking ====
+
+Malone itself does not provide version tracking, so this needs to be approximated. A cron job should regularly scan the state of all open bugs in the database. If the relevant release task has been marked as 'Fix released', the `fixed_version` field is set to the current version of the affected package in the respective release, unless it is already newer. If the bug has been made a duplicate or rejected, the entry is removed entirely.
+
+----
+CategorySpec

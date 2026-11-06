@@ -1,0 +1,104 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+
+* '''Launchpad Entry''': https://launchpad.net/distros/ubuntu/+spec/hardware-detection
+* '''Created''':  by JaneWeideman
+* '''Contributors''': JaneWeideman, ScottJamesRemnant
+* '''Packages affected''': udev, hotplug, initramfs-tools, klibc, linux-image-*, hal, grepmap
+
+=== Summary ===
+
+Covers how we detect hardware, both when the system is running and how we ensure that at startup we capture potentially missed events. Should also cover how we make sure we don't process events before we can deal with them (ie. network card module built-in, but none of ifupdown in initramfs).
+
+=== Rationale ===
+
+Modern computers aren't off-the-shelf static entities with standard parts and design; instead they are a collection of different hardware targetted for different purposes.  Ubuntu not only needs out of the box support for laptops and desktops, but micro-notebooks and massive servers.  In addition, we need to support the complete range of "hot pluggable" devices such as removable storage, digital cameras, scanners, printers, etc.
+
+The 2.6 kernel manages much of the hard work of managing hot plug interfaces such as USB, Firewire and server PCI and exposes information about connected devices through both the `/sys` filesystem and by passing events to user-space known as "uevents".
+
+=== Tools ===
+Ubuntu comes with a bunch of commandline tools which might help you detect hardware which is not to be discovered by the Hardware Manager.
+
+* Use cat /proc/cpuinfo for a crude, but quick way to display your processor information.
+* lshw is a great place to start for a definitive list of your hardware plus your options, which in turn can tell you what settings to enable in your kernel.
+* lspci is another great program which can output information about your PCI settings with varying levels of verbosity.
+* Like lspci, lsusb lists the current USB devices connected to the system.
+* To list all the network interfaces on your box: cat /proc/net/dev
+
+=== Use cases ===
+
+* Martin has bought a new laptop, when he installs Ubuntu on it he'd like as much of the hardware as possible to be automatically detected and the correct drivers loaded.
+
+* Daniel owns a portable MP3 player which presents itself as a USB storage device, when he plugs it into his computer it should be available for him to add and remove files to.
+
+* Euan runs a network of various different computers, he'd like to be able to install Ubuntu on all of them and have them work without having to manually configure the installations for the local hardware.
+
+* Sean's desktop system has broken, but he was able to rescue the hard-drive with his Ubuntu installation and all of his data.  When he buys a new desktop, he'd like to be able to boot it with the old hard drive and have it just work with the new hardware loading all the drivers and not complaining that the hardware has changed.
+
+* James is a system administrator who likes to compile his own kernels, compiling in drivers for those pieces of hardware he knows is on his system; and leaving out those which aren't.  When he boots his system, udev should still create device nodes for the built-in drivers and still provide activation for them.
+
+=== Scope ===
+
+The scope of this specification is the correct receipts of events from the kernel and reaction to those events.  Where the kernel does not currently support a particular piece of hardware, or the appropriate bus either doesn't support hotplugging or provide "Plug and Play" information about devices on it, it is out of scope for this specification.
+
+Further work to actively probe hardware on those kinds of buses, rather than the passive detection described here, is too invasive for the dapper time frame.
+
+=== Design ===
+
+==== Receiving events ====
+
+The kernel provides uevents by two means, by running the user-space program specified in `/proc/sys/kernel/hotplug` (usually `/sbin/hotplug`) and passing environment variables to describe the device and point to the information in the `/sys` filesystem; or over a netlink socket with packets containing the same information.
+
+As the "hotplug" system relies on user-space forks, it is potentially racey as the handling of one event could be superseded by the handling of another, resulting in out-of-order events.  For this reason the kernel supplies a sequence number for each event and any user-space system relying on this should take care to re-order events.  The `udevd` daemon contains this logic.
+
+`udevd` also listens on the netlink socket and receives uevents from there, eliminating duplicates and processing them the same was as if they came in through the "hotplug" system.  As this socket is a FIFO, there is no requirement to re-order events as they will not arrive out of order.
+
+For breezy we used a mixture of both methods because the input subsystem was not yet generating netlink events, in 2.6.15 this will have been fully converted to the new driver core and produces both kinds of events.  Therefore for dapper we intend to drop the "hotplug" interface and only listen for events on the netlink socket.  This is far more reliable and less error-prone due to the guaranteed ordering and no need to eliminate duplicates.
+
+==== Cold-plugging ====
+
+At system startup the kernel may have already detected much of the hardware on the system, especially that at the platform level.  All of the events for these will have been missed, so it is necessary to detect the hardware ourselves and reconstruct the events.
+
+Fortunately the kernel exposes information about all of the devices under `/sys` so one simply needs to walk this tree and construct an event for anything that looks like a device.  In breezy we used the `udevstart` tool for this, which caused an event to be queued in the running `udevd`.
+
+The 2.6.15 kernel adds a `uevent` attribute file to devices under `/sys` which when written to causes the regeneration of the original, missed, event; this is far more reliable than trying to guess the content of the event ourselves, so is the chosen replacement cold-plugging method for dapper.
+
+As we're one of the field leaders in this, some of the work to make this possible needs to be done ourselves and is detailed in HardwareActivation.
+
+==== Device node creation ====
+
+Each event for a device that should have a node under `/dev` needs to cause the creation of that device.  This was the original purpose of the `udev` tool which we will be using to receive events from the kernel, so device node creation comes for free.
+
+The names and permissions of those devices, as in breezy, will be specified with files in the `/etc/udev/rules.d` directory.  Also as with breezy, the system is safe against multiple cold-plugging (as noted in HardwareActivation) so we only need the permission rules on the real filesystem and not in the initramfs.
+
+==== Module loading ====
+
+Events often also need to cause the loading of a particular module or driver for the kernel to be able to handle the device.  Each driver declares in a table in the source code the devices that it can support, usually using combinations of information such as vendor and product identifies, device type, etc. all varying depending on the bus and subsystem the device exists on.
+
+Tables to aggregate the information for all drivers and map to the driver name are produces by the `depmod` utility; in breezy when we received a device event we'd look up the information in these tables and locate the module using a tool we wrote called `grepmap`.  The `hotplug` package was responsible for passing the right arguments to `grepmap`, loading the modules it suggested and running any further support programs.
+
+The 2.6.12 kernel introduced a new `MODALIAS` variable into the uevent which contains a string that matches against a new alias table far more efficiently than the old verbose tables.  Support for this is built directly into `modprobe`, along with blacklist support.  Therefore the entire `hotplug` package can be replaced with a simple `modprobe $MODALIAS` udev rule.
+
+==== Repeated events ====
+
+We may not be ready in some circumstances to process an event; for the dapper cycle this will be solved by repeating cold-plugging of those devices.  Support scripts should therefore be entirely safe to run multiple times on a device, as discussed in HardwareActivation.
+
+=== Implementation ===
+
+Specified in HardwareActivation and UdevRoadmap.
+
+==== Data preservation and migration ====
+
+Existing hotplug support scripts in the `/etc/hotplug.d` and `/etc/dev.d` directories will not be supported during the dapper development process, but enabled through a udev rule before preview release.  This will allow us to ensure we ship no package that relies on them, but that users will not need to immediately change their scripts.
+
+Scripts in the `/etc/hotplug` directory will need to be converted to udev rules.
+----
+CategorySpec CategoryHardware

@@ -1,0 +1,120 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+''Please check the status of this specification in Launchpad before editing it.  If it is Approved, contact the Assignee or another knowledgeable person before making changes.''
+
+* '''Launchpad entry''': https://launchpad.net/distros/ubuntu/+spec/dynamic-mirror-decisions
+* '''Created''': 2006-11-02 by BenjaminMontgomery
+* '''Contributors''': MichaelVogt, JamesTroup
+* '''Packages affected''': `update-manager`, `apt`
+
+=== Summary ===
+
+We would like Ubuntu to be able to ask for mirror recommendations and make efficient decisions as to which mirror to use - and to be able to do this after installation, as the mirror network expands and changes over time. Launchpad will hold the server-side data needed to inform any given desktop / server about its recommended mirrors, and systems will in turn be able to tell Launchpad what they experience when interacting with those mirrors. The goal is to make the whole mirror infrastructure more dynamic.
+
+=== Rationale ===
+
+In order to keep an Ubuntu system up to date it is necessary to periodically download updates from the Ubuntu archive.  Currently, users are only presented with the option to use a limited number of the mirrors of the Ubuntu archive that are available on the Internet.  Typically, the longest part of an update is downloading new packages from the archive.  The mirrors that are currently presented to a user may not be the fastest mirror available.  Providing users with a tool to find mirrors and determine their speed based on a user's network access might allow for faster package downloads.
+
+The current system that is based on the country code is too inflexible and does not offer enough granularity. Some countries like the US are just too big to have only a single mirror, some others (like South Afrika) have a network topology that is so difficult that a single mirror for the country may mean very good results for some users and very bad results for others. 
+
+The other rationale is that we want to get user feedback in case of network problems automatically (preferably with additional information like a traceroute dump).
+
+=== Use cases ===
+
+* Bob wants to speed up package downloads for his computer with Ubuntu installed.  Using a tool on his computer he retrieves a list of mirrors from Launchpad which is displayed to him sorted by the physical location of the mirror server.  Bob picks several mirrors and the software conducts tests on the mirror to determine the approximate speed of file transfers from a mirror to Bob's computer.  After testing mirrors Bob picks the fastest mirror and his sources.list file is automatically updated to use his choice.
+
+* James wants to know which mirror to recommend for users coming from a particular network address. The update manager client tells Launchpad what it knows about the mirrors that have been recommended to it so far, and that information is aggregated from many users to improve recommendations based on autonomous zones.
+
+=== Scope ===
+
+The problems we face are:
+* bad mirrors (404,md5 mismatch,outdated)
+* broken routing (e.g. t-com customers in germany get only 15K to cdimage.ubuntu.com)
+
+This specification requires adding additional functionality to Software Properties and also ensuring that format of the mirror information in Launchpad is standardized. In the future we  will extend this to provide feedback for us to report back problems with mirrors so that launchpad can dynamically update the mirror list.
+
+=== Design ===
+
+The user will need an application to retrieve the Ubuntu mirror list, test the speed of different mirrors, and update sources.list with the mirror that the user chooses.
+
+Launchpad will have to ensure that mirror data is presented to clients in a standard way.  Currently Launchpad offers RSS feeds of mirror information (such as https://launchpad.net/distros/ubuntu/+cdmirrors-rss). It is likely that we will need <nowiki>[[http://launchpad.net/bugs/72110|special RSS for this feature]]</nowiki>, though.
+
+For automatic mirror selection we offer a option at install time. The user will be asked if he preferes automatic mirror selection (that involves some feedback reporting back to us) or manual selection which means to select the mirror manually based on the launchpad rss feed. The feedback will consist of reporting failures and the relative speed of the tested mirrors. It will also submit the IP adress so that we know what autonomous zone the request came from. The system will send a list of mirror sorted by what it things is the fastest based on the submited AS information.
+
+To do meaningful speed measuring we need to download 64-128kb data per mirror to get around issues like slow start with tcp. We want to test three mirrors, the first two based on what we think is the fastest and the third one random. This is a certain hit for dialup users (64kb download takes ~16sec for a 56kb modem, multiplied by three is a long time just for a test). Testdata download has the disadvantage of wasting bandwidth so we should look into optimzing this as far as possible. A alternative approach would be to not use testdata and just download from the mirror that LP provided. Then record the download speed and calculate it relative to the fastest speed and report back to LP. This should give people a good average over time. The disadvantage is that sometimes really bad mirrors might be choosen (e.g. when insufficient data for a AS is available).
+
+=== Implementation ===
+
+An implementation of the spec has already been started by a member of the community. 
+
+For manual selection, we need to do:
+
+* Add code to Software Properties to download the mirror list from Launchpad
+* Create a new GUI for users to browse the mirror list and choose mirrors to test
+* Create a test to determine the approximate download speed for a particular mirror
+** The tool `apt-spy` on debian downloads the file ls-lR.gz to measure the speed
+
+For fully automatic selection we need:
+* add a new method to apt called "mirror" (<code>deb mirror://mirrors.ubuntu.com/getmirror edgy main universe</code>)
+* this mirror method gets a list of mirrors at the start of the download from the archive ordered by what LP thinks is fastest
+* the list contains the base-urls (e.g. http://de.archive.ubuntu.com/ubuntu or http://mirror.optus.net/ubuntu/)
+* apt uses its http method with the selected mirror to get the data
+* apt need to send the expected checksum of the download to the mirror method so that for a 404 or a checksum failure the next mirror can be selected 
+
+For a version that can report feedback back to launchpad we need:
+* Figure out how to tell Launchpad about the effectiveness of different mirrors from a particular autonomous zone
+** Traceroute information to the mirrors, with ping times and packet loss
+** Throughput indicators
+** Dealing sanely with the fact that no single data point can be trusted (dial-up, network changes etc)
+** Excluding sensitive information from any uplink
+* Figure out how Launchpad should interpret that information
+
+Given the scope of the automatic mirror selection it should probably be implemented in steps. Firstly the manual selection based on the current launchpad mirror list, then automatic selection, then failure reporting, then speed reporting.
+
+==== Code ====
+
+An implementation for software-properties is currently in development in the <nowiki>[[https://launchpad.net/people/bmontgom/+branch/update-manager/mirrors|mirrors]]</nowiki> branch of Update Manager by BenjaminMontgomery that is able to download the launchpad list and offer mirror selection based on this list.
+
+The scope for apt for feisty is:
+* mirror selection 
+* error reporting
+
+The current code in http://people.ubuntu.com/~mvo/bzr/apt/apt--mirror/ implements:
+* getting a mirror list from a url (currently only http is supported for the mirrors), the uri
+   look like like a regular apt uri with mirror as the transport (e.g "deb mirror://some.server/some.cgi feisty main")
+* RefreshInterval checking (the mirror information is considered "fresh" the given amount of time)
+* Proper mirror list cleanup of /var/lib/apt/mirrors/
+
+If downloading the mirror information fails, the last downloaded mirror information is used.
+
+=== Future work ===
+
+The speed reporting is out of the scope for feisty.
+
+=== Data migration ===
+
+Once we have a working and well tested mirror method we can add code to the software-properties utility to make switching to automatic mirror selection easy. To do this we add a new entry to the "Download from:" combobox: "Automatically select mirror".
+
+=== Unresolved issues ===
+
+For feedback reporting the server side needs to be specified. This needs input from the server team. 
+
+The automatic mirror selection with the new <code>mirror</code> method makes consistency across mirrors more important than it was before because the checksums needs to match. As long as the selected mirror gives no problems that is not a issue. But when there is a 404 or a checksum-mismatch this may become a problem if e.g. the next selected mirror is not in sync. Than it may not have the requested package or the indexfile has no matching checksum. This is not a regression to the current behavior were we just error out. 
+
+One problem we have is that test-data may get cached (proxy/transparent proxy) and that makes our testdata bad. It needs to be investigated if we can detect this somehow.
+
+=== Comments ===
+
+* BenjaminMontgomery: the code in the `mirrors` branch has a start of an implementation of this spec.  Features that work are: downloading the list of mirrors from LP (currently parses the HTML of the mirror page), displaying a list of mirrors sorted by country to the user, testing the speed of the mirror by downloading a file, and selecting a mirror to pass back to the main part of Software Properties.  For some reason the selected mirror gets passed back, but the GUI isn't updated correctly, sources.list gets updated so I'm assuming this is something I haven't done correctly with pygtk.  Finally, I hate the GUI that I made.  I would really like some feedback/help on how to make it more intuitive.
+
+* Ant23: You might want to look into <nowiki>[[http://www.metalinker.org/|Metalink]]</nowiki>, which is an XML format for listing mirrors (with priority and location), p2p, and checksums for downloads. (It allows for multiple links for redundancy or easy segmented/accelerated downloads). This will not help on mirror decisions, but once you have the information the .metalink file can be updated. Depending on the information, certain mirrors could have their priority changed to make the downloads more efficient for end users automatically. Metalinks are used by OpenOffice.org, openSUSE, Arch Linux, and other distributions, but the mirror information in their .metalinks is not updated dynamically.
+----
+CategorySpec

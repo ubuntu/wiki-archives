@@ -1,0 +1,176 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+
+''Please check the status of this specification in Launchpad before editing it.  If it is Approved, contact the Assignee or another knowledgeable person before making changes.''
+
+* '''Launchpad Entry''': UbuntuSpec:udev-lvm-mdadm-evms-gutsy
+* '''Packages affected''': udev, lvm, devmapper, evms, mdadm, cryptsetup
+
+=== Summary ===
+
+In feisty we changed the way LVM, software raid (mdadm), EVMS, et al, interact with udev, to try to improve the situation.  This was not a success and the resulting arrangements are racy.
+
+We now propose an alternative approach which we believe will reduce (and hopefully eliminate) races.
+
+''ScottJamesRemnant: the specification fails to detail what races have been uncovered, and link to bug reports that explain those races.  Since this is a "fix things that have gone wrong" specification, it MUST have quite a lot of detail about what went wrong, otherwise there is no way to test the success of this specification at correcting those bugs.  In addition, it would be worth detailing why we changed things in feisty, since we also need to not break those either.''
+
+=== Principle ===
+
+For userspace-provided devices such as dm-* and md-* (hereafter, ''synthetic'' devices) the relevant userspace tools will be responsible for device node creation and also for triggering consequential scanning.
+
+ ''ScottJamesRemnant: I wasn't aware of any race conditions with software RAID devices?  The problems that have been discussed were with devmapper devices being created by LVM; lit. that running `vol_id` on the transient ones created for snapshots can prevent LVM from completing its work.''
+
+ ''ScottJamesRemnant: Also making userspace responsible for creating software RAID devices would be a change from any previous version, these have ALWAYS been created by udev with no problems.''
+
+The intent is that synthetic devices will only be processed automatically if they have been ''published'' explicitly by the tool which creates them.
+
+=== Design ===
+
+* udev will be made to ignore kernel-generated events for devmapper and md devices.
+
+ ''ScottJamesRemnant: note above regression, udev has never ignored md devices in the past; it was only devmapper devices that were ignored''
+* the udev rendezvous functionality will be removed from libdevmapper; instead, libdevmapper will once again create device nodes itself (and we will set the default permissions to 600 root.root)
+
+ ''ScottJamesRemnant: perhaps libdevmapper should be modified to not fail if the device already exists with the correct major/minor?''
+* udev will be modified to support userspace-generated events (aka synthetic events; see below)
+* the userspace tools (lvm, mdadm, and evms, but not dmsetup) will be modified to generate synthetic udev events for each "top level" device when that device has been initialised and ready for I/O, and another event when the device is to be removed just before it becomes unavailable for I/O.
+
+ ''ScottJamesRemnant: why not dmsetup?  that seems to be top-level enough - the other problem packages use libdevmapper''
+* udev will respond to the synthetic event by overwriting the device node generated libdevmapper (or whatever) with one of its own with the correct ownership and permissions, using rename(2) to install it; it will also do normal vol_id scanning of the resulting device.
+
+=== Details of synthetic device publication conditions ===
+
+Publication of a synthetic device means that that device should be processed further by automatic scanning tools.  Currently publication only affects udev rules (see ''Problem unaddressed'', below).
+
+No synthetic device publication will be processed unless atoi(getenv("UDEV_SYNTHPUB_BLOCK")).  Synthetic device removal will always be recorded as withdrawal of any matching synthetic device (and will be idempotent if there is no such published synthetic device).
+
+lvm will publish all non-snapshot logical volumes, when activation of that LV is complete, and withdraw them before deactivating them.
+
+ ''ScottJamesRemnant: why not publish snapshot volumes too?''
+
+mdadm will publish all MD devices, when each device has been properly started and is ready for I/O.  It will withdraw each device before stopping it.
+
+dmsetup will publish any device itself.  User tools (scripts) which use dmsetup will need to be modified if automatic processing (mounting etc.) is desired.  A utility will be provided to make publication and withdrawal easy (see below).
+
+ ''ScottJamesRemnant: justification?''
+
+cryptsetup will publish a device when it successfully sets the keys and makes the encrypting dm-* device available for IO, and withdraw it before deactivating it.
+
+evms will publish "logical volumes" (ie storage objects which contain mountable filesystems) when they are activated, and withdraw them before they are deactivated.
+
+The udev rules which invoke the block device identification and activation tools (ie, the ones which run when physical block devices are detected and which also now run on the synthetic device creation) will set UDEV_SYNTHPUB_BLOCK.
+
+=== Rationale ===
+
+This design keeps internal block devices and messings-about used by lvm and other tools, internal to those tools.  It notifies the rest of the system of the availability of a new block device iff that device was automatically discovered and should be automatically used.
+
+=== Udev design ===
+
+A new entrypoint in libvolume_id and a corresponding command-line tool (in the volumeid package) will be made available to allow programs to publish and withdraw synthetic devices.  This librarylet entrypoint will be responsible for checking UDEV_SYNTHPUB_BLOCK (and likewise neither it nor the utility will fail if udev is not running, so that they can be used unconditionally).
+
+This new function will work by sending udev a control messsage instructing it to create or remove the device in its device database.  udevd will be made to send appropriate events in response, and will also record in its database that the device is synthetic.
+
+udevtrigger will be made to notify udevd as well as the kernel; udevd will then regenerate the creation events for the synthetic devices in its database.
+
+ ''ScottJamesRemnant: how will udevd know that a device triggered by udevtrigger is synthetic?  how about when users trigger devices by touching the uevent file in sysfs by hand?  how will udevd know to ignore these devices when they arrive over netlink?''
+
+=== Problem unaddressed ===
+
+The lvm and evms userspace tools, and mdadm in many modes, scan all block devices looking for physical volumes to consume and construct into logical volumes (or appropriate other terminology).  This means that synthetic block devices not intended for publication may be opened and even processed.
+
+To prevent this fact from causing trouble during normal boot-time device detection, we will use a single lock wrapping up all of the boot-time lvm, evms, mdadm, and cryptsetup scans.  This will ensure that at any one time only one such scanning process can be running - and it is those very scanning processes which are doing the activation.  This addresses problems with races although it does not prevent unwanted scanning of unpublished devices; be believe the latter to be largely harmless (since it happens quite a bit in pre-udev systems anyway).
+
+If some other process on the system causes multiple simultaneous or near-simultaneous synthetic device creations, there may still be a race.  The correct fix would be to fix all of the device-scanning systems not to scan synthetic block devices which have not been properly published.  This would be straightforward to implement with a suitable entrypoint to libvolume_id.
+
+ ''ScottJamesRemnant: seems reasonable if we run them in this mode.  Where we're running these tools without the scan mode, we don't need to do this, right?  This specification should address necessary modifications to run these tools without scanning''
+
+=== Alternative approach - Publication list stored in kernel ===
+
+The use of udevctrl to generate synthetic events for the published synthetic devices is not the only possible way to record and process this information.
+
+As an alternative, it would be possible to allow user programs to create uevent structures via a suitable kernel interface.  This would result in real kernel udev events and would avoid modifying udev.  Instead, the userland utility for publishing synthetic devices would publish them by talking to this new kernel interface (and would provide mechanisms for listing and deleting entries as well, so that state kernel data can be removed).
+
+The rest of the design remains largely unchanged.
+
+ ''ScottJamesRemnant: how does userspace specify that the existing kernel objects aren't for publication?''
+
+=== Alternative approach - fix the problem in the kernel ===
+
+The given problems are:
+
+* It is not possible to use some devices at the point the kernel objects for them are created.
+ The typical example is the `md*` software RAID devices normally set up by `mdadm`.  The kernel objects are created by the `md-mod` module when the array begins assembly, but cannot be used until the array has actually been assembled.  Likewise it is possible for the array to be disassembled, leading the devices to be unusable, without the kernel objects being removed (since the array partially exists).
+
+* Some devices are created simply as transients, intended for almost immediate removal.  Acting on these devices can mean the device is open when the creating tool expects it to not even exist on the disk.
+ The typical example here is `dm-*` devmapper devices created by LVM during the snapshot process.  devmapper registers them with the `dm-mod` module, so the kernel objects exist to hold information about them; but these objects shouldn't be used.
+
+Given that these devices have kernel objects, and come from kernel modules, I do not agree with the notion that they are synthetic.  They simply have more complex conditions of use than an ordinary block device from a disk subsystem.  (In fact, it's not unreasonable to expect a disk subsystem to have similar issues in future).
+
+For the `md*` case, the kernel module already knows whether the array is in a usable state, and exposes this in SYSFS through various attributes, notably `md/array_state` which will contain `clean` if the array is usable.  The kernel module also emits the `change` uevent type when it changes this status.  Therefore all udev needs to do is:
+
+ <pre>
+KERNEL=="md*", ATTR{md/state}=="clean", # do some action
+</pre>
+
+or
+
+ <pre>
+KERNEL=="md*", ATTR{md/state}!="clean", # skip some actions
+</pre>
+
+No moral equivalent exists for devmapper at this time; though the `dm-mod` module does emit the `change` uevent when it changes the block device table.  I propose:
+
+* modify the `dm-mod` kernel module, adding a sysfs attribute to indicate whether the device is usable or not.  Perhaps call it `active` and let it contain `0` or `1`.
+
+* modify the kernel/userspace API to allow creation of inactive devices, which have this set to `0`; otherwise devices created with the current API have it set to `1`
+
+* add a new API to activate/deactivate devices, ensure the `change` uevent is emitted
+
+* modify `libdevmapper` to support creation of inactive devices, and activation and deactivation of devices
+
+* modify `lvm` and `evms` to create inactive devices for those things that should not be touched
+
+* udev rules acting on devmapper devices should check `ATTR{active}=="1"` before continuing.
+
+=== Alternative approach - this stuff is already fixed ===
+
+* Restore devmapper to pre-feisty status
+* Apply the patch to export device info to udev from http://download.opensuse.org/distribution/SL-OSS-factory/inst-source/suse/src/device-mapper-1.02.19-2.src.rpm
+* Skip devices that aren't active, or have snapshot/error tables
+* Ensure devmapper and udev respect each other's mknod() calls, and check the stat() if they get -EEXIST
+
+* Apply the similar patch to mdadm from http://neil.brown.name/git?p=mdadm;a=commit;h=54bad3644f4ea8132a789e827d05d2e712b4f547
+* Skip md devices that aren't clean
+
+=== Alternative approach - Use udevdb ===
+
+* Modify the user mode tools to NOT try to open /dev/sd*, but rather be told which devices to inspect by udev and to query udevdb for any devices already detected that are part of the same set
+* Have udev run the user mode tools on new devices to scan them to see if they are dmraid/lvm/md/etc
+* Set attributes in the udevdb which indicate that the device is recognized and claimed by dmraid/lvm/md/etc, so it won't be scanned by the others
+* When the user mode tools create the synthetic device and wish to publish it, they set an attribute in udevdb marking it as published
+* Only when the published attribute is set on the synthetic devices will they be scanned
+
+=== Rejected approach ===
+
+We considered restoring the "udevsend" utility which existed in some previous udev versions; this could be used for sending synthetic events.  However,
+* It is not just necessary to send events.  We must also record the list of synthetic devices so that (for example) udevtrigger works properly.  Conceptually, udev events are notifications of changes to the list of uevent structures, rather than isolated events.  Therefore udevsend as previously implemented is wrong.
+* Also, the previous implementation of udevsend made rather too large a change to the udev source.  udevd does not have a proper non-blocking event loop, and udevsend needed it to have one.  The new proposal involving udevctrl does not need udevd converting to fully asynchronous reading with buffering.
+
+=== Release Note ===
+
+  The processing arrangements of LVM and RAID devices were changed, mainly to make booting more reliable.
+
+=== Demo plan ===
+
+It is difficult to demonstrate or test this feature as the primary intent is to reduce (ideally, eliminate) a set of hard-to-reproduce races which prevent some people's systems from booting.
+
+----
+CategorySpec

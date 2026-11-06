@@ -1,0 +1,166 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+
+* '''Launchpad Entry''': https://launchpad.net/distros/ubuntu/+spec/live-cd-share-live-cd
+* '''Created''':  by TollefFogHeen
+* '''Contributors''': TollefFogHeen
+* '''Packages affected''': 
+
+=== Summary ===
+
+It should be possible to share a running live CD on the network, for use by thin clients or other machines without a CD drive.
+
+=== Rationale ===
+
+Being able to share a live CD with machines that don't have a CD-ROM drive for installation is useful.  Sharing the live CD to machines which doesn't have a CD-ROM can be useful too, by treating the live CD as a poor-man's server.
+
+=== Use cases ===
+
+* Julia wants to install Ubuntu on her ultraportable laptop with no CD-ROM.  She doesn't know too much about computers and wouldn't be able to set up a DHCP server and netboot, but she reads that sharing the live CD works for installing too, so she does that and installs Ubuntu and is happy.
+
+* Sebastian works in a public library.  To avoid problems with people changing the setup of the clients or taking the CDs, they have a live CD setup which is then distributed to all the thin clients.  He uses a persistent setup to store the configuration files.
+
+=== Scope ===
+
+Affects the live seeds, casper and a new tool which will allow the user to control sharing of the live CD.
+
+=== Design and implementation ===
+
+Write a simple graphical tool which does the following:
+
+* Write a configuration file which will make `dhcp3-server` serve a tftp-bootable image with suitable parameters for it to pick the right nfsroot parameter.
+
+* Makes the dhcp server use the abovementioned file as the configuration file.
+
+* Puts a configuration file for pxelinux in `/var/lib/tftpboot`
+
+* Allows the user to start and stop the DHCP and tftpd server.
+
+* The default initramfs already supports NFS root, so it will be used, either copied or symlinked into the tftd's root directory.
+
+   ''Maybe the shellscript "knoppix-terminalserver" would be a good start. Since it uses dialog+Xdialog, it can be run "graphically" in textmode as well as in X. It's basically a configuration frontend for pxelinux, TFTP, DHCP and NFS. Needs some work to run in installed mode, since it's designed to run from the live DVD. -KlausKnopper''
+
+   ''The default initramfs already has casper init, which is a key element to having the shared livecd run as is.''
+
+=== Outstanding issues ===
+
+* Should we be able to share CDs for other architectures or share other CDs?
+
+* What do we do about already-configured network interfaces and conflicts with other DHCP servers?
+
+* NFS and unionfs haven't been friendly in the past.  This needs to be investigated and if they still aren't we either need to fix this or defer the spec until it's fixed.
+   
+   ''they still aren't (files missing on the client, problems with directory renames, inexplicable errors when overwriting files). unionfs is even known to be very unstable running on local drives only, if SMP and/or PREEMPT are enabled in the kernel. Just a personal comment. Unfortunately, there is no better choice for Knoppix right now, that's about the only reason I'm using it. -KlausKnopper''
+
+   ''Aufs (aufs.sourceforge.net) seems to be a rewrite of Unionfs.  SLAX has already moved over to it, and it is reported to be more reliable and less buggy.  I've not had a look at the code and so I don't know what its NFS support is like --PhillipLougher2''
+
+   ''Mounting them readonly seems to do the trick, debian have patched casper to do this, and the next merge to ubuntu will pick this up.''' -- RobertCollins
+
+=== Prototype machine configuration ===
+
+For linux.conf.au I (RobertCollins) setup a machine that shared out a liveCD, perhaps called a LiveNetboot ;). Anyway, thats really what this spec aims to automate the creation of, so I figure this is a good place to document what was involved in getting an edgy i386 environment working.
+
+=== TODO to make the prototype more useful for this spec ===
+* Generate the NFS exports via a script, or provide some form of $LOCAL_NET etc for the NFS permissions.
+* Investigate why GFXBOOT and GFXBOOT-BACKGROUND are not recognized by pzelinux.
+
+1. I copied the ISO to the local disk for performance, and then loopback mounted it for nfs export:
+<pre>
+$ sudo mount isos/ubuntu-6.10-desktop-i386.iso /mnt/ubuntu610 -o loop=/dev/loop1
+$ cat /etc/exports
+/mnt/ubuntu610 192.168.1.0/255.255.255.0(ro,no_root_squash,async)
+</pre>
+
+1. I configured up dhcpd for boot loading - the entire /etc/dhcpd.conf is:
+<pre>
+allow bootp; allow booting;
+option domain-name "example.com";
+option domain-name-servers 192.168.1.2;
+
+option subnet-mask 255.255.255.0;
+default-lease-time 60000;
+max-lease-time 7200;
+
+subnet 192.168.1.0 netmask 255.255.255.0 {
+  range 192.168.1.128 192.168.1.159;
+  option broadcast-address 192.168.1.255;
+  option routers 192.168.1.1;
+  next-server 192.168.1.2; # tftp boot server, same as this machine *in this case*.
+  filename "pxelinux.0";
+  }
+</pre>
+
+1. Installed atftpd, my preferred tftpd. This is configured via the inetd line:
+<pre>
+tftp            dgram   udp     wait    nobody /usr/sbin/tcpd /usr/sbin/in.tftpd --tftpd-timeout 300 --retry-timeout 5   --no-blksize --no-multicast    --maxthread 100 --verbose=5  /tftpboot
+</pre>
+
+1. Install pxelinux:
+<pre>
+sudo apt-get install syslinux
+sudo cp /usr/lib/syslinux/pxelinux.0 /tftpboot/
+sudo mkdir /tftpboot/pxelinux.cfg
+</pre>
+
+1. Setup architecture config. (I was allowing for more than one netboot architecture, this spec does not need that, but - may as well do it cleanly).
+<pre>
+sudo cp -a /mnt/ubuntu610/isolinux /tftpboot/i386
+sudo cp /mnt/ubuntu610/isolinux/isolinux.cfg /tftpboot/pxelinux.cfg/C
+sudo vim C
+
+sudo ln -s /tftpboot/i386/splash.rle /tftpboot/
+sudo ln -s /tftpboot/i386/splash.pcx /tftpboot/
+
+</pre>
+
+1. Create a new kernel and initramfs capable of NFS booting casper, in feisty this step should not be needed as casper will have NFS support.
+* <pre>
+sudo rm /tftpboot/i386/vmlinuz /tftpboot/i386/initrd.gz
+</pre>
+
+* Install a version of casper with NFS support. I had to use the debian version, as ubuntu was literally merging the relevant changes at the same time. I needed to rollback some changes from debian, to fit with the edgy squashfs, which we want to use unaltered. 
+
+** grep for <code>live_media</code> in <code>/usr/share/initramfs-tools/</code> and change it to <code>cdrom</code>
+** edit /etc/casper.conf and set the user and hostname variables to 'ubuntu', and the BUILD_SYSTEM one to 'Ubuntu'.
+** edit /usr/share/initramfs-tools/scripts/casper and make udev be run totally earlier, to get full network support:
+<pre>
+--- debiancasper/usr/share/initramfs-tools/scripts/casper       2006-12-03 03:02:11.000000000 +1100
++++ /usr/share/initramfs-tools/scripts/casper   2007-01-09 18:04:17.000000000 +1100
+@@ -226,6 +226,10 @@
+
+     modprobe "${MP_QUIET}" af_packet # For DHCP
+
++    # ask udev to find network devices.
++    sbin/udevtrigger # -bpci -Iclass=0x06* if we want to limit it to just network cards, but it should be fine as is.
++    sbin/udevsettle
++
+     ipconfig ${DEVICE} /tmp/net-${DEVICE}.conf | tee /netboot.config
+
+     if [ "${NFSROOT}" = "auto" ]; then
+</pre>
+* Generate a new initrd and copy the desired vmlinuz into place:
+<pre>
+sudo cp /boot/vmlinuz-VERSION /tftpboot/i386/vmlinuz
+sudo mkinitramfs -o /tftpboot/i386/initrd.gz VERSION
+</pre>
+
+1. Check portmap is listening on all interfaces:
+<pre>
+$ cat /etc/default/portmap
+OPTIONS=
+</pre>
+
+1. Start your NFS server and restart portmap. You may also need to check `/etc/hosts.allow` to ensure access is permitted.
+
+At this point, clients can netboot, and will come up just like the liveCD, be able to perform installations and run applications. Network access may glitch, as resolv.conf wasn't correctly configured for me, we should look at passing that through from casper.
+
+----
+CategorySpec

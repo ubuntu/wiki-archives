@@ -1,0 +1,161 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+
+* '''Launchpad Entry''': https://launchpad.net/distros/ubuntu/+spec/boot-message-logging
+* '''Created''':  by ScottJamesRemnant
+* '''Contributors''': ScottJamesRemnant, JeffBailey, SimonLaw
+* '''Packages affected''': `sysvinit`, `usplash`, `lsb-base`
+
+=== Summary ===
+
+This specification discusses what messages will be output on boot, which are available to other processes such as `usplash` and what is logged to `/var/log/boot`; including the mode of dispatch and translation of those messages.
+
+=== Rationale ===
+
+The messages output during the boot process often carry useful information, yet scroll past too quickly to be read by all but the fastest eyes.  Additionally much could be output that is not, such as status messages or detailed error messages, because there is no writable filesystem at that point in the boot process.
+
+Such messages are useful to developers and system administrators for debugging problems but are not so useful, and indeed can often scare off, novice users.
+
+=== Use cases ===
+
+* Benson is user who is not tech-savvy and is currently confused by the large number of messages during the boot sequence.  He would be comforted by no messages and a simple indication that the machine has not hung.
+
+* Karl is a systems administrator who would like to be able to watch servers boot and see which services are starting and which have failed to start.
+
+* Duncan is a consultant who has been called in to determine why a client's server is not running correctly, the problem happens at boot and there are no useful log files for him to read.
+
+* Dale is an Ubuntu developer and bug contact for a package that is failing at boot-time, he would like be able to ask for a verbose log file of the boot to quickly pin-point the problem.
+
+* Greg is a member of the Ubuntu QA team who triages incoming bug reports before giving them to developers, a single verbose log file of the boot would be a great aid towards determining the cause of the problem.
+
+* Jorge is a Spanish user who does not speak English, he is unable to read the messages that scroll past as they are not translated.
+
+=== Scope ===
+
+This specification is proposed for edgy and initially affects only the init process, though can touch particular init scripts.
+
+=== Design ===
+
+To allow for differing requirements of the number and style of messages displayed and logged during the boot process, the following levels of output are defined.  Each includes all of the messages from the previous log levels, unless otherwise stated.
+
+==== Quiet ====
+
+This is the level of information that will be passed to `usplash` by default, and sent to `/dev/console` when `usplash` is normally running.
+
+* Critical messages only.  Any message printed explains why the boot process is being delayed or stopped immediately after the message.
+
+* Progress of fsck is displayed.
+
+* Boot activity is shown, either as a progress bar or throbber if appropriate.  Whichever is displayed will be driven by activity from the init system, rather than idle time, so inactivity can be spotted.
+
+ <pre>
+Loading kernel.....
+
+Ubuntu edgy (development branch) ubuntu tty1
+
+ubuntu login:
+</pre>
+
+==== Failures ====
+
+This is the level of information that will be sent to `/dev/console` on servers where `usplash` is not normally running.
+
+* The names of services or scripts that failed during boot are printed, with a short error message if a useful one can be obtained.
+
+ <pre>
+Loading kernel...
+
+apache2 failed: unable to bind to 192.168.1.1
+
+Ubuntu edgy (development branch) ubuntu tty
+
+ubuntu login:
+</pre>
+
+==== Services ====
+
+* "Service starting" messages will be shown on a single line, overwriting any previous starting message on that line.
+
+* "Service failed" messages will be shown and the cursor moved down to the next line for future messages.
+
+(example during boot, once boot has complete it looks the same as the Failures mode)
+
+ <pre>
+Loading kernel...
+
+apache2 failed: unable to bind to 192.168.1.1
+Starting postgresql...
+</pre>
+
+==== Verbose ====
+
+This is the level of information that will be placed in `/var/log/boot`.
+
+* Kernel messages.
+
+* Names and arguments of scripts being run.
+
+* Commands run within each script (`sh -x`), perhaps optional.
+
+* Service starting and service failed messages on their own lines.
+
+* Output of every service and script run.
+
+* Early capture of `syslog` calls by reading from `/dev/log` until `syslogd` is able to take over.
+
+=== Implementation ===
+
+The precise implementation of how messages are obtained from the init scripts is largely dependant on the outcome of the ReplacementInit discussion, however it is likely that at least the following will be true:
+
+* Standard output and standard error will be redirected to the logging process.
+
+* An additional channel, or known file descriptor, will be available for logging failure messages and critical errors.
+
+* These messages will be sent from the init scripts using functions either similar to, or just using the LSB init functions.
+
+* Service descriptions (and thus the start/stop messages) will be handled from the init system, not the init scripts themselves.  This allows for much easier translations, directly obtained from description of the script rather than having to parse the script manually.
+
+* The output messages will be translated using `gettext`.
+
+* Kernel messages would not be sent to `/dev/console`.
+
+* Existing scripts would always be run with `VERBOSE=yes` to get the full messages.
+
+==== Script changes ====
+
+The initial necessary script changes are minimal, if not zero, as any messages the scripts print today would be shown only in the verbose mode.  The only additions would be to ensure scripts exit with a failure code to indicate failure (largely handled by LSB init functions) and supply a useful reason for the failure where appropriate; these things can be added on an individual basis as time permits.
+
+The only scripts that will need to be changed are those that can cause a critical failure of, or delay to, the boot process such as filesystem checking and mounting.  The following is noted:
+
+* `fsck` should be run such that its progress output is captured and sent to `usplash`
+
+* failure of `fsck` should log a critical message to ensure that it is displayed.
+
+* failure of `mount` should do likewise.
+
+==== Code ====
+
+A tiny logging daemon needs to be implemented to co-ordinate the messages being logged and displayed.
+
+* It receives line-terminated messages on a number of file descriptors, the source and timestamp for these is noted and the message translated.
+
+* If `/var/log/boot` is open for writing, the message is appended to the file.  If the file cannot be opened, the message is appended to an in-memory buffer.  If the file was successfully opened, the in-memory buffer is flushed to the file, and the message appended.
+
+* A list of named executables are run and passed the message formatted as required, provided the message is appropriate for the level of logging desired.
+
+* The message is printed to `/dev/console` if appropriate.
+
+The named executables would include `usplash_write` and for the SpokenBoot specification, `spd-say`.
+
+For future expansion, this program could also write the messages to a designated network socket (on the kernel command-line, causing the network card to be configured in initramfs) providing peace-of-mind during remote reboots.
+
+----
+CategorySpec

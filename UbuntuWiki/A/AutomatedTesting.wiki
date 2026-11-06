@@ -1,0 +1,305 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+=== Status ===
+
+* see https://launchpad.net/distros/ubuntu/+spec/automated-testing
+
+=== Contents ===
+
+=== Introduction ===
+
+Discuss ways to automatically check certain package properties which we regard as essential.
+
+=== Purpose, Scope and Use Cases ===
+
+Currently it is possible to upload packages which do not work at all, can disrupt the packaging system, are uninstallable, or have a broken build system. We want to introduce a set of universally applicable tests that reject such packages before they irritate anyone. To the extent possible, a package should also be able to check its own functionality to make regressions immediately visible.
+
+==== Testing environment use cases ====
+
+* Build daemons can test before installing packages in archive
+* Developers can test before uploading
+* Systems can be tested after installation
+
+==== Test case possibilities ====
+
+* Check validity of binary packaging (all packages)
+* Check (re)buildability of source packages (all packages)
+* Check for library and linking errors (many packages)
+* Check for functionality regressions (where applicable, i. e. for non-interactive programs)
+
+=== Overall Design ===
+
+==== Testing of installed packages ====
+
+We will create the following new machinery:
+ 1 Tester core.  This:
+** Interprets test metadata
+** Knows how to identify and locate tests, determine which test(s) are possible under the current circumstances
+** Knows how to invoke tests and collect results
+** Knows how to request test virtualisation services from the virtualisation regime
+** Provides a convenient interface for both manual use and building into automation (eg launchpad)
+ 2 Generic tests
+** Provides a set of tests (including metadata) which are supposed to be applicable to any package.  These tests will typically involve building, installing, removing, etc. the package
+** Provides appropriate metadata about these tests
+ 3 Virtualisation regime
+** Encapsulate the invocation of tests
+** Insulates the host that is performing the tests from the effects of the tests (insofar as this regime is able to)
+** Provides a standard interface to the driver core
+** There may be (eventually, will be) several virtualisation regimes; initially we will provide one that is simple to implement
+ 4 Package-specific tests
+** Test scripts and test metadata are found in a specified location in the unpacked source package.  These tests test the ''installed'' version of the package.
+
+Initially, all but the package-specific tests will be in a single test package.
+
+There are two main new interfaces here:
+
+* Test/metadata interface: a standard way describing the tests available and their important properties.  Provided by packages and the generic tests and used by the tester core.
+* Virtualisation interface: provided by virtualisation regimes and used by the tester core.
+
+==== Virtualisation ====
+
+To test a package it must be installed (and often, removed again) for testing.  Its installation or operation might alter the system or data in other ways.
+
+For other than the most ad-hoc testing by a knowledgeable expert, there has to be a separate testbed for this purpose.  Ideally, the testbed would be virtualised.
+
+There are a fair variety of virtualisation systems which differ in maturity, intrusiveness into the hosting system/hardware, features, etc.  We are interested in the following features:
+* Ability to set a checkpoint or make a snapshot, so that changes to the testbed filesystem can be undone fairly efficiently.  (Must have, for virtualisation to be at all useful.)
+* Defence of the host system from the virtual environment (ie, security).  (Must have for automated testing of possibly-untrusted packages, but optional in many cases for developers' use on their own systems.)
+* Ability to efficiently determine what changes were made to the testbed filesystem (as filenames and contents, not disk block changes).
+* Obviously, ability to run commands in the testbed (perhaps as root) and get the output and exit status, and copy data back and forth.
+
+Approaches or part-approaches that seem plausible include:
+* chroot.  Has the virtue of being well-known (used already by buildds, for example) and simple to implement - so we will do this first, with either unionfs or lvm snapshots.
+* <nowiki>[[http://www.cl.cam.ac.uk/Research/SRG/netos/xen/|Xen]]</nowiki>.  Looks very promising, and we hope to get it running soon in Dapper. That would require to run Dapper on the test server, but since we don't need public access on this server, we could maybe live with this for a limited time.
+* <nowiki>[[http://user-mode-linux.sourceforge.net/|UML]]</nowiki>
+* Union-fs
+* CPU emulators (Qemu, Bochs, PearPC, Faumachine?)
+* LVM snapshots
+* Separate machine
+* inotify
+
+There is a lot of activity in many of these projects, so their capabilities are changing.  And, different approaches make sense in different contexts (local testing, launchpad autotest, etc.).  So we introduce an abstraction interface which we'll provide at least one low-impact sample implementation of.
+
+Initially we will implement a regime based on chroot (for encapsulation), inotify (if feasible, for getting lists of changed files etc.) and lvm/dm snapshots (for reverting the fs efficiently).
+
+=== Interface Design ===
+
+==== Tests/metadata ====
+
+'''NOTE''' that this specification is no longer the master copy.  The primary copy is in autopkgtest/doc/README.package-tests.  '''DO NOT EDIT''' this section in the wiki; it is retained here only for historical interest.
+
+'''DRAFT''' ''- this section needs discussing with debian-policy.  We want to share this test infrastructure with Debian and other distros to allow us not to bear the burden of writing all the tests, forever.''
+
+The source package provides a test metadata file `debian/tests/control`.  This is a file containing zero or more RFC822-style stanzas, along these lines: <pre>
+        Tests: fred bill bongo
+        Restrictions: needs-root breaks-computer
+</pre>
+
+This means execute `debian/tests/fred`, `debian/tests/bill`, etc., each with no arguments, expecting exit status 0 and no stderr.  The cwd is guaranteed to be the root of the source package which will have been built (but note that the tests ''must test the installed version'').  If the file to be executed has no execute bits set, `chmod a+x` is applied to it.  `TMPDIR` will point to a directory for the execution of this particular test, which starts empty and will be deleted afterwards (so there is no need for the test to clean up files left there).
+
+Restrictions:
+* needs-root
+* breaks-computer
+* rw-build-tree: The test needs write access to the built source tree (so it may need to be copied first).  Even with this restriction, the test is ''not'' allowed to make any change to the built source tree which (i) isn't cleaned up by debian/rules clean (ii) affects the future results of any test (iii) affects binary packages produced by the build tree in the future.
+
+If the stanza contains: <pre>
+        Tests-Directory: path-from-source-root
+</pre> then we execute `path-from-source-root/fred`, `path-from-source-root/bar`, etc.  This allows tests to live outside the `debian/` metadata area, so that they can more palatably be shared with non-Debian distributions.
+
+Any unknown thing in Restrictions, or any unknown field in the RFC822 stanza, causes the tester core to skip the test with a message like `test environment does not support "blames-canada" restriction of test "simpsons"'.
+
+Additional possibilities: <pre>
+        Depends: ...
+        Tests: filenamepattern*
+        Restrictions: modifies-global-data needs-x-display
+</pre> etc. - moves complexity from individual packages into central tester core.
+
+A basic test could be simply running the binary and checking the result status (or other variants of this).  Eventually every package would to be changed to include at least one test.
+
+Ideally eventually where possible the upstream regression tests could be massaged so that they test the installed version.  Whether this is possible and how best to achieve it has to be decided on a per-package basis.
+
+Even integration tests can be represented like this: if one package's tests Depend on another package, then they are effectively integration tests.  The actual tests can live in whichever package is most convenient.
+
+==== Virtualisation interface ====
+
+'''NOTE''' that this specification is no longer the master copy.  The primary copy is in autopkgtest/doc/README.virtualisation-server.  '''DO NOT EDIT''' this section in the wiki; it is retained here only for historical interest.
+
+The virtualisation regime provides a single executable program which is used by the tester core to request virtualisation facilities.
+
+The server has the following states:
+* Closed: there is no particular testbed.  This is the initial state.
+* Open: the testbed is running and can be communicated with (and, if applicable, is not being used by any other concurrent test run)
+
+(Note that these are the states of the server, in the tester core to server protocol.  The actual testbed will probably have more states, including for example Closed, Open (and therefore busy), Modified, Broken, etc.  Ideally the virtualisation regime will prevent multiple concurrent uses of the same testbed; the tester core is allowed to assume that either its caller or the virtualisation regime will ensure that it has exclusive use of the testbed.)
+
+The server program is invoked with the argument `--debian-package-testing` and then proceeds to speak a protocol on its stdin/stdout.  The protocol is line-based.  In the future other ways of invoking the server may be defined; the current server should of course reject such invocations.
+
+* Initial response from regime server: `ok`
+* Command `capabilities`; response eg `ok efficient-diff revert ...` where the words after ok are features that not all regimes support.  Valid in all states.  Currently defined features:
+** `revert`: the testbed will actually revert when it is closed.  If this feature is not mentioned then changes to the testbed are persistent (so destructive tests should not be performed).
+** `changed-files`: the regime will provide a `changed-files` file (see below).
+* Command `open`; response `ok testbed-scratchspace`.  Checks that the testbed is present and reserves it (waiting for other uses of the testbed to finish first, if necessary).  State: Closed to Open.  testbed-scratchspace is a pathname on the testbed which can be used freely by the test scripts.
+* Command `stop local-pathname`; response `ok`.  Indicates that the testbed should be stopped; replaces local-pathname (on the host) with a directory containing a representation of the changes to the testbed's filesystem.  Then reverts the testbed.  State: Open to Closed.
+* Command `close`; response `ok`.  Stops and undoes filesystem changes.  State: Open to Closed.
+* Command `execute program,arg,arg... stdin stdout stderr cwd`; response `ok exitstatus`.  Executes the command (args separated by commas, everything url-encoded).  stdin, stdout, stderr are files on the testbed (must be files, not pipes).
+* Command `copydown host-tree testbed-path` or `copyup testbed-tree host-path`.  Response `ok`.  Like `cp -dR --preserve=mode,timestamps` only across the testbed boundary.
+* Command `quit`; response `ok` and regime server exits with status 0, after closing the testbed if applicable.
+
+On any error including signals to the regime server or EOF on stdin the testbed is unreserved and restored to its original state (ie, closed), and the regime server will print a message to stderr (unless it is dying with a signal).
+
+The representation of changes to the local filesystem is a directory containing zero or more of:
+* `changed-files`: list of filenames, each one nul-terminated
+* other formats with other data or combinations of data (for future use)
+
+=== Invoking the test suites ===
+
+The tester core will provide an interface which will be rich enough for build daemons or other automated test systems as well as interactive use by developers.
+
+Integration of this functionality into Launchpad will be the next step - see Tasks for the Future, below.
+
+The exact interface provided by the tester core to callers is not specified; the details will be as is convenient for the core to provide and will of course be properly documented.
+
+For example, the interface '''might''' look something like this: <pre>
+        $ debian/rules build
+        $ sudo dchroot -d spong \
+         dpkg -i ../name-of-binary-package_*.deb
+        ...
+        $ DEBIAN_TEST_VIRT=virt-chroot-boring-stupid \
+         DEBIAN_TEST_VIRT_CHROOT=/dchroots/spong \
+         debian-test-core-run-tests name-of-binary-package
+        fred    PASS
+        bill    SKIP needs-root
+        bongo   FAIL see test-out-bongo.file.somewhere
+        $ echo $?
+        1
+        $
+</pre> or <pre>
+        ...
+        $ DEBIAN_TEST_VIRT=virt-chroot-boring-stupid \
+         DEBIAN_TEST_VIRT_CHROOT=/dchroots/spong \
+         debian-test-core-run-tests --deb name-of-binary-package_*.deb
+        (install) PASS
+        fred    PASS
+        bill    SKIP needs-root
+        bongo   FAIL see test-out-bongo.file.somewhere
+        $ echo $?
+        1
+        $
+</pre>
+
+Supported testing approaches, provided by the tester core to its caller, will include (or provide functionality sufficient for):
+* Build package on testbed, install it, test it
+* Build package on host, copy build tree and package to testbed, install and test
+* Run tests on testbed, given full pathname of build tree on testbed and/or on host
+Other approaches which are convenient for developing tests, packages and testing software should be provided.  The internal design, and/or external interface, of the tester core should make it easy to add approaches.
+
+=== Rationale Q and A ===
+
+Q. Why put the tests in the source package ?
+
+A. Other possibilities include a special .deb generated by the source (which is a bit strange and what happens to this .deb and will make it even harder to reuse upstream test suites), or putting them in the .deb to be tested (definitely wrong - most people won't want the tests and they might be very large) or having them floating about separately somewhere (which prevents us from sharing and exchanging tests with other parts of the Free Software community).  The source package is always available when development is taking place.
+
+Q. Why the declarative test metadata, which has to be parsed, rather than just (say) a single test script to run ?
+
+A. The script which was run would have to decide which tests to run, based (eg) on environment variables etc.  It would end up replicating the machinery in the tester core, but this machinery would have to be in each package.  This also makes it harder to report things like which individual tests were passed, failed, skipped, etc.  The actual interface to the tester core would end up having to be nearly as complicated, anyway.
+
+Q. Re `execute program...` virtualisation regime server command: ColinWatson: Many programs behave differently (relevantly so) depending on whether stdin/stdout/stderr are regular files, pipes, or terminals. Can we arrange to test these as well?
+
+A. This is possible but we don't want to force the virtualisation regimes to directly support this.  If necessary the test suite could provide its own wrapper scripts etc. to do this.
+
+Q. ColinWatson: mdz and sabdfl would both like the per-package test metadata and the tests to be outside the debian/ directory, so that we can more conveniently share tests with non-Debian-based distributions in future. This does require inventing a name which won't be in use in any source packages.
+
+A. The metadata should remain in `debian/` because it contains data with format specified by, and meaning only relevant in the context of, Debian and derivatives.  The tests can (in the latest spec) be elsewhere, using the new `Tests-Directory` stanza field.
+
+=== Tasks for the future ===
+
+* Provide code in launchpad which runs packages' tests and acts on and/or appropriately publishes the results.
+* Support better virtualisation
+* Make lots of tests - at least a basic as-installed selftest for each package
+* Provide standard machinery for GUI tests
+* Proper diffs of changed files
+
+=== Proposed tests ===
+
+The minimum implementation profile to consider the goal achieved:
+* Install package
+* Run package's own tests
+* Purge package
+* Check filesystem not changed (unless inotify turns out to be infeasible)
+* At least one package which has some reasonable package-specific tests.
+
+The remainder of this section lists suggestions for the implementer's initial set of tests.  We expect the test suite to continuously expand and improve.
+
+==== Check validity of binary packaging ====
+
+Test installability:
+# Start with a sandbox with only essential packages.
+# Install all dependencies.
+# Create a list of all files in the sandbox.
+# Install the package.
+# Run functional self tests of the package (see below).
+# Reinstall the package to check that a (degraded) upgrading works.
+# Remove the package.
+# Remove all dependencies of the package.
+# Purge the package. If this fails, then the purging code depends on non-essential packages, which is invalid.
+# Create a list of all files in the sandbox and report any differences against the first list.
+
+Test conflicts:
+# Create a mapping installed file -> package from package contents lists.
+# Create the union of all installed files.
+# Remove all entries from that set whose file only appears once.
+# Remove all pairs where the associated packages declare a conflict to each other.
+# Ideally the remaining set should be empty, report all package names that are left.
+
+(Note that apparently some Debian folks already do this, so there might be some scripts around).
+
+Test debconf:
+* Install the packages using the non-interactive frontend.
+* Intercept mails sent by non-interactive to collect the questions the package would ask.
+* Ideally there should be no questions.  '''NOT TRUE:''' ''ColinWatson: It's not clear to me that this would always be a legitimate test failure ... we don't want packages in the default install to ask questions when installed at high priority under the noninteractive frontend, but requiring this for all packages is equivalent to requiring that packages must not ask any questions when installed at high priority, which I don't think is reasonable.'' I agree. This proposed test idea should stay here in the hope that it provides inspiration for something more correct. -iwj
+
+Test package contents:
+* Compare package contents list with latest version in the archive; notify the uploader if the number of files changed considerably (we had such errors in the past).
+
+==== Check validity of source package ====
+
+Buildability is already tested on the buildd's. However, many packages have broken `clean` rules which leave the package in an unbuildable state. We should fix all packages where this is the case.
+
+# Unpack the source package.
+# `dpkg-buildpackage`
+# Rename the resulting `diff.gz` to `diff.gz-first`
+# `dpkg-buildpackage`; if this fails, the packaging is broken
+# Compare the new `diff.gz` to `diff.gz-first`; if there is any difference, report this as a potentially broken package; however, many packages update `config.{guess,sub}`, so these should be excluded from the test
+
+==== Package self tests ====
+
+Build time self tests:
+* Many packages already come with test suites which are run at build time.
+* Add `debian/rules check` which runs those self tests and exits with 0 if all of them are successful.
+* `check` should not be a dependency of `binary` since there are test suites which take a fair amount of time, and it would be good to be able to decouple the testing from building (to allow the checks to be offloaded to another host or testbed and to shorten the critical path for tall build-dependency stacks).  We rather modify `dpkg-buildpackage` to check for the existence of the `check` target and call it if it exists. `dpkg-buildpackage` should get a new option `--no-check` to disable the invocation of the test suite.
+* If `check` fails, this should generally make the build fail to prevent publishing regressions to the archive. There are some exceptions like `glibc` where many tests are expected to fail and it is unreasonable to modify the package to disregard them; in these cases `check` should exit with a zero exit status if appropriate.
+* Idea: Export the results of regression tests in a tarball and publish it somewhere so package maintainers do not need to rebuild the package to evaluate the reason for failures.
+
+Run time self tests:
+* Call `ldd` on all ELF binaries and libraries and check for unresolved libraries.
+* `dlopen()` all ELF libraries and report failures.
+
+==== BOF braindump test suggestions ====
+
+** Install/uninstall (http://packages.debian.org/unstable/devel/piuparts):
+*** check for cruft left over on the filesystem after install/uninstall
+*** check for double-installs
+*** perhaps a package black-list (to avoid testing stuff which won't live nicely in the virtualization environment -- perhaps networking stuff)
+** Upgrading
+** Test functionality (where existent)
+
+----
+CategorySpec 

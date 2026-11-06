@@ -1,0 +1,182 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+== Proactive Security Roadmap ==
+
+=== Status ===
+
+** Created:  by MattZimmerman<<BR>>
+** Priority: LowPriority<<BR>>
+** People: MartinPittLead, AndrewMitchellSecond <<BR>>
+** Contributors: MattZimmerman<<BR>>
+** Interested: MartinPitt, MatthiasKlose, BrandonHale, AndrewMitchell<<BR>>
+** Status: ApprovedSpecification, EdgyGoal, DistroSpecification<<BR>>
+** Branch: <<BR>>
+** Malone Bug: <<BR>>
+** Packages: <<BR>>
+** Depends: <<BR>>
+** UduSessions: 2(0)<<BR>>
+
+=== Introduction ===
+
+Establish a strategy for implementing proactive security features in Ubuntu.
+
+=== Rationale ===
+
+We want to reduce the risk of security holes in Ubuntu systems by reducing the number of potential attack vectors and find general solutions for preventing common classes of vulnerabilities. This confines the impact of actual vulnerabilities to a minimum. 
+
+Visuals:  <nowiki>[[http://img306.imageshack.us/img306/4461/basicexploitattacktree3hi.png|Normal]]</nowiki> vs. <nowiki>[[http://img306.imageshack.us/img306/3024/protectedexploitattacktree7mg.png|Protected]]</nowiki> (protections:  address randomization; position independent executables; memory protection policy; stack smash protector)
+
+=== Scope and Use Cases ===
+
+* We will patch the Ubuntu kernel to provide protection against common attacks and reduce the privileges of system daemons so that they run with least privileges.
+
+* Users may find that some programs need fixes as a result of these protections, and so we will provide a method to disable the kernel improvements at runtime.
+
+* If a community member supplies packages, we will have modified gcc and kernel packages with hardened patches available in universe.
+
+=== Implementation Plan ===
+
+See also <nowiki>[[ProactiveSecurityRoadmap1]]</nowiki>
+
+==== Data Preservation and Migration ====
+
+Does not apply here.
+
+==== Packages Affected ====
+
+`Kernel`:
+* Port the <nowiki>[[http://www.openwall.com/|OpenWall]]</nowiki> patch that prevents exploitation of unsafe temporary file creation; it is really trivial; add a proc file to be able to enable/disable at runtime.
+** This could be done via SELinux instead.
+* Provide a grsecurity kernel in universe, if a community member is interested to care about it; <nowiki>[[http://people.ubuntu.com/~pitti/arch/martin.pitt@canonical.com--2005/linux-hardened--devel--2.6.10/|packaging]]</nowiki> is available.
+* Extract and port some of grsecurity's `/proc` restrictions which can be enabled/disabled at runtime:
+** Users can only see their own processes; this will keep them from e.g. seeing confidential command line arguments of other processes, which is still a very common mistake.
+** Hide memory addresses from map files: make it harder to deploy successful exploitations of heap overflows.
+** Probably can show these if the process reading is owned by current->euid, since the process will have the same privileges anyway.
+** Can we do this using SELinux policy?
+* Extract and port randomization patches from grsecurity:
+** PID: Prevent the prediction of PIDs for child processes to make it harder to exploit race conditions, and avoid information leaks.
+** TCP sequence numbers: Make it harder to hijack TCP connections.
+** TCP source ports: Drastically increase the average time for TCP reset attacks.
+* Add heap randomization as from Fedora Core/RHEL.
+* Patch the kernel for adjustable address space randomization via kernel command line parameters
+** ''heap-rand=n'':  Give ''n'' bits of randomization for the heap.
+** ''stack-rand=n'':  Give ''n'' bits of randomization for the stack.
+** ''mmap-rand=n'':  Give ''n'' bits of randomization for the stack.
+** These would cause the area over which these segments are randomized to be of size ''PERIOD'' * 2^''n'', where ''PERIOD'' is 16 for the stack and 4096 for the heap and mmap() base.
+** Large order randomization as used in PaX could be activated on the kernel command line.
+** A patch should be sent to the linux kernel mailing list for inclusion.
+** This could be deployed without any real changes and still allow developers to test high-order ASLR.
+
+`prelink`:
+* Prelinked applications leave a huge `/var/log/prelink.log` which contains memory address; patch prelink to not dump addresses.
+
+`gcc`:
+* If a community member is interested, we can provide SSP/Fortify/etc. gcc packages in universe, but we will not put them into main and use them as a default as long as upstream does not adopt a solution. Mainstream (gcc 4.1, the developement branch) integrated stack smashing protections. When gcc 4.1 will become the standard Ubuntu compiler, would be worth to activate this option for most packages compilation. 
+
+`dhcp3-client`:
+* Currently `dhclient` runs as root, which is much more than necessary.
+* Privilege requirements: normal users with CAP_NET_RAW and CAP_NET_BIND_SERVICE; needs a suid wrapper to call /etc/dhcp3/dhclient-script
+* `dhclient-script` must be security reviewed (proper quoting, etc.).
+* Status: Implemented in Breezy, patch sent to Debian.
+* OpenBSD has a modified (with privsep and the like) and well audited version of dhclient and dhcpd. Could be of use for a comparison.
+
+`dhcp3-server`:
+* Currently `dhcpd` runs as root, which is much more than necessary.
+* Privilege requirements: normal user with CAP_NET_RAW and CAP_NET_BIND_SERVICE for initialization phase; these can be dropped after socket creation.
+* Status: Implemented in Breezy, patch sent to Debian.
+
+`inetd`:
+* This package is currently installed by default as part of the base system; since it is a daemon running as root, but is not used much any more, it is desirable to throw it out to Supported.
+* MartinPitt compiled a list of all packages in main which use inetd on the InetdUsage page.
+
+`unix_chkpwd`:
+* Change `/sbin/unix_chkpwd` from setuid root to setgid shadow by default.
+* Since this breaks NIS lookups (see <nowiki>[[http://bugs.debian.org/cgi-bin/bugreport.cgi?bug=155583|#155583]]</nowiki>), the permissions need to be changed back to setuid root if the package `nis` is installed. There is no clean way to achieve that, though. After consulting Scott, the least evil hack seems to be:
+** `nis` postinst: If `unix_chkpwd` does not yet already have an override, do `dpkg-statoverride` to set the permissions to `root:root 4755`.
+** `nis` prerm: If the current permissions of `unix_chkpwd` is `root:root 4755` and there is a stat override for it, remove the override to restore permissions.
+
+=== Outstanding Issues ===
+
+Desirable for the future:
+* Exponentially delay the respawning of repeatedly crashing applications to prevent brute force attacks (eventually finding the correct offset of memory locations for buffer overflow attacks).
+** There are some potential ways to do this that can be mainly non-intrusive, these will be discussed later.
+* Evaluate chroot hardening patches.
+** A lot of nice stuff in GrSecurity.
+* Memory protection: Jamie will research whether there are things exploitable in exec-shield which aren't in PaX.
+** Typically only the stack can be made non-executable by Exec Shield due to a limitation of design.  Determine the viability for attack in the heap, library data, shared memory segments, and anonymous mmap()s.
+** The presence of a hardware NX bit overrides Exec Shield, granting proper enforcement of PROT_EXEC on all memory.
+** There are several memory protection policies that should be looked at to enforce ''data-code separation''.
+** Proper ''data-code separation'' is important for memory protection security; without it, we can make no guarantees that the protections are actually ever applied to a program, and thus we can not guarantee that the system is attempting to prevent an attack as advertised.
+** We could implement some of the simpler policies from PaX ''mprotect() Restrictions''.  SELinux can currently be used to implement these fine-grained restrictions.
+** PaX supplies a policy to passively and ''effectively'' prevent any memory from being ''created'' with ''PROT_EXEC''|''PROT_WRITE''; this is largely safe.
+** PaX supplies a policy to actively enforce separating ''PROT_WRITE'' and ''PROT_EXEC'' (''data-code separation''), by preventing memory from having ''PROT_EXEC'' added when non-present or having ''PROT_WRITE'' added when ''PROT_EXEC'' is already present.
+*** This is largely safe, but in notable cases (Java, Mono, nVidia GLX drivers) breaks some things.
+*** If it could be easily caught and a notice displayed to the user (similar to DEP on Windows), this would allow administrators to keep track of what programs were violating proper ''data-code separation'' and thus potentially more vulnerable.
+* Evaluate increased address space randomization.
+** Minor ASLR was merged since 2.6.12.
+** Fedora Core and RHEL use higher order entropy for ASLR, closer to what PaX uses.
+** It may be possible to control ASLR via a boot-time flag and default it to be similar to PaX.
+* Compile-time stack protection.
+** mudflap comes with gcc 4.0, but does not help in any way to improve proactive security
+** mudflap is a debugging tool, not a security tool.  Stop treating it like the next ProPolice.
+** <nowiki>[[http://www.research.ibm.com/trl/projects/security/ssp/|SSP]]</nowiki> currently offers the <nowiki>[[http://www.ida.liu.se/~johwi/research_publications/paper_ndss2003_john_wilander.pdf|most effective protection]]</nowiki>, but does not (currently) work with 4.0 and is unlikely to be accepted upstream.
+** Upstream in 4.1, although some report it to be semi-broken.
+** There is another project called FORTIFY_SOURCE which has a better chance to be eventually accepted upstream.
+** We will not support any solution that is not at least considered upstream.
+** Fedora Core 5 uses both FORTIFY_SOURCE and mainline SSP in tandem.
+** As of now, mainstream gcc development branch (4.1) implemented this protection (not mudflap). See <nowiki>[[http://gcc.gnu.org/gcc-4.1/changes.html|Gcc 4.1 changes]]</nowiki>
+* Runtime memory protection
+** Since there is no accepted upstream solution, we will not support that in main for now. However, if a community member wants to provide universe kernels, we would greatly appreciate that.
+** Some info is already compiled at http://ubuntu.com/wiki/UbuntuHardened.
+* Reduce the privileges of cron.
+** Parsing the crontabs as normal user and introducing a minimal setuid wrapper for actually executing the commands as the target user will not help to improve security; the remaining stuff (timer and signal handling) does not accept user input and thus is not very error prone. I do not really have a good idea about this. (Note: atd also runs with root privileges, it just hides them pretty well; I do not have an idea how to deroot this either, it's the same problem.)
+* Support SELinux out of the box; there is a <nowiki>[[SELinux|separate BoF]]</nowiki> about this topic. It should be noticed that Secure Computing recently reaffirmed his patent right on SELinux "Type Enforcement" technology. They allow to use SELinux freely on anything but firewalls, vpn and authentification servers etc. See <nowiki>[[http://www.securecomputing.com/pdf/Statement_of_Assurance.pdf|SSC Statement of assurance]]</nowiki> and <nowiki>[[http://lwn.net/Articles/6267/|LWN article]]</nowiki>. What's our position in regard to this patent ?
+* Evaluate RSBAC or GRsecurity as potentials SELinux alternatives for ACL. See. <nowiki>[[http://gentoo-wiki.com/Access_Control_Comparison_Table|Gentoo's ACL Comparison Table]]</nowiki>
+
+=== Comments ===
+
+ColinWatson: I think other-user-process hiding should be off by default; when turned on, it requires the system administrator to use extra privilege to inspect the state of the system, which is not necessarily an obvious security win.
+
+JohnMoser:  Colin, consider that most users don't need to know all that.  A 'sudo ps -e' is harmless unless the user running ''sudo'' has his account compromised, in which case running ''sudo'' could run a trojan that runs ''sudo'' to get itself root and (for stealth) execute your command.  Consider what I just said:  accounts with ''sudo'' access are basically root accounts with the stupidity guard on, they won't protect you from malware.
+
+FurryBall: I would like to comment on the SSP and userland protection part. In overall there are more effective and secure ways to achieve this - doing it by the kernelland governing the userland. Mentioning PAX and Exec_shield. I'd say do the task once and focus on doing it better there..
+
+JohnMoser: Furry, PaX and Exec Shield do not do direct stack smash protection, they do general memory corruption trap-and-kill.  Also in some cases you still get an executable stack, or you have low entropy on address space randomization and a 216 second brute force on apache.  In these cases, you have 32 orders of magnitude more work to do to break the SSP canary.  Sorry, but a format string bug will quickly defeat this; we're still 4 billion times better protected against vanilla buffer overflows on the stack.
+
+JohnMoser: Furry, you should also consider that ProPolice/SSP will re-order local variables and place passed arguments into local variables when entering a function.  This protects local variables and passed arguments (i.e. pointers) from short buffer overflows in ways the kernel could never hope to.  The only damage a buffer overflow can do before we detect it is to other stack frames from the calling function chain.
+
+JohnMoser:  An interesting hack would possibly be to combine ProPolice/SSP &mdash; protection of everything in the current stack frame &mdash; with a very ugly kernel and compiler hack that makes every stack frame start on a new page, and sticks an unmapped page between each stack frame.  This would create a situation where buffer overflows on the stack can reliably be prevented from altering program flow before being detected; RETP and SFP damage would be detected before use, passed arguments and local variables are not harmed, and the previous stack frame has a guard page that can't be faulted into.  This is of course a major ABI change and total breakage; '''it's a cute idea, but not viable'''.  Maybe OpenBSD will do it.
+
+JohnMoser:  There probably needs to be a team set up to handle this.  This stuff isn't a little toy you slap in just because "it helps" or something along those lines; these protections do absolutely nothing unless you can quantify their effects.  Saying, "We don't know how often or if it really works, but this protection may or may not stop a buffer overflow," will not tell you anything; when it comes down to it, the only safe assumption is that it's still 100% exploitable.  To that end, there needs to be a team to quantify exactly what the protections do and do not do; and to test and evaluate regressions to assure that the protections work as expected.  See ProactiveSecurityEffects for some quantification examples.
+
+==== Need for a Team ====
+We need a team dedicated to managing proactive security in Ubuntu.  Proactive security implementation affects packager policies, the kernel, and quality assurance testing.  We need a group whose job is to make sure the policies on how to build packages are clear and enforced; make sure the kernel patches are properly applied; and form regression tests to make sure that the protections are actually being applied and doing their job.
+
+==== Input from JohnMoser ====
+Considering hardened kernels, PaX/GrSecurity vs. Exec Shield is a major argument.  Exec Shield provides a very nice level of protection; while PaX provides a stricter but more secure environment.  Exec Shield has wide testing in Fedora Core and RHEL, and thus is an easier near-target.  See PaXvExecShield for a dedicated wiki entry comparing the two.
+
+Firstly, be aware that Exec Shield '''does not''' provide a real NX-bit.  A split is made where above is executable and below is non-executable; the highest '''PROT_EXEC''' page is the last executable page.  Typically this is a strip of code from a library; the stack thus will be non-executable.  '''The heap and library data and such are all still executable'''.  To correct this, either the CPU needs a real NX bit; the supervisor bit overloading (SBO) technique used in PaX PAGEEXEC emulation need be used to supplement the current method; or a new address space layout is needed.
+
+Most architectures besides IA-32 should have an NX-bit; some IA-32 architectures and IA-32 on x86-64 will have a hardware NX bit.  When this is present, it is turned on automatically.  This has been a feature in mainline for a short while now, since around 2.6.10.
+
+SBO works rather well in most cases, although it can create a rather steep level of overhead in some rare usage patterns.  The stack is spared this by the normal Exec Shield emulation model; PaX adopted this model for PAGEEXEC as an optimization a while back for exactly this reason.  Take note that the design of SBO utilizes separate Instruction TLB and Data TLB banks; faults on the K6 architecture use the same TLB, thus SBO cannot be used here.  By detecting stepping at boot time, we could disable this before it is used.  Failing that, just generate a simple userland process before init starts and use it to test behavior directly.
+
+A new address space layout is possible; however, this would reveal a lot about the layout of our address space.  Heap, anonymous mmap(), stack, non-executable file-backed mmap(), and shared memory would all be mapped high; code segments would all be mapped low.  The impact on address space layout randomization would have to be evaluated.  Also, stray mappings and the vsyscall() pages (mapped higher than the stack) would defeat this; the vsyscall() page was taken care of with Exec Shield, however.  OpenBSD uses a special lay-out to achieve these goals.
+
+Exec Shield could be implemented in the default Ubuntu kernel.  This works quite well in Fedora/RHEL, and thus has a wide test base.  Exec Shield is also controlled by the '''exec-shield''' kernel command line; '''exec-shield=0''' turns it off, mimicing IA-32 behavior; while '''exec-shield=2''' defaults it on unless a binary opts out, mimicing behavior on a true NX bit platform.  Rather than support kernels with and without Exec Shield, using the boot option would be possible.
+
+If I recall correctly, Fedora Core and RHEL both use a higher order address space layout randomization than stock mainline; but the code is in mainline Linux.  We should perhaps look into patching the kernel to use high order entropy by default, more similar to PaX; but also to accept a kernel command line parameter such as '''stack-aslr=12''' and '''mmap-aslr=16''' to adjust this at boot time.  Low entropy randomization is easily brute forced in respawning daemons, especially ones which fork() to handle connections:  ''apache'' is an easy target.
+
+One problem with Exec Shield is it does not implement PaX mprotect() restrictions to enforce true ''data-code separation''.  PaX second-guesses the program and makes sure all memory is initialized with only one of '''PROT_WRITE''' and '''PROT_EXEC'''.  This does not typically hinder program execution; however, there may be a few cases.  We should look into implementing this as a managable policy to create ''passive data-code separation''.
+
+PaX also has the ability to enforce data-code separation.  In this mode, non-executable memory never gains '''PROT_EXEC'''; and executable memory may never be granted '''PROT_WRITE''' without dropping '''PROT_EXEC'''.  This gives ''active data-code separation''.  This can be disabled in PaX per executable binary or, with SELinux hooks, per process based on security context.  This policy control is worth implementing, as it gives enterprise security administrators the ability to enforce fine-grained control over memory protection and keep track of what programs are most vulnerable in the event of a security alert.  This leads to prioritizing security patch application.
+
+GrSecurity has a good brute force deterrance scheme, which makes fork() enter a queue that gets one execution per 30 seconds when called if a PaX kill or segmentation fault is encountered in a child fork() process with the same executable image.  This causes one fork() to occur every 30 seconds.  As expected, this is a hugely visible denial-of-service attack; but hey, we're making broken code safe, it's not going to be pretty so don't try.  Obviously this DoS can only occur if an already existing security hole is attacked, so clean programs are unaffected.  '''It is possible to devise a less intrusive model that is almost as effective'''.

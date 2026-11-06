@@ -1,0 +1,101 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+'''NOTE:''' this page is obsolete; it has been integrated into UbuntuSpec:kernel-abi-package-handling
+
+== Improve linux-meta dependency handling ==
+
+The current linux-meta dependency handling is not optimal. Currently it it creates a meta-package "linux" that depends on the right version of "linux-image-$version-$abiversion" and "linux-restricted-modules-$version-$aviversion". This is needed to ensure that when a upgrade for the kernel, the restricted-modules packages is upgraded as well to the right version (that matches the kernel abi).
+
+There are new packages for linux-image and linux-restricted-modules when a new kernelversion/abiversion is released. They get installed by updating the dependencies in linux-meta.
+
+This approach works but does not scale very well, especially for external repositories that provide hardware drivers. If e.g. parts of the video driver (from a third party repository) depends on the kernel abi, then we can not safely upgrade the system to the new kernel abi unless the third party driver is upgraded too otherwise the user will loose his X. 
+
+The following solutions are available today:
+
+# Provide a third-party-driver meta package in the third-party repository that then depends on the right kernel version. This ensures that new kernel abi packages can be added by just uploaded a new third-party-driver-meta package. Update-grub should only switch the default kernel when all "third-party-driver" packages are updated to the new abi version. 
+# Provide a third-party-driver package that contains the binary drivers for all abi versions that are supported in ubuntu in a single packages. Building such a package would required building N times against the N available kernel ABIs so its not practical.
+
+The following solutions were discussed:
+
+# Provide a way to have a "Strong-Enhances: foo" control field in the third-party package "bar". The semantic would be that if package "foo" is installed, apt would automatically prompt for installing  "bar" because it effectively adds itself to the dependencies of "foo". The benefit would be that the dependencies are organized decentralized. The problem with that approach is when the user adds the third-party-drivers repository the system would want to install all of them that match the current kernel because we have no way of knowing which are important to the user or not
+# Provide a way to have "package groups" header. A package group would be a collections of packages that need to be installed together. The linux-image package would declare itself part of the "linux-image-$version-$abiversion" package group. When apt encounters packages that are installed and part of a package group it prompts for not installed packages of a package group autoamatically. A third party repository would then add a "package group" header for its drivers. It has the same disdavantage as the previous idea because it would also prompt for installing all drivers.
+# Extended the way apt handles tasks so that it matches the "package groups" idea from above. Automatically recommend to install new packages that are part of a task, but do not prompt for installing packages of a task that were deselected by the users (behave like recommends in effect). Same disdavantage as before, but does not need new concepts, just tweaking of the existing "tasks" header and handling in apt.
+
+There are two ways a package group can be used:
+* `ABI group`: Put all drivers for a particular kernel ABI into a group `linux-abi-2.6.XX-Y`.
+** Needs default version metapackages only for `linux-image-2.6.XX-Y-generic` itself, under the kernel team's control.
+** ''problem:'' package greedy, it pulls in all available drivers for that ABI, even the ones you do not need.
+ 
+* `driver group`: Put all ABI versions for a particular driver into a group `linux-drivername`.
+** Automatically keeps track of which drivers are installed and which shouldn't be installed
+** Seamlessly applies to `linux-image` itself, too, no `linux-meta` necessary at all any more.
+** ''problem:'' ABI greedy, since it pulls in all available ABIs, even the ones you just have removed (if we are not fast enough with NBSing old ABI versions)
+
+It seems that we need to combine both group "directions" to achieve what we need. (TBD)
+
+This could be done by using package groups in both directions at the same time. A package is automatically marked for installation IFF for all of its declared PackageGroups: there is at least one installed package which is already in that group. Then, every driver would declare two package groups, one for the ABI and one for the driver name. In this solution we still need `linux-meta` to point to the new default ABI, to trigger the update.
+
+Example with a linux image and two drivers ''nv'' and ''ati''. The user installed ''nv'', but does not neet ''ati''.
+
+Originally we just have one kernel ABI version 1. There are the following packages (green: installed, red: not installed, yellow: newly available):
+
+{| class="wikitable"
+|-
+| <#CCFFCC> `linux-default` <<BR>> `PG: linux-abi-1`
+| <#CCFFCC> `linux-1` <<BR>> `PG: linux, linux-abi-1`
+| <#CCFFCC> `nv-1`<<BR>> `PG: kmod-nv, linux-abi-1`
+| <#FFCCCC> `ati-1` <<BR>> `PG: kmod-ati, linux-abi-1`
+|}
+
+Now a new kernel ABI version 2 is introduced, and all drivers get updated for it. linux-default is not yet changed, though:
+
+{| class="wikitable"
+|-
+| <#CCFFCC> `linux-default` <<BR>> `PG: linux-abi-1`
+| <#CCFFCC> `linux-1` <<BR>> `PG: linux, linux-abi-1`
+| <#CCFFCC> `nv-1`<<BR>> `PG: kmod-nv, linux-abi-1`
+| <#FFCCCC> `ati-1` <<BR>> `PG: kmod-ati, linux-abi-1`
+|-
+| 
+| <#FFFFCC> `linux-2` <<BR>> `PG: linux, linux-abi-2`
+| <#FFFFCC> `nv-2`<<BR>> `PG: kmod-nv, linux-abi-2`
+| <#FFFFCC> `ati-2` <<BR>> `PG: kmod-ati, linux-abi-2`
+|}
+
+This will not trigger the installation of `linux-2` or any driver, since there is no package installed which is already in the `linux-abi-2` PG. 
+
+Now `linux-default` gets flipped to `linux-abi-2`. This will trigger selection of all packages which are also in that group, but only those drivers which were installed before. I. e. `ati-2` will not be installed because the `kmod-ati` is not installed, but the already present `kmod-nv` member will pull in `nvidia-2`:
+
+{| class="wikitable"
+|-
+| 
+| <#CCFFCC> `linux-1` <<BR>> `PG: linux, linux-abi-1`
+| <#CCFFCC> `nv-1`<<BR>> `PG: kmod-nv, linux-abi-1`
+| <#FFCCCC> `ati-1` <<BR>> `PG: kmod-ati, linux-abi-1`
+|-
+| <#CCFFCC> `linux-default` <<BR>> `PG: linux-abi-2`
+| <#CCFFCC> `linux-2` <<BR>> `PG: linux, linux-abi-2`
+| <#CCFFCC> `nv-2`<<BR>> `PG: kmod-nv, linux-abi-2`
+| <#FFCCCC> `ati-2` <<BR>> `PG: kmod-ati, linux-abi-2`
+|}
+
+Please note that the updating of `linux`, the drivers, and `linux-meta` does not need to happen in lockstep. The `X-Kernel-Boot-Essential` flag I propose in UbuntuSpec:kernel-abi-package-handling, and the `/etc/kernel/postinst.d/` script to switch the default kernel will make sure that the system will always boot, and that the default will be flipped if the critical drivers are updated. Above mechanism is purely for the "pull in new ABI versions" part of the current `linux-meta`.
+
+=== Problems? ===
+
+* BenC: One thing you have to be very careful about is that you do not force the non-use of a security update because of any of this infrastructure. For example, if Ubuntu puts out a security update on the kernel with an ABI bump, but some third party module repo that the user added for his digital camera is lagging behind ABI (or even worse, is abandoned), then the user should be made well aware of this situation, and given ways to fix the problem, instead of being left to boot with an insecure kernel.
+** Pitti: This is indeed a problem. Mitigation: (1) Such drivers should not be "boot-essential" (see UbuntuSpec:kernel-abi-package-handling draft), and (2) community drivers should use DKMS. This mechanism is entirely for packages which are maintained in Ubuntu's repo itself (such as virtualbox-ose-modules) or with a contracted vendor (such as Dell).
+
+* BenC: Note, not many cases of "X wont work" still exist (considering we have good fallbacks now), so that isn't entirely critical. Also, since users have the option to boot to an older kernel after an upgrade, failures on first boot of a new kernel may be better handled by a UI to detect when a new kernel doesn't boot, and offer to boot the previous kernel on the next boot (something that grub/initramfs could handle). Similar to how Windows does "Last known good profile"
+** Pitti: Good idea, although we should make sure that at least the basics (l-u-m, and graphics driver) are installed before the flip. See the `X-Kernel-Boot-Essential` flag I propose in UbuntuSpec:kernel-abi-package-handling
+
+* BenC: None of this addresses the proliferation of new kernels being installed on the system over time, which is caused by Linux-meta. Something to help that should be involved in any improvements to linux-meta.
+** Pitti: This is pretty orthogonal IMHO, but of course it remains a problem which should eventually be fixed.

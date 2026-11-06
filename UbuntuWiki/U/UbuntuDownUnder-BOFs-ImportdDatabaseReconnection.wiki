@@ -1,0 +1,76 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+== ImportdDatabaseReconnection ==
+
+=== Status ===
+
+* Created:  by RobertCollins
+* Priority: HighPriority
+* People: AndrewBennettsLead, RobertCollinsSecond
+* Contributors: 
+* Interested:
+* Status: DraftSpecification, BreezyGoal, UduBof, LaunchpadSpecification, StuartBishopQueue
+* Branch: 
+* Malone Bug: 
+* Packages: 
+* Depends: 
+* Dependents:
+** UduSessions: 2
+
+=== Introduction ===
+
+Currently database disconnections cause the import process to raise an exception due to initZopeless keeping transactions open too long.  This specification describes a small API and implementation change that solves the problem.
+
+=== Rationale ===
+
+Database reconnections should be able to happen on idle connections. Currently there are long term connections created implicitly after each transaction.  For example when "I have started" is written to the database and committed, a new transaction is immediately created but not used.  Then, if the database is bounced, the next attempt to use the transaction raises an exception.
+
+=== Scope and Use Cases ===
+
+Some common situations are:
+
+* Importd is idle.  The database should be able to reboot with no impact on Importd.
+* Importd is busy importing.  During the import the database is not used, so the database should be able to reboot with no impact on Importd.
+* Importd is uploading arch data to the database, and the database is rebooted.  Importd should receive an exception.  Importd should also be able to continue processing non-database steps, and once the database is available should be about to successfully process new work involving the database.
+
+Currently, Importd has to shutdown when the database is upgraded/rebooted. This disrupts import jobs that
+are otherwise database agnostic.  Importd needs a reconnecting database facility.
+
+Other systems such as the Librarian have similar issues, and so will also benefit from a solution.
+
+=== Implementation Plan ===
+
+==== Background ====
+
+Importd uses Launchpad SQLObjects with the `initZopeless` environment.
+
+==== Proposed API change ====
+
+When a transaction begins, we should keep reconnecting until a connection and transaction is successfully established, or timeout (if a timeout is specified by the creator of the transaction).   
+
+If a transaction is in progess, then a database connection error is a genuine failure that cannot be automatically recovered, and should be raised as normal.
+
+The simplest place to implement this is probably `_ZopelessConnectionDescriptor.__get__` -- we only need to fix this in the zopeless environment, the Zope web-app publishing layer works ok as-is for now.  Some investigation is required to confirm that this is the best place for this.
+
+To do this, we need to know when a transaction begins.  Currently, this happens implicitly immediately after a commit or abort.  To fix this, we can add an '''`implicitBegin`''' flag to `ZopelessTransactionManager` (which `initZopeless` will need to accept and pass through).  Then the `commit` and `abort` methods of `ZopelessTransactionManager` can test this flag before calling `self.begin()`.  For backwards compatibility, this flag will default to `True`.
+
+==== Backwards compatibility and API transition ====
+
+* Add `implicitBegin` flag, defaulting to `None` (the current behaviour).  Emit `DeprecationWarnings` when `implicitBegin` is `True`, however.
+* Once all the `DeprecationWarnings` have been removed (i.e. all callers have been updated to use `implicitBegin=False`), we can remove the `implicitBegin=True` support, and raise an exception rather than just a `DeprecationWarning`. 
+
+After that, we can deprecate setting `implicitBegin` entirely, and eventually remove it.  This isn't necessary to solve the reconnection problem; it's just a matter of code tidiness.
+
+This plan will avoid breaking existing systems entirely while allowing Importd and other systems to update and take advantage of the improved API.
+
+----
+CategoryUdu
+CategorySpec 

@@ -1,0 +1,123 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+
+* '''Launchpad Entry''': https://launchpad.net/distros/ubuntu/+spec/kubuntu-ipod
+* '''Created''':  by Ltmon
+* '''Contributors''': Ltmon
+* '''Packages affected''': 
+
+=== Summary ===
+iPods should be well integrated and easy to use with Kubuntu.
+=== Rationale ===
+Apple has been reporting sales of over 5 million iPod units per quarter.  With such popularity any OS that doesn't have good iPod support will suffer.
+=== Use cases ===
+1. User plugs in iPod
+* Ipod should appear on desktop and in media:/
+2. User double-clicks on ipod
+* New Konqueror window opens at ipod:/
+* Alternatively amaroK is launched, and it's "media device" tab activated (do-able via dcop?)
+3. User right-clicks on ipod
+* "Safely remove" option available
+** When selected, the iPod is ejected fully
+4. User right-clicks on audio file
+* "Send to ipod" option available
+** When selected, the audio file is sent to ipod:/ and then the ipod is synchronized.  Non aac/mp3 files are transcoded on the fly
+5. User right-clicks on an audio CD icon
+* "Send to ipod" option available
+** When selected, the entire CD is sent to to ipod:/ and the ipod is synchronized.
+=== Scope ===
+To achieve the above use cases the following packages may need modification:
+1. udev
+2. HAL
+3. kdebase-kio-plugins
+4. kubuntu-default-settings
+=== Design ===
+
+=== Implementation ===
+1. Add the following rule to existing udev rules:
+
+<code>BUS="scsi", SYSFS{model}="iPod            ", KERNEL="sd*", NAME="%k", SYMLINK="ipod"</code>
+
+This will cause any ipod to automatically have a symlink to their physical device at <code>/dev/ipod</code>, and means that any further code or settings can refer to this device rather than e.g. <code>/dev/sda2</code> which will be different for each system.
+
+2. Add the following rule to the <code>/etc/sudoers</code> file:
+
+<code>ALL     ALL= NOPASSWD: /usr/bin/eject /dev/ipod</code>
+
+As the ipod needs to be ejected with root permissions, this rule will allow a context menu to eject the ipod without needing to prompt the user for a password.
+
+3. HAL rules should be developed to mimic the behaviour of the following <code>/etc/fstab</code> entry:
+
+<code>/dev/ipod       /mnt/ipod       vfat    sync,nodev,nosuid,user,rw,noauto      00</code>
+
+This mounts the ipod at <code>/mnt/ipod</code>, which is where ipodslave ("ipod:/") looks for ipods.  The fstab approach is unworkable because it requires the user to choose between "vfat" and "hfs" filesystems.  A properly constructed HAL rule will make this not necessary.  A properly created HAL configuration will also prevent the firmware partition of the iPod from ever being mounted.  A good start on this is <nowiki>[[http://lists.bizrace.com/pipermail/desktop-commits/2005-May/001805.html]]</nowiki>
+
+'''Update:''' The newest snapshot of ipodslave seems to not mind if the ipod is mounted at <code>/media/iPod</code>.  In this case the current Breezy hal setup is sufficient to get the iPod mounted correctly.  Still to test where the newest versions of Amarok require the iPod to reside, as they are now changing to use libgpod to handle ipods.
+
+4. The default version of the <code>kdebase/kioslave/media</code> files (in package kdebase-kio-plugins) should be overwritten by a patched version.  This version contains the following changes:
+* In <code>kdebase/kioslave/media/mediamanager/halbackend.cpp</code> the code starting from line 453 (in KDE 3.5 beta 2) should be replaced with:
+
+<pre>
+case LIBHAL_DRIVE_TYPE_PORTABLE_AUDIO_PLAYER:
+    medium->setIconName("ipod" + MOUNT_ICON_SUFFIX);
+    if (QString(libhal_drive_get_model(halDrive)) == "iPod")
+    {
+        mimeType = "media/ipod" + MOUNT_SUFFIX;
+        medium->unmountableState("ipod:/");
+    }
+    break;
+</pre>
+
+This is causing an ipod to be recognized as distinct from any other portable audio player, and assigned it's own mimetype.
+
+'''Update:''' Doing this exposes a bug in the ipodslave.  Under normal circumstances the base ioslave class will assume any UDS entry without a mimetype specified will be an <code>inode/directory</code>, wheras the forwarding ioslave (used in media:/) does not.  This causes all directories in the ipodslave to appear as unknown mimetypes.  I have sent a fix for this to the ipodslave author.
+'''Update 2:''' The latest snapshot release of ipodslave contains this fix.  Available at <nowiki>[[http://sourceforge.net/project/showfiles.php?group_id=109277&package_id=120178]]</nowiki>
+
+* The ipod_mounted and ipod_unmounted mimetypes should be created.  <code>kdebase/kioslave/media/mimetypes/ipod_mounted.desktop</code> could look similar to this:
+
+<pre>
+[Desktop Entry]
+Encoding=UTF-8
+Icon=ipod_mount
+Type=MimeType
+MimeType=media/ipod_mounted
+Comment=Mounted iPod
+X-KDE-AutoEmbed=true
+X-KDE-IsAlso=inode/directory
+</pre>
+* Buildfiles in the <code>mimetype</code> source directory also need to be updated to reflect the two new mimetypes.
+
+5. Context menu entries need to be created to assess use cases 3, 4, 5 (see <nowiki>[[http://developer.kde.org/documentation/tutorials/dot/servicemenus.html]]</nowiki>).  A context menu to remove an ipod is:
+
+<pre>
+[Desktop Entry]
+ServiceTypes=media/ipod_mounted
+Actions=MediaSafelyRemoveIpod;
+X-KDE-Priority=TopLevel
+X-KDE-MediaNotifierHide=true
+
+[Desktop Action MediaSafelyRemoveIpod]
+Name=Safely Remove
+Exec=kio_media_mounthelper -s %u && sleep 1 && sudo eject ipod
+</pre>
+
+6. Package or meta-package needs to be created to contain all this, plus the existing ipodslave package.
+==== Code ====
+See "Implementation"
+==== Data preservation and migration ====
+None.
+=== Outstanding issues ===
+Neither AAC or MP3 codecs are fully free, these are therefore in the Universe repository.  All other ipod support needs to reside there also.
+
+=== BoF agenda and discussion ===
+I (ltmon) have followed this implementation up until step 5 so far with some success, but also with some bugs.  This was done on Breezy with KDE 3.5 beta 2 and a 4G ipod photo.  I'll expand this page as I find out more.
+----
+CategorySpec

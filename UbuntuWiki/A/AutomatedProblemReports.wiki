@@ -1,0 +1,170 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+
+* '''Launchpad Entry''': https://launchpad.net/distros/ubuntu/+spec/automated-problem-reports
+* '''Created''':  by JaneWeideman
+* '''Contributors''': MartinPitt, MichaelVogt, RobertCollins, SimonLaw
+* '''Packages affected''':
+
+=== Introduction ===
+
+Crashes of userspace applications should be detected automatically so the user gets an easy to use frontend for adding information to the problem report and is offered to send the report to our database.
+
+=== Rationale ===
+
+Currently, many program crashes remain unreported or unfixed because:
+* many crashes are not easily reproducible (after e. g. installing a debug version)
+* end users do not know how to prepare a report that is really useful for developers
+* and we have no easy frontend which allow users to submit detailed problem reports.
+
+If the process of data collection is automated and detailed information about a crash can be collected at the very time a crash occurs, this will help the developers to be notified about problems and give them much of the information they need to deal with it.
+
+We hope that this will lead to a much better level of quality assurance in the future.
+
+=== Scope ===
+
+This specification deals with detecting crashes of processes running in the user's session. Crashes of system processes are covered to some degree. Kernel and package failures will be dealt with in separate specifications.
+
+=== Use Cases ===
+
+* Joe is a non-technically inclined Ubuntu user. His gaim application randomly crashes. He is willing to help us find the problem, but he does not have the skills and time to build a debug version, run it under gdb, and try to reproduce the crash.
+* Stuart runs a PostgreSQL server in the data center where no users usually are logged in. If the current postmaster process crashes, he wants to be notified about it and wants to get information about the crash.
+
+=== Design ===
+
+==== Process crash detection ====
+
+There are three ways how to detect a crash:
+
+* Create a small library `libcrashrep.so` whose init function installs a signal handler for the most common types of crashes (segmentation violation, floating point error, and bus error). The handler will catch all signals that the application does not handle itself. When a crash is detected, the library calls an external program. The library is put into `/etc/ld.so.preload`.
+* Extend the kernel to call an userspace program when a process exits with one of the mentioned signals. The program should be configued in `/proc/sys/proc/process_crash_handler` (or a similar file).
+* Change the default libc signal handler to call the crash handler.
+
+The library solution does not require any changes to the existing system, but is less robust than the kernel approach, since it requires to handle the crash in a corrupted environment. Ben Collins already implemented the kernel hook, so we will use this solution and keep the others as fallback just for the case we encounter problems with the kernel hook approach. The preload library solution already implemented and tested.
+
+==== Data collection ====
+
+The process spawned from the crash signal handler collects all useful information and puts them into a report in `/var/crash/`. The file permissions will ensure that only the process owner can read the file, so that no sensitive data is made available to other user.
+
+This process limits the number of crash reports for a particular executable to avoid filling up the disk with reports from repeatedly crashing respawning processes.
+
+==== Presenting the information ====
+
+Depending on the environment, we can potentially provide different crash handler frontends. As a first small implementation for Gnome, a daemon in the desktop will watch `/var/crash/` with inotify; if it detects a crash report it can read, it creates a notification which points to the file and asks to file a bug.
+
+==== Stack trace generation ====
+
+Debug symbols are very big and we want to avoid requiring to download them on the client machine. So we need a server which processes the incoming reports, generates a backtrace from the report data, stack frame, and debug symbols, and adds the stacktrace to the generated report. If the original report was retrieved from a bug report, the stack trace is added as an attachment to this bug report.
+
+=== Implementation ===
+
+==== Process crash detection ====
+
+The crash handler collects the following information about the crash:
+
+* Execution status (`/proc/$$`)
+* Packaging information (package, version, dependencies)
+* Crash information (executable path, signal, backtrace, memory status)
+* Environment information (OS version, time, `uname`, etc.)
+
+For details about particular fields, see next section.
+
+All data is written into a file in debcontrol format and put into `/var/crash/`''Executable``Path''`.txt`. (With slashes being converted to underscores).
+
+A cronjob will regularly clean up reports which are older than a week.
+
+==== Problem information file format ====
+
+Three different problem types exist: program crash, packaging problem and kernel crash. We only support the first type for now, but the file format should support future improvements. The file should contain enough information to help developers analyzing the problem. A possible list of fields includes:
+
+* `ProblemType: [Crash|Packaging|Kernel] `
+* `Date` (localtime)
+* `DistroRelease` (`lsb_release -sir`)
+* `Uname`
+* `Package` (name and version)
+* `SourcePackage` (only the name)
+* `Dependencies `(with versions)
+* `UserNotes`
+* `StackFrame` (base64 encoded, Problem``Type: Crash, optional)
+* `CoreDump` (bzip2'ed, base64 encoded, Problem``Type: Crash, optional)
+* `Stacktrace` (`bt full`, Problem``Type: Kernel or Crash)
+* `ThreadStacktrace` (`thread apply all bt full`, Problem``Type: Crash)
+* `PackageError` (Problem``Type: Packaging, dependency problem or `dpkg` output)
+* `ExecutablePath` (Problem``Type: Crash)
+* `Signal` (Problem``Type: Crash)
+* `ProcCmdline` (Problem``Type: Crash, from `/proc/$pid/cmdline`)
+* `ProcEnviron` (Problem``Type: Crash, from `/proc/$pid/environ`)
+* `ProcStatus` (Problem``Type: Crash, from `/proc/$pid/status`)
+* `ProcMaps` (Problem``Type: Crash, from `/proc/$pid/maps`)
+
+==== Enriching the stack trace with symbols ====
+
+To get a human readable backtrace, gdb looks for available debug symbols in `/usr/lib/debug/` (which is where the -dbgsym packages put them). If they are not present, the graphical crash handler can offer to download the dbgsym deb from the Ubuntu server. Alternatively, a Launchpad service would construct the backtrace from the stack frame data and the debug symbols in the archive.
+
+==== Data Preservation and Migration ====
+
+Those processes will not alter the user's data in any way.
+
+=== Future improvements ===
+
+* Improve the crash handler frontend:
+** offer to open the bug reporting tool (or just do it) in 'crash' mode
+** offer to download debug symbols and start gdb
+** provide mail frontend for server: mail is sent to the process owner, pointing to the report
+** provide Nagios frontend for server
+* Automated crash reporting to Launchpad (taking privacy issues into account).
+* Duplicate recognition based on the package and backtrace.
+* Offer to save the core file somewhere, so that the user can further assist the people who try to fix the bug
+
+=== Superseded discussion ===
+
+This does not form part of the spec but is retained here for information and reference.
+
+==== CBI ====
+
+The <nowiki>[[http://www.cs.wisc.edu/cbi/|Cooperative bug isolation]]</nowiki> project was mentioned in this BoF, and there was some ongoing discussion about whether to adopt it in Ubuntu. CBI focuses on compiling applications with a modified toolchain to enrich them with code augmentations and debug information. However, this enlarges packages considerably, which would affect the number  of packages we could ship on a CD. On the other hand, the solution that is proposed here works for all packages, does not enlarge packages, and does not require a modified toolchain. On the downside, our solution requires network access to get usable backtraces, but this can be mitigated by caching downloaded debug symbol files.
+
+==== Package installation failures ====
+
+For package system failures, code needs to be written so that apt can report dependency problems (`apt-get install $foo` fails) and package installation/removal/upgrade to a external application. Before reporting a problem apt needs to check that the installed dependencies on the system are all right (`apt-get install -f` runs successfully). A option in apt should control if apt reports the problems or not (so that users/developer running on a unstable distribution can turn it off). The report should include the sources.list of the user to identify problems with 3rd party repositories. In some cases the output of `apt-get install -o Debug::pkgProblemResolver=true` is useful as well. The list of installed packages is useful sometimes too, but it can easily get huge, so it's probably not feasible to include it in a report.
+
+==== Providing minimal symbols in binaries ====
+
+A possible alternative to creating separate debug packages for everything is to include some symbols in binary packages.  The primary problem for upstream developers receiving backtraces are functions listed as (???) instead of giving the function name.  Additional information such as source code file and line number, although interesting, is less important.  Including symbols for every function directly in the binary file would provide the former, without increasing the binary size as much as including full debugging information.  This can be implemented by using the -g option to strip instead of what is currently used.  Some discussion is necessary to determine the optimal strip flags.
+
+==== Turning addresses into functions later ====
+
+Symbols in packages won't retrieve the names of static functions or inline functions; only full debugging data contains that information.  Unfortunately this is a lot of extra cruft to add to a user's system, see the considerations in ''Stack trace generation'' above.  We can generate a backtrace as a list of addresses on the client machine, and along with the maps file and library versions have enough information that we can get the function names out of the debugging data on our end; but this is not entirely straightforward either.
+
+Because `gdb` doesn't take maps and a debugging file and associate addresses properly, we need to improvise a little.  We can probably just load the program in the debugger and compare its maps to the collected one, then adjust our collected addresses according to the base change of the library they're in.  This should work because by subtracting the base address of the library from the address, we get an offset of the address in the library; and then by adding the base address of the library on our end to that offset, we get the address of the same point in the library in our traced process, allowing us to ask the debugger what line of code is relevant here.
+
+This method is pretty much applying a relocation to our collected address, it's the same thing the dynamic linker does when it loads a library.
+
+==== Sensitive information ====
+Sensitive information may be included in:
+
+* `Stack dumps`:  The stack frame or a small stack dump may contain GPG keys or passwords.
+* `core dumps`:  Contain the contents of memory, so anything can be here.
+* `/proc/$pid/cmdline`:  Some dirty scripts do `mysql -u root -pmypasswd`, among other things.
+* `/proc/$pid/environ`:  Leaks user names at the very least; we say ''invalid username/password combination'' instead of ''bad username'' or ''bad password'' for a reason.  Other nasty stuff may be in the environment in rare cases.
+
+A backtrace is fine; return addresses are not sensitive.  The other stuff needs to be handled carefully and needs user intervention.
+
+==== Signals ====
+Besides `SIGSEGV`, `SIGBUS`, and `SIGFPE`, there are two more signals to trap.
+
+* `SIGILL`:  Illegal instruction, indicating something like `mono` generated bad code, or someone trashed program memory, or someone got the program executing data (crack attack).
+* `SIGKILL` to self:  Distinctly odd, but useful.  Stack smashes are clean exits and not detected; but we can modify `__stack_chk_fail()` in `glibc` to `kill(getpid(),SIGKILL)` and create an easily detectable stack smash crash.
+
+Stack smashes can possibly call the crash detector directly; see AutomatedSecurityVulnerabilityDetection for an explanation.  This can also be used to report heap corruption, since `glibc` knows how to bail when `malloc()` or `free()` see something ugly.
+
+----
+CategorySpec

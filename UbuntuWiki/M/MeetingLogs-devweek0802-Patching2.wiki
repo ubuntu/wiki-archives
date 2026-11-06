@@ -1,0 +1,358 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+=== Dev Week -- Patching Packages -- Martin Pitt -- Fri, Feb 22 ===
+see also <nowiki>[[MeetingLogs/devweek0802/Patching1|Monday session]]</nowiki>.
+
+<pre>
+[15:59]  * pitti rings the schoolbell
+[15:59] <pitti> welcome!
+[15:59] <pitti> so, who is here to learn about patching packages?
+[16:00] <pitti> and how has the week been so far for you?
+[16:00] <db-keen> +1
+[16:00] <AstralJava> o/
+[16:00] <rbr_> I'm no programmer, just curious
+[16:00] <grazieno> +1
+=== warp10 is now known as warp10_
+[16:00] <AstralJava> Haven't had much time to follow other lessons, but plan to do so today. Great sessions ahead. :)
+[16:00] <pochu> hey hey
+[16:01]  * warp10_ raises an hand
+[16:01] <pitti> cool, relatively quiet
+=== warp10_ is now known as warp10
+[16:01] <pitti> Welcome to the hands-on training session about how to patch Ubuntu source packages!
+[16:01] <pitti> This assumes that you already know what a patch is and how to handle .patch files in general (i. e. for upstream authors). Also, you should have a rough idea what an Ubuntu source package is.
+[16:02] <pitti> The purpose of this session is to teach you how to put a patch into an Ubuntu source package, since unlike rpm this is not very consistent still.
+[16:02] <pitti> While I do some introduction, please install some packages and sources on your box which we will need for the training:
+[16:02] <pitti>   sudo apt-get install dpatch cdbs quilt patchutils devscripts debhelper fakeroot
+[16:02] <pitti>   mkdir training; cd training
+[16:02] <pitti>   apt-get source cron udev pmount ed xterm
+[16:02] <pitti>   wget http://people.ubuntu.com/~pitti/scripts/dsrc-new-patch
+[16:02] <pitti>   chmod 755 dsrc-new-patch
+[16:02] <pitti> I deliberately picked the smallest packages I could find
+[16:03] <pitti> this can run in the background while I continue
+[16:03] <pitti> if anyone has any question, or I'm totally uncomprehensible (sorry for my English, I'm German), please do not hesitate to interrupt and ask *immediately*
+[16:03] <pitti> Also, don't bother trying to take notes, we'll sort that out at the end. You can fully concentrate on the discussion and examples.
+[16:03] <pitti> ok everyone?
+[16:04] <warp10> +1
+[16:04] <pitti> Let's begin with a little bit of history:
+[16:04] <grazieno> ok!
+[16:04] <AstralJava> Almost set.
+[16:04] <dargol> done
+[16:04] <pitti> == Why use separate patches ==
+[16:04] <pitti> In earlier times, people just applied patches inline (i. e. directly in the source code tree). However, this makes it very hard to extract patches later to modify them, send them upstream, etc. Also this means that new upstream versions are a pain, since they generate a lot of rejections when applying the package diff.gz to them.
+[16:04] <pitti> With split-out patches it is much easier to send them upstream, keep track of them, develop them, etc., since you always see which changes belong together.
+[16:05] <pitti> The ideal state is an unmodified tarball from upstream, plus clean and separate patches, plus the packaging bits in debian/. That means that lsdiff -z <sourcepackage>.diff.gz only contains debian/.
+[16:05] <pitti> The first attempts to split-out patches were pretty trivial: storing patches in debian/patches/, and adding some patch/patch -R snippets to debian/rules. This worked for small patches, but provided no tools for editing these patches, updating them for new upstream versions, etc.
+[16:05] <pitti> (debian/rules is the central script for building a package, in case you don't know)
+[16:06] <pitti> Thus several standard patch systems were created which are easy to deploy and provide tools for patch juggling and editing.
+[16:06] <pitti> --
+[16:06] <pitti> What I would like to do now is to introduce the most common patch systems and show some hands-on demo how to add a new patch and how to edit one.
+[16:06] <pitti> For this, I will point at a source package from the current gutsy or hardy archive, quickly explain the patch system, and show how to apply some (braindead) modifications to it.
+[16:06] <pitti> I recommend you to do the same steps in a terminal, so that you get a feeling for the process and can immediately ask questions.
+[16:06] <pitti> is everyone fine with this approach?
+[16:07] <dargol> k
+[16:07] <warp10> yep!
+[16:07] <AstralJava> Sure.
+[16:07] <bobbo> +1
+[16:07] <pitti> = cron: inline patches ==
+[16:07] <pitti> No patch system at all, nothing much to say about this. So this is an example of the "old" style of packaging, a counter-example
+[16:07] <pitti> You directly edit the files in the source tree.
+[16:07] <pitti> This is convenient for a simple and quick change, but will bite back for new upstream versions (see above) and is inconvenient for submitting patches upstream, or reviewing for merges.
+[16:08] <pitti> if you do 'lsdiff -z <package>.diff.gz' and you see changes which are not in debian/, then you probably have such a package
+[16:08] <pitti> i. e. in this case lsdiff -z cron*.diff.gz
+[16:08] <pitti> (you can also take a look at it to see how all patches are lumped together)
+[16:08] <pitti> so, I think I do not need to say anything else about cron, unless someone has a question
+[16:09] <pitti> == udev: separate patches, but no standard patch system ==
+[16:09] <pitti> This case is the most complicated one since you have to do all the hard work manually.
+[16:09] <pitti> In order to make you understand what a patch system does, and to give you a fallback method that will *always* work with any patch system, I handle this first.
+[16:09] <pitti> The good news is that you will seldomly be required to actually do this procedure, since for many packages there are nice tools which make things a charm.
+[16:09] <pitti> The bad news is that it may seem utterly complicated for people who never did it before, but I would like you to understand what's actually going on behind the curtains of the tools.
+[16:10] <pitti> BTW; when I'm too fast, don't hesitate to ping
+[16:10] <pitti> So please do not desperate if you do not fully understand it at first; there's written documentation and you can always take your time to grok it.
+[16:10] <pitti> The general approach, which you can print out and hang over your desk :) is:
+[16:10] <pitti> 1. copy the clean source tree to a temporary directory /tmp/old
+[16:11] <pitti> 2. apply all patches up to the one you want to edit; if you want to create a new patch, apply all existing ones (this is necessary since in general patches depend on previous patches)
+[16:11] <pitti> 3. copy the whole source tree again: cp -a /tmp/old /tmp/new
+[16:11] <pitti> 4. go into /tmp/new, do your modifications
+[16:11] <pitti> 5. go back into /tmp and generate the patch with
+[16:11] <pitti>   diff -Nurp old new > mypatchname.patch
+[16:11] <pitti> 6. move the newly generated patch to <original source dir>/debian/patches/mypatchname.patch
+[16:12] <pitti> in general we want the following diff options:
+[16:12] <pitti> -N -> include new files
+[16:12] <pitti> -u -> unified patches (context diffs are ugly)
+[16:12] <pitti> -r -> recursive
+[16:12] <pitti> -p -> bonus, you can see the name of the affected function in the patch
+[16:12] <pitti> does anyone have a question about the principle method?
+[16:12] <pitti> (I'll do a hands-on example now)
+[16:13] <AstralJava> All good here.
+[16:13] <warp10> here too
+[16:13] <bobbo> same here
+[16:13] <pitti> so, open a shell, ready your fingers :)
+[16:13] <pitti> udev example 1, let's create a new patch 92_penguins.patch:
+[16:13] <pitti> cd udev-* # -113 on gutsy, -117 on hardy
+[16:13] <pitti> -> now we are in our original source tree where we want to add a new patch
+[16:14] <pitti>   cp -a . /tmp/old
+[16:14] <pitti> -> create a copy of the clean sources as reference tree
+[16:14] <pitti>   pushd /tmp/old
+[16:14] <pitti> -> go to /tmp/old; 'pushd' to remember the previous directory, so that we can go back conveniently
+[16:14] <pitti>   debian/rules patch
+[16:14] <pitti> -> apply all already existing patches; of course we could use the 'patch' program to do it manually, but since debian/rules already knows how to do it, let's use it. The actual name for the patch target varies, I have seen the following ones so far: patch, setup, apply-patches, unpack, patch-stamp. You have to look in debian/rules how it is called.
+[16:15] <pitti>   cp -a . /tmp/new; cd ../new
+[16:15] <pitti> -> copies our patched reference tree to our new work directory /tmp/new where we can hack in
+[16:15] <pitti> that's the preparatory part
+[16:15] <pitti> let's do a braindead modification now
+[16:15] <pitti>   sed -i 's/Linux/Penguin/g' README
+[16:15] <pitti> -> changes the README file; of course you can use your favourite editor, but I wanted to keep my examples copy&pasteable
+[16:15] <pitti> and now we create a patch between the reference and our new tree:
+[16:16] <pitti>   cd ..
+[16:16] <pitti> -> go back to /tmp, i. e. where our reference tree (old) and hacked tree (new) is located
+[16:16] <pitti>   diff -Nurp old new > 95_penguins.patch
+[16:16] <pitti> -> generate the patch (Ignore the 'recursive directory loop' warnings)
+[16:16] <pitti>   popd
+[16:16] <pitti> -> now you should be back in your original source tree (when you did the pushd)
+[16:16] <pitti>   rm -rf /tmp/old /tmp/new
+[16:16] <pitti> -> clean up the temporary trees
+[16:16] <pitti>   mv /tmp/95_penguins.patch debian/patches
+[16:16] <pitti> -> move the patch from /tmp to the source tree's patch directory, where it belongs.
+[16:16] <pitti> *uff* :)
+[16:16] <pitti> Now take a look at your shiny new debian/patches/95_penguins.patch.
+[16:17] <pitti> and give a ping when you are ready
+[16:17]  * warp10 is ready
+[16:17] <snewland> ping
+[16:17] <bobbo> +1
+[16:18] <pitti> great, that goes very smoothly today :)
+[16:18] <pitti> if you do 'debian/rules patch', you'll see that the patch applies cleanly
+[16:18] <pitti> warp10, AstralJava, dargol, db-keen: caught up?
+[16:19] <warp10> pitti: sure!
+[16:19] <db-keen> yep
+[16:19] <dargol> yep
+[16:19] <AstralJava> Yeah, sorry was AFK for a bit.
+[16:20] <pitti> awesome
+[16:20] <pitti> so, obviously that's not the end of the wisdom, but if you do these steps a couple of times, you should get a feeling for how to create the most complicated patch conceivable
+[16:20] <phoenix24> +1
+[16:20] <pitti> so this procedure is the life safer if anything else fails
+[16:20] <pitti> questions so far?
+[16:20] <AstralJava> Nope. :)
+[16:20] <pitti> (just drop them into #-chat)
+[16:20] <pitti> Pretty much work, isn't it? Since this happens pretty often, I created a very dumb helper script 'dsrc-new-patch' for this purpose.
+[16:21] <pitti> First, let's bring back udev to the previous state by removing the source tree and re-unpacking the source package:
+[16:21] <pitti>   cd ..
+[16:21] <pitti>   rm -r udev-*
+[16:21] <pitti>   dpkg-source -x udev_*.dsc
+[16:21] <pitti> Then, using my script, above steps would reduce to:
+[16:21] <pitti> cd udev-*
+[16:21] <pitti>   ../dsrc-new-patch 95_penguins.patch
+[16:22] <pitti> ^ this now does all the preparation for you and drops you into a shell where you can edit the code
+[16:22] <pitti>   sed -i 's/Linux/Penguin/g' README
+[16:22] <pitti>   <press Control-D to leave the subshell>
+[16:22] <pitti> that looks slightly better, doesn't it?
+[16:23] <pitti> look at debian/patches/95_penguins.patch, it should look exactly like the one created manually
+[16:23] <pitti> If you like the script, please put it into your ~/bin, so that it is in your $PATH
+[16:23] <pitti> but I had to torture you with the close-to-the-metal method for the sake of understanding.
+[16:23] <pitti> You might have noticed that we applied all previous patches before creating our's. Does someone have an idea why this is done?
+[16:24] <warp10> some patches could depend on other patches
+[16:24] <pitti> which means?
+[16:24] <AstralJava> They need to be applied in order.
+[16:24] <AstralJava> correct order, that is.
+[16:24] <dargol> they coud only aply to the patched source
+[16:25] <pitti> i. e. patch 22 can change the same file that patch 7 did, and patch 22 might not even apply to the pristine upstream source.
+[16:25] <pitti> dargol: exactly
+[16:25] <pitti> That's why you will commonly see numeric prefixes to the patch files, since they are applied asciibetically in many patch systems (including the application of patches in udev).
+[16:25] <pochu> with that script I won't need dpatch-edit-patch anymore ;)
+[16:25] <pitti> pochu: oh, you do
+[16:25] <pitti> we'll get to that later
+[16:25] <pochu> oh
+[16:26] <pitti> dsrc-new-patch is a hack which mostly works for packages without a real patch system, but split-out patches
+[16:26] <pitti> like udev
+[16:26] <pitti> (which is really a bug we should fix)
+[16:26] <pitti> but makes a nice example :-P
+[16:26] <pitti> Since above procedure is so hideously complicated, patch systems were invented to aid you with that.
+[16:26] <pitti> Let's look at the most popular ones now (they are sufficient to allow you to patch about 90% of the archive's source packages; for the rest you have to resort to the manual approach above).
+[16:26] <dargol> exit
+[16:26] <pochu> ah, found it
+[16:26] <dargol> (sorry)
+[16:26] <pitti> dargol: ?
+[16:26] <pitti> ok
+[16:27] <pitti> == pmount: cdbs with simple-patchsys ==
+[16:27] <dargol> (wrong place)
+[16:27] <pitti> cdbs' simple-patchsys.mk module matches its name, it has no bells and whistles whatsoever.
+[16:27] <pitti> However, it is pretty popular since it is sufficient for most tasks
+[16:27] <pitti> and long ago I wrote a script 'cdbs-edit-patch' which most people can live with pretty well.
+[16:27] <pitti> This script is contained in the normal cdbs package.
+[16:27] <pitti> You just supply the name of a patch to the script, and depending on whether it already exists or not, it will create a new patch or edit an existing one.
+[16:28] <pitti> (dsrc-new-patch can currently *not* edit existing patches, mind you; patches welcome :-)
+[16:28] <pitti> but real patch systems can do that of course
+[16:28] <pitti>   cd pmount-*
+[16:28] <pitti> everyone please look in debian/patches, debian/rules to get a feeling how it looks like
+[16:28] <pitti> i. e. in debian/rules you simply include simple-patchsys.mk, and that'll do all the magic
+[16:28] <pitti> and debian/patches looks pretty much like udev
+[16:29] <pitti> so, let's mess up pmount a bit
+[16:29] <pitti> and add a new patch
+[16:29] <pitti>   cdbs-edit-patch 07-simple-readme.patch
+[16:29] <pitti>   echo 'This should document pmount' > README
+[16:29] <pitti>   <press Control-D to leave the subshell>
+[16:29] <pitti> easy, isn't it?
+[16:29] <pitti> this will take care of applying all patches that need to be applied, can change patches in the middle of the stack, and also create new ones
+[16:31] <pitti> Editing an already existing patch works exactly the same way.
+[16:31] <pitti> so I won't give a demo
+[16:31] <pitti> BTW, "cdbs-edit-patch" is slightly misleading, since it actually only applies to simple-patchsys.mk. You can also use other cdbs patch system plugins, such as dpatch or quilt.
+[16:31] <pitti> questions?
+[16:32] <AstralJava> Nothing at the moment, no. :)
+[16:32] <pitti> (sorry, some #-chat action going on)
+[16:32] <AstralJava> All good, all good. :)
+[16:32] <pitti> == ed: dpatch ==
+[16:32] <pitti> dpatch is a pretty robust and proven patch system which also ships a script 'dpatch-edit-patch'
+[16:32] <pitti> packages which use this build-depend on 'dpatch', and debian/rules includes 'dpatch.mk'
+[16:33] <pitti> The two most important things you should be aware of:
+[16:33] <pitti>  * dpatch does not apply debian/patches/*, but instead applies all patches mentioned in debian/patches/00list, in the mentioned order. That means that you do not have to rely on asciibetical ordering of the patches and can easily disable patches, but you have to make sure to not forget to update 00list if you add a new patch.
+[16:34] <pitti> (forgetting to update 00list is a common cause of followup uploads :-) )
+[16:34] <pitti>  * dpatch patches are actually scripts that are executed, not just patches fed to 'patch'. That means you can also do fancy things like calling autoconf or using sed in a dpatch if you want.
+[16:34] <pitti> using dpatch for non-native patches is rare, and normally you do not need to worry about how a .dpatch file looks like
+[16:34] <pitti> but I think it's important to mention it
+[16:35] <pitti> so if you ever want to replace *all* instances of Debian with Ubuntu in all files, write a dpatch with a small shell script that uses sed
+[16:35] <pitti> instead of doing a 300 KB static patch which won't apply to the next version anyway
+[16:35] <pitti> The manpage is very good and has examples, too, so I will only give one example here:
+[16:35] <pitti> This will edit an already existing patch and take care that all previous patches are applied in order:
+[16:35] <pitti>   cd /whereever/you/unpacked/the/source/ed-0.7
+[16:36] <pitti> (if you are still in the pmount directory: cd ../ed-0.7)
+[16:36] <pitti>   dpatch-edit-patch 05_ed.1-warning-fix
+[16:36] <pitti>   <edit stuff, press Ctrl+D>
+[16:36] <pitti> so that's exactly like cdbs-edit-patch
+[16:36] <pitti> ok, now we edited a patch, that's pretty easy, right?
+[16:37] <pitti> now let's create a new one; this is different from cdbs-e-p
+[16:37] <pitti>   dpatch-edit-patch foo 07_ed.1-spelling-fixes
+[16:37] <pitti>   <edit stuff, press Ctrl+D>
+[16:37] <pitti>   echo foo.dpatch >> debian/patches/00list
+[16:37] <pitti> ^ this is the new bit; you have to explicitly add a new patch to that 00list index file
+[16:38] <pitti> This will create a new patch foo.dpatch relative to the already existing 07_ed.1-spelling-fixes.dpatch.
+[16:38] <pitti> If your patch is very confined and does not depend on other patches, you can leave out the second argument.
+[16:38] <pitti> BTW, you even have bash commandline completion for dpatch-edit-patch!
+[16:38] <pitti> alright?
+[16:38] <bobbo> yeah
+[16:39] <warp10> y
+[16:39] <dargol> k
+[16:39] <AstralJava> Fine here. :)
+[16:39] <pitti> db-keen, phoenix24: ok?
+[16:39] <phoenix24> Yep!
+[16:40] <pitti> == xterm: quilt ==
+[16:40] <pitti> quilt is the other non-dumb standard patch system. Like dpatch, it has a list of patches to apply in patches/series (to use debian/patches, packages need to add a sylink).
+[16:41] <pitti> or set $QUILT_PATCHES to debian/patches
+[16:41] <pitti> It is non-trivial to set up and has a lot of advanced commands which make it very flexible, but not very easy to use.
+[16:41] <pitti> nontrivial to set up for Debian source packages, that is
+[16:41] <pitti> (it's not hard either, but more work than simple-patchsys, and even dpatch)
+[16:41] <pitti> it's not that widespread, but common enough to handle it here, and it apparently gains more popularity
+[16:41] <pitti> I will only show a small example here
+[16:42] <pitti>   cd /whereever/you/unpacked/the/source/xterm-229
+[16:42] <pitti> if you followed me exactly, that should be cd ../xterm-229
+[16:42] <pitti>   export QUILT_PATCHES=debian/patches
+[16:42] <pitti> This is necessary because the default patch directory for quilt is ./patches. But for Debian-style source packages we want to keep them in debian/patches, because that's the convention.
+[16:42] <pitti> Now let's edit the already existing patch 901_xterm_manpage.diff:
+[16:42] <pitti>   quilt push 901_xterm_manpage.diff
+[16:43] <pitti> this will apply all patches in the stack up to the given one
+[16:43] <pitti> apply inline right in the source tree, that is
+[16:43] <pitti> unlike quilt, cdbs-edit-pattch, and dpatch-edit-patch, quilt doesn't create temporary directories with a copy, but remembers old versions of the files and uses the normal working tree
+[16:43] <pitti> a bit like version control (svn, bzr, etc.)
+[16:43] <pitti> now let's edit a file that is already touched by the original patch
+[16:44] <pitti>   sed -i 's/Copyright/Copyleft/' xterm.man
+[16:44] <pitti> let's commit the change:
+[16:44] <pitti>   quilt refresh 901_xterm_manpage.diff
+[16:44] <pitti> ^ updates the patch file with your recent changes
+[16:44] <pitti>   quilt pop -a
+[16:44] <pitti> ^ unapplies all patches to go back to pristine source tree
+[16:45]  * pitti waits a bit for people to catch up and finish the example on their keyboards
+[16:45] <pitti> ok everyone?
+[16:45] <dargol> done
+[16:45] <bobbo> yep, done
+[16:45] <AstralJava> Done.
+[16:45] <warp10> y
+[16:45] <pitti> look at debian/patches/901_xterm_manpage.diff to see the effect
+[16:45] <cprov-out> #join ubuntu-classroom-chat
+[16:45]  * pitti hands cprov-out a slash
+[16:45] <cprov-out> sorry ...
+[16:46] <pitti> Finally, let's add a new patch to the top of the stack:
+[16:46] <phoenix24> Done1
+[16:46] <cprov-out> pitti: thanks ;)
+[16:46] <pitti>   quilt push -a
+[16:46] <pitti> '-a' means 'all patches', thus it applies all further patches after 901_xterm_manpage.diff up to the top
+[16:46] <pitti>   quilt new muhaha.diff
+[16:46] <pitti> register a new patch name (which we want to put on top of the patch stack)
+[16:46] <pitti>   quilt add README
+[16:46] <pitti> you have to do that for all files you modify, so that quilt can keep track of the original version
+[16:46] <pitti> this tells quilt to keep track of the original version of README
+[16:47] <pitti>   sed -i '1 s/^/MUHAHA/' README
+[16:47] <pitti> modify the source
+[16:47] <pitti>   quilt refresh
+[16:47] <pitti> update the currently edited patch
+[16:47] <pitti>   quilt pop -a
+[16:47] <pitti> this will finally create debian/patches/muhaha.diff with the changes to README
+[16:47] <pitti> as I already said above, quilt has a patch list, too
+[16:47] <pitti> in debian/patches/series
+[16:48] <pitti> which is much like debian/patches/00list for dpatch
+[16:48] <pitti> except that you don't edit it manually usually
+[16:48] <pitti> if you push -a, then the patch will land on top of the patch stack, and will automatically be put at the end of series
+[16:48] <pitti> of course you can create the patch in other levels of the patch stack
+[16:48] <pitti> sometimes, when you pull changes from upstream CVS, it's better to put them at the bottom of the stack
+[16:48] <pitti> i. e. upstream changes shuold generally come *before* distro-specific changes
+[16:48] <pitti> someone has an idea why this is done?
+[16:49] <pitti> or, rather, should be done
+[16:50] <dargol> same as before, upstream changes are only guarantied to work on original source
+[16:50] <pitti> first that
+[16:50] <pitti> and second, it forces you to port your local patches to the updated source
+[16:51] <pitti> so that, when you update to a new upstream version which incorporates the patch, it's much easier
+[16:51] <pitti> i. e. the closer to upstream a patch is, the more stable are your distro patches
+[16:52] <pitti> ok, that was the hard bit :)
+[16:52] <pitti> == A glimpse into the future ===
+[16:52] <pitti> As you saw, Debian source packages do not have any requirements wrt. structure, patch systems, etc.
+[16:52] <pitti> other source package systems like SRPM are much stricter wrt that.
+[16:52] <pitti> This of course means more flexibility, but also much more learning overhead.
+[16:52] <pitti> As a member of the security team I can tell tales of the pain of a gazillion different source package layouts... :)
+[16:53] <pitti> there has been an attempt to teach an official patch system to dpkg itself ("dpkg 2.0", aka. "Wig&Pen format")
+[16:53] <pitti> but unfortunately development on it has ceased
+[16:53] <pitti> Therefore some clever people sat together the other day to propose a new design which would both give us a new and unified source package and patch system that uses bzr (with a quilt-like workflow).
+[16:53] <pitti> This would also integrate packages and patches much better into Launchpad and revision control in general.
+[16:54] <pitti> Please take a look at https://wiki.ubuntu.com/NoMoreSourcePackages if you are interested in this.
+[16:54] <pitti> --
+[16:54] <pitti> so, thanks a lot for your attention!
+[16:54] <pitti> I hope it was a bit useful for you
+[16:54] <pitti> we have five more minutes for Q+A
+[16:55] <pitti> https://wiki.ubuntu.com/PackagingGuide/PatchSystems is some written documentation about patch systems
+[16:55] <pitti> a nice reference about what I explained here
+[16:56] <AstralJava> Can't come up with any questions really at this point, but thanks very much Martin for this session! :) Highly beneficial to over the steps in correct order and manner. :)
+[16:56] <pitti> warp10| QUESTION: If I need to apply a patch to a brand new package, or to fix a bug, or whatever, and a patchsystem has not been deployed yet, which (or how) should I choose?
+[16:56] <pitti> that's mostly a matter of taste
+[16:56] <pitti> if adding a patch system is actually justified in terms of keeping the delta to Debian low, then I'd give the following guidelines:
+[16:57] <pitti>  * if the package already uses cdbs, simply include simple-patchsys.mk and add the patch
+[16:57] <pitti> no question with this, that's unintrusive
+[16:57] <pitti>  * if the package doesn't use cdbs, and you get along with dpatch, use that
+[16:58] <pitti> (please ask questions here now)
+[16:58] <pitti> ETA for NoMoreSourcePackages is currently undefined
+[16:58] <pitti> right now we try to push forward the complete bzr import of ubuntu packages
+[16:58] <pitti> which is a first step
+[16:58] <pochu> QUESTION: do you know where to find some good documentation regarding working with .rej files? (as we don't have time now to explain it)
+[16:58] <pitti> I don't know docs, sorry
+[16:59] <pitti> because at that point it's really common sense and experience
+[16:59] <pitti> if there was a programmatic way how to resolve them, we wouldn't need them in the first place :)
+[16:59] <pitti> cdbs-edit-patch and dpatch-edit-patch will deal with it
+[16:59] <pitti> i. e. if a patch doesn't apply, they give you the .rej, you resolve them manually and Ctrl+D
+[16:59] <pochu> that's what I mean, how to resolve them
+[17:00] <pitti> make sure to delete the .rej after resolving
+[17:00] <pitti> they deliberately don't ignore .rej files
+[17:00] <pitti> just to make sure you don't accidentally overlooked them
+[17:00] <pitti> ok, my time is up
+[17:00] <dargol> thank you for the class!
+[17:00] <pochu> thanks pitti
+[17:00] <bobbo> thanks pitti
+[17:00] <pitti> please continue questions to me personally or in -chat
+[17:00] <AstralJava> Thanks again, that was super. :)
+[17:00] <pitti> thanks everyone!
+[17:01] <warp10> thank you pitti, that was very interesting :)
+[17:01] <cprov-out> pitti: great, thank you.
+[17:01] <phoenix24> thanks pitti!!
+</pre>

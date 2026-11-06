@@ -1,0 +1,228 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+Edgy will not install on the Shuttle SS30G2 out of the box (see this <nowiki>[[http://ubuntuforums.org/showthread.php?t=269393|post]]</nowiki>).  
+
+You need to include the drivers for the SATA controller and the Ethernet Adapter when you install the operating system.  There are two ways to do this, one is to remaster the install CD, the other is to run the live CD using the drivers and then replace the drivers in the installed system.  These options are described in Step 2 on this page.
+
+Thanks to Ross Wolin (rowol) who originally wrote these instructions and compiled the drivers to get this working.
+Arjen Lentz added notes on SCSI device name assignment and kernel upgrades, plus small fix (s/sys/sysfs/) in existing instructions.
+
+== Step 0: BIOS Settings ==
+Run setup on Shuttle and make sure the SATA controller is set for AHCI mode (or maybe RAID mode, haven't tried it?) but not IDE emulation mode.
+
+== Step 1: Compile the Drivers ==
+
+Note: If you are too lazy to do this step then the drivers are available from:
+
+http://www.clever.co.nz/resources/ahci.ko
+http://www.clever.co.nz/resources/sis190.ko
+
+Thanks again to Ross Wolin (rowol) who compiled these drivers.
+
+=== SATA Driver ===
+The ahci.c driver in the 2.6.17 kernel included on the Edgy install CD needs to be patched to work with this chipset.
+
+Start with exact Ubuntu kernel sources (2.6.17-10.33, but pretend it's 2.6.17-10.24, which is what we need) from launchpad.net
+<pre>
+cd /usr/src
+tar -xvzf /dv/downloads/Linux/kernel.src/ubuntu/linux-source-2.6.17_2.6.17.orig.tar.gz -C /usr/src
+
+mv linux-source-2.6.17-2.6.17.orig linux-source-2.6.17-10.24-ubuntu.shuttle
+rm linux
+ln -s linux-source-2.6.17-10.24-ubuntu.shuttle linux
+
+cp ~/edgy.eft.remaster/squashfs/boot/config-2.6.17-10-generic .config
+</pre>
+Patched drivers/scsi/ahci.c driver to recognize the Sis966L (id=1184) SATA controller based on an email from David Wang at Sis, by adding these lines:
+<pre>
+{ PCI_VENDOR_ID_SI, 0x1184, PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+  board_ahci }, /* SiS 966 */
+{ PCI_VENDOR_ID_SI, 0x1185, PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+  board_ahci }, /* SiS 966 */
+{ PCI_VENDOR_ID_SI, 0x186, PCI_ANY_ID, PCI_ANY_ID, 0, 0,
+  board_ahci }, /* SiS 968 */
+</pre>
+=== Ethernet Driver ===
+
+Go to http://www.sis.com/download and agree to the terms, on the next page choose "Linux, Network Driver, SiS 191 Gigabit & SiS 190"  Copy the file sis190.c from the driver source package to /usr/src/linux/drivers/net, then edit the following lines:
+
+<pre>
+MODULE_PARM(multicast_filter_limit, "i");
+MODULE_PARM(max_interrupt_work, "i");
+MODULE_PARM(debug, "i");
+</pre>
+
+To this:
+
+<pre>
+MODULE_INFO(multicast_filter_limit, "i");
+MODULE_INFO(max_interrupt_work, "i");
+MODULE_INFO(debug, "i");
+</pre>
+
+Then build the kernel:
+
+<pre>
+make-kpkg --revision=1.0 --append_to_version=-shuttle-2 kernel_image modules_image --initrd
+</pre>
+
+This will build the kernel as a Debian package.  You can just use "make" if you want here.
+
+== Step 2: Install the Operating System ==
+
+=== Option A: Remaster the Edgy Install CD ===
+<pre>
+su
+
+cd ~/edgy.eft.remaster
+
+mkdir iso
+mount -o loop /dv/downloads/Linux/Ubuntu/ubuntu-6.10-beta-desktop-i386.iso iso
+
+mkdir iso.edit
+rsync --exclude=/casper/filesystem.squashfs -a iso/ iso.edit
+
+mkdir squashfs
+mount -t squashfs -o loop iso/casper/filesystem.squashfs squashfs
+
+mkdir squashfs.edit
+cp -a squashfs/* squashfs.edit/
+
+umount squashfs
+umount iso
+</pre>
+Copy in the new/patched AHCI+network drivers you built in step 1
+<pre>
+cp /lib/modules/2.6.17-10-generic/kernel/drivers/scsi/ahci.ko squashfs.edit/lib/modules/2.6.17-10-generic/kernel/drivers/scsi/ahci.ko 
+
+cp /lib/modules/2.6.17-10-generic/kernel/drivers/net/sis190.ko squashfs.edit/lib/modules/2.6.17-10-generic/kernel/drivers/net/sis190.ko
+</pre>
+
+Then rebuild the initrd
+<pre>
+chroot squashfs.edit
+mount -t proc none /proc
+mount -t sysfs none /sys
+
+export HOME=/root
+export LC_ALL=C
+
+mkinitramfs -o /initrd.gz 2.6.17-10-generic
+
+umount proc 
+umount sys
+exit
+
+mv squashfs.edit/initrd.gz iso.edit/casper
+</pre>
+
+And copy this to squashfs filesystem also (I think this is necessary?)
+<pre>
+cp iso.edit/casper/initrd.gz squashfs.edit/boot/initrd.img-2.6.17-10-generic 
+</pre>
+
+Regenerate manifest
+<pre>
+chmod + iso.edit/casper/filesystem.manifest
+chroot squashfs.edit dpkg-query -W --showformat='${Package} ${Version}\n'  >iso.edit/casper/filesystem.manifest
+cp iso.edit/casper/filesystem.manifest iso.edit/casper/filesystem.manifest-desktop
+sed -ie '/ubiquity/d' iso.edit/casper/filesystem.manifest-desktop
+</pre>
+Compress filesystems (this takes a while)
+<code>mksquashfs squashfs.edit iso.edit/casper/filesystem.squashfs	</code>
+Calculate new md5sums
+<pre>
+rm iso.edit/md5sum.txt
+(cd iso.edit && find . -type f -print0 | xargs -0 md5sum >md5sum.txt)
+</pre>
+
+Create ISO (this takes a while)
+<pre>
+rm ubuntu.iso
+cd iso.edit
+mkisofs -r -V "Ubuntu" -cache-inodes -J -l -b isolinux/isolinux.bin -c isolinux/boot.cat -no-emul-boot -boot-load-size 4 -boot-info-table -o ../ubuntu.iso .
+cd ..
+</pre>
+
+Burn the CD (use -dummy to test first if desired, and yeah this takes a while too)
+<pre>
+cdrecord dev=/dev/hda speed=16 driveropts=burnfree ubuntu.iso
+eject /dev/hda}}}
+Then use the CD to install Edgy to the SATA drive.
+
+=== Option B: Replace the Drivers in the Running Live CD ===
+'''Warning:''' Doing things this way will mean that you have to repeat these steps every time you install the operating system.  Option A is the safest method because you have an install CD that works with your hardware.
+
+First, copy the drivers you built in step 1 to some other media (USB stick or CD).  Start the machine using the Edgy live CD. Then replace SATA driver in running kernel:
+{{{
+cp /media/usbdisk/ahci.ko /lib/modules/2.6.17-10-generic/kernel/drivers/scsi
+modprobe ahci
+</pre>
+
+This will allow the install process to recognise the SATA drive.  Run the installation, partition the drive and install GRUB.  Don't restart the machine at the end of the install process, keep running from the Live CD.
+
+Mount the newly installed drive:
+<pre>
+mkdir /mnt/root
+mount /dev/sda1 /mnt/root
+</pre>
+Copy drivers into correct locations:
+<pre>
+cp /media/usbdisk/ahci.ko /mnt/root/lib/modules/2.6.17-10-generic/kernel/drivers/scsi
+cp /media/usbdisk/sis190.ko /mnt/root/lib/modules/2.6.17-10-generic/kernel/drivers/net
+</pre>
+Chroot into installed drive and mount /proc and /sys:
+<pre>
+chroot /mnt/root
+mount -t proc none /proc
+mount -t sysfs none /sys
+</pre>
+Move the existing boot image out of the way and make a new initrd image:
+<pre>
+mv /boot/initrd.img-2.6.17-10-generic /boot/initrd.img-2.6.17-10-generic.old
+mkinitramfs -o /boot/initrd.img-2.6.17-10-generic gz 2.6.17-10-generic
+</pre>
+Unmount everything and reboot:
+<pre>
+umount /proc
+umount /sys
+exit
+umount /mnt/root
+shutdown -r now
+</pre>
+When you reboot, grub will load the new initrd image (which contains the new drivers).
+
+==== Warning on SCSI Device Name Assignments ====
+
+Your USB key is likely to show up as a SCSI device (/dev/sda) which means that after the ahci kernel module loads, your SATA drive becomes /dev/sdb. This happens even if you umount the USB key before loading the kernel module.
+
+If this happens, everything will install perfectly but fail on reboot, because then the SATA drive will be detected first (even if the USB key is present) and thus become /dev/sda again.
+
+If you see this occurring while doing the above steps, be sure to edit the following files and replace any /dev/sdb occurrance with /dev/sda.
+<pre>
+/boot/grub/device.map
+/boot/grub/menu.lst
+/etc/fstab
+/etc/blkid.tab
+</pre>
+
+== Step 3: After Kernel Upgrades ==
+
+After a kernel upgrade (for instance dist-upgrade after Edgy Eft installation will upgrade to 2.6.17-11) you will need to copy the modified drivers into the module directory of the new kernel version, and recreate the new initrd image.
+-11 will accept the same binary drivers so a simply copy should suffice.
+However, mkinitrdfs does not work now, whereas update-initramfs will.
+Simply use
+<pre>
+update-initramfs -k 2.6.17-11-generic -c
+</pre>
+
+----
+CategoryHardware

@@ -1,0 +1,113 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+As of Ubuntu 7.10, official support for EVMS has been dropped and the packages have accordingly been moved from the `main` component to the community-supported `universe` component.  If you had installed prior to Ubuntu 6.10, you will have had `evms` installed as part of the default set of packages; the update manager will recommend that you remove it, failing to do so can render your computer unbootable (or at least, incredibly slow).
+
+This page attempts to document what the problem is and why we have opted to drop support for EVMS.
+
+=== Introduction ===
+
+The Enterprise Volume Management System (EVMS) is a project that attempts to provide a single, unified system for managing storage and filesystems.  Rather than managing individual disks, partitions and filesystems; LVM Physical Volumes, Volume Groups and Logical Volumes; RAID arrays (both software and hardware) etc. yourself, using EVMS you can address them in one consistent way.
+
+In effect, EVMS attempts to do all of the heavy lifting for you.
+
+=== How it works ===
+
+EVMS performs most of its relevant functionality using the kernel Device Mapper API, which allows the creation of arbitrary block devices from pieces of others.  (For the sake of avoiding confusion, it's worth noting that Device Mapper continues to be supported, and is the foundation of new features in Ubuntu 7.10 such as Encrypted LVM filesystems).
+
+To support using EVMS for "legacy" disks and partitions, it reads the partition table of the disk itself and creates devmapper devices for the partitions that it finds.  This means that you end up with three ways of accessing partitions, `/dev/sda1` (the kernel-provided device), `/dev/mapper/sda1` (the devmapper device) and `/dev/evms/sda1` (the EVMS-provided copy of the devmapper device).
+
+In theory, while you can use any of these, you should use one consistently for all of your filesystems; EVMS recommends that you only use `/dev/evms` paths.
+
+=== Early problems ===
+
+We've had problems with EVMS throughout the development of Ubuntu, most particularly as we've worked to allow use of filesystems and disks by logical information such as filesystem UUID and LABEL (to allow for the impending, and now past change of IDE drivers from the `ide` subsystem to `libata`).
+
+The problem is simple and obvious; for an ordinary partition, you have three devices which all have the same UUID; so which one do you use?  The worst case bug was where swap would be activated using both, so you would have twice the available swap, with both halves mapped over the same physical device.
+
+Incredibly, the kernel has a feature designed to prevent exactly this kind of problem ... bd_claim.
+
+=== bd_claim ===
+
+The Linux 2.6 kernel tracks use of block devices, and only allows one thing to claim a block device at one time.  This works to prevent the kind of mess we were seeing.
+
+Only one thing could claim the `/dev/sda` disk block device (and thus create devices for the partitions), preventing there from being multiple ways to access particular parts of the disk.  Normally the kernel's own partition handling wins this.
+
+For partitions themselves, claims are given if you create devmapper maps of the partition, if you mount the partition or if you use it in some other way (e.g. swap).
+
+It's not possible to activate the same swap partition twice, and it's not possible to an activate a swap partition that has a devmapper "shadow" (you can only activate the shadow).
+
+Given that recent Ubuntu releases have activated filesystems, RAID devices, and LVM devices by default when they appear, rather than waiting for a timeout, this kernel feature is important to guarantee the sanity of a user's system.
+
+=== Maintenance issues ===
+
+EVMS appears (as of today, Thursday 11th October 2007) to be unmaintained.  The evidence for this supposition is as follows:
+
+* The mailing list thread associated with this message: <nowiki>[[http://marc.info/?l=evms-devel&m=118945728830262&w=2|(Evms-devel) question: EVMS status]]</nowiki>
+* The last release of evms was 2.5.5 on February 26, 2006  (source: http://evms.sourceforge.net/), this is over 18 months ago
+* EVMS depends on the extremely outdated and unmaintained GTK+ 1.2 libraries, it has not been updated to the GTK+ 2.0 series (currently 2.12.0)
+* EVMS does not support the vanilla Linux 2.6 kernel, and instead requires that the bd_claim feature be patched out (source: http://evms.sourceforge.net/install/kernel.html#bdclaim)
+
+There are patches for the GTK+ issue, but it's the last issue that most concerns us.  Ubuntu has only ever supported the 2.6 kernel series, so the upstream for a supported package explicitly refusing to make their software work with that kernel series and instead suggesting you patch out important safety/sanity features is ... worrying.
+
+=== Problems ===
+
+If you have the `evms` packages installed, but are not using them as they suggest (`/dev/evms` for everything, or EVMS configuration changes), then your system will become either unbootable or very, very slow as EVMS repeatedly tries to create mapped block devices for disks and partitions the kernel has already claimed.  It doesn't treat the failure as an error, but instead keeps retrying immediately.
+
+This can be identified by the `udevd` process (the user-space daemon that handles device creation) using 100% CPU, and repeated kernel errors such as:
+
+  <pre>
+kernel: [ 227.338011] device-mapper: table: 254:1: linear: dm-linear: Device lookup failed
+kernel: [ 227.338017] device-mapper: ioctl: error adding target to table
+</pre>
+
+See <nowiki>[[https://bugs.edge.launchpad.net/ubuntu/+source/evms/+bug/115616|Bug #115616]]</nowiki> for more details.
+
+=== Solution ===
+
+There are three possible solutions to the problem, as detailed on the EVMS website.
+
+ 1) '''Patch the kernel to remove support for block device claim tracking.'''
+
+ This removes an important safety feature, which we feel is necessary to ensure the correct behaviour of user's systems.  Without this feature, and with `evms` still installed, we would be back having to deal with bugs of swap devices being activated multiple times, partitions being overwritten by accident, etc.
+
+ Fundamentally, we consider this kernel feature more important than support for EVMS.
+
+ 2) '''Modify EVMS configuration to exclude disks by default.'''
+
+ This would be a tricky modification, since we'd be applying it to users who are upgrading from a previous release of Ubuntu and potentially may be using EVMS themselves.  The default install of EVMS could be configured this way, but then if you're installing it, you potentially know what you're doing anyway (see below).
+
+ Error-prone and likely to cause more problems.
+
+ 3) '''Use EVMS for all devices.'''
+
+ This is the way EVMS upstream prefer you to use it, and if you've installed EVMS yourself or are a fan of it, you're likely to be using it this way already.  With the vanilla configuration, this does not conflict with the kernel because none of the partitions will have been claimed since you would use `/dev/evms` paths for everything.
+
+Our preferred solution is to remove `evms` from users computers unless they are using it; since if they're using it, they are most likely using it according to #3.  Likewise if a user installs it, they are likely to be following the instructions that result in #3 as well.
+
+Users who want EVMS can continue to use it, users who don't know what it is will have it removed from their system.
+
+=== But EVMS is still installed ===
+
+Be sure that you upgrade to Ubuntu 7.10 using our recommended "Update Manager" process, which also has a command-line tool for upgrading servers.  This will inform you that `evms` is no longer supported, and recommend its removal:
+
+<nowiki>[[File:evms-support-ended.png]]</nowiki> <nowiki>[[File:remove-evms.png]]</nowiki>
+
+If you use a tool such as `apt-get` or `aptitude` to upgrade, you will have to remove the `evms` package yourself.  Also note that this check was added after the release of 7.10 Beta, so if you upgraded before then you will still have `evms` installed and will need to remove it by hand.
+
+=== Removing EVMS entirely ===
+
+In many cases it is possible to entirely remove EVMS without adversly affecting the system.  This is because most systems do not use any EVMS-specific features, using it for rather straight forward things such as raid0/1/1+0/linear etc.  
+
+If a system does use EVMS to manage all partitions however, it is generally still possible to convert any existing EVMS devices to LVM compatible devices by following instructions found here: <nowiki>[[http://evms.sourceforge.net/user_guide/#evmstocomp]]</nowiki>.  This then allows EVMS to be safely purged, and the system to be converted to something better supported such as mdadm.
+
+A basic summary of the steps for converting an EVMS device can be seen here: <nowiki>[[http://ubuntuforums.org/showthread.php?p=3976387#post3976387]]</nowiki>
+
+When uninstalling EVMS, check the output to ensure that the initramfs for your current kernel has been updated.  In the current version of the Ubuntu packages (as of 2-16-2008) when EVMS is uninstalled, only one kernel will have its initramfs rebuilt.  As a result, some parts of EVMS will still be present when other kernels are run and EVMS-related problems will persist.  This can be fixed by running update-initramfs for other kernel versions.

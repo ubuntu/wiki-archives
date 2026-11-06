@@ -1,0 +1,325 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+
+
+This document is geared towards ''feisty'' and later releases. Where possible, differences for other releases are noted.
+
+This is meant as a reference for the kernel team.
+
+=== Getting the source ===
+
+Ubuntu kernel source is available via git. More information can be obtained from KernelGitGuide.
+
+=== Build system breakdown ===
+
+This requires some knowledge of the Debian build system (including the ''debian/rules'', etc). The Ubuntu kernel currently uses ''kernel-package'' and ''kernel-wedge'' to do the bulk of the work. These packages handle building the kernels, creating the .deb's and creating extra packages such as headers and udeb's.
+
+==== Flavours ====
+
+Flavours are how we define different types of kernels on the same architecture. Each flavour can be targeted to a specific CPU, or provide some functionality for a specific purpose.
+
+For example, the amd64 (x86_64) architecture has these flavours:
+
+* generic - The default install kernel.
+* server - Optimized for server installations.
+* lowlatency - Unsupported kernel for multimedia applications.
+
+When building on the amd64 architecture, these are the kernels that are built. In reality, they only differ in slight variations of kernel config options.
+
+==== Configs ====
+
+Each flavour is built using a pre-defined configuration file (used by the kernel build system). Each architecture contains it's config files in ''debian/config/<arch>/''. The files are split for each flavour in ''debian/config/<arch>/config.<flavour>'', and common options are shared in ''debian/config/<arch>/config''.
+
+When the kernels are built, the common and flavour specific config files are concatenated together.
+
+==== debian/control ====
+
+The ''debian/control'' file is generated from ''debian/control.stub'' by the kernel-wedge command.
+
+The ''debian/control.stub'' file is generated from ''debian/control.stub.in'' by a ''debian/rules'' target. This is populated by files defining the flavours in ''debian/config/vars.*'' and ''debian/config/*/vars.*''.
+
+The vars files define package descriptions for each flavour.
+
+==== debian/changelog ====
+
+The changelog file is where we track all changes made to the repository. This is a standard ''debian/changelog''. However, changes are not added to it manually. Instead, it is done automatically at release time using ''git-log''. See below for process.
+
+==== ABI ====
+
+The ABI is probably one of the most important features of the build system. In the kernel package naming, the ABI is the numerical component immediately following the kernel version. E.g.
+
+<pre>
+2.6.20-6-generic
+</pre>
+
+The ABI in the above example is '''6'''. The ABI is represented in the ''debian/changelog'' as:
+
+<pre>
+linux-source-2.6.20 (2.6.20-6.11) feisty; urgency=low
+</pre>
+
+The minor version after the ABI is an ever increasing counter. It basically denotes how many uploads have been made for this kernel version.
+
+The kernel ABI is derived from the ''Modules.symver'' file produced during the kernel build. Each exported function is given a hash defining the function's arguments and return value, making it easy to detect changes which can break modules built against the kernel (such as our own ''linux-restricted-modules'' package).
+
+The ABI files for the previous build are located in ''debian/abi/<prev-rev>/''. The layout is similar to the ''debian/config/'' directory in that each architecture is a subdirectory, and each flavour is a file with the ABI for that flavour in it.
+
+When the kernel build process finishes, it checks each flavour against the prev ABI. If the previous and current ABI's are the same version (e.g. 6), and the ABI has changed, the build will fail. This signifies that an ABI bump is needed (see below).
+
+As of now, a single ABI change in any flavour results in an ABI bump for the entire build. There is no per-flavour or per-architecture ABI number. This is for sanity reasons.
+
+==== Module lists ====
+
+Module lists are tracked similarly to the ABI, and are kept in ''debian/abi/<prev-ver>/<arch>/<flavour>.modules''. The file is a basename sorted list, sans .ko extension, of all the modules in a particular flavour. This is checked regardless of ABI, since it's meant to track release-to-release to avoid modules going missing by mistake.
+
+The check will also honor a list in ''debian/abi/<prev-ver>/<arch>/modules.ignore'', which is considered a list of modules that have gone missing, and are known. This file is architecture specific.
+
+=== Development cycle ===
+
+This section describes all the steps involved in a common development cycles. That is, the cycles from one upload (release) of the Ubuntu kernel to the next.
+
+==== Updating ABI and modules lists ====
+
+To start a new release, you need to download the ABI and module files from the previous release. To do this, use:
+
+<pre>
+debian/bin/getabis 2.6.20 6.11
+</pre>
+
+This will download all the previous deb's, and extract the ABI files, and module lists. You may find it easier to do this from a DC machine where the archive is closer too (downloading all the kernel deb's is a bandwidth eater).
+
+==== Starting a new release ====
+
+Immediately after an upload you should run:
+
+<pre>
+debian/rules startnewrelease
+</pre>
+
+This will generate a new ''debian/changelog'' entry for the next revision number, and modify appropriate other files under the ''debian/'' directory.
+
+==== Bumping the ABI ====
+
+If it becomes necessary to increase the ABI, you simply need to edit ''debian/changelog'', increase the ABI in the version, then run this command:
+
+<pre>
+debian/rules debian/control.stub
+</pre>
+
+This will regenerate all of the control files with the appropriate ABI.
+
+==== Commit templates ====
+
+In ''debian/commit-templates/'' are files used for making git-commit's easier.
+
+You would use these files in this way:
+
+<pre>
+git-commit -s -F debian/commit-templates/<template> -e
+</pre>
+
+Always commit using ''-s'' to add your Signed-off-by to the commit log. The ''-e'' flag says to edit the log before committing. Some templates do not require editing (e.g. the ''bumpabi'' and ''updateconfigs'' templates).
+
+The primary one you will use is the ''patch'' template. It is commented heavily, so should be self explanatory.
+
+==== Upstream syncing ====
+
+During an Ubuntu development cycles, the kernel is constantly synced against upstream Linux GIT head. This involves merging conflicts, possibly deprecating local patches, and performing test builds.
+
+For stable releases, we cherry pick and sometimes outright sync to the 2.6.x.y GIT tree for that particular release.
+
+==== Maintaining ubuntu/ ====
+
+The ''ubuntu/'' subdirectory in our GIT tree contains third-party drivers. These are drivers that have not yet made it into the kernel proper (e.g. '''d80211''') or that will never make it into the kernel proper, but is something our users need (e.g. '''ipw3945''').
+
+The subdirectory is laid our similarly to the standard source tree, and even has an ''include/'' subdirectory for headers, that will be included in the ''linux-headers'' packages.
+
+==== Updating configs ====
+
+As new drivers are added and merges are done with upstream, it becomes necessary to update our configs in ''debian/config/''. This is easily done for all architectures with one simple command:
+
+<pre>
+debian/rules updateconfigs
+</pre>
+
+This runs '''silentoldconfig''' for all flavours, so if any possible config options unanswered, it will ask you. Alternatively, if you know of a new config option, you can alleviate answering the same question for it on all flavours by prepending it to the ''debian/config/<arch>/config'' files, and running the above command.
+
+Once the configs are updated, you simply commit the new changes:
+
+<pre>
+git-update-index debian/config/*/*
+git-commit -s -F debian/commit-templates/update-configs
+</pre>
+
+==== Preparing an upload ====
+
+Once the tree is ready for upload, follow these steps to complete the package for uploading:
+
+* Run ''git-status'' to be sure you have no outstanding commits, or extraneous files in your local tree.
+* Create the changelog entries, with the following commands:
+ <pre>
+ debian/rules insertchanges
+ <open edit debian/changelog in editor to verify release and date>
+ git-update-index debian/changelog
+ git-commit -s -F debian/commit-templates/updateconfigs
+ }}}
+* Tag the release. The '''-m''' option is the message for the tag commit, and matches the actual tag name.
+ {{{
+ git-tag -s -m Ubuntu-2.6.20-6.11 Ubuntu-2.6.20-6.11
+ }}}
+* Push the changes and tag to our repo.
+* Run dpkg-buildpackage. '''NOTE''': Requires dpkg-dev in feisty so that it ignores GIT meta-data.
+ {{{
+ dpkg-buildpackage -S -rfakeroot
+ }}}
+* Upload using whatever tools you wish (''dupload'' for example).
+
+It should be noted that for development releases, a new tarball is generated at each upload. However at release time, a .orig.tar.gz is generated, sans ''debian/'' directory (but with ''debian/firmware/'', to more easily track changes after release.
+
+==== Pushing to our repo ====
+
+The kernel team should push changes to our internal repo (see KernelGitGuide for public repo). To make this easy, you can setup a script called ''push-feisty'' with this:
+
+{{{
+
+branches="master"
+remotes="kernel.ubuntu.com:/srv/kernel.ubuntu.com/git/ubuntu/ubuntu-feisty.git"
+
+cd /path/to/your/repo
+
+for repo in $remotes; do
+        echo "Pushing to: $repo"
+        git-send-pack $repo $branches $@
+        echo
+done
+</pre>
+
+For normal pushes, just call the script, but if you need to push a tag, add the tag to the command line, e.g.:
+
+<pre>
+push-feisty Ubuntu-2.6.20-6.11
+</pre>
+
+==== Security and Proposed Updates ====
+
+On occasion, security patches are applied to stable kernels. For these kernels, you will set the archive in ''debian/changelog'' to '''<rel>-security''', where '''<rel>''' is some release like ''edgy''.
+
+The security team generally provides patches in the form of CVE's, with GIT SHA URL's to an upstream patch that fixes the problem. We usually use will fetch from the upstream GIT repo, and ''git-cherry-pick'' to get the fix into the local tree.
+
+The easiest way to fetch the remote repo's objects is to create a remote file such as ''.git/remotes/upstream-linux-2.6.20'', containing:
+
+<pre>
+URL: ssh://master.kernel.org/pub/scm/linux/kernel/git/stable/linux-2.6.20.y.git
+Pull: master:upstream-linux-2.6.20
+</pre>
+
+Then to pull the objects, and cherry pick an SHA, do this:
+
+<pre>
+git-fetch upstream-linux-2.6.20
+git-cherry-pick -e -x aa1812b3e344dbb2c7f30e1b95661cbd36d0cd2b
+</pre>
+
+The '''-e''' option will bring up an editor to add any Ubuntu related info to the commit (perhaps a bug number, or maybe even add the CVE number). The '''-x''' will keep the original GIT SHA in the commit message to track where it came from.
+
+Security uploads should be build tested prior to upload (this is the case for any upload, but especially so for security and proposed updates). You and one other person should boot test the resulting kernel.
+
+After upload, notify the security team that you have made the upload and include a copy of the changelog.
+
+=== Performing builds ===
+
+Aside from the standard ''dpkg-buildpackage'' build method, there are several easier ways to do build for developers. When I actually add new code, I generally do an out-of-tree build for test, like so:
+
+<pre>
+}}}
+
+You can add '''-jX''' as needed.
+
+One other helpful tool for a developer is to install the ''ccache'' package. This speeds rebuild by a large factor.
+
+==== Normal full build ====
+
+To test normal package building, one can use this command from the kernel git repo:
+
+{{{
+fakeroot debian/rules binary-debs
+</pre>
+
+This will build every kernel flavour, and leaves the packages in ''debian/build/''.
+
+==== Partial build ====
+
+You can also do single or multiple specific flavours during the build, using this syntax:
+
+<pre>
+fakeroot debian/rules binary-debs flavours="generic server"
+</pre>
+
+==== Build options ====
+
+There are several build options, in the form of environment variables and make variables. Make options are passed on the ''debian/rules'' command line.
+
+* Environment
+** '''CONCURRENCY_LEVEL'''='''X''' where '''X''' is a number to pass using ''make's'' ''-j'' option.
+** '''AUTOBUILD''' - (can be passed to make as well). Tells the build to create a non-official package with generated ABI. Used for daily builds of the kernel.
+
+* Make
+** '''skipabi''' - Used for test only, causes the build to skip the ABI consistency check.
+** '''NOKERNLOG''' - Used for the '''insertchanges''' or '''printchanges''' target. Causes git-ubuntu-log to not include upstream kernel changes in changelog output.
+
+=== Post upload ===
+
+There are several things to do after an upload. These depend greatly on what the upload involved. Usually, for a non-ABI changing upload, you do not need to do anything further.
+
+However, for an ABI changing upload, packages need to be rebuilt against the linux-headers. Note that these packages have a extra version who's major matches the ABI of the kernel it is being built against.
+
+==== linux-restricted-modules ====
+
+This package contains modules that are proprietary. They are distributed separately so that it is easy for users to not have to use them.
+
+For an ABI bump, edit ''debian/rules'' and find '''abi_version'''. Change the value to the new ABI number. Use ''dpkg-buildpackage'' as normal after creating a new changelog entry.
+
+==== linux-meta ====
+
+The linux-meta package provides meta packages for easier user upgrades. Because our kernel packages are named with full ABI and flavour, users normally would have to manually upgrade to a new kernel (if it had an ABI bump). The meta packages always point to the latest kernel, so if users install these packages (and they are installed by default on new systems), then upgrades will always pull in everything they need to be current.
+
+For an ABI bump, edit ''debian/rules'' and find '''KERNEL_ABI'''. Do the same as for ''linux-restricted-modules''.
+
+==== linux-backports-modules ====
+
+This package is usually empty during development. It is meant for post-release updates of new drivers. It is packages separately from the kernel so that it is easier to provide sometimes untested drivers for new hardware on a stable release. Users do not have this package installed by default.
+
+The ABI bump method is the same as for linux-meta.
+
+=== main, proposed and security, OH MY! ===
+
+We have some differing processes for different types of uploads. Described here for the sanity challenged.
+
+==== main ====
+
+No differences for this. Uploading to main (the current development release) is the primary target for work.
+
+==== proposed ====
+
+Technically known as ''<rel>-proposed'' (e.g. ''edgy-proposed'') is where we can push changes that need testing, and are unsuited for a wide audience of users who expect a rock solid distribution.
+
+Typical changes in this tree are new drivers, and large updates to support new hardware.
+
+The GIT tree is named ''<rel>-updates.git''. It's ABI remains a constant '''-50''', and the changelog for this release never rolls, meaning the it only has one changelog set for every upload. This changelog set is updated every upload to reflect new patches, and to remove ones that are either broken, or have been merged to the stable kernel tree.
+
+See the KernelUpdates page for more information.
+
+==== security ====
+
+This is self explanatory, or so it would seem. While the ''<rel>-security.git'' tree is meant primarily for security updates, occasionally stable changes are merged into it from proposed.
+
+----
+CategoryKernel

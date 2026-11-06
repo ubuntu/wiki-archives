@@ -1,0 +1,190 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+
+''Please check the status of this specification in Launchpad before editing it.  If it is Approved, contact the Assignee or another knowledgeable person before making changes.''
+
+* '''Launchpad Entry''': UbuntuSpec:PowerPolicyManagement
+* '''Packages affected''': ppm
+
+=== Summary ===
+
+The Power Policy Manager (PPM) is a layered, system-wide power policy framework. Most power managers assume a binary power policy. For example, they change power policies when AC power is removed, but don’t provide a way for users to override these settings. Many policy managers that do provide user choice attempt to hardcode exceptions, and do not provide a way for users to select multiple power policies.<<BR>>
+
+This functional specification proposes the addition of PPM package into the UME apt repository to solve the Mobile-Internet-Device specific power policy needs.<<BR>>
+
+=== Release Note ===
+
+By adding the ppm implementation, a new mechanism for defining device power profiles will be added to the UME technology pool.  For the most part the operations of the PPM will be seen by the end user, but eventually new control panel applets and/or status bar indicators could provide additional controls and/or information about the device power state.
+
+A classic example would be a control panel applet that would provide a UI for placing the device into "Airplane Mode", which would trigger the device to turn off all radios (per federal air regulations) and also enable various low level power saving settings to enable the end-user to use their device for as long as possible.
+
+=== Rationale ===
+
+What is needed is a flexible power policy manager that allows users to select multiple policies, and easily modify those policies to fit their system. The system should leverage existing system power management capabilities, such as Advanced Configuration and Power Interface (ACPI). It should also allow users to write their own power management code for new hardware. Most importantly, it should be a system-wide policy manager that focuses on more than just the CPU frequency.<<BR>>
+
+=== Use Cases ===
+
+==== Normal System Starup ====
+
+* On system start-up the upstart process parses the ppm startup script in /etc/events.d/ppm, which triggers /usr/sbin/ppm to be loaded with the 'refresh' flag.
+
+* The ppm daemon process loads each of plugin modules found in /usr/lib/ppm/, and calls the plug-ins entry function (allowing the plug-in to then call the ppm registration function.)
+
+* The ppm daemon then parses each of the policy layer configuration files found in /usr/share/ppm/layers/ and constructs an in-memory database of policy layers.
+
+* The ppm daemon then parses each of the policy modes configuration files found in /usr/share/ppm/modes/, and for each mode that is marked as 'default' the ppm will designated the associated layers as 'active'
+
+* The ppm then flattens the activated layers to construct a power policy for the system with will result in a series of commands to each of the loaded ppm plugins.
+
+* The ppm plugins interpret the commands to implement the policy.
+
+==== User Un-Docks Device ====
+
+* ppm daemon receives a dbus signal from HAL that the power state has changed, and now the system is running off the battery
+
+* ppm daemon activates the battery mode which causes the associated layers to be activated
+
+* ppm constructs a new system wide power policy by re-flattening all the activated layers
+
+* ppm sends a series of commands to each of the ppm plug-ins which then interpret the policy commands to specific actions
+
+==== User Sets 'Airplane Mode' ====
+
+* user opens the control panel and touches the 'Power Settings' applet
+
+* the 'Power Settings' applet will call a remote function in the ppm via dbus to query that 'Airplane Mode' is currently deactivated.
+
+* the 'Power Settings' exposes a user interface that indicates that 'Airplane Mode' is disabled
+
+* the user uses the UI to turn on 'Airplane Mode', which triggers the applet to call a remote function (via dbus) to activate the mode.
+
+* the ppm daemon will activate the associated layers, and then flatten the layers into a new system wide policy
+
+* the ppm then sends a series of commands to each of the loaded ppm plugins.  One of the commands is to turn off all radios.  All the plug-ins that do not deal with a device that contains a radio will just ignore the command, and each of the plug-ins that are managing a radio device will call the device specific mechanisms to turn ensure the radio is off.
+
+==== User Starts Power Policy Aware Application ====
+
+* user launches a full screen movie and the application wishes to ensure that the screen both stays on and also stays at full brightness
+
+* the application calls a remote function in the ppm via dbus to set 'Presentation Mode'
+
+* the ppm daemon will activate the associated layers, and then flatten the layers into a new system wide policy
+
+* the ppm then sends a series of commands to each of the loaded ppm plugins.  One of the commands is to set the screen to 100% brightness and screen blank timeout to infinite.
+
+=== Assumptions ===
+
+* Device provides some mechanism for regulating power hungry devices.  This could be something as common as ACPI, or as unique as a custom micro-controller with a ad-hoc interface for programing from the Linux system running on the CPU.
+
+=== Design ===
+
+The Framework The PPM breaks down power policy management by using plug-ins, layers, and modes.
+*** Modes determines which layers to use.
+*** Layers contains the list of commands.
+*** Plug-ins communicate the commands to the hardware.
+
+<nowiki>[[File:image003.png]]</nowiki>
+
+<<BR>>
+A mode contains the list of which layers to activate. Multiple modes can be active at the same time. If two modes select different layers, the commands sent to the plug-ins will be based on a combination of the layers. Higher priority layers take precedence.
+<<BR>>
+For example, if one layer had the plug-in command, "cpu performance max", but a higher priority layer had the plug-in command, "cpu performance cool", the latter command would be sent to the CPU plug-in. Layers are transparent, which means that commands from lower priority layers that don't overlap with commands from higher priority layers, are active.
+<<BR>>
+A policy layer is a grouping of plug-in commands, with an associated priority.
+<<BR>>
+Example layer 1 For example, a low-power layer might contain commands to:
+*** set the CPU to a low-power mode
+*** set the screensaver timeout to 2 minutes
+*** dim the screen
+<<BR>>
+Example layer 2 A second layer, dealing with thermal issues, might:
+*** set the screensaver timeout to 30 seconds
+*** put the SATA hard drive into low power mode
+*** tell the CPU to go into "cool" mode
+
+<<BR>>
+Which layer takes precedence? The thermal policy layer would have the highest priority, to make sure that the system doesn't overheat.
+<<BR>>
+
+<nowiki>[[File:image001.png]]</nowiki>
+
+Code example A layer file would look something like this (first release is simple text description):
+*** File name convention: Priority_Name (for example: 00_default)
+*** Policy file structure is three columns and N number of rows.
+*** First column is CLASS, referring to device classes.
+*** Second column is COMMAND, referring to operation to be invoked on the device or subsystem.
+*** Third column is VALUE, such as ON, OFF, MAX (depending on the device).
+<<BR>>
+Layer content An example of the 00_default policy:
+<pre>
+CPU		Performance	Max
+radio		radio		allowed
+wifi		radio		on
+display		screensaver	user
+display		brightness	50
+bt		radio		off
+</pre>
+
+=== Implementation ===
+
+The source tree for the ppm is available in a public git tree via:
+http://www.lesswatts.org/repos/projects/ppm.git/
+
+The implementation is split into:
+* daemon: PPM service launched at system startup
+* ppmtool: command line tool for configuring the ppm deamon
+* plugins: PPM plug-ins that receive power policy commands and then interpret those commands to specific actions
+* layers: power policy configuration files
+* modes: configuration files that group sets of layers together
+
+==== UI Changes ====
+
+The PPM package does not present a UI, but as soon as the PPM is available in UME then a moblin-applets control panel applet will be added that allows the user to set airplane mode.
+
+==== Code Changes ====
+
+This is all new code.
+
+==== Migration ====
+
+N/A since this is all new code.
+
+=== Test/Demo Plan ===
+
+A functional spec for the PPM is hosted on the project home page:
+http://www.lesswatts.org/projects/power-policy/
+
+Testing will focus on three main functional areas:<<BR>>
+
+* DBus based application interface for activating/deactivating layers
+* PPM Plug-in interface for inserting new micro-policy engines
+* Core PPM engine parsing of policy files
+
+Testing will not explicitly cover individual device policies, but device specific policy files will be created and exercised for a handful of devices in order to meet the functional testing goals stated above.<<BR>>
+
+NOTE: It is the device vendor / solution creator that will need to craft device specific policy and potentially PPM plug-ins.  Since the PPM is general purpose, it is impossible to test for the infinite number of devices that might hit the market. <<BR>>
+
+=== Outstanding Issues ===
+
+This should highlight any issues that should be addressed in further specifications, and not problems with the specification itself; since any specification with problems cannot be approved.
+
+A standard mechanism for measuring system power utilization needs to be adopted before an optimal power policy can be created.  The lesswatts project is working towards this goal.
+
+=== BoF agenda and discussion ===
+
+N/A
+
+=== See also ===
+* <nowiki>[[power-management-in-Ubuntu]]</nowiki>
+* <nowiki>[[ReducedPowerUsage]]</nowiki>
+
+----
+CategorySpec

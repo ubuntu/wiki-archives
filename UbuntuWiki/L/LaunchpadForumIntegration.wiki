@@ -1,0 +1,485 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+
+''Please check the status of this specification in Launchpad before editing it.  If it is Approved, contact the Assignee or another knowledgeable person before making changes.''
+
+* '''Launchpad entry''': https://features.launchpad.net/products/launchpad/+spec/launchpad-forum-integration/
+* '''Packages affected''': 
+
+=== Summary ===
+
+We want Launchpad to provide useful services to the Ubuntu Forums to
+provide a better user experience and cross pollenation.
+
+=== Rationale ===
+
+=== Use cases ===
+
+* When searching the forums for help, Doug sees Launchpad Karma scores
+    associated with a number of posters. He uses this as a metric to help
+    determine which answers are more likely to help him.
+
+* Bob is a Karma whore, and when he discovers he gets Launchpad Karma
+    for posting to the Ubuntu Forums he starts participating there.
+
+* Ryan is an Ubuntu Forums administrator, and he currently need to
+    maintain teams both in Launchpad and on the Ubuntu Forums. He writes
+    a script to pull team membership information from Launchpad into the
+    Forums database every few hours to half his workload.
+
+* Ethyl is a Launchpad user and wants to post to the Forums for the first
+    time. She is authenticated using her Launchpad credentials and only
+    needs to enter a Forums nickname in order for her to proceed.
+    
+=== Scope ===
+
+This spec only describes the Launchpad side of this integration.
+
+=== Design ===
+
+The Ubuntu Forums will communicate with Launchpad using an XML-RPC
+interface provided by Launchpad. This will be an Ubuntu Forums specific
+interface and must have and access control list making it accessible only
+to designated IP addresses.
+
+'''XXX:''' Discuss with sysadmins their preferred access control mechansisms.
+Perhaps username/password is preferable? Client cert would be problematic.
+
+Because there will occasionally be periods of Launchpad downtime, the
+Forums system should be robust. If Launchpad cannot be contacted, the
+messages should remain queued for later submission. Because of this
+restriction it is probably best if the Ubuntu Forums sends the
+messages asynchronously with a background process rather than
+synchronously. This also keeps the Forums systems responsive even if
+Launchpad is running slow for some reason.
+
+ '''MarkShuttleworth''': I don't think queued messages are a requirement for the initial cut. It makes more sense to me that we accept that LP downtime will result in lost Karma for Forums events initially. Queing and reliable message delivery are just going to slow down implementation of this.
+
+The facilities that Launchpad should provide can be grouped into four
+discreet areas:
+
+1. Account creation.
+
+    Launchpad needs to store the Forums nickname. When an account is
+    created in the Ubuntu Forums, a message is sent to Launchpad
+    informing it of the account creation. The Ubuntu Forums will provide
+    the Forums Nickname and the email address used to register.
+
+    Launchpad will create a Launchpad for the user if the email address
+    has not yet been registered in Launchpad, or will set the Launchpad
+    user's Forum Nickname if there is a user with the given email address
+    already registered in Launchpad. A forum_account_creation Karma event
+    will be stored for the user if they did not already have a Forum
+    Nickname stored.
+
+    Note that if the email address is registered to a Launchpad user who
+    already has a Forums Nickname set, then this nickname will be
+    overwritten with the new Nickname. This means that the Forums cannot
+    assume that every Forums account has a corresponding Launchpad
+    account. A similar edge case exists for when two accounts, both with
+    Forums Nicknames, are merged.
+
+2. Send Karma events.
+
+    Each day, the forums will count the number of posts and other events
+    and notify Launchpad of these events.
+
+    Each event is a tuple of Forums Nickname, event label, and UTC timestamp.
+
+    Because we expect to receive 25,000 or more events per day, the XML-RPC
+    API provided by Launchpad to receive these messages needs to accept
+    batches of several thousand events rather than one at a time.
+
+{| class="wikitable"
+|-
+| '''Event Type'''
+| '''Karma Points per event'''
+|-
+| forum_account_creation
+| 10
+|-
+| forum_post ('''*''')
+| 1
+|}
+
+    '''*''' This event does not need to be sent as it will be stored
+            automatically by Launchpad when it receives notification of
+            account creation.
+
+    '''XXX:''' What other events do we want to store?
+
+    Note that Launchpad needs to ensure that Karma is granted to invalid
+    accounts. The current Karma allocation API does not do this, so its
+    behavior needs to be extended.
+
+    '''MarkShuttleworth''': I think batching the events is unnecessary, it will require more heavy lifting changes in the Forums software. Let's just have the event transmitted in a function which returns immediately, so the Forums software requires only small changes. We can handle 25,000 updates in a day easily!
+
+    '''StuartBishop''': I don't see much difference in implementation time between writing events to a text file for a simple cron script to deal with rather than having the forums execute a synchronous XML-RPC call while handling the request. The other major advantage of doing it asynchronously is the responsiveness of the forums will not be affected (launchpad will take up to 20 seconds to attempt the insert, which would translate to a possible extra 20 seconds for the forums to handle a request). And with the asynchronous model you get fault tolerance nearly for free. I agree we can handle the load though - it was significant when the spec was written but 25000 requests now represent just a 1% increase in hits/day.
+
+    '''MarkShuttleworth''': I agree we want asynchronous writes from inside the Forums code, the forums code should get a single new API "note this Forums Karma event for that user" which returns instantaneously no matter what is going on with LP. I don't want a fancy LP API which dumps in sets of events, though, just one call per event to LP. And I suspect your comment applies more to my previous comment saying that these events should not be queued - what I mean is that we don't want a buffer mechanism on the LP side of the XML-RPC to deal with cases where LP itself is down.
+
+3. Retrieve information from Launchpad.
+
+    The Ubuntu Forums need to be able to retrieve the following information
+    about lists of Launchpad users:
+
+    Forum Nickname, Launchpad Account Name, Total Karma,
+    Forum Category Karma, Display Name, Preferred Email Address
+    (if not hidden).
+
+    The Forums will retrieve this information for a list of users
+    either by providing a list of Forums Nicknames, or for members of
+    a public Launchpad team.
+
+    Retrieving this information for all members of a public Launchpad
+    team allows the Forums to keep team membership synchronized between
+    Launchpad and the Ubuntu Forums.
+
+    '''XXX:''' Why did we need to retrieve this information for a list
+    of arbitrary users again? Maybe YAGNI.
+
+    Information will only be returned for Launchpad users with a Forums
+    Nickname set. Users without a Forums Nickname will be filtered.
+
+4. Open``Id
+
+    Launchpad will become an Open``Id server, allowing the Ubuntu Forums
+    to authenticate using Launchpad authentication credentials without
+    risk of them being intercepted by untrusted machines or code.
+
+    Open``Id will not be discussed further in this spec, as its
+    implementation is already discussed elsewhere '''XXX''': Provide link.  See also https://launchpad.net/launchpad/+bug/1169
+
+    ''''MarkShuttleworth''': what is the unique ID that the Forums will retain over time? How will it handle changes in LP username?
+
+=== Implementation ===
+
+    <pre>
+class IUbuntuForumsAPI(Interface):
+    def newAccount(forums_nickname, email_address):
+        '''Notify Launchpad about creation of a new Forums account'''
+
+    def giveKarma(events):
+        '''Give Karma.
+
+            events must be a list of (forums nickname, karma_action, timestamp).
+
+            karma_action must be a valid KarmaAction name in the Forums
+            category (eg. 'forum_post').
+
+            timestamp is a string in standard ISO format (YYYY-MM-DD HH:MI:SS)
+        '''
+
+    def getUserInfoForTeam(team_name):
+        '''Retrieve information about users in a Launchpad team.
+
+            Returns a list of (Forum Nickname, Launchpad Account Name,
+            Total Karma, Forum category Karma, Display name,
+            Preferred Email Address).
+
+            Only users with a Forum Nickname set in Lauchpad will be
+            returned.
+
+            The preferred email address will be an empty string if the
+            user has elected to hide their email address.
+        '''
+
+    def getUserInfo(nickname_list):
+        '''As getUserInfoForTeam, except information is retrieved for
+            a list of Forums Nicknames.
+        '''
+</pre>
+
+==== Code ====
+
+==== Data preservation and migration ====
+
+=== Unresolved issues ===
+
+ubuntu_demon and kiko had a conversation at UDS Sevilla about this spec and what it entails.
+
+* We already have an export of teams via /+rdf that could be used to sync if the code to update the teams was written on the vbulletin side. For instance: https://launchpad.net/~ubuntu-forum-ambassadors/+rdf
+* The user authentication part of the spec are mostly blocked on the implementation of OpenID (nearing completion).
+* On the Launchpad side we need to figure out how to do XMLRPC authentication of the forums robot when posting new karma events.
+* There are 290,000 forums users -- providing that list  to Launchpad is already an expensive operation. It's likely that having the forum ID stored in Launchpad is a reasonable shortcut for this.
+* Migrating user accounts is tricky but could be done progressively as users logged in to the forums (we would trigger an account creation in Launchpad).
+
+Some questions on the Forums side:
+
+* Is having an RDF listing of users in a team useful to address the team-membership-sync use case?
+* Is there any code for handling OpenID in vbulletin?
+* How would caching of karma values be done to avoid having to hammer the Launchpad web service for each and every post?
+* We need to deal with forums users which are unlinkable (via email or Launchpad ID) to Launchpad users. What should we do for that?
+* Is there a risk of the user impersonating another person in Launchpad?
+
+=== BoF agenda and discussion ===
+
+==== Comments ====
+
+'''MartinAlbisetti''': I know this spec scope refers only to Launchpad's side of the integration, but I would like to add two links about proposals to integrate Launchpad into de Forums: 
+* https://lists.ubuntu.com/archives/launchpad-users/2007-March/001184.html
+* https://lists.ubuntu.com/archives/launchpad-users/2007-March/001219.html
+* http://ubuntuforums.org/showthread.php?p=2299093
+
+'''AzraelNightwalker''': 
+* What about Launchpad Answers? Maybe they could be integrated with forums somehow?
+* Also bug reports could have an option to link forum threads with them, just like Launchpad Answers.
+
+==== IRC log ====
+<pre>
+(11:01:44) ubuntu_demon [i=depjayds@conference/ubuntuconf/x-393a7e65a7ba8589] entered the room.
+(11:01:46) ubuntugeek [n=rtroy@64.141.138.3] entered the room.
+(11:01:53) ubuntu_demon: hey
+(11:01:56) ubuntugeek: howdy
+(11:02:52) ubuntu_demon: What Mark (and others) would like : Karma integration , Ubuntu Member titles on the forums and single-login for launchpad and forums
+(11:03:23) stub: Howdy
+(11:03:36) Guilherme Salgado [i=salgado@conference/ubuntuconf/x-e9327c433332f08c] entered the room.
+(11:03:48) stub: So it sounds like we need to provide an XML-RPC API on Launchpad for you to submit events
+(11:03:49) ubuntu_demon: stub and salgado are launchpad developers
+(11:04:44) stub: We store a list of events for each user with a timestamp that the event happened on.
+(11:04:49) ubuntugeek: Ubuntu member titles, would be easy.
+(11:05:01) ubuntugeek: Single-login and karma could be the hard parts
+(11:05:22) stub: Each event type has a score, which can be changed at any time to 'tune' the scoring
+(11:05:56) Guilherme Salgado: yeah, the karma thing would require authentication. we can't provide the XML-RPC API without requiring users to first authenticate
+(11:06:17) stub: So whenever a user makes a post, you would just send an XML-RPC request to launchpad saying 'Store a forums-post event for  foo@example.com timestamped at 2006-02-01 11:52:12'
+(11:06:31) stub: This could be done online, or batched, or whatever you want
+(11:06:34) ubuntugeek: trying to think how that would work on the forums.. everything is pretty tight knit as far as were it wants to pull datafrom..
+(11:06:38) Guilherme Salgado: so I think we'll need to have the single-login before
+(11:07:16) Robert Collins (lifeless) [n=robertc@ppp245-86.static.internode.on.net] entered the room.
+ubuntu_demon ubuntugeek 
+(11:08:00) ubuntugeek: yeah, the main issue with single login is the way vbulletin does its authentication. Its tied very deeply to its db structure.
+ubuntu_demon ubuntugeek 
+(11:08:34) stub: We should discuss auth after karma
+ubuntu_demon ubuntugeek 
+(11:09:01) ubuntugeek: we might start with a general user creation standard. Its pretty easy for me to allow a user to be inserted into our database.
+(11:10:22) stub: We have gotten confused. 
+(11:10:30) stub: So far, I am purely talking about assigning karma for a user
+(11:10:37) ubuntugeek: gotcha
+(11:10:41) stub: We do not need authentication integration at all to do this. It is very simple.
+(11:10:59) stub: We tell launchpad that the IP addresses you define are trusted
+(11:11:10) stub: such that we accept XML-RPC requests
+(11:11:10) ubuntugeek: k
+(11:11:21) stub: stating 'Store a forums-post event for  foo@example.com timestamped at 2006-02-01 11:52:12'
+(11:11:31) stub: We can then allocate that karma to the correct user
+(11:11:46) stub: If the user does not have an account registered in Launchpad with that email address, we can create it
+(11:12:09) stub: If users end up with multiple accounts in Launchpad, they can merge them after the fact.
+(11:12:21) stub: Does that sound reasonable to everyone?
+(11:12:36) Guilherme Salgado: sort of
+(11:12:38) ubuntu_demon: ubuntu_demon: yeah sounds reasonable to me
+(11:12:43) Guilherme Salgado: we don't give karma to unvalidated accounts
+(11:12:58) Guilherme Salgado: there may be contraints to prevent that already
+(11:13:12) stub: Ok. We need to allow that in this case and test it.
+(11:13:31) Robert Collins (lifeless): salgado: thats ok though, so they need to validate first, or we can explicitly allow it
+(11:13:32) ubuntugeek: the issue on the forums side is how we will store the data in relation to the user. IE, there is no preset way to pull data from an outside source other then its local db. We might batch grab karma data then process it on our side and update the local db.
+(11:14:16) Guilherme Salgado: the issue is that lots of callsites (such as rosetta) rely on this to not assign karma to teams or unvalidated users
+(11:14:36) Guilherme Salgado: that check is done on assignKarma() and we'd have to remove it from there and do it on lots of callsites
+(11:14:41) Robert Collins (lifeless): salgado: so we can have an optional parameter, which this new callsite sets to True
+(11:14:41) stub: salgado: We can fix this - no worries.
+(11:15:44) Guilherme Salgado: definitely
+(11:16:08) Guilherme Salgado: my point is that we'll have quite some work to find out which callsites can assign karma to teams/unvalidated persons and fixing them
+(11:16:24) Guilherme Salgado: we had lots of problems because of this in the past, because it's not easy to identify these callsites
+ubuntu_demon ubuntugeek 
+(11:17:51) Guilherme Salgado: ubuntugeek, yeah, I think batching the karma is okay
+(11:18:02) stub: ubuntugeek: You say 'batch grab karma data'. I was thinking the karma would be purely a push from the forums to Launchpad. Do you need to pull Karma information from Launchpad?
+(11:18:04) Guilherme Salgado: mainly because we update a person's karma only once every day
+(11:18:48) ubuntugeek: stub: gotcha..
+(11:18:53) ubuntu_demon: We can for example scale forum posts from Cafe and Backyard on the forums side to have no number and different numbers for different forum sections. We could also have different karma for moderation events. And on the launchpad side they can scale forums karma to make it fit in with karma for bugs and stuff. as far as I understand this
+(11:19:44) ubuntugeek: stub: i think it would be easy if we pushed the karma data to the LP. But updating and reflecting the karma numbers for that user on our side is were i was talking about batching
+(11:19:47) ubuntu_demon: well it would also be nice to have karma from launchpad reflected on the forums ofcourse
+(11:20:12) stub: Yes. And adjusting the scores for each event type can be done at any point, with the changes affecting scores retroactively. So you don't have to get the point assignment per karma category correct the first time (trial and error is fine to get the scoring well balanced)
+(11:20:43) stub: Ok. We can provide an API for getting the karma for an email address easily enough. It will be up to 24 hours out of date, but that should be fine.
+(11:21:03) ubuntugeek: stub: cool
+(11:21:27) stub: Actually - make that 'list of email addresses'. No point making 100,000 calls when 1 would do :)
+(11:21:41) ubuntugeek: right ;)
+(11:22:34) stub: I think we have covered enough on Karma? It seems like a self contained section that can be done quite quickly at our end.
+(11:22:45) ubuntugeek: yep
+(11:22:56) stub: Ok. Authentication is the scarier one
+(11:23:16) ubuntugeek: yeah
+(11:23:21) stub: We probably cannot have passwords transported through your servers.
+(11:23:42) stub: Even though the servers are on our LAN, we haven't audited the software so people would likely scream if I suggested it.
+(11:23:58) stub: We plan to support Open-ID from Launchpad
+(11:24:07) ubuntugeek: one thing would do is this
+(11:24:09) ubuntugeek: hmm
+(11:24:25) stub: which is an open specification developed as a direct competitor to the useful bits of Passport.
+(11:24:32) ubuntugeek: yeah not sure how to make the auth work to be honest
+(11:24:38) ubuntugeek: we need to pull that data from our db
+(11:24:48) ubuntugeek: there isnt a way to use an external source right now
+(11:25:09) ubuntu_demon: ubuntugeek : can't we write some plugin for this ?
+(11:25:19) stub: The basic way it works is that the forums would redirect to Launchpad providing a key, Lauchpad authenticates the user, and redirects to the Forums with credentials set.
+(11:25:39) stub: There might already be a plugin available - it is an open specification and gaining support.
+(11:25:55) ubuntugeek: I can look into this
+(11:25:55) stub: LiveJournal is probably the largest open-id user
+(11:26:11) ubuntugeek: There might be a hack already
+(11:26:15) ubuntugeek: to use open-id
+(11:27:29) ubuntugeek: stub: that might work, I would need to see what credentials need to be set on our end.
+(11:27:36) ubuntugeek: I cant remember off hand..
+(11:28:42) stub: Ideally vbulletin would be open-id enabled, which fits us perfectly. If that is going to be problematic, we could look at alternatives or some other approach such as a Google Summer of Code project or something (don't quote me on that - I'm just floating ideas)
+(11:30:28) ubuntugeek: sure..
+(11:30:46) ubuntugeek: i seem to remember seeing vbulletin talking about this at some point.
+(11:30:52) ubuntugeek: openid that is..
+(11:31:23) ubuntu_demon: http://www.vbulletin.org/forum/showthread.php?t=120923&highlight=openid
+(11:31:25) ubuntugeek: i try to stay away from editing direct code do the fact it makes upgrading simpler
+(11:32:01) stub: Because LiveJournal are an open-id server, people no longer need to create accounts everywhere, so it is easier for users to get involved in things like web forums. So I expect lots of people are interested who are aware of the spec.
+(11:32:02) ubuntugeek: ud: hmm interesting I'll give it a test on my dev vb install.
+(11:32:17) ubuntugeek: ud: its for vb 3.5.4 though so we might need to make it work for 3.6.3
+(11:32:28) stub: I would like to get Mailman enabled myself
+(11:33:43) stub: Ok. We can discuss auth more later if open id becomes problematic. Let me know how the research goes so I can give you a timeline on when our end would be ready.
+(11:33:49) ubuntugeek: ud: ahh that plugin might be a good starting point. But it requires the user to first setup an account on vb (do to the way it handles auth) then the user can setup openid credentials
+(11:33:58) stub: What do we need for membership information?
+(11:34:02) ubuntugeek: stub: ok i'll do some research
+(11:34:32) ubuntugeek: and get back to you
+(11:34:51) stub: I'm told you want to retrieve a list of the ubuntu-members team
+(11:35:28) stub: I imagine you want their launchpad name, displayname, preferred email address (if it isn't hidden!), total karma, karma in the 'forums' category.
+(11:35:32) stub: Anything else?
+(11:35:57) ubuntugeek: dont think so
+(11:36:22) stub: What format? You could pull it via HTTP as a .txt document, say comma seperated. Or XML-RPC.
+(11:36:27) stub: Your call.
+(11:37:38) ubuntugeek: txt would work fine
+(11:40:13) stub: ok. Will not seeing the email address if the user has chosen to hide it in Launchpad be a problem?
+(11:41:41) ubuntugeek: dont think so
+(11:41:45) stub: (We will eventually allow users to specify if their email address is hidden from the public, but available to trusted sources such as team administrators. But I wouldn't want to block forums stuff on that unless necessary)
+(11:41:47) stub: ok
+(11:42:12) stub: I'm informed Launchpad will need to be notified on Forum account creation, so we can store the Forum username. 
+(11:42:33) stub: This will allow us to include the Forum username in our reports so your end can match things up correctly.
+(11:42:41) ubuntugeek: yep
+(11:44:00) stub: ok. We can store that information on Launchpad. It will be made non-editable, so only the Forums servers can set it.
+(11:44:07) stub: Can users change their forum nickname?
+(11:45:10) ubuntugeek: No they cant
+(11:45:21) ubuntugeek: unless an admin does it.. but we are trying to stop it from happening
+(11:45:42) stub: ok. That makes things easier. We can add support for that at a later stage if it becomes a problem.
+(11:45:44) ubuntugeek: causes to much load when the post cache rebuilds if it happens.
+(11:47:11) stub: Ok. So when the forums send us karma events, we will use the forum nickname as the key rather than the email address.
+(11:47:21) stub: Which solves a few messy edge cases :)
+(11:47:52) stub: (email address not registered in Launchpad, but their forum nickname attached to their old email address in Launchpad etc)
+(11:48:02) ubuntugeek: sounds good
+(11:48:32) stub: Will notification of new accounts be done synchronously or in a daily batch?
+(11:48:49) ubuntugeek: synchronously i would like to see
+(11:49:13) ubuntugeek: i would say if the account is registered on the forums, we'll send the info then to LP
+(11:49:51) stub: Ok. So an XML-RPC api for notifying launchpad that a single new account has been created, telling Launchpad 'New Forum user nerfherder created with email address foo@example.com'.
+(11:50:11) ubuntugeek: just a thought here.. in LP maybe have an option were an already existing user can enter a forum username if they have one
+(11:50:24) stub: We need the email address to create their Launchpad account if it does not already exist, or link it to their Launchpad account if it does.
+(11:50:27) ubuntugeek: stub: exactly
+(11:51:18) stub: I would rather just get a dump of the current forum database to seed Launchpad
+(11:51:32) stub: Just a .csv of Forum nickname, email address
+(11:51:49) stub: (Hmm... you have 1.4 million odd accounts. We just have about 600,000 at this stage)
+(11:52:00) stub: Oh... sorry. I'm of
+(11:52:02) stub: off
+(11:52:16) stub: 140,000 active. So it won't bloat my database :)
+(11:52:22) ubuntugeek: hah
+(11:53:09) ubuntugeek: should we do a dump the other way as well to popular ours?
+(11:53:37) stub: Would their be much point?
+(11:54:03) stub: I don't see anything particularly wrong with that, provided you don't send password notifications regularly or other spam
+(11:54:03) ubuntugeek: true
+(11:54:19) ubuntugeek: yeah we dont send anything
+(11:54:22) stub: But adding half a million new users might make your software fall over :)
+(11:54:45) ubuntugeek: unless the user requets a password notifiation IE to change it
+(11:55:09) stub: Most  of our accounts are from people requesting CDs via shipit, so it would be a lot of noise.
+(11:55:24) ubuntugeek: sure..
+(11:55:30) stub: Also, it would involve you generating Forum nicknames for the users. Which as we already discussed they cannot change.
+(11:55:44) stub: (easily)
+(11:55:47) ubuntugeek: right yeah scratch that
+(11:57:37) ubuntugeek: Ok, so I'll look into seeing how the forums can auth from an external source.. Once we get that setup I'll send your a csv of the username/email/password to import into LP.
+(11:57:53) ubuntugeek: at the same time i'll modify our user creation script to send the info to LP
+(11:59:23) ubuntugeek: authby external source IE meaning what we need sent back to ensure the session gets started on our side correctly.
+(12:00:25) ubuntu_demon: to ubuntugeek : Ubuntu Members is the most useful team to us (forums) but do you think it would be nice to show other teams as well ?
+(12:00:43) ubuntugeek: Sure we can show any team we want
+(12:00:48) ubuntugeek: What we'll do is
+(12:01:32) ubuntugeek: create the team on the forums and let users join if they meet the credentials IE the are a member of the team
+(12:01:50) ubuntugeek: that will in turn change their forum title to whatever team
+(12:02:52) ubuntu_demon: but forum users could be part of multiple teams
+(12:03:35) ubuntugeek: sure
+(12:03:45) ubuntugeek: we can make it show as many teams as we need
+(12:03:46) ubuntugeek: :)
+(12:04:20) stub: ok. So we can allow you do grab the team membership from arbitrary public teams (we will have private teams at some point).
+(12:04:49) stub: If you want to maintain a mirror of the team in the forums, it should be fairly simple to refresh the forum team from the Launchpad master.
+(12:05:11) stub: It would be possible to go the other way too (maintain a Launchpad team using a Forums master), but we can't do that in the short term.
+(12:05:24) ubuntu_demon: So we could show multiple titles for a user. But do we wish to show all launchpad teams a user belongs to on the forums ? I mean we don't want users to create their own teams for fun/spam.
+(12:05:36) ubuntugeek: stub: that sounds fine
+(12:06:03) ubuntugeek: ud: no, users cant create teams on teh forums only join ones we predefine
+(12:06:17) ubuntugeek: and they need to be a member of that team
+(12:06:20) ubuntu_demon: ubuntugeek : I know but users can create teams on launchpad ;)
+(12:06:21) ubuntugeek: based on info from LP
+(12:06:30) ubuntugeek: ahh true
+(12:06:47) ubuntu_demon: ubuntugeek : but you could just only import the teams you select manually
+(12:06:54) ubuntugeek: yeah
+(12:07:10) ubuntu_demon: ubuntugeek: as long as launchpad has all the information available in text/xml that you want to grab
+(12:07:19) ubuntugeek: right
+(12:07:55) stub: When we generate the team lists, we should filter it so we only list users who have a Forum nickname set. That will simplify things at your end.
+(12:08:27) ubuntugeek: stub: yeah exactly. Would it be possible for existing LP users to enter a forum nickname on LP?
+(12:08:32) ubuntugeek: if they choose?
+(12:09:02) stub: I would rather we set it for them automatically using a list you provide.
+(12:09:11) stub: That way we ensure that they match up correctly.
+(12:09:29) stub: After the system is running
+(12:09:37) ubuntugeek: gotcha
+(12:09:39) ubuntugeek: thats fine
+(12:10:27) stub: When a new account is created, you can send Launchpad an email address and nickname. This will link with an existing lauchpad accout if it already exists, or create an account if not.
+(12:10:55) ubuntugeek: k
+(12:11:08) stub: In the future, we could create forums accounts via Launchpad on request. But I think we should defer that until we have the other stuff we have discussed running.
+(12:11:25) stub: Open-ID might make that entirely redundant for example
+(12:12:00) stub: (I expect that Open-ID enabled forums would create accounts automatically when someone logs on with open-id credentials)
+(12:12:42) ubuntugeek: stub: sure, allowing LP to create an account on the forums would be simple for us.
+(12:13:05) ubuntugeek: stub: without or with openid.. we just need to let you access the api to send credentials.
+(12:13:56) stub: A little bit more complicated, as we need to cope with 'That nickname is already in use' errors etc. But not too hard. 
+(12:14:09) ubuntugeek: sure..
+(12:14:18) stub: You would want this feature?
+(12:15:29) ubuntugeek: if we allowed LP to create a forum account, we could just redirect our account creation to LP.. Fine with me.
+(12:15:52) ubuntu_demon: I think it would be nice to have this as we want to encourage other community members to just "click" to create a forums account
+(12:20:39) ubuntu_demon: we are going to create a spec now :)
+(12:20:55) ubuntugeek: ok
+(12:21:01) ubuntu_demon: stub is dumping his notes to the wiki ;)
+(12:21:11) stub: https://wiki.ubuntu.com/LaunchpadForumIntegration
+(12:21:26) ubuntugeek: any sign of elmo around there ud?
+(12:21:51) ubuntu_demon: I looked for him but couldn't find him and then I decided to do this first. I'll look for him again after this.
+(12:21:59) ubuntugeek: np
+(12:22:17) ubuntu_demon: we are making nice progress with all of the forums stuff :)
+(12:23:53) ubuntugeek: yeah fors ure
+(12:23:55) ubuntugeek: sure *
+(12:24:01) stub: https://features.launchpad.net/products/launchpad/+spec/launchpad-forum-integration
+(12:24:09) stub: (you can subscribe there)
+(12:24:11) ubuntu_demon: please review the spec :)
+(12:24:20) stub: It isn't quite a spec yet ;)
+(12:24:44) ubuntugeek: :)
+(12:24:52) stub: But we have four discreet sections.
+(12:24:57) stub: Number 1 needs to be done first
+(12:25:04) stub: The other three can be done in any order
+(12:25:13) stub: I don't think any of it is terribly much work.
+(12:26:06) stub: But I can't decide on the timeframes. We currently have a list of stuff to do for 'Launchpad 1.0'. Its not my decision if these features get added to that list or deferred until later.
+(12:26:15) ubuntugeek: sure np
+(12:26:37) ubuntu_demon: What timeframe would you like ?
+(12:26:51) ubuntu_demon: How much time do you have to work on the forums end of things ?
+(12:27:03) ubuntu_demon: you = ug
+(12:27:27) ubuntugeek: well :)
+(12:27:45) ubuntugeek: account creating should be pretty easy for us
+(12:28:10) ubuntugeek: i'll need to get info on the details api calls etc..
+(12:28:25) ubuntugeek: with my current work load few weeks prob to get something working
+(12:28:36) ubuntu_demon: Maybe the christmas holiday is a nice timeframe ?
+(12:28:39) stub: I will draft this into a proper spec so you can look over it to see if we have missed anything and to ensure it is workable.
+(12:28:50) ubuntugeek: ud: yeah thats possible
+(12:29:13) ubuntugeek: would be so easy for account creating if LP sent to us.. but either way its work for someone.. :) heh
+(12:29:35) stub: I will discuss timeframe next week at our company meeting (unless ud convinces Mark to make this a Launchpad 1.0 target).
+(12:30:07) ubuntugeek: :)
+(12:31:57) ubuntu_demon: ubuntugeek : should I talk to mark about this ? Or do you want to do some research and stuff first ?
+(12:32:18) stub: Launchpad 1.0 is due out this month I believe (we don't have much more to do before all the required features are done).
+(12:32:51) stub: Mark will probably want to approve the spec before making any commitments
+(12:32:54) ubuntu_demon: But if I ask Mark to make this a 1.0 target it won't be very nice if the forums part isn't ready yet ;)
+(12:36:30) ubuntu_demon: at least I subscribed Mark to the spec :)
+(12:39:44) ubuntu_demon: Nothing left to discuss right ?
+(12:40:21) ubuntu_demon: stub will do some more work on this spec and will approach me for questions .. I'll ping/email you ug if I can't answer
+(12:48:43) ubuntugeek: nope dont think so
+(12:48:48) ubuntugeek: sorry, boss came to my desk
+(12:48:49) ubuntugeek: :)
+(12:49:45) ubuntu_demon: :P
+(12:49:54) ubuntu_demon: thanks everybody
+(12:49:59) ubuntugeek: thanks
+</pre>
+
+----
+CategorySpec

@@ -1,0 +1,173 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+== Introduction ==
+
+This project is divided into three parts:
+* a debhelper script dh_installfirewall
+* a new package kraal as iptables frontend
+* a graphical config tool Kraal-GTK to act as a frontend to Kraal. Kraal-GTK has been moved to its own <nowiki>[[http://wiki.ubuntu.com/Kraal-GTK|Wikipage]]</nowiki>.
+
+Adding rule-files to packages is not and can not be part of an firewall-bounty, unless the person the bounty is assigned to is an Ubuntu core-developer.
+
+The Firewall will be deactivated by default until all packages provide rules. The work should be done by the package maintainers when they update the packages. Maybe work can be simplified by using some kind of patch-o-matic, but I'm not sure if Ubuntu has such a tool and how it works. When we can get Debian to provide firewall-rules in their packages we could save patching all packages that provide services every six month.
+
+== Scope and Use Cases ==
+
+ 1. Charlotte creates private internet-sites in her spare time and has installed a local webserver to test websites before she publishes them. She does not want the local webserver to be accessible from outside.
+
+ 1. Martin, Dieter and Bob want to protect their PC's, which are directly connected to the Internet, from attackers. All have different firewall policies that should be realizable with Kraal:
+** Dieter wants to deny connections to cupsys and allow everything else. He wants newly installed services  to be accessible from outside.
+** Martin's firewall policy is "deny every incoming connection, but ssh". He does not want newly installed services to be accessible from outside.
+** Martin extends his firewall-policy to "deny ssh from 10.1.20.34, allow ssh from eth1 and deny other incoming connections".
+** Bob wants one policy (allow ssh and ftp) that applies to all interfaces as fallback and another policy for his vpn-tunnels (allow ssh). Because of this, special policies override more general ones. Bob is now able assign his vpn-policy to a specific interface and his fallback-policy to all interfaces and Kraal automatically does what he wants.
+
+ 1. Michael owns a little company and uses an Ubuntu-box with three interfaces as firewall, one interface is connected to the internet, one is connected to the intranet and the other is connected to his webserver.
+** All interfaces have different policies, so we support assignment of different interfaces to policies.
+** The internet should be accessible from the intranet. Because Michael uses a dial-up connection to his ISP we support masquerading.
+** Incoming HTTP-traffic needs to be forwarded to the webserver, so we support Destination NAT.
+** Michal's trainee has got his own computer and is only allowed to establish HTTP-connections into the internet. So we support configuring the built-in chain OUTPUT.
+
+ 1. Maria uses a dial-up connection, and the Linux kernel is not consistent when assigning ppp device numbers.  Because of this, we support wildcards in the device numbers with the syntax 'ppp+'.
+
+== dh_installfirewall ==
+
+Kraal needs to be restarted if a new service is installed via apt/dpkg. The only clean way to do this is in postinst. dh_installfirewall will provide package-maintainers a simple way to extend postinst in that way and it will copy the rules package provide to the right place.
+
+Other firewalls should be able to use the firewall-infrastructure too, so dh_installfirewall puts the rules in a directory that is independet from Kraal (/etc/firewall/rules.d/) and the generated postinst-scripts use "run-parts --arg=reload /etc/firewall/init.d/" to reload the firewall. Every firewall that uses this infrastructure should provide an Sys V style init script in /etc/firewall/rules.d/ to make this work.
+
+== Ubuntu Firewall ==
+
+=== Package kraal ===
+
+One main-goal of this package is a proper integration of a implementation-independent packetfilter in Ubuntu. Another main-goal (stolen from Perl) is to make the easy things easy, and the difficult things possible. Sadly some very difficult things like filtering on OSI-Layer 7 or only allowing n connections to port y per second will probably never be possible with this package, admins that really need such very exotic packet-filter behavior are mostly able to write those iptables-scripts themself anyway.
+
+The package kraal will provide a init-script that generates and runs iptables-rules from the rules packages provide, the main configuration-file /etc/firewall/conf and the policies in /etc/firewall/policies.d/. Packages that provide rules will reload the firewall in their postinst script.
+
+Adding support for other packet-filters, i.e. for Ubuntu/KFreeBSD is easily possible without the need to touch the rules packages provide, due to the implementation independent syntax.
+
+Kraal provides an interface that allows other packages to change settings in its main configuration file, i.e. to add masquerading.
+
+=== Possible future improvements ===
+* Ubuntu Firewall should only open ports on which services listen if the according service is started. Current problems:
+** We need a clean interface to find out which service is running (not all services provide a pid-file).
+** We need to ensure that ubuntu-firewall is reloaded if a service is started.
+** A user might not expect this behavior and he or she will possibly run into problems because of this unexpected behaviour.
+* Ubuntu Firewall should automatically find out on which ports services listen, i.e. by parsing its configfile. We need a clean interface for it, maybe Config4GNU is the right one. So we should have a closer look at it after it has been ported to Ubuntu.
+* Publicise services marked as "open" via ZeroConf.
+* Enable configuring remote firewalls by scp'ing their configfiles.
+* By using a special P2P-rule it will be possible to enable peer-to-peer connections, even if the P2P-tool is not installed from an official Ubuntu repository (official packages will have their own rule-file, that open the required ports).
+
+=== Connection Tracking ===
+
+Packets with the states "established" or "related" will be accepted per default. Other packets will be accepted, rejected or dropped according to the firewall-policy defined in the configfiles.
+
+=== Chains ===
+
+Kraal generates user-defined chains by the following rule: "name of the built-in chain" + "-" + "name of the interface" (i.e. INPUT-ETH0). Packets will be redirected to the adequate user-defined chain. These chains contain iptable-rules according to the configuration.
+
+=== Logging ===
+
+Logging can be enabled globally or per policy in the configfiles.
+
+Logging of spoofed packets will not be handled via /proc/sys/net/ipv4/conf/all/log_martians.
+
+=== Forwarding ===
+
+It will be configured in this firewall's main configuration file and be included in the first release of kraal.
+
+=== Configuration ===
+
+==== Syntax ====
+
+'''/etc/kraal/conf:'''
+
+===== [inbound] =====
+[inbound] assigns different interfaces to policies and uses them for the chain input.
+* + as wildcard is allowed, "+" (without the quotes) matches all interfaces.
+* Every file in /etc/firewall/policies/ is a policy.
+* A policy "allow-all" for the chain input is assigned to the loopback-interface per default (of course this can be overwritten).
+* A policy "allow-installed" for the chain input that is assigned to all interfaces (the assignment of "allow-all" to the loopback-interface overrides this for lo) is provided too. "allow-installed" will accept connections to every port for which rules exist. By use of this policy only services which were installed with root rights can be accessed from outside but not trojans or viruses. The disadvantage of a firewall per default is that software installed from non-ubuntu repositories (i.e. something like skype - hmm, bad example, skype does not require listening ports) is not able to be accessed from outside even when the user wants them to, unless the user creates a rule-file for them.
+* special rules override more general ones, i.e. "lo = allow_all" overrides "+ = allow-installed" for the interface lo.
+
+[inbound] is only allowed in /etc/firewall/conf.
+
+===== [outbound] =====
+Same as [inbound], except policies will be used for the chain output and the policy "allow-all" is per default assigned to all interfaces for the output-chain, but this may be overwritten.
+
+===== [main] =====
+Values in this section have different syntaxes, i.e.:
+* tcp-reject with = icmp-net-unreachable | icmp-host-unreachable | icmp-port-unreachable | icmp-proto-unreachable | icmp-net-prohibited | icmp-host-prohibited | icmp-admin-prohibited | tcp-reset | drop
+* udp-reject with = icmp-net-unreachable | icmp-host-unreachable | icmp-port-unreachable | icmp-proto-unreachable | icmp-net-prohibited | icmp-host-prohibited | icmp-admin-prohibited | drop
+
+Values apply to all interfaces, unless a main-section in a policy overrides them.
+
+===== [masquerade] =====
+* source = target
+* source is [!]interface
+* target is interface
+* + as wildcard for interfaces is allowed
+
+[masquerade] is only allowed in /etc/firewall/conf.
+
+'''/etc/kraal/policies.d/*:'''
+
+===== [services] =====
+[services] has an uniform syntax:
+* service|all|installed|icmp|list
+* a service is a rule provides by packages (see Rules later on this wikipage), a user-specified rule or the internal rule "all".
+* a list is a comma-seperated list which may include one or more of the following items: allow | deny | [!]interface(s) | [!]ip-address[-ip-address/netmask] | [!]hostname
+* If an service is missing the default-policy (from [main]) is used for this service (excluding the internal rule "all", which is only used if explicitly specified).
+* If default-policy is not set, allow is used as default-policy.
+* Lists are processed from left to right.
+* [!]interface(s), [!]ip-address[-ip-address/netmask] and [!]hostname may be preceding by a [^]
+* A preceding ! means "all but", i.e. !eth0 accepts all connections, but from eth0.
+* A preceding '''^''' rejects or drops connections from the matching hostname, IP-range or interface
+* I.e. '''^'''eth0 drops or rejects (according to tcp- or udp-reject-with) all connections from or to (depends on the used chain) this interface.
+* '''^''' and ! may be combined,
+* I.e. '''^'''!eth0 drops all connections beside from those coming from eth0.
+* If a packet is not matched by any of the list-items it is denied unless the last listitem begins with '''^''' (something like accept all from 10.1.190.0/24, deny all from eth1 and deny all other packets would not make sense)
+
+===== [main] =====
+This section has the same syntax as [main] in /etc/firewall/conf. Values in policies overrides those in /etc/firewall/conf.
+
+=== Rules ===
+Packages which provide daemons that should be listening on networked ports (eg apache2, samba) should provide a file in /etc/firewall/rules.d/ that lists the ports they wish to use.
+
+These rules are in a implementation-independent format, so that these rules can be used for non-linux ports too (i.e. Ubuntu *BSD or Ubuntu Hurd), i.e.:
+
+<pre>
+[main]
+description: "Domain Name Server"
+origin: "bind9"
+
+[listen]
+tcp: 53
+udp: 53
+icmp:
+</pre>
+
+Syntax for section [listen] is:
+* tcp|udp|icmp: port|portrange[,port|portrange[,port|portrange...]]
+* port is a number from 1 to 65535 and 1 to 255 for icmp
+* port-range has the following syntax: port-port
+
+By using the option icmp it is possible to add rules like "respond to ICMP echo requests" (we have to find a more human-readable name for this).
+
+=== non-IANA ports ===
+Users should be able to run services on non-IANA ports aka non-standard ports. This is done by marking the rules in /etc/firewall/rules.d/ as user-configurable files.
+
+== Comments ==
+
+* The config file syntax from above seems structured by functions. Have you thought about a more object oriented approach to describe the rules? Not only some "harder" things for kraal you write above are pretty easy to express that way for humans (with some gui help for some). <nowiki>[[http://firehol.sourceforge.net|FireHol]]</nowiki> does it. A filter generator with splittable config files (config.d), separate service definitions, etc. (debian package "firehol")
+* I dont really see the usecase - the ubuntu policy is "no open ports" and if the user decides to change that, he assumably knows what he is doing. Of course I always appreciate an easier way to configure iptables, but I do not see the point in setting this as default
+** [porl]: if you install apache to do private web editing (testing php etc) the ports will be open though. if you want to test it privately currently you have to edit the firewall tables yourself or install an external firewall gui.
+* * An important use case is NAT config. NAT should be easily configurable... Don't know if that falls into the "Firewall" category though...
+* If I may say, nice work but moot. I've run 100% non-firewalled Windows XP on 10mbit copper connection 24/7 for couple years. Not one single security problem. I have run non-firewalled Linux for years. It's a storm out there but it does not do a thing. Why? There are two very simple reasons. First of all, firewalls affect the symptoms and not the reasons of security problems. Manage your platform well (updates, sane configuration etc) and you have managed the reasons. Second, if you have a vulnerability in some daemon or like you will be opening most likely a hole for it anyways - making the firewall in most cases useless anyways. On top of that firewalls break easily intented network usage and provide a huge potential common point of failure. In the end of the day firewalls do NOT belong on simple desktops at all.

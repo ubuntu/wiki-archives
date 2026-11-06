@@ -1,0 +1,94 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+
+== UbuntuDevel/UdevRaces ==
+
+=== Status ===
+
+** Created:  by MattZimmerman<<BR>>
+** Priority: LowPriority<<BR>>
+** People: TollefFogHeenLead, ScottJamesRemnantSecond<<BR>>
+** Contributors: ScottJamesRemnant<<BR>>
+** Interested: <<BR>>
+** Status: MattZimmermanQueue, EditedSpecification, BreezyGoal, DistroSpecification<<BR>>
+** Branch: <<BR>>
+** Malone Bug: <<BR>>
+** Packages: <<BR>>
+** Depends: <<BR>>
+** UduSessions: 2 (0)<<BR>>
+
+=== Introduction ===
+
+Udev is the new way of handling device hot-plugging and cold-plugging. In some cases, udev and the regular init script system works together in surprising and non-deterministic ways.  This specification seeks to describe those race conditions and a strategy to eliminate them.  `dev.d` scripts are called when the hardware becomes available and are responsible for starting the relevant services.  (Alsa would be the service to start when a sound card becomes available)
+
+=== Rationale ===
+
+If the race conditions are not handled correctly, the boot process will be non-deterministic.  Problems such as longer boot times or failure to start services may be the result.  By using a multiplexer, udevsend and udevd (described below), we can get rid of the race conditions.  Not moving towards using dev.d can cause non-deterministic boots due to hardware not being available.  This can be mitigated to a certain extent by having the init scripts check for the hardware and wait (with a timeout).  However, this will give new problems such as ntpdate not running if the DHCP client takes more than about five seconds to obtain a lease.
+
+=== Scope and Use Cases ===
+
+* System boots up.  As there is no network connection, `ntpdate` and other network-requiring services are not started.
+
+* System boots up.  As soon as the necessary hardware dependencies (in this case, mouse and framebuffer) for X are ready, `gdm` starts up.
+
+=== Implementation Plan ===
+
+* Move `alsa`, `powernowd` (for hotplug cpus), `bluez-utils`, `gdm` (if it has hardware dependencies such as mouse or framebuffer), `fetchmail`, `ntpdate`, `mountnfs` (unless /usr is NFS-mounted), `ifrename` to dev.d scripts.  The easiest way to do this is making the dev.d scripts call the existing init scripts (to minimize the delta relative to Debian) but remove the init scripts from the normal boot sequence.
+
+* The init script for `gdm` would be left in the boot sequence, with a check added to only run if called from dev.d _or_ on a system with no mouse or frame buffer (one on which the dev.d event would not occur)
+
+* The init script for `mountnfs` would be similarly modified to check whether run from dev.d or on a system with an NFS-mounted /usr 
+
+* Implement a dev.d multiplexer which either keeps state or is able to look up state in `/sys`.  Using the multiplexer, it should be possible to express relations such as "start gdm when both the mouse and the framebuffer are available" as well as the trivial "start alsa when sound driver is loaded".  It should also be possible to express "run this script on the first type of this class of devices, but not on subsequent"; an example would be running ntpdate when the first interface is brought up, but not on addition of subsequent interfaces.
+
+* Add `udevd` and `udevsend` as well as hotplug-ng to the distribution.  This gives us a sane ordering of the calling of dev.d scripts.  Without it, the remove script can be called before the add script and similar problems.  `hotplug-ng` makes sure to traverse the tree in correct order so depended-on devices are done before depending devices.  It is also written in C rather than a pile of shell scripts and will be used for initramfs (see EarlyUserspace).
+
+==== Data Preservation and Migration ====
+
+dev.d scripts exist outside the runlevel concept, so a user wanting to have a runlevel without X would not be able to express this any longer.  
+
+==== Packages Affected ====
+
+* `hotplug`
+* `hotplug-ng`
+* `udev`
+* `udevd`
+
+==== User Interface Requirements ====
+
+Handle the case of multiple dev.d scripts wanting to present information to the user at the same time.
+
+=== Outstanding Issues ===
+
+* Need to define whether applications such as apache are network services.  Is postfix?  What about cups, which is a queue daemon in addition to the network service part of it.
+
+* In some cases, you might need network to mount networked file systems and you need networked file systems to continue booting (`/usr` on NFS).  This must be possible to express somehow.
+
+* Any sane way to handle runlevel-like functionality for users who want that?
+
+==== UDU BOF Agenda ====
+
+* Should we make a distribution-wide move toward dev.d scripts? (pro/con)  If so:
+
+** To what extent can existing init scripts be used unmodified?
+
+** How can we make the packaging delta, relative to Debian, easier to manage?
+
+* If not, what other options are available to avoid races?
+
+* Ensure that all components which require the network start after all forms of networking (e.g., bug #1261)
+
+* How to handle the situation of an init script needing a dev.d script to be run without the dev.d script calling the init script (gdm and loading the mouse driver springs to mind).
+
+==== UDU Pre-Work ====
+
+* Determine which init scripts are candidates for being converted into dev.d scripts
+** ScottJamesRemnant did much of this work in Mataro

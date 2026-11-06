@@ -1,0 +1,95 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+
+''Please check the status of this specification in Launchpad before editing it.  If it is Approved, contact the Assignee or another knowledgeable person before making changes.''
+
+* '''Launchpad entry''': https://features.launchpad.net/distros/ubuntu/+spec/zero-configuration-networking
+* '''Packages affected''': `basefiles`, `dhclient`, `zeroconf`, `libnss-mdns`, `network-manager` / `network-admin`, , `avahi-autoipd`, `avahi-daemon`, `ifupdown`, `gnome-system-tools`
+
+=== Summary ===
+When a dynamic network configuration is desired and a local DHCP server is not available for a network, Ubuntu needs to correctly assign itself a link-local address.  This is implemented by `avahi-autoipd`, but requires some additional configuration and packaging corrections to have the system behave in a fully correct way.
+
+=== Rationale ===
+Other operating system correctly use link-local addresses for communicating on adhoc networks or local LANs without a DHCP server.  Ubuntu users will be much happier and more productive when they are effortlessly able to communicate with other device with link-local addresses.
+
+=== Use cases ===
+
+ 1. Claudia and Mary set up an adhoc wireless network between between their laptops.  They want to be able to communicate without needing to do anything special with interface address assignments.
+ 2. John's home server was booted and it got a link-local address.  He adds a DHCP server to his network, and boots his laptop, which receives a regular DHCP-assigned address.  He wants his server and laptop to be able to communicate without fiddling with their interfaces.
+ 3. Ellen uses a name server that makes a `.local` top-level-domain available.  She upgrades her computer from Edgy to Feisty, where link-local addresses are assigned by default.  She gets a notification that the unicast `.local` TLD and the link-local `.local` domain conflict with each other, along with instructions on how to disable link-local networking.
+
+=== Scope ===
+
+Up to version 6.10, Ubuntu did not create or use link-local addresses by default.  Changes to implement this spec will be limited to making this functionality available without impacting the existing dynamic and static network assignments methods.  The work will mostly surround `avahi-autoipd` and `libnss-mdns`, with supporting changes in related packages.  Changes to, or enhancements of, DNS service-discovery are out of scope for this spec.
+
+=== Design ===
+
+* After coming up, interfaces must be able to correctly route traffic to the local network for the link-local IANA network (169.254.0.0/16).
+* Dynamic interfaces that do not get a DHCP address must assign themselves a link-local address.
+* The `.local` TLD must be resolvable via the link-local mDNS.
+* Users new to link-locale addressing need to be educated about the changes.
+
+=== Implementation ===
+
+* `base-files`:
+** add "link-local 169.254.0.0" to /etc/networks so that `route` will be less confusing to users
+* `/etc/dhcp3/dhclient-exit-hooks.d/zzz_avahi-autoipd` -- add hook for DNS changes to check for unicast "local" TLD
+** When a unicast `local` TLD is available, notify the user about the problem, and offer to fix it.  Since this is not a compatible operational situation, the only sane thing to do is to disable Avahi entirely.  With Avahi (and the desired libnss-mdns configuration) running, the unicast `local` domain would be totally unavailable to the user.
+   <pre>
+if ! host -t soa local. >/dev/null 2>&1; then NOTIFY; fi
+</pre>
+* `zeroconf` -- incompatible with avahi-autoipd
+** remove package from archive
+* `libnss-mdns` -- to resolve link-local `local` TLD
+** start with Debian version 0.8-5 (with Sjoerd's fixes), -6 has many fixes reverted
+** audit and promote to main
+** read <nowiki>[[http://bugs.debian.org/cgi-bin/bugreport.cgi?bug=393711|debian #393711]]</nowiki>
+** audit for error conditions around automatic update of the `nsswitch.conf` 'hosts' line
+** build package with `--disable-legacy` (drops potentially dangerous ministack fall-back)
+* `network-manager`
+** when n-m brings up an adhoc network, make sure that avahi-autoipd is launched for the interface.
+* `avahi-autoipd` -- the actual core of ipv4ll assignment
+** audit and promote to main
+* `avahi-daemon`
+** enable by default and make sure that the check-box in network-admin shows the expected Avahi state.
+* `ifupdown`
+** All activated interfaces must add a 169.254.0.0/16 route to their local network.  Those with multiple active interfaces will likely not be using ipv4ll in any meaningful way, so this won't break them any worse than they already are.
+** To bring up an ipv4ll address correctly with avahi-autoipd, a new network method for use in /etc/network/interfaces is needed.  It should be called "ipv4ll".  (Other existing methods are the common "dhcp", "static", etc.)  This method will need to be taught to network-admin as well, and documented in the `interfaces(5)` manpage.
+
+=== Clarification of terminology ===
+Zeroconf is a collection of protocols including ipv4 link local networking, mDNS, and DNS service-discovery.  Apple's implementation of zeroconf was originally named "Rendezvous" and was later renamed to "Bonjour".  Avahi is a free software implementation of zeroconf.  See http://avahi.org/wiki/AboutAvahi.
+
+* IPv4 link-local addresses are in the 169.254.0.0/16 space.
+* mDNS is DNS over multicast on the local network.
+* DNS-sd allows for service discovery using mDNS and unicast DNS (which is out of scope for this spec).
+
+=== Comments ===
+* To potentially assist in auditing Avahi, there are some items already available for review at http://avahi.org/wiki/SecurityConsiderations
+* Add EthernetOverUsb support.
+
+=== Tests ===
+
+ 0. Create a small network between computers that does not involve a DHCP server, by doing one of:
+** plug two computers together with a crossover ethernet cable and tell network-manager to use the cable network; after about 30 seconds it should display that it is connected to the cable network
+** use network-manager to create an ad-hoc WLAN and connect to it using another computer with a WiFi card; after about 30 seconds, that other computer should connect to the wifi as well.
+
+  (The 30 seconds is the default DHCP waiting timeout) 
+
+  Now check with `ifconfig` that there is an `ethX:avahi` interface on either side with a 169.254.x.x address.
+
+ 0. Use `ping `''hostname''`.local` (where hostname is the name of the remote computer) to check that you can ping each other using nss-mdns. You should also be able to ping your own hostname, of course (with `.local` appended).
+
+ 0. Call `route` and verify that there is a route to the `link-local` network target (as opposed to only displaying the numerical 169.254.0.0 value).
+
+ 0. Manual configuration: Choose 'static configuration' in network-manager (which brings up `network-admin`). Select an interface, click 'Properties' and change it to ''Local zeroconf network (IPv4LL)''. This should change the method in `/etc/network/interfaces` to `ipv4ll`. Enabling the device in network-admin (or with `sudo ifup ethX`) should configure the `ethX:avahi` interface immediately. (Note that this method is really only for users who know what they are doing).
+
+----
+CategorySpec

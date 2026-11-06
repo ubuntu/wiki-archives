@@ -1,0 +1,74 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+=== This page contains the design and related discussion about the OfflineUpdateSpec and the actual tool ===
+
+==== Definitions ====
+* '''Host Machine''': The machine where the packages will be downloaded and prepared for installation on the target machine. We will assume that the Host Machine is connected to the Internet and is running Ubuntu Linux. (In the future there may be a provision of the Host Machine being a Windows Machine, but it's out of scope at the moment).
+* '''Target Machine''': The machine where the packages will be installed. We will assume that the target machine is also running Ubuntu Linux and is either not connected to the Internet, or has a very low bandwidth connection. We will also assume that the target machine will have the Ubuntu base desktop installed. Otherwise, the diagnostic tool may be run on the target machine to generate a custom profile.
+
+==== Functional Design Ideas ====
+* The tool will have multiple profiles. The ''default'' profile will assume that the target system has only the Ubuntu base system (ubuntu-desktop) installed. The custom profiles will operate on the basis of diagnostics fetched from the target system (''dpkg -l'').
+* There will be a diagnostic tool for creating custom profiles which will just do a ''dpkg -l'' on the target system and generate a list of packages (and versions) installed in the system. It may also take the ''/etc/apt/sources.list'' to account to understand which repositories are enabled in the target machine. (There may be a way to override the target machine sources.list and use the one in the host machine instead)
+* The diagnostic metadata thus produced can be fed in the host machine to create a custom profile.
+* The tool will provide the user with an UI to select which packages to download. The user can manually select the packages to download, or alternately can ask the tool to look for available (security) updates, based on the metadata fetched from the target machine.
+* The tool will then calculate the dependencies on the basis of the target machine profile and download all the required packages. It will automatically try to resolve dependency issues by downloading other dependencies.
+* Once the packages are downloaded, the tool will run ''apt-ftparchive'' on the packages dir and will generate the appropriate index files.
+* Then the tool might optionally create ISO images for burning into CDROMs, else the user can copy the whole directory to an USB drive or portable hard-disk.
+* Then on the target machine, the tool will automatically detect the packages when the media is inserted and install them on the machine. The automatic media detection will be done by integrating the tool with ''update-manager''
+
+==== Implementation Ideas ====
+
+Let apt take up the task, see http://wiki.debian.org/AptMedium for a proof-of-concept.
+
+===== The host and the target =====
+Only profile creation and the actual installation will be done in the the target machine. Everything else like dependency calculation and the downloading of packages will be done on the host side. (Thin target, fat host)
+
+The software requirements of both the host & the target will be minimal. We will assume that both have ubuntu-desktop & python-apt installed. ''[pitti: This should be python-gtk2 and python-apt, right?]''
+
+===== Profile Creation =====
+The ''profile'' of a given target machine will contain two files, the ''/var/lib/dpkg/status'' & ''/etc/apt/sources.list''. Any other source except http or ftp in the sources.list file will be ignored by the tool. The status file copied from the target may be optimised for size by dropping a few fields if possible.
+
+===== Dependency Resolution =====
+The package dependency of the target machine can be resolved by using the ''/var/lib/dpkg/status'' file contained in the target system profile. This can be done automatically from within python-apt by using 
+
+<code>apt_pkg.Config.Set("Dir::Etc::Status","/path/to/target/var/lib/dpkg/status")</code>
+
+===== Updating packages list in the target =====
+One issue is that of updating the packages list on the target machine. There may be two scenarios to this ---
+
+* Networked machine (with (http|ftp) sources)
+   In this case we use the target machine's sources.list to know about the enabled components and the release and then use the http/ftp sources listed in the file to download the Packages.gz, Release, Release.gpg, etc. files. Then later those files can be copied over to ''/var/lib/apt/lists'' on the target machine. On the target machine the packages will be copied to ''/var/cache/apt/archives''.
+
+* Non networked machine
+   In this case, the sources.list of the target machine may not contain any http/ftp sources. So we will use a special file:/// source for the offline-update tool and we will drop the apt lists files and the packages themselves on that directory. The file:/// source will be automatically dropped into ''/etc/apt/sources.list.d''.
+
+==== Some python-apt examples ====
+
+If we copy the targets /var/lib/dpkg/status (or the relevant parts of it, stripping descriptions etc) we can use python-apt to do most of the work. Here is some example code (warning, not tested) what can be done:
+
+<pre>
+import apt
+import apt_pkg
+
+apt_pkg.Config.Set("Dir::Etc::Status","/path/to/targets/var/lib/dpkg/status")
+apt_pkg.Config.Set("Dir::Etc::Sourceslist","/path/to/generated-for-the-target/e\tc/apt/sources.list")
+apt_pkg.Config.Set("Dir::State","/path/to/for/profile/var/lib/apt")
+apt_pkg.Config.Set("Dir::Cache::archives","/path/to/the/dir/of/the/packages")
+
+cache = apt.Cache()
+
+cache["3dchess"].markInstall()
+
+fetcher = apt_pkg.GetFetcher()
+pm = apt_pkg.GetPackageManager()
+cache._fetchArchives(fetcher, pm)
+
+</pre>

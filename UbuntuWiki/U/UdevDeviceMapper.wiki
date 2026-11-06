@@ -1,0 +1,81 @@
+{|
+| '''Warning'''
+* This is a '''readonly''' and '''text-based''' archive of a deprecated wiki.
+* '''Images''' and '''attachments''' have been removed to conserve space.
+* '''Links''' may not work and there may be formatting issues.
+* A '''compressed''' version with images and the original syntax is in the repo '''Releases'''.
+|}
+
+__TOC__
+
+
+''Please check the status of this specification in Launchpad before editing it.  If it is Approved, contact the Assignee or another knowledgeable person before making changes.''
+
+* '''Launchpad entry''': <nowiki>[[https://features.launchpad.net/distros/ubuntu/+spec/udev-device-mapper|udev-device-mapper]]</nowiki>
+* '''Packages affected''': udev, dmsetup
+
+=== Summary ===
+
+This specification details how to make udev and device-mapper play nicely together, in particular ensuring that udev events are issued for device-mapper blocks and that UUIDs are correctly exported and do not conflict.
+
+=== Rationale ===
+
+device-mapper is used by several server systems, such as LVM and RAID, to create block devices from partial parts or combinations of other block devices.  In order to support event-based mounting of these filesystems, we need reliable events from the block subsystem and no race conditions.
+
+=== Use cases ===
+
+* Fabio uses a combination of LVM and RAID for his root filesystem, he would like this to continue to be supported.
+
+* Martin uses a cryptographically encrypted USB disk, the block device of which is exposed by device mapper.  When he inserts it, he'd like it to be mounted normally with HAL and pmount, without failing due to race conditions.
+
+=== Scope ===
+
+The scope of this specification is limited to the interaction between udev and device-mapper; other specifications will address similar concerns with LVM, EVMS, RAID, etc.
+
+=== Design ===
+
+dmsetup (via libdevmapper) currently creates the `/dev/mapper/NAME` device nodes itself, after requesting the map with the DM_DEV_CREATE ioctl.  This ioctl causes a `dm-N` block device to be created, and the appropriate `/block/dm-N` uevent issued.
+
+udev receives only the major/minor number of the device in the uevent, however fortunately this can be looked up to obtain the proper name; and thus the `/dev/mapper/NAME` created instead.  This device name is then passed to HAL and upstart as normal.
+
+The NAME, and thus the device path, consitutes a unique identifier; there is no need for UUID or LABEL support for these block devices.  We will continue to ignore them.
+
+While the current arrangements mean that the device node is guaranteed to exist when dmsetup returns, the device isn't guaranteed to exist when udev is run; and there's actually a race between udev creating the block device and dmsetup creating it.
+
+Instead we will create the device in udev as normal, and dmsetup (actually libdevmapper) will be modified to, if the system is using udev, create the device in /dev/.static/dev (or /.dev) instead, and wait until the device is created (or a timeout is reached).  The logic for deciding whether the system is using udev, and which directory to use, will be the same as that used in /dev/MAKEDEV.
+
+When using udev, libdevmapper and the udev script will rendezvous as follows.  libdevmapper will (when doing device create, rename or remove):
+* open and F_GETLKW /dev/mapper/name,lock; fstat; if nlink==0 close and retry
+* mkfifo /dev/mapper/name,rendezvous 600
+* open /dev/mapper/name,rendezvous O_RDWR
+* call the DM ioctl
+* select(readfds=[/dev/mapper/name,rendezvous], 5 seconds)
+* unlink and close /dev/mapper/name,rendezvous
+* release the lock: unlink /dev/mapper/name,lock; close
+and udev scripts will:
+* call dmname to determine the device name
+* create the device node in /dev
+* call dmname --poke-libdevmapper which will open /dev/mapper/name,rendezvous O_RDWR, write(,"\0",1), close
+* do other stuff which depends on the device
+
+If libdevmapper detects udev, it will stat /lib/udev/.udev-device-mapper-rendezvous to see if the udev supports the protocol above.  If it doesn't it will leave out the steps involving the rendezvous fifo.
+
+=== Implementation ===
+
+* Write a small udev helper to obtain the name of a device map from the major/minor number.
+
+* Replace the existing "do not create" udev rule for `dm-[0-9]*` with one that uses that helper to name it, and sets the name, e.g.
+  <pre>
+KERNEL=="dm-[0-9]*", IMPORT{program}="dmname %M %m", NAME="mapper/$result"
+</pre>
+
+* Patch libdevmapper to spin and timeout until the device is created, instead of creating it itself.
+
+=== Unresolved issues ===
+
+The kernel side of the device-mapper system could do with properly kobjectifying, so that information can be obtained through sysfs instead of ioctl.  Not essential, and not necessary.
+
+Renaming or reloading devices produces no uevents, however since whatever we did with the event (ie. mounted the block device) will already have happened, it's probably fine.  If not, programs should remove and add anyway to ensure things are unmounted and mounted differently.
+
+----
+CategorySpec
